@@ -2,11 +2,36 @@
 
 #include <atomic>
 
+#if LRRT_ENABLE_HSA
+#include <hsa/hsa.h>
+#endif
+
 namespace {
 
 std::atomic<bool> g_initialized{false};
 
 bool valid_device(lr_device_t device) { return device.index == 0; }
+
+#if LRRT_ENABLE_HSA
+lr_status_t to_lr_status(hsa_status_t status) {
+  return status == HSA_STATUS_SUCCESS ? LR_SUCCESS : LR_ERROR_RUNTIME;
+}
+
+hsa_status_t count_gpu_agents(hsa_agent_t agent, void *data) {
+  auto *count = static_cast<uint32_t *>(data);
+  hsa_device_type_t device_type = HSA_DEVICE_TYPE_CPU;
+  hsa_status_t status =
+      hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
+  if (status != HSA_STATUS_SUCCESS) {
+    return status;
+  }
+
+  if (device_type == HSA_DEVICE_TYPE_GPU) {
+    ++(*count);
+  }
+  return HSA_STATUS_SUCCESS;
+}
+#endif
 
 }  // namespace
 
@@ -43,6 +68,15 @@ lr_status_t lr_init(void) {
   if (!g_initialized.compare_exchange_strong(expected, true)) {
     return LR_ERROR_ALREADY_INITIALIZED;
   }
+
+#if LRRT_ENABLE_HSA
+  hsa_status_t status = hsa_init();
+  if (status != HSA_STATUS_SUCCESS) {
+    g_initialized.store(false);
+    return to_lr_status(status);
+  }
+#endif
+
   return LR_SUCCESS;
 }
 
@@ -51,6 +85,15 @@ lr_status_t lr_shutdown(void) {
   if (!g_initialized.compare_exchange_strong(expected, false)) {
     return LR_ERROR_NOT_INITIALIZED;
   }
+
+#if LRRT_ENABLE_HSA
+  hsa_status_t status = hsa_shut_down();
+  if (status != HSA_STATUS_SUCCESS) {
+    g_initialized.store(true);
+    return to_lr_status(status);
+  }
+#endif
+
   return LR_SUCCESS;
 }
 
@@ -63,7 +106,12 @@ lr_status_t lr_device_count(uint32_t *count) {
   }
 
   *count = 0;
+#if LRRT_ENABLE_HSA
+  hsa_status_t status = hsa_iterate_agents(count_gpu_agents, count);
+  return to_lr_status(status);
+#else
   return LR_SUCCESS;
+#endif
 }
 
 lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {

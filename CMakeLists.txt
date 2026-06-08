@@ -7,6 +7,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 set(CMAKE_VISIBILITY_INLINES_HIDDEN YES)
 
+find_path(
+  HSA_INCLUDE_DIR
+  NAMES hsa/hsa.h
+  HINTS /opt/rocm/include
+)
+find_library(
+  HSA_RUNTIME_LIBRARY
+  NAMES hsa-runtime64
+  HINTS /opt/rocm/lib /opt/rocm/lib64
+)
+
 add_library(lrrt src/runtime.cpp)
 add_library(lrrt::lrrt ALIAS lrrt)
 
@@ -18,6 +29,15 @@ target_include_directories(
 )
 
 target_compile_features(lrrt PUBLIC cxx_std_17)
+
+if(HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
+  target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)
+  target_include_directories(lrrt PRIVATE "${HSA_INCLUDE_DIR}")
+  target_link_libraries(lrrt PRIVATE "${HSA_RUNTIME_LIBRARY}")
+  message(STATUS "HSA runtime enabled: ${HSA_RUNTIME_LIBRARY}")
+else()
+  message(STATUS "HSA runtime not found; building stub runtime")
+endif()
 
 add_executable(lrrt_vector_add examples/vector_add/vector_add.cpp)
 target_link_libraries(lrrt_vector_add PRIVATE lrrt::lrrt)
