@@ -27,6 +27,13 @@ int main(void) {
       return 1;
     }
     printf("opened device: %u\n", device.index);
+
+    status = lr_synchronize(device);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "lr_synchronize failed: %s\n", lr_status_string(status));
+      lr_shutdown();
+      return 1;
+    }
   }
 
   lr_shutdown();

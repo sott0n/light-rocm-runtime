@@ -1,6 +1,9 @@
 #include "lrrt/lrrt.h"
 
 #include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <vector>
 
 #if LRRT_ENABLE_HSA
 #include <hsa/hsa.h>
@@ -10,22 +13,21 @@ namespace {
 
 std::atomic<bool> g_initialized{false};
 
-bool valid_device(lr_device_t device) { return device.index == 0; }
-
 #if LRRT_ENABLE_HSA
+struct DeviceState {
+  hsa_agent_t agent;
+  hsa_queue_t *queue;
+};
+
+std::mutex g_devices_mutex;
+std::vector<DeviceState> g_devices;
+
 lr_status_t to_lr_status(hsa_status_t status) {
   return status == HSA_STATUS_SUCCESS ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
 
-struct FindGpuAgentData {
-  uint32_t target_index;
-  uint32_t current_index;
-  hsa_agent_t agent;
-  bool found;
-};
-
-hsa_status_t count_gpu_agents(hsa_agent_t agent, void *data) {
-  auto *count = static_cast<uint32_t *>(data);
+hsa_status_t collect_gpu_agents(hsa_agent_t agent, void *data) {
+  auto *devices = static_cast<std::vector<DeviceState> *>(data);
   hsa_device_type_t device_type = HSA_DEVICE_TYPE_CPU;
   hsa_status_t status =
       hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
@@ -34,53 +36,45 @@ hsa_status_t count_gpu_agents(hsa_agent_t agent, void *data) {
   }
 
   if (device_type == HSA_DEVICE_TYPE_GPU) {
-    ++(*count);
+    devices->push_back(DeviceState{agent, nullptr});
   }
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t find_gpu_agent(hsa_agent_t agent, void *data) {
-  auto *find_data = static_cast<FindGpuAgentData *>(data);
-  hsa_device_type_t device_type = HSA_DEVICE_TYPE_CPU;
+hsa_status_t create_default_queue(DeviceState *device) {
+  uint32_t max_queue_size = 0;
   hsa_status_t status =
-      hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
+      hsa_agent_get_info(device->agent, HSA_AGENT_INFO_QUEUE_MAX_SIZE,
+                         &max_queue_size);
   if (status != HSA_STATUS_SUCCESS) {
     return status;
   }
-
-  if (device_type != HSA_DEVICE_TYPE_GPU) {
-    return HSA_STATUS_SUCCESS;
+  if (max_queue_size == 0) {
+    return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
   }
 
-  if (find_data->current_index == find_data->target_index) {
-    find_data->agent = agent;
-    find_data->found = true;
-    return HSA_STATUS_INFO_BREAK;
+  uint32_t queue_size = 1024;
+  while (queue_size > max_queue_size) {
+    queue_size >>= 1;
+  }
+  if (queue_size == 0) {
+    queue_size = 1;
   }
 
-  ++find_data->current_index;
-  return HSA_STATUS_SUCCESS;
-}
-
-lr_status_t find_gpu_agent_by_index(uint32_t index, hsa_agent_t *agent) {
-  FindGpuAgentData data = {
-      index,
-      0,
-      hsa_agent_t{0},
-      false,
-  };
-  hsa_status_t status = hsa_iterate_agents(find_gpu_agent, &data);
-  if (status != HSA_STATUS_SUCCESS && status != HSA_STATUS_INFO_BREAK) {
-    return to_lr_status(status);
-  }
-  if (!data.found) {
-    return LR_ERROR_INVALID_ARGUMENT;
-  }
-
-  *agent = data.agent;
-  return LR_SUCCESS;
+  return hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
+                          nullptr, nullptr, UINT32_MAX, UINT32_MAX,
+                          &device->queue);
 }
 #endif
+
+bool valid_device(lr_device_t device) {
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  return device.index < g_devices.size();
+#else
+  return device.index == 0;
+#endif
+}
 
 }  // namespace
 
@@ -124,6 +118,17 @@ lr_status_t lr_init(void) {
     g_initialized.store(false);
     return to_lr_status(status);
   }
+
+  {
+    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    g_devices.clear();
+    status = hsa_iterate_agents(collect_gpu_agents, &g_devices);
+  }
+  if (status != HSA_STATUS_SUCCESS) {
+    hsa_shut_down();
+    g_initialized.store(false);
+    return to_lr_status(status);
+  }
 #endif
 
   return LR_SUCCESS;
@@ -136,6 +141,17 @@ lr_status_t lr_shutdown(void) {
   }
 
 #if LRRT_ENABLE_HSA
+  {
+    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    for (DeviceState &device : g_devices) {
+      if (device.queue) {
+        hsa_queue_destroy(device.queue);
+        device.queue = nullptr;
+      }
+    }
+    g_devices.clear();
+  }
+
   hsa_status_t status = hsa_shut_down();
   if (status != HSA_STATUS_SUCCESS) {
     g_initialized.store(true);
@@ -156,8 +172,9 @@ lr_status_t lr_device_count(uint32_t *count) {
 
   *count = 0;
 #if LRRT_ENABLE_HSA
-  hsa_status_t status = hsa_iterate_agents(count_gpu_agents, count);
-  return to_lr_status(status);
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  *count = static_cast<uint32_t>(g_devices.size());
+  return LR_SUCCESS;
 #else
   return LR_SUCCESS;
 #endif
@@ -172,10 +189,17 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
   }
 
 #if LRRT_ENABLE_HSA
-  hsa_agent_t agent{0};
-  lr_status_t status = find_gpu_agent_by_index(index, &agent);
-  if (status != LR_SUCCESS) {
-    return status;
+  {
+    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    if (index >= g_devices.size()) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (!g_devices[index].queue) {
+      hsa_status_t status = create_default_queue(&g_devices[index]);
+      if (status != HSA_STATUS_SUCCESS) {
+        return to_lr_status(status);
+      }
+    }
   }
 #else
   if (index != 0) {
@@ -284,11 +308,18 @@ lr_status_t lr_synchronize(lr_device_t device) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return LR_SUCCESS;
+#else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-
   return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 }  // extern "C"
