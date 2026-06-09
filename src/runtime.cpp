@@ -17,6 +17,13 @@ lr_status_t to_lr_status(hsa_status_t status) {
   return status == HSA_STATUS_SUCCESS ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
 
+struct FindGpuAgentData {
+  uint32_t target_index;
+  uint32_t current_index;
+  hsa_agent_t agent;
+  bool found;
+};
+
 hsa_status_t count_gpu_agents(hsa_agent_t agent, void *data) {
   auto *count = static_cast<uint32_t *>(data);
   hsa_device_type_t device_type = HSA_DEVICE_TYPE_CPU;
@@ -30,6 +37,48 @@ hsa_status_t count_gpu_agents(hsa_agent_t agent, void *data) {
     ++(*count);
   }
   return HSA_STATUS_SUCCESS;
+}
+
+hsa_status_t find_gpu_agent(hsa_agent_t agent, void *data) {
+  auto *find_data = static_cast<FindGpuAgentData *>(data);
+  hsa_device_type_t device_type = HSA_DEVICE_TYPE_CPU;
+  hsa_status_t status =
+      hsa_agent_get_info(agent, HSA_AGENT_INFO_DEVICE, &device_type);
+  if (status != HSA_STATUS_SUCCESS) {
+    return status;
+  }
+
+  if (device_type != HSA_DEVICE_TYPE_GPU) {
+    return HSA_STATUS_SUCCESS;
+  }
+
+  if (find_data->current_index == find_data->target_index) {
+    find_data->agent = agent;
+    find_data->found = true;
+    return HSA_STATUS_INFO_BREAK;
+  }
+
+  ++find_data->current_index;
+  return HSA_STATUS_SUCCESS;
+}
+
+lr_status_t find_gpu_agent_by_index(uint32_t index, hsa_agent_t *agent) {
+  FindGpuAgentData data = {
+      index,
+      0,
+      hsa_agent_t{0},
+      false,
+  };
+  hsa_status_t status = hsa_iterate_agents(find_gpu_agent, &data);
+  if (status != HSA_STATUS_SUCCESS && status != HSA_STATUS_INFO_BREAK) {
+    return to_lr_status(status);
+  }
+  if (!data.found) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  *agent = data.agent;
+  return LR_SUCCESS;
 }
 #endif
 
@@ -121,12 +170,22 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
+
+#if LRRT_ENABLE_HSA
+  hsa_agent_t agent{0};
+  lr_status_t status = find_gpu_agent_by_index(index, &agent);
+  if (status != LR_SUCCESS) {
+    return status;
+  }
+#else
   if (index != 0) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
 
   device->index = index;
-  return LR_ERROR_NOT_SUPPORTED;
+  return LR_SUCCESS;
 }
 
 lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {

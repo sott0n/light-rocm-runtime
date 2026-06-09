@@ -18,6 +18,17 @@ int main(void) {
   }
 
   printf("devices: %u\n", count);
+  if (count > 0) {
+    lr_device_t device = {0};
+    status = lr_device_open(0, &device);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "lr_device_open failed: %s\n", lr_status_string(status));
+      lr_shutdown();
+      return 1;
+    }
+    printf("opened device: %u\n", device.index);
+  }
+
   lr_shutdown();
   return 0;
 }
