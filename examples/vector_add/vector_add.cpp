@@ -1,5 +1,6 @@
 #include "lrrt/lrrt.h"
 
+#include <string.h>
 #include <stdio.h>
 
 int main(void) {
@@ -27,6 +28,52 @@ int main(void) {
       return 1;
     }
     printf("opened device: %u\n", device.index);
+
+    const float input[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float output[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    void *device_ptr = NULL;
+
+    status = lr_malloc(device, sizeof(input), &device_ptr);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "lr_malloc failed: %s\n", lr_status_string(status));
+      lr_shutdown();
+      return 1;
+    }
+
+    status = lr_memcpy(device, device_ptr, input, sizeof(input),
+                       LR_MEMCPY_HOST_TO_DEVICE);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "host-to-device copy failed: %s\n",
+              lr_status_string(status));
+      lr_free(device, device_ptr);
+      lr_shutdown();
+      return 1;
+    }
+
+    status = lr_memcpy(device, output, device_ptr, sizeof(output),
+                       LR_MEMCPY_DEVICE_TO_HOST);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "device-to-host copy failed: %s\n",
+              lr_status_string(status));
+      lr_free(device, device_ptr);
+      lr_shutdown();
+      return 1;
+    }
+
+    if (memcmp(input, output, sizeof(input)) != 0) {
+      fprintf(stderr, "memory roundtrip mismatch\n");
+      lr_free(device, device_ptr);
+      lr_shutdown();
+      return 1;
+    }
+    printf("memory roundtrip: ok\n");
+
+    status = lr_free(device, device_ptr);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "lr_free failed: %s\n", lr_status_string(status));
+      lr_shutdown();
+      return 1;
+    }
 
     status = lr_synchronize(device);
     if (status != LR_SUCCESS) {
