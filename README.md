@@ -25,11 +25,33 @@ cmake --build build
 The current runtime is a scaffold. HSA-backed execution will be added behind the
 same public API.
 
-## Layout
+## Development GPU
 
-```text
-include/lrrt/lrrt.h      public C API
-src/runtime.cpp          runtime state and API entry points
-examples/vector_add/     first end-to-end target
-docs/plan.md             milestone plan
-```
+This repository is currently developed and tested on:
+
+- GPU: AMD Radeon RX 7800 XT
+- HSA agent name: `gfx1101`
+- ISA names:
+  - `amdgcn-amd-amdhsa--gfx1101`
+  - `amdgcn-amd-amdhsa--gfx11-generic`
+- Compute units: 60
+- Wavefront size: 32
+- Workgroup max size: 1024
+- Queue max size: 131072
+- VRAM reported by ROCm: 16760832 KB
+- XNACK: disabled
+
+## AMD Dependencies
+
+The current implementation uses the ROCr/HSA runtime directly. The versions
+below describe the AMD stack used for development:
+
+- ROCm: `6.4.4`
+- ROCr/HSA runtime package: `hsa-rocr 1.15.0.60404-129~22.04`
+- ROCr/HSA development package: `hsa-rocr-dev 1.15.0.60404-129~22.04`
+- HSA runtime API: `1.15`
+- HSA runtime extension API: `1.7`
+- HSA runtime library: `/opt/rocm-6.4.4/lib/libhsa-runtime64.so.1`
+- ROCm LLVM: `19.0.0.25224.60404-129~22.04`
+- AMD Comgr: `3.0.0.60404-129~22.04`
+- rocminfo: `1.0.0.60404-129~22.04`
