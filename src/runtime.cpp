@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -18,8 +20,17 @@ std::atomic<bool> g_initialized{false};
 struct DeviceState {
   hsa_agent_t agent;
   hsa_region_t global_region;
+  hsa_region_t kernarg_region;
   bool has_global_region;
+  bool has_kernarg_region;
   hsa_queue_t *queue;
+};
+
+struct SymbolSearch {
+  const char *name;
+  std::string descriptor_name;
+  hsa_executable_symbol_t symbol;
+  bool found;
 };
 
 std::mutex g_devices_mutex;
@@ -40,12 +51,12 @@ hsa_status_t collect_gpu_agents(hsa_agent_t agent, void *data) {
   }
 
   if (device_type == HSA_DEVICE_TYPE_GPU) {
-    devices->push_back(DeviceState{agent, {}, false, nullptr});
+    devices->push_back(DeviceState{agent, {}, {}, false, false, nullptr});
   }
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t select_global_region(hsa_region_t region, void *data) {
+hsa_status_t select_device_regions(hsa_region_t region, void *data) {
   auto *device = static_cast<DeviceState *>(data);
   hsa_region_segment_t segment = HSA_REGION_SEGMENT_READONLY;
   hsa_status_t status =
@@ -72,19 +83,25 @@ hsa_status_t select_global_region(hsa_region_t region, void *data) {
   if (status != HSA_STATUS_SUCCESS) {
     return status;
   }
-  if ((flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) == 0) {
-    return HSA_STATUS_SUCCESS;
+
+  if (!device->has_global_region &&
+      (flags & HSA_REGION_GLOBAL_FLAG_COARSE_GRAINED) != 0) {
+    device->global_region = region;
+    device->has_global_region = true;
+  }
+  if (!device->has_kernarg_region &&
+      (flags & HSA_REGION_GLOBAL_FLAG_KERNARG) != 0) {
+    device->kernarg_region = region;
+    device->has_kernarg_region = true;
   }
 
-  device->global_region = region;
-  device->has_global_region = true;
   return HSA_STATUS_SUCCESS;
 }
 
 hsa_status_t populate_device_regions() {
   for (DeviceState &device : g_devices) {
     hsa_status_t status =
-        hsa_agent_iterate_regions(device.agent, select_global_region, &device);
+        hsa_agent_iterate_regions(device.agent, select_device_regions, &device);
     if (status != HSA_STATUS_SUCCESS) {
       return status;
     }
@@ -116,6 +133,60 @@ hsa_status_t create_default_queue(DeviceState *device) {
                           nullptr, nullptr, UINT32_MAX, UINT32_MAX,
                           &device->queue);
 }
+
+uint16_t packet_header(hsa_packet_type_t type) {
+  return static_cast<uint16_t>(
+      (type << HSA_PACKET_HEADER_TYPE) |
+      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE) |
+      (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE));
+}
+
+uint16_t packet_setup(uint16_t dimensions) {
+  return static_cast<uint16_t>(dimensions
+                              << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
+}
+
+uint16_t dispatch_dimensions(const lr_launch_config_t *config) {
+  if (config->grid.z > 1 || config->block.z > 1) {
+    return 3;
+  }
+  if (config->grid.y > 1 || config->block.y > 1) {
+    return 2;
+  }
+  return 1;
+}
+
+hsa_status_t find_kernel_symbol(hsa_executable_t, hsa_agent_t,
+                                hsa_executable_symbol_t symbol, void *data) {
+  auto *search = static_cast<SymbolSearch *>(data);
+  hsa_symbol_kind_t kind = HSA_SYMBOL_KIND_VARIABLE;
+  hsa_status_t status = hsa_executable_symbol_get_info(
+      symbol, HSA_EXECUTABLE_SYMBOL_INFO_TYPE, &kind);
+  if (status != HSA_STATUS_SUCCESS || kind != HSA_SYMBOL_KIND_KERNEL) {
+    return status;
+  }
+
+  uint32_t name_length = 0;
+  status = hsa_executable_symbol_get_info(
+      symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME_LENGTH, &name_length);
+  if (status != HSA_STATUS_SUCCESS) {
+    return status;
+  }
+
+  std::string name(name_length, '\0');
+  status = hsa_executable_symbol_get_info(
+      symbol, HSA_EXECUTABLE_SYMBOL_INFO_NAME, name.data());
+  if (status != HSA_STATUS_SUCCESS) {
+    return status;
+  }
+
+  if (name == search->name || name == search->descriptor_name) {
+    search->symbol = symbol;
+    search->found = true;
+    return HSA_STATUS_INFO_BREAK;
+  }
+  return HSA_STATUS_SUCCESS;
+}
 #endif
 
 bool valid_device(lr_device_t device) {
@@ -131,10 +202,22 @@ bool valid_device(lr_device_t device) {
 
 struct lr_module_t {
   lr_device_t device;
+  std::vector<lr_kernel_t *> kernels;
+#if LRRT_ENABLE_HSA
+  hsa_code_object_reader_t reader;
+  hsa_executable_t executable;
+  hsa_loaded_code_object_t loaded_code_object;
+#endif
 };
 
 struct lr_kernel_t {
   lr_module_t *module;
+#if LRRT_ENABLE_HSA
+  uint64_t object;
+  uint32_t kernarg_size;
+  uint32_t group_segment_size;
+  uint32_t private_segment_size;
+#endif
 };
 
 extern "C" {
@@ -396,7 +479,62 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
   }
 
   *module = nullptr;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  hsa_profile_t profile = HSA_PROFILE_FULL;
+  hsa_status_t status =
+      hsa_agent_get_info(state.agent, HSA_AGENT_INFO_PROFILE, &profile);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+
+  auto *loaded_module = new lr_module_t{};
+  loaded_module->device = device;
+
+  status = hsa_code_object_reader_create_from_memory(
+      image, image_size, &loaded_module->reader);
+  if (status != HSA_STATUS_SUCCESS) {
+    delete loaded_module;
+    return to_lr_status(status);
+  }
+
+  status = hsa_executable_create_alt(
+      profile, HSA_DEFAULT_FLOAT_ROUNDING_MODE_NEAR, nullptr,
+      &loaded_module->executable);
+  if (status != HSA_STATUS_SUCCESS) {
+    hsa_code_object_reader_destroy(loaded_module->reader);
+    delete loaded_module;
+    return to_lr_status(status);
+  }
+
+  status = hsa_executable_load_agent_code_object(
+      loaded_module->executable, state.agent, loaded_module->reader, nullptr,
+      &loaded_module->loaded_code_object);
+  if (status != HSA_STATUS_SUCCESS) {
+    hsa_executable_destroy(loaded_module->executable);
+    hsa_code_object_reader_destroy(loaded_module->reader);
+    delete loaded_module;
+    return to_lr_status(status);
+  }
+
+  status = hsa_executable_freeze(loaded_module->executable, nullptr);
+  if (status != HSA_STATUS_SUCCESS) {
+    hsa_executable_destroy(loaded_module->executable);
+    hsa_code_object_reader_destroy(loaded_module->reader);
+    delete loaded_module;
+    return to_lr_status(status);
+  }
+
+  *module = loaded_module;
+  return LR_SUCCESS;
+#else
   return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 lr_status_t lr_module_destroy(lr_module_t *module) {
@@ -407,7 +545,21 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  for (lr_kernel_t *kernel : module->kernels) {
+    delete kernel;
+  }
+  hsa_status_t executable_status = hsa_executable_destroy(module->executable);
+  hsa_status_t reader_status = hsa_code_object_reader_destroy(module->reader);
+  delete module;
+  if (executable_status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(executable_status);
+  }
+  return to_lr_status(reader_status);
+#else
   return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
@@ -420,7 +572,61 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
   }
 
   *kernel = nullptr;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (module->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  SymbolSearch search{name, std::string(name) + ".kd", {}, false};
+  hsa_status_t status = hsa_executable_iterate_agent_symbols(
+      module->executable, g_devices[module->device.index].agent,
+      find_kernel_symbol, &search);
+  if (status != HSA_STATUS_SUCCESS && status != HSA_STATUS_INFO_BREAK) {
+    return to_lr_status(status);
+  }
+  if (!search.found) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto *loaded_kernel = new lr_kernel_t{};
+  loaded_kernel->module = module;
+
+  status = hsa_executable_symbol_get_info(
+      search.symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_OBJECT,
+      &loaded_kernel->object);
+  if (status != HSA_STATUS_SUCCESS) {
+    delete loaded_kernel;
+    return to_lr_status(status);
+  }
+  status = hsa_executable_symbol_get_info(
+      search.symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_SIZE,
+      &loaded_kernel->kernarg_size);
+  if (status != HSA_STATUS_SUCCESS) {
+    delete loaded_kernel;
+    return to_lr_status(status);
+  }
+  status = hsa_executable_symbol_get_info(
+      search.symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_GROUP_SEGMENT_SIZE,
+      &loaded_kernel->group_segment_size);
+  if (status != HSA_STATUS_SUCCESS) {
+    delete loaded_kernel;
+    return to_lr_status(status);
+  }
+  status = hsa_executable_symbol_get_info(
+      search.symbol, HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_PRIVATE_SEGMENT_SIZE,
+      &loaded_kernel->private_segment_size);
+  if (status != HSA_STATUS_SUCCESS) {
+    delete loaded_kernel;
+    return to_lr_status(status);
+  }
+
+  module->kernels.push_back(loaded_kernel);
+  *kernel = loaded_kernel;
+  return LR_SUCCESS;
+#else
   return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
@@ -435,8 +641,81 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
       config->block.x == 0 || config->block.y == 0 || config->block.z == 0) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  if (config->grid.x < config->block.x || config->grid.y < config->block.y ||
+      config->grid.z < config->block.z) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (config->block.x > UINT16_MAX || config->block.y > UINT16_MAX ||
+      config->block.z > UINT16_MAX) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
 
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  lr_device_t device = kernel->module->device;
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  if (!state.queue || !state.has_kernarg_region ||
+      args_size > kernel->kernarg_size) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  void *kernarg = nullptr;
+  hsa_status_t status =
+      hsa_memory_allocate(state.kernarg_region, kernel->kernarg_size, &kernarg);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+  std::memset(kernarg, 0, kernel->kernarg_size);
+  std::memcpy(kernarg, args, args_size);
+
+  hsa_signal_t signal{};
+  status = hsa_signal_create(1, 0, nullptr, &signal);
+  if (status != HSA_STATUS_SUCCESS) {
+    hsa_memory_free(kernarg);
+    return to_lr_status(status);
+  }
+
+  const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
+  auto *packets =
+      static_cast<hsa_kernel_dispatch_packet_t *>(state.queue->base_address);
+  hsa_kernel_dispatch_packet_t *packet =
+      &packets[index & (state.queue->size - 1)];
+  std::memset(packet, 0, sizeof(*packet));
+  packet->setup = packet_setup(dispatch_dimensions(config));
+  packet->workgroup_size_x = static_cast<uint16_t>(config->block.x);
+  packet->workgroup_size_y = static_cast<uint16_t>(config->block.y);
+  packet->workgroup_size_z = static_cast<uint16_t>(config->block.z);
+  packet->grid_size_x = config->grid.x;
+  packet->grid_size_y = config->grid.y;
+  packet->grid_size_z = config->grid.z;
+  packet->private_segment_size = kernel->private_segment_size;
+  packet->group_segment_size =
+      kernel->group_segment_size + config->shared_memory_bytes;
+  packet->kernel_object = kernel->object;
+  packet->kernarg_address = kernarg;
+  packet->completion_signal = signal;
+  packet->header = packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
+
+  hsa_signal_store_screlease(state.queue->doorbell_signal, index);
+  hsa_signal_value_t value = hsa_signal_wait_scacquire(
+      signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+
+  hsa_status_t destroy_status = hsa_signal_destroy(signal);
+  hsa_status_t free_status = hsa_memory_free(kernarg);
+  if (value != 0) {
+    return LR_ERROR_RUNTIME;
+  }
+  if (destroy_status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(destroy_status);
+  }
+  return to_lr_status(free_status);
+#else
   return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 lr_status_t lr_synchronize(lr_device_t device) {
