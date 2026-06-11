@@ -1,0 +1,126 @@
+#include "lrrt/lrrt.hpp"
+
+#include <math.h>
+#include <stdio.h>
+
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#ifndef LRRT_SCALE_HSACO
+#define LRRT_SCALE_HSACO "scale_kernel.hsaco"
+#endif
+
+typedef struct scale_args_t {
+  const float *in;
+  float *out;
+  float alpha;
+  int n;
+} scale_args_t;
+
+static std::vector<unsigned char> read_file(const char *path) {
+  FILE *file = fopen(path, "rb");
+  if (!file) {
+    throw std::runtime_error(std::string("failed to open ") + path);
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    throw std::runtime_error(std::string("failed to seek ") + path);
+  }
+  long length = ftell(file);
+  if (length <= 0) {
+    fclose(file);
+    throw std::runtime_error(std::string("empty file ") + path);
+  }
+  rewind(file);
+
+  std::vector<unsigned char> data(static_cast<size_t>(length));
+  if (fread(data.data(), 1, data.size(), file) != data.size()) {
+    fclose(file);
+    throw std::runtime_error(std::string("failed to read ") + path);
+  }
+  fclose(file);
+  return data;
+}
+
+static void expect_lrrt_error(lr_status_t status) {
+  try {
+    lrrt::check(status, "expected_failure");
+  } catch (const lrrt::Error &error) {
+    if (error.status() == status) {
+      return;
+    }
+    throw std::runtime_error("lrrt::Error carried the wrong status");
+  }
+  throw std::runtime_error("lrrt::check did not throw");
+}
+
+int main(void) {
+  try {
+    expect_lrrt_error(LR_ERROR_INVALID_ARGUMENT);
+
+    lrrt::Runtime runtime;
+
+    uint32_t count = 0;
+    lrrt::check(lr_device_count(&count), "lr_device_count");
+    if (count == 0) {
+      printf("cpp_wrapper: skipped, no GPU devices\n");
+      return 0;
+    }
+
+    lr_device_t device = {0};
+    lrrt::check(lr_device_open(0, &device), "lr_device_open");
+
+    const int n = 64;
+    const float alpha = 3.0f;
+    float in[n];
+    float out[n];
+    for (int i = 0; i < n; ++i) {
+      in[i] = (float)i + 1.0f;
+      out[i] = 0.0f;
+    }
+
+    lrrt::DeviceBuffer device_in(device, sizeof(in));
+    lrrt::DeviceBuffer device_out(device, sizeof(out));
+    if (device_in.size() != sizeof(in) || device_out.size() != sizeof(out)) {
+      throw std::runtime_error("DeviceBuffer reported the wrong size");
+    }
+
+    lrrt::check(lr_memcpy(device, device_in.data(), in, sizeof(in),
+                          LR_MEMCPY_HOST_TO_DEVICE),
+                "copy in");
+
+    std::vector<unsigned char> hsaco = read_file(LRRT_SCALE_HSACO);
+    lrrt::Module module(device, hsaco);
+    if (module.get() == nullptr) {
+      throw std::runtime_error("Module returned a null handle");
+    }
+    lr_kernel_t *kernel = module.kernel("scale");
+
+    scale_args_t args = {
+        (const float *)device_in.data(),
+        (float *)device_out.data(),
+        alpha,
+        n,
+    };
+    lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+    lrrt::check(lr_launch(kernel, &config, &args, sizeof(args)), "lr_launch");
+
+    lrrt::check(lr_memcpy(device, out, device_out.data(), sizeof(out),
+                          LR_MEMCPY_DEVICE_TO_HOST),
+                "copy out");
+
+    for (int i = 0; i < n; ++i) {
+      float expected = alpha * in[i];
+      if (fabsf(out[i] - expected) > 0.001f) {
+        throw std::runtime_error("scale result mismatch");
+      }
+    }
+
+    printf("cpp_wrapper: ok\n");
+    return 0;
+  } catch (const std::exception &error) {
+    fprintf(stderr, "%s\n", error.what());
+    return 1;
+  }
+}
