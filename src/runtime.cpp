@@ -6,11 +6,32 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #if LRRT_ENABLE_HSA
 #include <hsa/hsa.h>
 #endif
+
+struct lr_module_t {
+  lr_device_t device;
+  std::vector<lr_kernel_t *> kernels;
+#if LRRT_ENABLE_HSA
+  hsa_code_object_reader_t reader;
+  hsa_executable_t executable;
+  hsa_loaded_code_object_t loaded_code_object;
+#endif
+};
+
+struct lr_kernel_t {
+  lr_module_t *module;
+#if LRRT_ENABLE_HSA
+  uint64_t object;
+  uint32_t kernarg_size;
+  uint32_t group_segment_size;
+  uint32_t private_segment_size;
+#endif
+};
 
 namespace {
 
@@ -36,6 +57,8 @@ struct SymbolSearch {
 std::mutex g_devices_mutex;
 std::vector<DeviceState> g_devices;
 std::unordered_map<void *, uint32_t> g_allocations;
+std::unordered_set<lr_module_t *> g_modules;
+std::unordered_set<lr_kernel_t *> g_kernels;
 
 lr_status_t to_lr_status(hsa_status_t status) {
   return status == HSA_STATUS_SUCCESS ? LR_SUCCESS : LR_ERROR_RUNTIME;
@@ -187,6 +210,22 @@ hsa_status_t find_kernel_symbol(hsa_executable_t, hsa_agent_t,
   }
   return HSA_STATUS_SUCCESS;
 }
+
+hsa_status_t destroy_module_resources(lr_module_t *module) {
+  for (lr_kernel_t *kernel : module->kernels) {
+    g_kernels.erase(kernel);
+    delete kernel;
+  }
+  module->kernels.clear();
+
+  hsa_status_t executable_status = hsa_executable_destroy(module->executable);
+  hsa_status_t reader_status = hsa_code_object_reader_destroy(module->reader);
+  delete module;
+  if (executable_status != HSA_STATUS_SUCCESS) {
+    return executable_status;
+  }
+  return reader_status;
+}
 #endif
 
 bool valid_device(lr_device_t device) {
@@ -199,26 +238,6 @@ bool valid_device(lr_device_t device) {
 }
 
 }  // namespace
-
-struct lr_module_t {
-  lr_device_t device;
-  std::vector<lr_kernel_t *> kernels;
-#if LRRT_ENABLE_HSA
-  hsa_code_object_reader_t reader;
-  hsa_executable_t executable;
-  hsa_loaded_code_object_t loaded_code_object;
-#endif
-};
-
-struct lr_kernel_t {
-  lr_module_t *module;
-#if LRRT_ENABLE_HSA
-  uint64_t object;
-  uint32_t kernarg_size;
-  uint32_t group_segment_size;
-  uint32_t private_segment_size;
-#endif
-};
 
 extern "C" {
 
@@ -280,6 +299,12 @@ lr_status_t lr_shutdown(void) {
 #if LRRT_ENABLE_HSA
   {
     std::lock_guard<std::mutex> lock(g_devices_mutex);
+    for (lr_module_t *module : g_modules) {
+      destroy_module_resources(module);
+    }
+    g_modules.clear();
+    g_kernels.clear();
+
     for (DeviceState &device : g_devices) {
       if (device.queue) {
         hsa_queue_destroy(device.queue);
@@ -531,6 +556,7 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
   }
 
   *module = loaded_module;
+  g_modules.insert(loaded_module);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -547,16 +573,13 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
 
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
-  for (lr_kernel_t *kernel : module->kernels) {
-    delete kernel;
+  auto module_entry = g_modules.find(module);
+  if (module_entry == g_modules.end()) {
+    return LR_ERROR_INVALID_ARGUMENT;
   }
-  hsa_status_t executable_status = hsa_executable_destroy(module->executable);
-  hsa_status_t reader_status = hsa_code_object_reader_destroy(module->reader);
-  delete module;
-  if (executable_status != HSA_STATUS_SUCCESS) {
-    return to_lr_status(executable_status);
-  }
-  return to_lr_status(reader_status);
+
+  g_modules.erase(module_entry);
+  return to_lr_status(destroy_module_resources(module));
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -574,6 +597,9 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
   *kernel = nullptr;
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_modules.find(module) == g_modules.end()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
   if (module->device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -622,6 +648,7 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
   }
 
   module->kernels.push_back(loaded_kernel);
+  g_kernels.insert(loaded_kernel);
   *kernel = loaded_kernel;
   return LR_SUCCESS;
 #else
@@ -652,6 +679,10 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
 
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_kernels.find(kernel) == g_kernels.end() ||
+      g_modules.find(kernel->module) == g_modules.end()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
   lr_device_t device = kernel->module->device;
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;

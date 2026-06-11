@@ -219,7 +219,37 @@ int main(void) {
     }
     printf("vector_add: ok\n");
 
-    lr_module_destroy(module);
+    status = lr_module_destroy(module);
+    if (status != LR_SUCCESS) {
+      fprintf(stderr, "lr_module_destroy failed: %s\n",
+              lr_status_string(status));
+      lr_free(device, device_c);
+      lr_free(device, device_b);
+      lr_free(device, device_a);
+      lr_shutdown();
+      return 1;
+    }
+    status = lr_launch(kernel, &config, &args, sizeof(args));
+    if (status != LR_ERROR_INVALID_ARGUMENT) {
+      fprintf(stderr, "stale kernel launch returned: %s\n",
+              lr_status_string(status));
+      lr_free(device, device_c);
+      lr_free(device, device_b);
+      lr_free(device, device_a);
+      lr_shutdown();
+      return 1;
+    }
+    status = lr_module_destroy(module);
+    if (status != LR_ERROR_INVALID_ARGUMENT) {
+      fprintf(stderr, "stale module destroy returned: %s\n",
+              lr_status_string(status));
+      lr_free(device, device_c);
+      lr_free(device, device_b);
+      lr_free(device, device_a);
+      lr_shutdown();
+      return 1;
+    }
+
     lr_free(device, device_c);
     lr_free(device, device_b);
     lr_free(device, device_a);
