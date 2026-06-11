@@ -50,6 +50,12 @@ endif()
 add_executable(lrrt_vector_add examples/vector_add/vector_add.cpp)
 target_link_libraries(lrrt_vector_add PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_memory_bounds_tests tests/memory_bounds.cpp)
+target_link_libraries(lrrt_memory_bounds_tests PRIVATE lrrt::lrrt)
+
+add_executable(lrrt_handle_registry_tests tests/handle_registry.cpp)
+target_link_libraries(lrrt_handle_registry_tests PRIVATE lrrt::lrrt)
+
 if(AMDCLANGXX AND CLANG_OFFLOAD_BUNDLER)
   set(VECTOR_ADD_BUNDLE "${CMAKE_CURRENT_BINARY_DIR}/vector_add_kernel.bundle")
   set(VECTOR_ADD_HSACO "${CMAKE_CURRENT_BINARY_DIR}/vector_add_kernel.hsaco")
@@ -75,8 +81,17 @@ if(AMDCLANGXX AND CLANG_OFFLOAD_BUNDLER)
   )
   add_custom_target(lrrt_vector_add_hsaco DEPENDS "${VECTOR_ADD_HSACO}")
   add_dependencies(lrrt_vector_add lrrt_vector_add_hsaco)
+  add_dependencies(lrrt_handle_registry_tests lrrt_vector_add_hsaco)
   target_compile_definitions(
     lrrt_vector_add
     PRIVATE LRRT_VECTOR_ADD_HSACO="${VECTOR_ADD_HSACO}"
   )
+  target_compile_definitions(
+    lrrt_handle_registry_tests
+    PRIVATE LRRT_VECTOR_ADD_HSACO="${VECTOR_ADD_HSACO}"
+  )
 endif()
+
+enable_testing()
+add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
+add_test(NAME lrrt_handle_registry_tests COMMAND lrrt_handle_registry_tests)
