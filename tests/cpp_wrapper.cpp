@@ -5,6 +5,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef LRRT_SCALE_HSACO
@@ -80,8 +81,10 @@ int main(void) {
       out[i] = 0.0f;
     }
 
-    lrrt::DeviceBuffer device_in(device, sizeof(in));
-    lrrt::DeviceBuffer device_out(device, sizeof(out));
+    lrrt::DeviceBuffer first_in(device, sizeof(in));
+    lrrt::DeviceBuffer device_in(std::move(first_in));
+    lrrt::DeviceBuffer device_out(device, sizeof(out) / 2);
+    device_out = lrrt::DeviceBuffer(device, sizeof(out));
     if (device_in.size() != sizeof(in) || device_out.size() != sizeof(out)) {
       throw std::runtime_error("DeviceBuffer reported the wrong size");
     }
@@ -91,7 +94,9 @@ int main(void) {
                 "copy in");
 
     std::vector<unsigned char> hsaco = read_file(LRRT_SCALE_HSACO);
-    lrrt::Module module(device, hsaco);
+    lrrt::Module first_module(device, hsaco);
+    lrrt::Module module(std::move(first_module));
+    module = lrrt::Module(device, hsaco);
     if (module.get() == nullptr) {
       throw std::runtime_error("Module returned a null handle");
     }

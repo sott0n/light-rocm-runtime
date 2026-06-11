@@ -43,19 +43,41 @@ public:
       : device_(device), ptr_(nullptr), size_(size) {
     check(lr_malloc(device_, size_, &ptr_), "lr_malloc");
   }
-  ~DeviceBuffer() {
-    if (ptr_) {
-      lr_free(device_, ptr_);
-    }
+  ~DeviceBuffer() { reset(); }
+
+  DeviceBuffer(DeviceBuffer &&other) noexcept
+      : device_(other.device_), ptr_(other.ptr_), size_(other.size_) {
+    other.ptr_ = nullptr;
+    other.size_ = 0;
   }
 
   DeviceBuffer(const DeviceBuffer &) = delete;
   DeviceBuffer &operator=(const DeviceBuffer &) = delete;
 
+  DeviceBuffer &operator=(DeviceBuffer &&other) noexcept {
+    if (this != &other) {
+      reset();
+      device_ = other.device_;
+      ptr_ = other.ptr_;
+      size_ = other.size_;
+      other.ptr_ = nullptr;
+      other.size_ = 0;
+    }
+    return *this;
+  }
+
   void *data() const { return ptr_; }
   size_t size() const { return size_; }
 
 private:
+  void reset() noexcept {
+    if (ptr_) {
+      lr_free(device_, ptr_);
+      ptr_ = nullptr;
+      size_ = 0;
+    }
+  }
+
   lr_device_t device_;
   void *ptr_;
   size_t size_;
@@ -72,14 +94,23 @@ public:
   Module(lr_device_t device, const std::vector<unsigned char> &image)
       : Module(device, image.data(), image.size()) {}
 
-  ~Module() {
-    if (module_) {
-      lr_module_destroy(module_);
-    }
+  ~Module() { reset(); }
+
+  Module(Module &&other) noexcept : module_(other.module_) {
+    other.module_ = nullptr;
   }
 
   Module(const Module &) = delete;
   Module &operator=(const Module &) = delete;
+
+  Module &operator=(Module &&other) noexcept {
+    if (this != &other) {
+      reset();
+      module_ = other.module_;
+      other.module_ = nullptr;
+    }
+    return *this;
+  }
 
   lr_kernel_t *kernel(const char *name) const {
     lr_kernel_t *kernel = nullptr;
@@ -90,6 +121,13 @@ public:
   lr_module_t *get() const { return module_; }
 
 private:
+  void reset() noexcept {
+    if (module_) {
+      lr_module_destroy(module_);
+      module_ = nullptr;
+    }
+  }
+
   lr_module_t *module_;
 };
 
