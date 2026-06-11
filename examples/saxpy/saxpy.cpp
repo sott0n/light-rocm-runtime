@@ -1,4 +1,5 @@
 #include "../common/example_utils.h"
+#include "lrrt/lrrt.hpp"
 
 #include <math.h>
 #include <stdio.h>
@@ -16,17 +17,17 @@ typedef struct saxpy_args_t {
 
 int main(void) {
   try {
-    lrrt_example::Runtime runtime;
+    lrrt::Runtime runtime;
 
     uint32_t count = 0;
-    lrrt_example::check(lr_device_count(&count), "lr_device_count");
+    lrrt::check(lr_device_count(&count), "lr_device_count");
     printf("devices: %u\n", count);
     if (count == 0) {
       return 0;
     }
 
     lr_device_t device = {0};
-    lrrt_example::check(lr_device_open(0, &device), "lr_device_open");
+    lrrt::check(lr_device_open(0, &device), "lr_device_open");
     printf("opened device: %u\n", device.index);
 
     const int n = 64;
@@ -38,18 +39,18 @@ int main(void) {
       y[i] = (float)(i * 3);
     }
 
-    lrrt_example::DeviceBuffer device_x(device, sizeof(x));
-    lrrt_example::DeviceBuffer device_y(device, sizeof(y));
-    lrrt_example::check(lr_memcpy(device, device_x.data(), x, sizeof(x),
-                                  LR_MEMCPY_HOST_TO_DEVICE),
-                        "copy x");
-    lrrt_example::check(lr_memcpy(device, device_y.data(), y, sizeof(y),
-                                  LR_MEMCPY_HOST_TO_DEVICE),
-                        "copy y");
+    lrrt::DeviceBuffer device_x(device, sizeof(x));
+    lrrt::DeviceBuffer device_y(device, sizeof(y));
+    lrrt::check(lr_memcpy(device, device_x.data(), x, sizeof(x),
+                          LR_MEMCPY_HOST_TO_DEVICE),
+                "copy x");
+    lrrt::check(lr_memcpy(device, device_y.data(), y, sizeof(y),
+                          LR_MEMCPY_HOST_TO_DEVICE),
+                "copy y");
 
     std::vector<unsigned char> hsaco =
         lrrt_example::read_file(LRRT_SAXPY_HSACO);
-    lrrt_example::Module module(device, hsaco);
+    lrrt::Module module(device, hsaco);
     lr_kernel_t *kernel = module.kernel("saxpy");
 
     saxpy_args_t args = {
@@ -59,11 +60,10 @@ int main(void) {
         n,
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
-    lrrt_example::check(lr_launch(kernel, &config, &args, sizeof(args)),
-                        "lr_launch");
-    lrrt_example::check(lr_memcpy(device, y, device_y.data(), sizeof(y),
-                                  LR_MEMCPY_DEVICE_TO_HOST),
-                        "copy y back");
+    lrrt::check(lr_launch(kernel, &config, &args, sizeof(args)), "lr_launch");
+    lrrt::check(lr_memcpy(device, y, device_y.data(), sizeof(y),
+                          LR_MEMCPY_DEVICE_TO_HOST),
+                "copy y back");
 
     for (int i = 0; i < n; ++i) {
       float expected = alpha * x[i] + (float)(i * 3);

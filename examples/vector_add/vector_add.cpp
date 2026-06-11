@@ -1,4 +1,5 @@
 #include "../common/example_utils.h"
+#include "lrrt/lrrt.hpp"
 
 #include <math.h>
 #include <stdio.h>
@@ -16,17 +17,17 @@ typedef struct vector_add_args_t {
 
 int main(void) {
   try {
-    lrrt_example::Runtime runtime;
+    lrrt::Runtime runtime;
 
     uint32_t count = 0;
-    lrrt_example::check(lr_device_count(&count), "lr_device_count");
+    lrrt::check(lr_device_count(&count), "lr_device_count");
     printf("devices: %u\n", count);
     if (count == 0) {
       return 0;
     }
 
     lr_device_t device = {0};
-    lrrt_example::check(lr_device_open(0, &device), "lr_device_open");
+    lrrt::check(lr_device_open(0, &device), "lr_device_open");
     printf("opened device: %u\n", device.index);
 
     const int n = 64;
@@ -39,19 +40,19 @@ int main(void) {
       c[i] = 0.0f;
     }
 
-    lrrt_example::DeviceBuffer device_a(device, sizeof(a));
-    lrrt_example::DeviceBuffer device_b(device, sizeof(b));
-    lrrt_example::DeviceBuffer device_c(device, sizeof(c));
-    lrrt_example::check(lr_memcpy(device, device_a.data(), a, sizeof(a),
-                                  LR_MEMCPY_HOST_TO_DEVICE),
-                        "copy a");
-    lrrt_example::check(lr_memcpy(device, device_b.data(), b, sizeof(b),
-                                  LR_MEMCPY_HOST_TO_DEVICE),
-                        "copy b");
+    lrrt::DeviceBuffer device_a(device, sizeof(a));
+    lrrt::DeviceBuffer device_b(device, sizeof(b));
+    lrrt::DeviceBuffer device_c(device, sizeof(c));
+    lrrt::check(lr_memcpy(device, device_a.data(), a, sizeof(a),
+                          LR_MEMCPY_HOST_TO_DEVICE),
+                "copy a");
+    lrrt::check(lr_memcpy(device, device_b.data(), b, sizeof(b),
+                          LR_MEMCPY_HOST_TO_DEVICE),
+                "copy b");
 
     std::vector<unsigned char> hsaco =
         lrrt_example::read_file(LRRT_VECTOR_ADD_HSACO);
-    lrrt_example::Module module(device, hsaco);
+    lrrt::Module module(device, hsaco);
     lr_kernel_t *kernel = module.kernel("vector_add");
 
     vector_add_args_t args = {
@@ -61,11 +62,10 @@ int main(void) {
         n,
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
-    lrrt_example::check(lr_launch(kernel, &config, &args, sizeof(args)),
-                        "lr_launch");
-    lrrt_example::check(lr_memcpy(device, c, device_c.data(), sizeof(c),
-                                  LR_MEMCPY_DEVICE_TO_HOST),
-                        "copy c back");
+    lrrt::check(lr_launch(kernel, &config, &args, sizeof(args)), "lr_launch");
+    lrrt::check(lr_memcpy(device, c, device_c.data(), sizeof(c),
+                          LR_MEMCPY_DEVICE_TO_HOST),
+                "copy c back");
 
     for (int i = 0; i < n; ++i) {
       if (fabsf(c[i] - (a[i] + b[i])) > 0.001f) {
