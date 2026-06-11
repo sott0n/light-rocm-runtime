@@ -110,6 +110,18 @@ int main(void) {
       return 1;
     }
 
+    status = lr_memcpy(device, device_a, a, sizeof(a) + sizeof(float),
+                       LR_MEMCPY_HOST_TO_DEVICE);
+    if (status != LR_ERROR_INVALID_ARGUMENT) {
+      fprintf(stderr, "oversized host-to-device copy returned: %s\n",
+              lr_status_string(status));
+      lr_free(device, device_c);
+      lr_free(device, device_b);
+      lr_free(device, device_a);
+      lr_shutdown();
+      return 1;
+    }
+
     status = lr_memcpy(device, device_a, a, sizeof(a),
                        LR_MEMCPY_HOST_TO_DEVICE);
     if (status != LR_SUCCESS) {

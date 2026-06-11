@@ -54,9 +54,14 @@ struct SymbolSearch {
   bool found;
 };
 
+struct AllocationInfo {
+  uint32_t device_index;
+  size_t size;
+};
+
 std::mutex g_devices_mutex;
 std::vector<DeviceState> g_devices;
-std::unordered_map<void *, uint32_t> g_allocations;
+std::unordered_map<void *, AllocationInfo> g_allocations;
 std::unordered_set<lr_module_t *> g_modules;
 std::unordered_set<lr_kernel_t *> g_kernels;
 
@@ -225,6 +230,15 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
     return executable_status;
   }
   return reader_status;
+}
+
+bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
+  auto allocation = g_allocations.find(ptr);
+  if (allocation == g_allocations.end()) {
+    return false;
+  }
+  const AllocationInfo &info = allocation->second;
+  return info.device_index == device.index && size <= info.size;
 }
 #endif
 
@@ -412,7 +426,7 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
     return to_lr_status(status);
   }
 
-  g_allocations[*ptr] = device.index;
+  g_allocations[*ptr] = AllocationInfo{device.index, size};
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -431,7 +445,7 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
   std::lock_guard<std::mutex> lock(g_devices_mutex);
   auto allocation = g_allocations.find(ptr);
   if (allocation == g_allocations.end() ||
-      allocation->second != device.index) {
+      allocation->second.device_index != device.index) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
@@ -466,24 +480,16 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
   }
 
   if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
-    auto allocation = g_allocations.find(dst);
-    if (allocation == g_allocations.end() ||
-        allocation->second != device.index) {
+    if (!valid_allocation(dst, device, size)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
   } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
-    auto allocation = g_allocations.find(const_cast<void *>(src));
-    if (allocation == g_allocations.end() ||
-        allocation->second != device.index) {
+    if (!valid_allocation(const_cast<void *>(src), device, size)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
   } else {
-    auto dst_allocation = g_allocations.find(dst);
-    auto src_allocation = g_allocations.find(const_cast<void *>(src));
-    if (dst_allocation == g_allocations.end() ||
-        src_allocation == g_allocations.end() ||
-        dst_allocation->second != device.index ||
-        src_allocation->second != device.index) {
+    if (!valid_allocation(dst, device, size) ||
+        !valid_allocation(const_cast<void *>(src), device, size)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
   }
