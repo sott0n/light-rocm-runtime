@@ -26,6 +26,32 @@ find_program(
   HINTS /opt/rocm/llvm/bin
 )
 
+function(lrrt_add_hsaco_kernel name source output_var)
+  if(AMDCLANGXX AND CLANG_OFFLOAD_BUNDLER)
+    set(bundle "${CMAKE_CURRENT_BINARY_DIR}/${name}.bundle")
+    set(hsaco "${CMAKE_CURRENT_BINARY_DIR}/${name}.hsaco")
+    set(host_object "${CMAKE_CURRENT_BINARY_DIR}/${name}.host.o")
+
+    add_custom_command(
+      OUTPUT "${hsaco}" "${bundle}" "${host_object}"
+      COMMAND
+        "${AMDCLANGXX}" --offload-device-only
+        "--offload-arch=${LRRT_AMDGPU_TARGET}" -x hip -include
+        hip/hip_runtime.h "${CMAKE_CURRENT_SOURCE_DIR}/${source}" -o
+        "${bundle}"
+      COMMAND
+        "${CLANG_OFFLOAD_BUNDLER}" -type=o
+        "-targets=host-x86_64-unknown-linux-gnu-,hipv4-amdgcn-amd-amdhsa--${LRRT_AMDGPU_TARGET}"
+        "-input=${bundle}" "-output=${host_object}" "-output=${hsaco}"
+        -unbundle
+      DEPENDS "${source}"
+      VERBATIM
+    )
+    add_custom_target(${name}_hsaco DEPENDS "${hsaco}")
+    set(${output_var} "${hsaco}" PARENT_SCOPE)
+  endif()
+endfunction()
+
 add_library(lrrt src/runtime.cpp)
 add_library(lrrt::lrrt ALIAS lrrt)
 
@@ -50,38 +76,36 @@ endif()
 add_executable(lrrt_vector_add examples/vector_add/vector_add.cpp)
 target_link_libraries(lrrt_vector_add PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_saxpy examples/saxpy/saxpy.cpp)
+target_link_libraries(lrrt_saxpy PRIVATE lrrt::lrrt)
+
+add_executable(lrrt_fill examples/fill/fill.cpp)
+target_link_libraries(lrrt_fill PRIVATE lrrt::lrrt)
+
 add_executable(lrrt_memory_bounds_tests tests/memory_bounds.cpp)
 target_link_libraries(lrrt_memory_bounds_tests PRIVATE lrrt::lrrt)
 
 add_executable(lrrt_handle_registry_tests tests/handle_registry.cpp)
 target_link_libraries(lrrt_handle_registry_tests PRIVATE lrrt::lrrt)
 
-if(AMDCLANGXX AND CLANG_OFFLOAD_BUNDLER)
-  set(VECTOR_ADD_BUNDLE "${CMAKE_CURRENT_BINARY_DIR}/vector_add_kernel.bundle")
-  set(VECTOR_ADD_HSACO "${CMAKE_CURRENT_BINARY_DIR}/vector_add_kernel.hsaco")
-  set(VECTOR_ADD_HOST_OBJECT
-      "${CMAKE_CURRENT_BINARY_DIR}/vector_add_kernel.host.o")
+add_executable(lrrt_scale_tests tests/scale.cpp)
+target_link_libraries(lrrt_scale_tests PRIVATE lrrt::lrrt)
 
-  add_custom_command(
-    OUTPUT "${VECTOR_ADD_HSACO}" "${VECTOR_ADD_BUNDLE}"
-           "${VECTOR_ADD_HOST_OBJECT}"
-    COMMAND
-      "${AMDCLANGXX}" --offload-device-only
-      "--offload-arch=${LRRT_AMDGPU_TARGET}" -x hip -include
-      hip/hip_runtime.h
-      "${CMAKE_CURRENT_SOURCE_DIR}/examples/vector_add/vector_add_kernel.cpp"
-      -o "${VECTOR_ADD_BUNDLE}"
-    COMMAND
-      "${CLANG_OFFLOAD_BUNDLER}" -type=o
-      "-targets=host-x86_64-unknown-linux-gnu-,hipv4-amdgcn-amd-amdhsa--${LRRT_AMDGPU_TARGET}"
-      "-input=${VECTOR_ADD_BUNDLE}" "-output=${VECTOR_ADD_HOST_OBJECT}"
-      "-output=${VECTOR_ADD_HSACO}" -unbundle
-    DEPENDS examples/vector_add/vector_add_kernel.cpp
-    VERBATIM
-  )
-  add_custom_target(lrrt_vector_add_hsaco DEPENDS "${VECTOR_ADD_HSACO}")
-  add_dependencies(lrrt_vector_add lrrt_vector_add_hsaco)
-  add_dependencies(lrrt_handle_registry_tests lrrt_vector_add_hsaco)
+add_executable(lrrt_copy_kernel_tests tests/copy_kernel.cpp)
+target_link_libraries(lrrt_copy_kernel_tests PRIVATE lrrt::lrrt)
+
+lrrt_add_hsaco_kernel(
+  vector_add_kernel examples/vector_add/vector_add_kernel.cpp
+  VECTOR_ADD_HSACO
+)
+lrrt_add_hsaco_kernel(saxpy_kernel examples/saxpy/saxpy_kernel.cpp SAXPY_HSACO)
+lrrt_add_hsaco_kernel(fill_kernel examples/fill/fill_kernel.cpp FILL_HSACO)
+lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
+lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
+
+if(VECTOR_ADD_HSACO)
+  add_dependencies(lrrt_vector_add vector_add_kernel_hsaco)
+  add_dependencies(lrrt_handle_registry_tests vector_add_kernel_hsaco)
   target_compile_definitions(
     lrrt_vector_add
     PRIVATE LRRT_VECTOR_ADD_HSACO="${VECTOR_ADD_HSACO}"
@@ -91,7 +115,34 @@ if(AMDCLANGXX AND CLANG_OFFLOAD_BUNDLER)
     PRIVATE LRRT_VECTOR_ADD_HSACO="${VECTOR_ADD_HSACO}"
   )
 endif()
+if(SAXPY_HSACO)
+  add_dependencies(lrrt_saxpy saxpy_kernel_hsaco)
+  target_compile_definitions(
+    lrrt_saxpy
+    PRIVATE LRRT_SAXPY_HSACO="${SAXPY_HSACO}"
+  )
+endif()
+if(FILL_HSACO)
+  add_dependencies(lrrt_fill fill_kernel_hsaco)
+  target_compile_definitions(lrrt_fill PRIVATE LRRT_FILL_HSACO="${FILL_HSACO}")
+endif()
+if(SCALE_HSACO)
+  add_dependencies(lrrt_scale_tests scale_kernel_hsaco)
+  target_compile_definitions(
+    lrrt_scale_tests
+    PRIVATE LRRT_SCALE_HSACO="${SCALE_HSACO}"
+  )
+endif()
+if(COPY_HSACO)
+  add_dependencies(lrrt_copy_kernel_tests copy_kernel_hsaco)
+  target_compile_definitions(
+    lrrt_copy_kernel_tests
+    PRIVATE LRRT_COPY_HSACO="${COPY_HSACO}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
 add_test(NAME lrrt_handle_registry_tests COMMAND lrrt_handle_registry_tests)
+add_test(NAME lrrt_scale_tests COMMAND lrrt_scale_tests)
+add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)
