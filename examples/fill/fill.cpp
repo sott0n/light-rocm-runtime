@@ -18,15 +18,13 @@ int main(void) {
   try {
     lrrt::Runtime runtime;
 
-    uint32_t count = 0;
-    lrrt::check(lr_device_count(&count), "lr_device_count");
+    uint32_t count = runtime.device_count();
     printf("devices: %u\n", count);
     if (count == 0) {
       return 0;
     }
 
-    lr_device_t device = {0};
-    lrrt::check(lr_device_open(0, &device), "lr_device_open");
+    lr_device_t device = runtime.open_device(0);
     printf("opened device: %u\n", device.index);
 
     const int n = 64;

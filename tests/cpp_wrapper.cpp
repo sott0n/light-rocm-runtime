@@ -62,15 +62,13 @@ int main(void) {
 
     lrrt::Runtime runtime;
 
-    uint32_t count = 0;
-    lrrt::check(lr_device_count(&count), "lr_device_count");
+    uint32_t count = runtime.device_count();
     if (count == 0) {
       printf("cpp_wrapper: skipped, no GPU devices\n");
       return 0;
     }
 
-    lr_device_t device = {0};
-    lrrt::check(lr_device_open(0, &device), "lr_device_open");
+    lr_device_t device = runtime.open_device(0);
 
     const int n = 64;
     const float alpha = 3.0f;

@@ -35,6 +35,18 @@ public:
 
   Runtime(const Runtime &) = delete;
   Runtime &operator=(const Runtime &) = delete;
+
+  uint32_t device_count() const {
+    uint32_t count = 0;
+    check(lr_device_count(&count), "lr_device_count");
+    return count;
+  }
+
+  lr_device_t open_device(uint32_t index) const {
+    lr_device_t device = {0};
+    check(lr_device_open(index, &device), "lr_device_open");
+    return device;
+  }
 };
 
 class DeviceBuffer {
