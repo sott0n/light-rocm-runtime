@@ -115,9 +115,35 @@ inline void copy_to_device(DeviceBuffer &dst, const void *src, size_t size) {
         "lr_memcpy host to device");
 }
 
+template <typename T, size_t N>
+inline void copy_to_device(DeviceBuffer &dst, const T (&src)[N]) {
+  copy_to_device(dst, src, sizeof(src));
+}
+
+template <typename T>
+inline void copy_to_device(DeviceBuffer &dst, const std::vector<T> &src) {
+  if (src.empty()) {
+    return;
+  }
+  copy_to_device(dst, src.data(), src.size() * sizeof(T));
+}
+
 inline void copy_to_host(void *dst, const DeviceBuffer &src, size_t size) {
   check(lr_memcpy(src.device(), dst, src.data(), size, LR_MEMCPY_DEVICE_TO_HOST),
         "lr_memcpy device to host");
+}
+
+template <typename T, size_t N>
+inline void copy_to_host(T (&dst)[N], const DeviceBuffer &src) {
+  copy_to_host(dst, src, sizeof(dst));
+}
+
+template <typename T>
+inline void copy_to_host(std::vector<T> &dst, const DeviceBuffer &src) {
+  if (dst.empty()) {
+    return;
+  }
+  copy_to_host(dst.data(), src, dst.size() * sizeof(T));
 }
 
 inline void copy_device_to_device(DeviceBuffer &dst, const DeviceBuffer &src,

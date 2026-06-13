@@ -90,15 +90,25 @@ int main(void) {
       throw std::runtime_error("DeviceBuffer reported the wrong size");
     }
 
-    lrrt::copy_to_device(device_in, in, sizeof(in));
+    lrrt::copy_to_device(device_in, in);
 
     lrrt::DeviceBuffer device_copy(device, sizeof(in));
     lrrt::copy_device_to_device(device_copy, device_in, sizeof(in));
     float copied[n];
-    lrrt::copy_to_host(copied, device_copy, sizeof(copied));
+    lrrt::copy_to_host(copied, device_copy);
     for (int i = 0; i < n; ++i) {
       if (fabsf(copied[i] - in[i]) > 0.001f) {
         throw std::runtime_error("device copy result mismatch");
+      }
+    }
+
+    std::vector<float> vector_in(in, in + n);
+    std::vector<float> vector_out(n, 0.0f);
+    lrrt::copy_to_device(device_in, vector_in);
+    lrrt::copy_to_host(vector_out, device_in);
+    for (int i = 0; i < n; ++i) {
+      if (fabsf(vector_out[i] - in[i]) > 0.001f) {
+        throw std::runtime_error("vector copy result mismatch");
       }
     }
 
@@ -123,7 +133,7 @@ int main(void) {
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     lrrt::launch(kernel, config, args);
 
-    lrrt::copy_to_host(out, device_out, sizeof(out));
+    lrrt::copy_to_host(out, device_out);
 
     for (int i = 0; i < n; ++i) {
       float expected = alpha * in[i];

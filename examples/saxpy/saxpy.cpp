@@ -39,8 +39,8 @@ int main(void) {
 
     lrrt::DeviceBuffer device_x(device, sizeof(x));
     lrrt::DeviceBuffer device_y(device, sizeof(y));
-    lrrt::copy_to_device(device_x, x, sizeof(x));
-    lrrt::copy_to_device(device_y, y, sizeof(y));
+    lrrt::copy_to_device(device_x, x);
+    lrrt::copy_to_device(device_y, y);
 
     std::vector<unsigned char> hsaco =
         lrrt_example::read_file(LRRT_SAXPY_HSACO);
@@ -55,7 +55,7 @@ int main(void) {
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     lrrt::launch(kernel, config, args);
-    lrrt::copy_to_host(y, device_y, sizeof(y));
+    lrrt::copy_to_host(y, device_y);
 
     for (int i = 0; i < n; ++i) {
       float expected = alpha * x[i] + (float)(i * 3);
