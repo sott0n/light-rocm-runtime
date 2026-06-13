@@ -45,7 +45,7 @@ int main(void) {
     std::vector<unsigned char> hsaco =
         lrrt_example::read_file(LRRT_SAXPY_HSACO);
     lrrt::Module module(device, hsaco);
-    lr_kernel_t *kernel = module.kernel("saxpy");
+    lrrt::Kernel kernel = module.kernel("saxpy");
 
     saxpy_args_t args = {
         alpha,

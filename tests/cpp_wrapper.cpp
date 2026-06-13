@@ -106,7 +106,10 @@ int main(void) {
     if (module.get() == nullptr) {
       throw std::runtime_error("Module returned a null handle");
     }
-    lr_kernel_t *kernel = module.kernel("scale");
+    lrrt::Kernel kernel = module.kernel("scale");
+    if (kernel.get() == nullptr) {
+      throw std::runtime_error("Kernel returned a null handle");
+    }
 
     scale_args_t args = {
         (const float *)device_in.data(),

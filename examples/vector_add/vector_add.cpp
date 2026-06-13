@@ -47,7 +47,7 @@ int main(void) {
     std::vector<unsigned char> hsaco =
         lrrt_example::read_file(LRRT_VECTOR_ADD_HSACO);
     lrrt::Module module(device, hsaco);
-    lr_kernel_t *kernel = module.kernel("vector_add");
+    lrrt::Kernel kernel = module.kernel("vector_add");
 
     vector_add_args_t args = {
         (const float *)device_a.data(),

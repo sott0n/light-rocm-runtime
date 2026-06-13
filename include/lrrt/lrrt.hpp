@@ -113,6 +113,16 @@ inline void copy_device_to_device(DeviceBuffer &dst, const DeviceBuffer &src,
         "lr_memcpy device to device");
 }
 
+class Kernel {
+public:
+  explicit Kernel(lr_kernel_t *kernel) : kernel_(kernel) {}
+
+  lr_kernel_t *get() const { return kernel_; }
+
+private:
+  lr_kernel_t *kernel_;
+};
+
 inline void launch(lr_kernel_t *kernel, const lr_launch_config_t &config,
                    const void *args, size_t args_size) {
   check(lr_launch(kernel, &config, args, args_size), "lr_launch");
@@ -122,6 +132,17 @@ template <typename Args>
 inline void launch(lr_kernel_t *kernel, const lr_launch_config_t &config,
                    const Args &args) {
   launch(kernel, config, &args, sizeof(args));
+}
+
+inline void launch(const Kernel &kernel, const lr_launch_config_t &config,
+                   const void *args, size_t args_size) {
+  launch(kernel.get(), config, args, args_size);
+}
+
+template <typename Args>
+inline void launch(const Kernel &kernel, const lr_launch_config_t &config,
+                   const Args &args) {
+  launch(kernel.get(), config, args);
 }
 
 class Module {
@@ -153,10 +174,10 @@ public:
     return *this;
   }
 
-  lr_kernel_t *kernel(const char *name) const {
+  Kernel kernel(const char *name) const {
     lr_kernel_t *kernel = nullptr;
     check(lr_kernel_get(module_, name, &kernel), "lr_kernel_get");
-    return kernel;
+    return Kernel(kernel);
   }
 
   lr_module_t *get() const { return module_; }

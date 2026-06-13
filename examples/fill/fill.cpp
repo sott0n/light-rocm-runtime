@@ -34,7 +34,7 @@ int main(void) {
     lrrt::DeviceBuffer device_out(device, sizeof(out));
     std::vector<unsigned char> hsaco = lrrt_example::read_file(LRRT_FILL_HSACO);
     lrrt::Module module(device, hsaco);
-    lr_kernel_t *kernel = module.kernel("fill");
+    lrrt::Kernel kernel = module.kernel("fill");
 
     fill_args_t args = {(float *)device_out.data(), value, n};
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
