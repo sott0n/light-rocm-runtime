@@ -28,6 +28,17 @@ inline void check(lr_status_t status, const char *operation) {
   }
 }
 
+class Device {
+public:
+  explicit Device(lr_device_t device) : device_(device) {}
+
+  lr_device_t get() const { return device_; }
+  uint32_t index() const { return device_.index; }
+
+private:
+  lr_device_t device_;
+};
+
 class Runtime {
 public:
   Runtime() { check(lr_init(), "lr_init"); }
@@ -42,10 +53,10 @@ public:
     return count;
   }
 
-  lr_device_t open_device(uint32_t index) const {
+  Device open_device(uint32_t index) const {
     lr_device_t device = {0};
     check(lr_device_open(index, &device), "lr_device_open");
-    return device;
+    return Device(device);
   }
 };
 
@@ -55,6 +66,9 @@ public:
       : device_(device), ptr_(nullptr), size_(size) {
     check(lr_malloc(device_, size_, &ptr_), "lr_malloc");
   }
+
+  DeviceBuffer(Device device, size_t size) : DeviceBuffer(device.get(), size) {}
+
   ~DeviceBuffer() { reset(); }
 
   DeviceBuffer(DeviceBuffer &&other) noexcept
@@ -155,6 +169,12 @@ public:
 
   Module(lr_device_t device, const std::vector<unsigned char> &image)
       : Module(device, image.data(), image.size()) {}
+
+  Module(Device device, const void *image, size_t image_size)
+      : Module(device.get(), image, image_size) {}
+
+  Module(Device device, const std::vector<unsigned char> &image)
+      : Module(device.get(), image.data(), image.size()) {}
 
   ~Module() { reset(); }
 

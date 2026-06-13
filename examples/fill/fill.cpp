@@ -24,8 +24,8 @@ int main(void) {
       return 0;
     }
 
-    lr_device_t device = runtime.open_device(0);
-    printf("opened device: %u\n", device.index);
+    lrrt::Device device = runtime.open_device(0);
+    printf("opened device: %u\n", device.index());
 
     const int n = 64;
     const float value = 7.25f;

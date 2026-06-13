@@ -68,7 +68,10 @@ int main(void) {
       return 0;
     }
 
-    lr_device_t device = runtime.open_device(0);
+    lrrt::Device device = runtime.open_device(0);
+    if (device.index() != 0) {
+      throw std::runtime_error("Device reported the wrong index");
+    }
 
     const int n = 64;
     const float alpha = 3.0f;
