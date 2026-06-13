@@ -113,6 +113,17 @@ inline void copy_device_to_device(DeviceBuffer &dst, const DeviceBuffer &src,
         "lr_memcpy device to device");
 }
 
+inline void launch(lr_kernel_t *kernel, const lr_launch_config_t &config,
+                   const void *args, size_t args_size) {
+  check(lr_launch(kernel, &config, args, args_size), "lr_launch");
+}
+
+template <typename Args>
+inline void launch(lr_kernel_t *kernel, const lr_launch_config_t &config,
+                   const Args &args) {
+  launch(kernel, config, &args, sizeof(args));
+}
+
 class Module {
 public:
   Module(lr_device_t device, const void *image, size_t image_size)

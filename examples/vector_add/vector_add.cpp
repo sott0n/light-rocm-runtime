@@ -56,7 +56,7 @@ int main(void) {
         n,
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
-    lrrt::check(lr_launch(kernel, &config, &args, sizeof(args)), "lr_launch");
+    lrrt::launch(kernel, config, args);
     lrrt::copy_to_host(c, device_c, sizeof(c));
 
     for (int i = 0; i < n; ++i) {
