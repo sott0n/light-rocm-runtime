@@ -89,9 +89,17 @@ int main(void) {
       throw std::runtime_error("DeviceBuffer reported the wrong size");
     }
 
-    lrrt::check(lr_memcpy(device, device_in.data(), in, sizeof(in),
-                          LR_MEMCPY_HOST_TO_DEVICE),
-                "copy in");
+    lrrt::copy_to_device(device_in, in, sizeof(in));
+
+    lrrt::DeviceBuffer device_copy(device, sizeof(in));
+    lrrt::copy_device_to_device(device_copy, device_in, sizeof(in));
+    float copied[n];
+    lrrt::copy_to_host(copied, device_copy, sizeof(copied));
+    for (int i = 0; i < n; ++i) {
+      if (fabsf(copied[i] - in[i]) > 0.001f) {
+        throw std::runtime_error("device copy result mismatch");
+      }
+    }
 
     std::vector<unsigned char> hsaco = read_file(LRRT_SCALE_HSACO);
     lrrt::Module first_module(device, hsaco);
@@ -111,9 +119,7 @@ int main(void) {
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     lrrt::check(lr_launch(kernel, &config, &args, sizeof(args)), "lr_launch");
 
-    lrrt::check(lr_memcpy(device, out, device_out.data(), sizeof(out),
-                          LR_MEMCPY_DEVICE_TO_HOST),
-                "copy out");
+    lrrt::copy_to_host(out, device_out, sizeof(out));
 
     for (int i = 0; i < n; ++i) {
       float expected = alpha * in[i];

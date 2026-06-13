@@ -68,6 +68,7 @@ public:
 
   void *data() const { return ptr_; }
   size_t size() const { return size_; }
+  lr_device_t device() const { return device_; }
 
 private:
   void reset() noexcept {
@@ -82,6 +83,23 @@ private:
   void *ptr_;
   size_t size_;
 };
+
+inline void copy_to_device(DeviceBuffer &dst, const void *src, size_t size) {
+  check(lr_memcpy(dst.device(), dst.data(), src, size, LR_MEMCPY_HOST_TO_DEVICE),
+        "lr_memcpy host to device");
+}
+
+inline void copy_to_host(void *dst, const DeviceBuffer &src, size_t size) {
+  check(lr_memcpy(src.device(), dst, src.data(), size, LR_MEMCPY_DEVICE_TO_HOST),
+        "lr_memcpy device to host");
+}
+
+inline void copy_device_to_device(DeviceBuffer &dst, const DeviceBuffer &src,
+                                  size_t size) {
+  check(lr_memcpy(dst.device(), dst.data(), src.data(), size,
+                  LR_MEMCPY_DEVICE_TO_DEVICE),
+        "lr_memcpy device to device");
+}
 
 class Module {
 public:

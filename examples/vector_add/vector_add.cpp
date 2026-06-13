@@ -43,12 +43,8 @@ int main(void) {
     lrrt::DeviceBuffer device_a(device, sizeof(a));
     lrrt::DeviceBuffer device_b(device, sizeof(b));
     lrrt::DeviceBuffer device_c(device, sizeof(c));
-    lrrt::check(lr_memcpy(device, device_a.data(), a, sizeof(a),
-                          LR_MEMCPY_HOST_TO_DEVICE),
-                "copy a");
-    lrrt::check(lr_memcpy(device, device_b.data(), b, sizeof(b),
-                          LR_MEMCPY_HOST_TO_DEVICE),
-                "copy b");
+    lrrt::copy_to_device(device_a, a, sizeof(a));
+    lrrt::copy_to_device(device_b, b, sizeof(b));
 
     std::vector<unsigned char> hsaco =
         lrrt_example::read_file(LRRT_VECTOR_ADD_HSACO);
@@ -63,9 +59,7 @@ int main(void) {
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     lrrt::check(lr_launch(kernel, &config, &args, sizeof(args)), "lr_launch");
-    lrrt::check(lr_memcpy(device, c, device_c.data(), sizeof(c),
-                          LR_MEMCPY_DEVICE_TO_HOST),
-                "copy c back");
+    lrrt::copy_to_host(c, device_c, sizeof(c));
 
     for (int i = 0; i < n; ++i) {
       if (fabsf(c[i] - (a[i] + b[i])) > 0.001f) {
