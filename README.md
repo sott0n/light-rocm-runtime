@@ -12,8 +12,8 @@ The first target is intentionally narrow:
 - launch one kernel
 - synchronize and copy results back
 
-This project is not trying to replace the full HIP runtime. The initial
-implementation will use the HSA/ROCr API directly and keep a small public C ABI.
+This project is not trying to replace the full HIP runtime. The implementation
+uses the HSA/ROCr API directly and keeps a small public C ABI.
 
 ## Build
 
@@ -22,8 +22,58 @@ cmake -S . -B build
 cmake --build build
 ```
 
-The current runtime is a scaffold. HSA-backed execution will be added behind the
-same public API.
+The runtime uses the HSA/ROCr API directly for device memory, code object
+loading, and kernel dispatch.
+
+## C++ Usage
+
+The C++ wrapper in `lrrt/lrrt.hpp` keeps the C ABI underneath, but provides
+small RAII/value helpers for the common flow:
+
+```cpp
+#include "lrrt/lrrt.hpp"
+
+#include <vector>
+
+std::vector<unsigned char> read_hsaco(const char *path);
+
+struct args_t {
+  const float *in;
+  float *out;
+  int n;
+};
+
+int main() {
+  lrrt::Runtime runtime;
+  lrrt::Device device = runtime.open_device(0);
+
+  std::vector<float> in(64, 1.0f);
+  std::vector<float> out(64, 0.0f);
+
+  lrrt::DeviceBuffer device_in(device, in.size() * sizeof(float));
+  lrrt::DeviceBuffer device_out(device, out.size() * sizeof(float));
+  lrrt::copy_to_device(device_in, in.data(), in.size() * sizeof(float));
+
+  std::vector<unsigned char> hsaco = read_hsaco("my_kernel.hsaco");
+  lrrt::Module module(device, hsaco);
+  lrrt::Kernel kernel = module.kernel("my_kernel");
+
+  args_t args = {
+      static_cast<const float *>(device_in.data()),
+      static_cast<float *>(device_out.data()),
+      static_cast<int>(in.size()),
+  };
+  lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+  lrrt::launch(kernel, config, args);
+
+  lrrt::copy_to_host(out.data(), device_out, out.size() * sizeof(float));
+}
+```
+
+`Runtime`, `DeviceBuffer`, and `Module` manage their runtime resources through
+constructors and destructors. `Device` and `Kernel` are lightweight wrappers
+around the C handles; their lifetimes are still tied to the runtime/module that
+created them.
 
 ## Development GPU
 
