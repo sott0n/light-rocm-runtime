@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -11,7 +12,18 @@
 
 #if LRRT_ENABLE_HSA
 #include <hsa/hsa.h>
+#include <hsa/hsa_ext_amd.h>
 #endif
+
+struct lr_event_t {
+  lr_device_t device;
+#if LRRT_ENABLE_HSA
+  hsa_signal_t signal;
+  bool pending;
+  bool completed;
+  uint64_t completion_tick;
+#endif
+};
 
 struct lr_module_t {
   lr_device_t device;
@@ -56,6 +68,7 @@ struct DeviceState {
   bool has_kernarg_region;
   hsa_queue_t *queue;
   std::vector<PendingDispatch> pending_dispatches;
+  std::vector<lr_event_t *> pending_events;
   std::vector<hsa_signal_t> signal_pool;
   std::vector<KernargBuffer> kernarg_pool;
 };
@@ -75,6 +88,7 @@ struct AllocationInfo {
 std::mutex g_devices_mutex;
 std::vector<DeviceState> g_devices;
 std::unordered_map<void *, AllocationInfo> g_allocations;
+std::unordered_set<lr_event_t *> g_events;
 std::unordered_set<lr_module_t *> g_modules;
 std::unordered_set<lr_kernel_t *> g_kernels;
 
@@ -170,9 +184,19 @@ hsa_status_t create_default_queue(DeviceState *device) {
     queue_size = 1;
   }
 
-  return hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
-                          nullptr, nullptr, UINT32_MAX, UINT32_MAX,
-                          &device->queue);
+  status = hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
+                            nullptr, nullptr, UINT32_MAX, UINT32_MAX,
+                            &device->queue);
+  if (status != HSA_STATUS_SUCCESS) {
+    return status;
+  }
+
+  status = hsa_amd_profiling_set_profiler_enabled(device->queue, 1);
+  if (status != HSA_STATUS_SUCCESS) {
+    hsa_queue_destroy(device->queue);
+    device->queue = nullptr;
+  }
+  return status;
 }
 
 uint16_t packet_header(hsa_packet_type_t type) {
@@ -180,6 +204,11 @@ uint16_t packet_header(hsa_packet_type_t type) {
       (type << HSA_PACKET_HEADER_TYPE) |
       (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCACQUIRE_FENCE_SCOPE) |
       (HSA_FENCE_SCOPE_SYSTEM << HSA_PACKET_HEADER_SCRELEASE_FENCE_SCOPE));
+}
+
+uint16_t barrier_packet_header(hsa_packet_type_t type) {
+  return static_cast<uint16_t>(packet_header(type) |
+                               (1 << HSA_PACKET_HEADER_BARRIER));
 }
 
 uint16_t packet_setup(uint16_t dimensions) {
@@ -245,6 +274,38 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
   return reader_status;
 }
 
+lr_status_t event_wait_locked(lr_event_t *event) {
+  if (!event->pending) {
+    return LR_SUCCESS;
+  }
+
+  DeviceState &device = g_devices[event->device.index];
+  hsa_signal_value_t value = hsa_signal_wait_scacquire(
+      event->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+      HSA_WAIT_STATE_BLOCKED);
+  auto pending = std::find(device.pending_events.begin(),
+                           device.pending_events.end(), event);
+  if (pending != device.pending_events.end()) {
+    *pending = device.pending_events.back();
+    device.pending_events.pop_back();
+  }
+
+  event->pending = false;
+  if (value != 0) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  hsa_amd_profiling_dispatch_time_t time{};
+  hsa_status_t status =
+      hsa_amd_profiling_get_dispatch_time(device.agent, event->signal, &time);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+  event->completion_tick = time.end;
+  event->completed = true;
+  return LR_SUCCESS;
+}
+
 lr_status_t drain_device_locked(DeviceState *device) {
   lr_status_t result = LR_SUCCESS;
   for (const PendingDispatch &dispatch : device->pending_dispatches) {
@@ -259,7 +320,23 @@ lr_status_t drain_device_locked(DeviceState *device) {
     device->kernarg_pool.push_back(dispatch.kernarg);
   }
   device->pending_dispatches.clear();
+
+  std::vector<lr_event_t *> pending_events = device->pending_events;
+  for (lr_event_t *event : pending_events) {
+    lr_status_t status = event_wait_locked(event);
+    if (status != LR_SUCCESS && result == LR_SUCCESS) {
+      result = status;
+    }
+  }
   return result;
+}
+
+lr_status_t ensure_queue_slot_locked(DeviceState *device) {
+  if (device->pending_dispatches.size() + device->pending_events.size() <
+      device->queue->size) {
+    return LR_SUCCESS;
+  }
+  return drain_device_locked(device);
 }
 
 void release_device_pools_locked(DeviceState *device, lr_status_t *result) {
@@ -402,6 +479,12 @@ lr_status_t lr_shutdown(void) {
     g_modules.clear();
     g_kernels.clear();
 
+    for (lr_event_t *event : g_events) {
+      hsa_signal_destroy(event->signal);
+      delete event;
+    }
+    g_events.clear();
+
     for (DeviceState &device : g_devices) {
       if (device.queue) {
         hsa_queue_destroy(device.queue);
@@ -478,6 +561,185 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
 
   device->index = index;
   return LR_SUCCESS;
+}
+
+lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!valid_device(device) || !event) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  *event = nullptr;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto *created_event = new lr_event_t{};
+  created_event->device = device;
+  hsa_status_t status =
+      hsa_signal_create(1, 0, nullptr, &created_event->signal);
+  if (status != HSA_STATUS_SUCCESS) {
+    delete created_event;
+    return to_lr_status(status);
+  }
+
+  created_event->pending = false;
+  created_event->completed = false;
+  created_event->completion_tick = 0;
+  g_events.insert(created_event);
+  *event = created_event;
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_event_destroy(lr_event_t *event) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!event) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  auto event_entry = g_events.find(event);
+  if (event_entry == g_events.end() || event->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  lr_status_t wait_status = event_wait_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+
+  hsa_status_t status = hsa_signal_destroy(event->signal);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+
+  g_events.erase(event_entry);
+  delete event;
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_event_record(lr_event_t *event) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!event) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_events.find(event) == g_events.end() ||
+      event->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  DeviceState &state = g_devices[event->device.index];
+  if (!state.queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  lr_status_t wait_status = event_wait_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+  lr_status_t slot_status = ensure_queue_slot_locked(&state);
+  if (slot_status != LR_SUCCESS) {
+    return slot_status;
+  }
+
+  hsa_signal_store_relaxed(event->signal, 1);
+  event->completed = false;
+  event->completion_tick = 0;
+
+  const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
+  auto *packets =
+      static_cast<hsa_barrier_and_packet_t *>(state.queue->base_address);
+  hsa_barrier_and_packet_t *packet = &packets[index & (state.queue->size - 1)];
+  std::memset(packet, 0, sizeof(*packet));
+  packet->completion_signal = event->signal;
+  packet->header = barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND);
+
+  event->pending = true;
+  state.pending_events.push_back(event);
+  hsa_signal_store_screlease(state.queue->doorbell_signal, index);
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_event_synchronize(lr_event_t *event) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!event) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_events.find(event) == g_events.end() ||
+      event->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return event_wait_locked(event);
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
+                                     const lr_event_t *end,
+                                     uint64_t *elapsed_ns) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!start || !end || !elapsed_ns) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  *elapsed_ns = 0;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_events.find(const_cast<lr_event_t *>(start)) == g_events.end() ||
+      g_events.find(const_cast<lr_event_t *>(end)) == g_events.end() ||
+      start->device.index != end->device.index || start->pending ||
+      end->pending || !start->completed || !end->completed) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  uint64_t frequency = 0;
+  hsa_status_t status =
+      hsa_system_get_info(HSA_SYSTEM_INFO_TIMESTAMP_FREQUENCY, &frequency);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+  if (frequency == 0 || end->completion_tick < start->completion_tick) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  uint64_t ticks = end->completion_tick - start->completion_tick;
+  *elapsed_ns =
+      static_cast<uint64_t>((static_cast<unsigned __int128>(ticks) *
+                             1000000000ULL) /
+                            frequency);
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
@@ -806,11 +1068,9 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
       args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  if (state.pending_dispatches.size() >= state.queue->size) {
-    lr_status_t drain_status = drain_device_locked(&state);
-    if (drain_status != LR_SUCCESS) {
-      return drain_status;
-    }
+  lr_status_t slot_status = ensure_queue_slot_locked(&state);
+  if (slot_status != LR_SUCCESS) {
+    return slot_status;
   }
 
   KernargBuffer kernarg{};

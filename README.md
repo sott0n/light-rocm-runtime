@@ -60,6 +60,12 @@ predictable while the runtime is small. Code that wants explicit control should
 call `lr_synchronize` before reading results or destroying resources that may be
 used by queued kernels.
 
+Events provide a lightweight way to mark queue progress and measure elapsed
+time. `lr_event_record` enqueues a marker after previously submitted work on the
+event's device, `lr_event_synchronize` waits for that marker, and
+`lr_event_elapsed_time_ns` reports the nanoseconds between two completed
+markers.
+
 ## C++ Usage
 
 The C++ wrapper in `lrrt/lrrt.hpp` keeps the C ABI underneath, but provides
@@ -99,8 +105,14 @@ int main() {
       static_cast<int>(in.size()),
   };
   lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+  lrrt::Event start(device);
+  lrrt::Event end(device);
+  start.record();
   lrrt::launch(kernel, config, args);
-  device.synchronize();
+  end.record();
+  end.synchronize();
+  start.synchronize();
+  uint64_t elapsed_ns = lrrt::elapsed_time_ns(start, end);
 
   lrrt::copy_to_host(out.data(), device_out, out.size() * sizeof(float));
 }

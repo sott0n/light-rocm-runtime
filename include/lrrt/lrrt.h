@@ -33,6 +33,7 @@ typedef struct lr_device_t {
   uint32_t index;
 } lr_device_t;
 
+typedef struct lr_event_t lr_event_t;
 typedef struct lr_module_t lr_module_t;
 typedef struct lr_kernel_t lr_kernel_t;
 
@@ -57,6 +58,29 @@ LRRT_API lr_status_t lr_shutdown(void);
 
 LRRT_API lr_status_t lr_device_count(uint32_t *count);
 LRRT_API lr_status_t lr_device_open(uint32_t index, lr_device_t *device);
+
+LRRT_API lr_status_t lr_event_create(lr_device_t device, lr_event_t **event);
+
+/*
+ * Waits for the event if it is still pending, then releases the event handle.
+ */
+LRRT_API lr_status_t lr_event_destroy(lr_event_t *event);
+
+/*
+ * Enqueues an event marker after previously submitted work on the event's
+ * device. Re-recording a pending event waits for the previous marker first.
+ */
+LRRT_API lr_status_t lr_event_record(lr_event_t *event);
+
+/* Waits for a recorded event marker to complete. */
+LRRT_API lr_status_t lr_event_synchronize(lr_event_t *event);
+
+/*
+ * Returns the elapsed time in nanoseconds between two completed event markers.
+ */
+LRRT_API lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
+                                              const lr_event_t *end,
+                                              uint64_t *elapsed_ns);
 
 LRRT_API lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr);
 

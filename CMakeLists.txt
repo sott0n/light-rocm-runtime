@@ -94,6 +94,9 @@ target_link_libraries(lrrt_scale_tests PRIVATE lrrt::lrrt)
 add_executable(lrrt_copy_kernel_tests tests/copy_kernel.cpp)
 target_link_libraries(lrrt_copy_kernel_tests PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_event_timing_tests tests/event_timing.cpp)
+target_link_libraries(lrrt_event_timing_tests PRIVATE lrrt::lrrt)
+
 add_executable(lrrt_cpp_wrapper_tests tests/cpp_wrapper.cpp)
 target_link_libraries(lrrt_cpp_wrapper_tests PRIVATE lrrt::lrrt)
 
@@ -131,9 +134,14 @@ if(FILL_HSACO)
 endif()
 if(SCALE_HSACO)
   add_dependencies(lrrt_scale_tests scale_kernel_hsaco)
+  add_dependencies(lrrt_event_timing_tests scale_kernel_hsaco)
   add_dependencies(lrrt_cpp_wrapper_tests scale_kernel_hsaco)
   target_compile_definitions(
     lrrt_scale_tests
+    PRIVATE LRRT_SCALE_HSACO="${SCALE_HSACO}"
+  )
+  target_compile_definitions(
+    lrrt_event_timing_tests
     PRIVATE LRRT_SCALE_HSACO="${SCALE_HSACO}"
   )
   target_compile_definitions(
@@ -154,4 +162,5 @@ add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
 add_test(NAME lrrt_handle_registry_tests COMMAND lrrt_handle_registry_tests)
 add_test(NAME lrrt_scale_tests COMMAND lrrt_scale_tests)
 add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)
+add_test(NAME lrrt_event_timing_tests COMMAND lrrt_event_timing_tests)
 add_test(NAME lrrt_cpp_wrapper_tests COMMAND lrrt_cpp_wrapper_tests)

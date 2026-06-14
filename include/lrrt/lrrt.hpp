@@ -46,6 +46,58 @@ inline void synchronize(Device device) {
   check(lr_synchronize(device.get()), "lr_synchronize");
 }
 
+class Event {
+public:
+  explicit Event(lr_device_t device) : event_(nullptr) {
+    check(lr_event_create(device, &event_), "lr_event_create");
+  }
+
+  explicit Event(Device device) : Event(device.get()) {}
+
+  ~Event() { reset(); }
+
+  Event(Event &&other) noexcept : event_(other.event_) {
+    other.event_ = nullptr;
+  }
+
+  Event(const Event &) = delete;
+  Event &operator=(const Event &) = delete;
+
+  Event &operator=(Event &&other) noexcept {
+    if (this != &other) {
+      reset();
+      event_ = other.event_;
+      other.event_ = nullptr;
+    }
+    return *this;
+  }
+
+  lr_event_t *get() const { return event_; }
+
+  void record() const { check(lr_event_record(event_), "lr_event_record"); }
+
+  void synchronize() const {
+    check(lr_event_synchronize(event_), "lr_event_synchronize");
+  }
+
+private:
+  void reset() noexcept {
+    if (event_) {
+      lr_event_destroy(event_);
+      event_ = nullptr;
+    }
+  }
+
+  lr_event_t *event_;
+};
+
+inline uint64_t elapsed_time_ns(const Event &start, const Event &end) {
+  uint64_t elapsed_ns = 0;
+  check(lr_event_elapsed_time_ns(start.get(), end.get(), &elapsed_ns),
+        "lr_event_elapsed_time_ns");
+  return elapsed_ns;
+}
+
 class Runtime {
 public:
   Runtime() { check(lr_init(), "lr_init"); }

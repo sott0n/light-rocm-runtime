@@ -131,8 +131,16 @@ int main(void) {
         n,
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+    lrrt::Event start(device);
+    lrrt::Event end(device);
+    start.record();
     lrrt::launch(kernel, config, args);
-    device.synchronize();
+    end.record();
+    end.synchronize();
+    start.synchronize();
+    if (lrrt::elapsed_time_ns(start, end) == 0) {
+      throw std::runtime_error("event elapsed time was zero");
+    }
 
     lrrt::copy_to_host(out, device_out);
 
