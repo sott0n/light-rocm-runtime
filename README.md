@@ -38,6 +38,28 @@ cmake --build build
 The runtime uses the HSA/ROCr API directly for device memory, code object
 loading, and kernel dispatch.
 
+## Execution Semantics
+
+`lr_launch` is asynchronous with respect to the host. A successful return means
+the kernel dispatch packet was enqueued on the device queue; it does not mean
+the kernel has finished running.
+
+Use `lr_synchronize` to wait for all previously enqueued work on a device.
+Kernel execution errors are reported by `lr_synchronize` or by a later API call
+that must drain pending work for safety.
+
+The current memory and lifetime APIs are conservative:
+
+- `lr_memcpy` waits for pending work before copying
+- `lr_free` waits before releasing a runtime-managed allocation
+- `lr_module_destroy` waits before destroying code object state for that device
+- `lr_shutdown` waits for all devices before releasing runtime resources
+
+These implicit synchronization points keep pointer and module lifetimes
+predictable while the runtime is small. Code that wants explicit control should
+call `lr_synchronize` before reading results or destroying resources that may be
+used by queued kernels.
+
 ## C++ Usage
 
 The C++ wrapper in `lrrt/lrrt.hpp` keeps the C ABI underneath, but provides

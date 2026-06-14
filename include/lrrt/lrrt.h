@@ -51,13 +51,19 @@ typedef struct lr_launch_config_t {
 LRRT_API const char *lr_status_string(lr_status_t status);
 
 LRRT_API lr_status_t lr_init(void);
+
+/* Waits for pending work on all devices before releasing runtime resources. */
 LRRT_API lr_status_t lr_shutdown(void);
 
 LRRT_API lr_status_t lr_device_count(uint32_t *count);
 LRRT_API lr_status_t lr_device_open(uint32_t index, lr_device_t *device);
 
 LRRT_API lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr);
+
+/* Waits for pending work on the device before releasing ptr. */
 LRRT_API lr_status_t lr_free(lr_device_t device, void *ptr);
+
+/* Waits for pending work on the device before performing the copy. */
 LRRT_API lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
                                size_t size, lr_memcpy_kind_t kind);
 
@@ -65,13 +71,23 @@ LRRT_API lr_status_t lr_module_load_hsaco(lr_device_t device,
                                           const void *image,
                                           size_t image_size,
                                           lr_module_t **module);
+
+/* Waits for pending work on the module's device before destroying it. */
 LRRT_API lr_status_t lr_module_destroy(lr_module_t *module);
 
 LRRT_API lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
                                    lr_kernel_t **kernel);
+
+/*
+ * Enqueues a kernel dispatch and returns after the packet is submitted to the
+ * device queue. Kernel completion and execution errors are observed by
+ * lr_synchronize or by later APIs that implicitly wait for pending work.
+ */
 LRRT_API lr_status_t lr_launch(lr_kernel_t *kernel,
                                const lr_launch_config_t *config,
                                const void *args, size_t args_size);
+
+/* Waits for all previously enqueued work on the device. */
 LRRT_API lr_status_t lr_synchronize(lr_device_t device);
 
 #ifdef __cplusplus
