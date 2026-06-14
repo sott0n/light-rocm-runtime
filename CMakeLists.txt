@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.18)
 project(light_rocm_runtime VERSION 0.1.0 LANGUAGES C CXX)
 
 set(LRRT_AMDGPU_TARGET "gfx1101" CACHE STRING "AMDGPU target for examples")
+option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,6 +21,7 @@ find_library(
   HINTS /opt/rocm/lib /opt/rocm/lib64
 )
 find_program(AMDCLANGXX amdclang++ HINTS /opt/rocm/bin /opt/rocm/llvm/bin)
+find_program(UV_EXECUTABLE uv HINTS "$ENV{HOME}/.local/bin")
 find_program(
   CLANG_OFFLOAD_BUNDLER
   clang-offload-bundler
@@ -49,6 +51,34 @@ function(lrrt_add_hsaco_kernel name source output_var)
     )
     add_custom_target(${name}_hsaco DEPENDS "${hsaco}")
     set(${output_var} "${hsaco}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(lrrt_add_triton_vector_add output_hsaco_var output_manifest_var)
+  if(UV_EXECUTABLE)
+    set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/triton_vector_add_bundle")
+    set(hsaco "${output_dir}/kernels.hsaco")
+    set(manifest "${output_dir}/manifest.json")
+
+    add_custom_command(
+      OUTPUT "${hsaco}" "${manifest}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
+      COMMAND
+        "${CMAKE_COMMAND}" -E env
+        "TRITON_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/triton-cache"
+        "UV_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/uv-cache"
+        "${UV_EXECUTABLE}" run --no-project --with-requirements
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/triton/requirements.txt" python
+        "${CMAKE_CURRENT_SOURCE_DIR}/examples/triton/vector_add_kernel.py"
+        "--arch=${LRRT_AMDGPU_TARGET}" "--output-dir=${output_dir}"
+      DEPENDS
+        examples/triton/requirements.txt
+        examples/triton/vector_add_kernel.py
+      VERBATIM
+    )
+    add_custom_target(triton_vector_add_bundle DEPENDS "${hsaco}" "${manifest}")
+    set(${output_hsaco_var} "${hsaco}" PARENT_SCOPE)
+    set(${output_manifest_var} "${manifest}" PARENT_SCOPE)
   endif()
 endfunction()
 
@@ -82,6 +112,15 @@ target_link_libraries(lrrt_saxpy PRIVATE lrrt::lrrt)
 add_executable(lrrt_fill examples/fill/fill.cpp)
 target_link_libraries(lrrt_fill PRIVATE lrrt::lrrt)
 
+if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
+  add_executable(lrrt_triton_vector_add examples/triton/triton_vector_add.cpp)
+  target_link_libraries(lrrt_triton_vector_add PRIVATE lrrt::lrrt)
+elseif(LRRT_ENABLE_TRITON_EXAMPLES)
+  message(STATUS "uv not found; skipping Triton example")
+else()
+  message(STATUS "Triton examples disabled")
+endif()
+
 add_executable(lrrt_memory_bounds_tests tests/memory_bounds.cpp)
 target_link_libraries(lrrt_memory_bounds_tests PRIVATE lrrt::lrrt)
 
@@ -111,6 +150,10 @@ lrrt_add_hsaco_kernel(saxpy_kernel examples/saxpy/saxpy_kernel.cpp SAXPY_HSACO)
 lrrt_add_hsaco_kernel(fill_kernel examples/fill/fill_kernel.cpp FILL_HSACO)
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
 lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
+if(LRRT_ENABLE_TRITON_EXAMPLES)
+  lrrt_add_triton_vector_add(TRITON_VECTOR_ADD_HSACO
+                             TRITON_VECTOR_ADD_MANIFEST)
+endif()
 
 if(VECTOR_ADD_HSACO)
   add_dependencies(lrrt_vector_add vector_add_kernel_hsaco)
@@ -159,6 +202,15 @@ if(COPY_HSACO)
     PRIVATE LRRT_COPY_HSACO="${COPY_HSACO}"
   )
 endif()
+if(TRITON_VECTOR_ADD_HSACO)
+  add_dependencies(lrrt_triton_vector_add triton_vector_add_bundle)
+  target_compile_definitions(
+    lrrt_triton_vector_add
+    PRIVATE
+      LRRT_TRITON_VECTOR_ADD_HSACO="${TRITON_VECTOR_ADD_HSACO}"
+      LRRT_TRITON_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -168,3 +220,6 @@ add_test(NAME lrrt_scale_tests COMMAND lrrt_scale_tests)
 add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)
 add_test(NAME lrrt_event_timing_tests COMMAND lrrt_event_timing_tests)
 add_test(NAME lrrt_cpp_wrapper_tests COMMAND lrrt_cpp_wrapper_tests)
+if(TARGET lrrt_triton_vector_add)
+  add_test(NAME lrrt_triton_vector_add COMMAND lrrt_triton_vector_add)
+endif()
