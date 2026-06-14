@@ -174,9 +174,22 @@ inline void copy_to_device(DeviceBuffer &dst, const void *src, size_t size) {
         "lr_memcpy host to device");
 }
 
+inline void copy_to_device_async(DeviceBuffer &dst, const void *src,
+                                 size_t size, const Event &event) {
+  check(lr_memcpy_async(dst.device(), dst.data(), src, size,
+                        LR_MEMCPY_HOST_TO_DEVICE, event.get()),
+        "lr_memcpy_async host to device");
+}
+
 template <typename T, size_t N>
 inline void copy_to_device(DeviceBuffer &dst, const T (&src)[N]) {
   copy_to_device(dst, src, sizeof(src));
+}
+
+template <typename T, size_t N>
+inline void copy_to_device_async(DeviceBuffer &dst, const T (&src)[N],
+                                 const Event &event) {
+  copy_to_device_async(dst, src, sizeof(src), event);
 }
 
 template <typename T>
@@ -187,14 +200,36 @@ inline void copy_to_device(DeviceBuffer &dst, const std::vector<T> &src) {
   copy_to_device(dst, src.data(), src.size() * sizeof(T));
 }
 
+template <typename T>
+inline void copy_to_device_async(DeviceBuffer &dst, const std::vector<T> &src,
+                                 const Event &event) {
+  if (src.empty()) {
+    return;
+  }
+  copy_to_device_async(dst, src.data(), src.size() * sizeof(T), event);
+}
+
 inline void copy_to_host(void *dst, const DeviceBuffer &src, size_t size) {
   check(lr_memcpy(src.device(), dst, src.data(), size, LR_MEMCPY_DEVICE_TO_HOST),
         "lr_memcpy device to host");
 }
 
+inline void copy_to_host_async(void *dst, const DeviceBuffer &src, size_t size,
+                               const Event &event) {
+  check(lr_memcpy_async(src.device(), dst, src.data(), size,
+                        LR_MEMCPY_DEVICE_TO_HOST, event.get()),
+        "lr_memcpy_async device to host");
+}
+
 template <typename T, size_t N>
 inline void copy_to_host(T (&dst)[N], const DeviceBuffer &src) {
   copy_to_host(dst, src, sizeof(dst));
+}
+
+template <typename T, size_t N>
+inline void copy_to_host_async(T (&dst)[N], const DeviceBuffer &src,
+                               const Event &event) {
+  copy_to_host_async(dst, src, sizeof(dst), event);
 }
 
 template <typename T>
@@ -205,11 +240,28 @@ inline void copy_to_host(std::vector<T> &dst, const DeviceBuffer &src) {
   copy_to_host(dst.data(), src, dst.size() * sizeof(T));
 }
 
+template <typename T>
+inline void copy_to_host_async(std::vector<T> &dst, const DeviceBuffer &src,
+                               const Event &event) {
+  if (dst.empty()) {
+    return;
+  }
+  copy_to_host_async(dst.data(), src, dst.size() * sizeof(T), event);
+}
+
 inline void copy_device_to_device(DeviceBuffer &dst, const DeviceBuffer &src,
                                   size_t size) {
   check(lr_memcpy(dst.device(), dst.data(), src.data(), size,
                   LR_MEMCPY_DEVICE_TO_DEVICE),
         "lr_memcpy device to device");
+}
+
+inline void copy_device_to_device_async(DeviceBuffer &dst,
+                                        const DeviceBuffer &src, size_t size,
+                                        const Event &event) {
+  check(lr_memcpy_async(dst.device(), dst.data(), src.data(), size,
+                        LR_MEMCPY_DEVICE_TO_DEVICE, event.get()),
+        "lr_memcpy_async device to device");
 }
 
 class Kernel {

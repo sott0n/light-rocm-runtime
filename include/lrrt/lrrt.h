@@ -91,6 +91,16 @@ LRRT_API lr_status_t lr_free(lr_device_t device, void *ptr);
 LRRT_API lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
                                size_t size, lr_memcpy_kind_t kind);
 
+/*
+ * Starts an asynchronous copy and records completion in event. The event must
+ * belong to the same device. The runtime waits for earlier queued work before
+ * starting the copy, and later lr_launch calls wait for pending async copies.
+ * Use lr_event_synchronize to wait for copy completion.
+ */
+LRRT_API lr_status_t lr_memcpy_async(lr_device_t device, void *dst,
+                                     const void *src, size_t size,
+                                     lr_memcpy_kind_t kind, lr_event_t *event);
+
 LRRT_API lr_status_t lr_module_load_hsaco(lr_device_t device,
                                           const void *image,
                                           size_t image_size,

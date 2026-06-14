@@ -51,6 +51,8 @@ that must drain pending work for safety.
 The current memory and lifetime APIs are conservative:
 
 - `lr_memcpy` waits for pending work before copying
+- `lr_memcpy_async` waits for earlier queued work, starts the copy, and reports
+  copy completion through an event
 - `lr_free` waits before releasing a runtime-managed allocation
 - `lr_module_destroy` waits before destroying code object state for that device
 - `lr_shutdown` waits for all devices before releasing runtime resources
@@ -65,6 +67,12 @@ time. `lr_event_record` enqueues a marker after previously submitted work on the
 event's device, `lr_event_synchronize` waits for that marker, and
 `lr_event_elapsed_time_ns` reports the nanoseconds between two completed
 markers.
+
+Asynchronous copies are currently ordered conservatively with kernel dispatches:
+the runtime drains earlier queued work before starting an async copy, and
+`lr_launch` waits for pending async copies before enqueueing a kernel. This
+keeps buffer lifetime and data visibility predictable until explicit event
+dependencies between copies and dispatches are added.
 
 ## C++ Usage
 

@@ -18,7 +18,14 @@
 struct lr_event_t {
   lr_device_t device;
 #if LRRT_ENABLE_HSA
+  enum class Kind {
+    None,
+    Marker,
+    AsyncCopy,
+  };
+
   hsa_signal_t signal;
+  Kind kind;
   bool pending;
   bool completed;
   uint64_t completion_tick;
@@ -295,13 +302,27 @@ lr_status_t event_wait_locked(lr_event_t *event) {
     return LR_ERROR_RUNTIME;
   }
 
-  hsa_amd_profiling_dispatch_time_t time{};
-  hsa_status_t status =
-      hsa_amd_profiling_get_dispatch_time(device.agent, event->signal, &time);
-  if (status != HSA_STATUS_SUCCESS) {
-    return to_lr_status(status);
+  if (event->kind == lr_event_t::Kind::Marker) {
+    hsa_amd_profiling_dispatch_time_t time{};
+    hsa_status_t status =
+        hsa_amd_profiling_get_dispatch_time(device.agent, event->signal, &time);
+    if (status != HSA_STATUS_SUCCESS) {
+      return to_lr_status(status);
+    }
+    event->completion_tick = time.end;
+  } else if (event->kind == lr_event_t::Kind::AsyncCopy) {
+    hsa_amd_profiling_async_copy_time_t time{};
+    hsa_status_t status =
+        hsa_amd_profiling_get_async_copy_time(event->signal, &time);
+    if (status != HSA_STATUS_SUCCESS) {
+      return to_lr_status(status);
+    }
+    event->completion_tick = time.end;
+  } else {
+    return LR_ERROR_INVALID_ARGUMENT;
   }
-  event->completion_tick = time.end;
+
+  event->kind = lr_event_t::Kind::None;
   event->completed = true;
   return LR_SUCCESS;
 }
@@ -326,6 +347,20 @@ lr_status_t drain_device_locked(DeviceState *device) {
     lr_status_t status = event_wait_locked(event);
     if (status != LR_SUCCESS && result == LR_SUCCESS) {
       result = status;
+    }
+  }
+  return result;
+}
+
+lr_status_t drain_async_copies_locked(DeviceState *device) {
+  lr_status_t result = LR_SUCCESS;
+  std::vector<lr_event_t *> pending_events = device->pending_events;
+  for (lr_event_t *event : pending_events) {
+    if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy) {
+      lr_status_t status = event_wait_locked(event);
+      if (status != LR_SUCCESS && result == LR_SUCCESS) {
+        result = status;
+      }
     }
   }
   return result;
@@ -587,6 +622,7 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
     return to_lr_status(status);
   }
 
+  created_event->kind = lr_event_t::Kind::None;
   created_event->pending = false;
   created_event->completed = false;
   created_event->completion_tick = 0;
@@ -655,12 +691,17 @@ lr_status_t lr_event_record(lr_event_t *event) {
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
+  lr_status_t copy_status = drain_async_copies_locked(&state);
+  if (copy_status != LR_SUCCESS) {
+    return copy_status;
+  }
   lr_status_t slot_status = ensure_queue_slot_locked(&state);
   if (slot_status != LR_SUCCESS) {
     return slot_status;
   }
 
   hsa_signal_store_relaxed(event->signal, 1);
+  event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
   event->completion_tick = 0;
 
@@ -855,6 +896,91 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
   }
 
   return to_lr_status(hsa_memory_copy(dst, src, size));
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
+                            size_t size, lr_memcpy_kind_t kind,
+                            lr_event_t *event) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!valid_device(device) || !dst || !src || size == 0 || !event) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (kind != LR_MEMCPY_HOST_TO_DEVICE && kind != LR_MEMCPY_DEVICE_TO_HOST &&
+      kind != LR_MEMCPY_DEVICE_TO_DEVICE) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() ||
+      g_events.find(event) == g_events.end() ||
+      event->device.index != device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    if (!valid_allocation(dst, device, size)) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    if (!valid_allocation(const_cast<void *>(src), device, size)) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  } else {
+    if (!valid_allocation(dst, device, size) ||
+        !valid_allocation(const_cast<void *>(src), device, size)) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  }
+
+  lr_status_t wait_status = event_wait_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  lr_status_t drain_status = drain_device_locked(&state);
+  if (drain_status != LR_SUCCESS) {
+    return drain_status;
+  }
+
+  hsa_status_t status = hsa_amd_profiling_async_copy_enable(true);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+
+  hsa_agent_t null_agent{};
+  hsa_agent_t dst_agent = null_agent;
+  hsa_agent_t src_agent = null_agent;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    dst_agent = state.agent;
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    src_agent = state.agent;
+  } else {
+    dst_agent = state.agent;
+    src_agent = state.agent;
+  }
+
+  hsa_signal_store_relaxed(event->signal, 1);
+  event->kind = lr_event_t::Kind::AsyncCopy;
+  event->completed = false;
+  event->completion_tick = 0;
+
+  status = hsa_amd_memory_async_copy(dst, dst_agent, src, src_agent, size, 0,
+                                     nullptr, event->signal);
+  if (status != HSA_STATUS_SUCCESS) {
+    event->kind = lr_event_t::Kind::None;
+    return to_lr_status(status);
+  }
+
+  event->pending = true;
+  state.pending_events.push_back(event);
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -1067,6 +1193,10 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
   if (!state.queue || !state.has_kernarg_region ||
       args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
+  }
+  lr_status_t copy_status = drain_async_copies_locked(&state);
+  if (copy_status != LR_SUCCESS) {
+    return copy_status;
   }
   lr_status_t slot_status = ensure_queue_slot_locked(&state);
   if (slot_status != LR_SUCCESS) {

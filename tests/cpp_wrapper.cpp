@@ -102,6 +102,17 @@ int main(void) {
       }
     }
 
+    lrrt::Event async_copy_event(device);
+    lrrt::copy_device_to_device_async(device_copy, device_in, sizeof(in),
+                                      async_copy_event);
+    async_copy_event.synchronize();
+    lrrt::copy_to_host(copied, device_copy);
+    for (int i = 0; i < n; ++i) {
+      if (fabsf(copied[i] - in[i]) > 0.001f) {
+        throw std::runtime_error("async device copy result mismatch");
+      }
+    }
+
     std::vector<float> vector_in(in, in + n);
     std::vector<float> vector_out(n, 0.0f);
     lrrt::copy_to_device(device_in, vector_in);
