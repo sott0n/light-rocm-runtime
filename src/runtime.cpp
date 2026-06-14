@@ -38,9 +38,14 @@ namespace {
 std::atomic<bool> g_initialized{false};
 
 #if LRRT_ENABLE_HSA
+struct KernargBuffer {
+  void *ptr;
+  size_t size;
+};
+
 struct PendingDispatch {
   hsa_signal_t completion_signal;
-  void *kernarg;
+  KernargBuffer kernarg;
 };
 
 struct DeviceState {
@@ -51,6 +56,8 @@ struct DeviceState {
   bool has_kernarg_region;
   hsa_queue_t *queue;
   std::vector<PendingDispatch> pending_dispatches;
+  std::vector<hsa_signal_t> signal_pool;
+  std::vector<KernargBuffer> kernarg_pool;
 };
 
 struct SymbolSearch {
@@ -244,21 +251,59 @@ lr_status_t drain_device_locked(DeviceState *device) {
     hsa_signal_value_t value = hsa_signal_wait_scacquire(
         dispatch.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
         HSA_WAIT_STATE_BLOCKED);
-    hsa_status_t destroy_status =
-        hsa_signal_destroy(dispatch.completion_signal);
-    hsa_status_t free_status = hsa_memory_free(dispatch.kernarg);
     if (value != 0 && result == LR_SUCCESS) {
       result = LR_ERROR_RUNTIME;
     }
-    if (destroy_status != HSA_STATUS_SUCCESS && result == LR_SUCCESS) {
-      result = to_lr_status(destroy_status);
-    }
-    if (free_status != HSA_STATUS_SUCCESS && result == LR_SUCCESS) {
-      result = to_lr_status(free_status);
-    }
+    hsa_signal_store_relaxed(dispatch.completion_signal, 1);
+    device->signal_pool.push_back(dispatch.completion_signal);
+    device->kernarg_pool.push_back(dispatch.kernarg);
   }
   device->pending_dispatches.clear();
   return result;
+}
+
+void release_device_pools_locked(DeviceState *device, lr_status_t *result) {
+  for (hsa_signal_t signal : device->signal_pool) {
+    hsa_status_t status = hsa_signal_destroy(signal);
+    if (status != HSA_STATUS_SUCCESS && *result == LR_SUCCESS) {
+      *result = to_lr_status(status);
+    }
+  }
+  device->signal_pool.clear();
+
+  for (KernargBuffer kernarg : device->kernarg_pool) {
+    hsa_status_t status = hsa_memory_free(kernarg.ptr);
+    if (status != HSA_STATUS_SUCCESS && *result == LR_SUCCESS) {
+      *result = to_lr_status(status);
+    }
+  }
+  device->kernarg_pool.clear();
+}
+
+hsa_status_t acquire_signal_locked(DeviceState *device, hsa_signal_t *signal) {
+  if (!device->signal_pool.empty()) {
+    *signal = device->signal_pool.back();
+    device->signal_pool.pop_back();
+    hsa_signal_store_relaxed(*signal, 1);
+    return HSA_STATUS_SUCCESS;
+  }
+  return hsa_signal_create(1, 0, nullptr, signal);
+}
+
+hsa_status_t acquire_kernarg_locked(DeviceState *device, size_t size,
+                                    KernargBuffer *kernarg) {
+  for (size_t i = 0; i < device->kernarg_pool.size(); ++i) {
+    if (device->kernarg_pool[i].size >= size) {
+      *kernarg = device->kernarg_pool[i];
+      device->kernarg_pool[i] = device->kernarg_pool.back();
+      device->kernarg_pool.pop_back();
+      return HSA_STATUS_SUCCESS;
+    }
+  }
+
+  kernarg->ptr = nullptr;
+  kernarg->size = size;
+  return hsa_memory_allocate(device->kernarg_region, size, &kernarg->ptr);
 }
 
 bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
@@ -348,6 +393,7 @@ lr_status_t lr_shutdown(void) {
       if (status != LR_SUCCESS && drain_status == LR_SUCCESS) {
         drain_status = status;
       }
+      release_device_pools_locked(&device, &drain_status);
     }
 
     for (lr_module_t *module : g_modules) {
@@ -767,19 +813,19 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
     }
   }
 
-  void *kernarg = nullptr;
+  KernargBuffer kernarg{};
   hsa_status_t status =
-      hsa_memory_allocate(state.kernarg_region, kernel->kernarg_size, &kernarg);
+      acquire_kernarg_locked(&state, kernel->kernarg_size, &kernarg);
   if (status != HSA_STATUS_SUCCESS) {
     return to_lr_status(status);
   }
-  std::memset(kernarg, 0, kernel->kernarg_size);
-  std::memcpy(kernarg, args, args_size);
+  std::memset(kernarg.ptr, 0, kernel->kernarg_size);
+  std::memcpy(kernarg.ptr, args, args_size);
 
   hsa_signal_t signal{};
-  status = hsa_signal_create(1, 0, nullptr, &signal);
+  status = acquire_signal_locked(&state, &signal);
   if (status != HSA_STATUS_SUCCESS) {
-    hsa_memory_free(kernarg);
+    state.kernarg_pool.push_back(kernarg);
     return to_lr_status(status);
   }
 
@@ -800,7 +846,7 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
   packet->group_segment_size =
       kernel->group_segment_size + config->shared_memory_bytes;
   packet->kernel_object = kernel->object;
-  packet->kernarg_address = kernarg;
+  packet->kernarg_address = kernarg.ptr;
   packet->completion_signal = signal;
   packet->header = packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
 

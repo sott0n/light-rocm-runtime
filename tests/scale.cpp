@@ -83,7 +83,8 @@ int main(void) {
   }
 
   const int n = 64;
-  const float alpha = 4.0f;
+  const float alphas[] = {2.0f, 3.0f, 4.0f};
+  const float final_alpha = alphas[sizeof(alphas) / sizeof(alphas[0]) - 1];
   float in[n];
   float out[n];
   for (int i = 0; i < n; ++i) {
@@ -143,29 +144,32 @@ int main(void) {
     return 1;
   }
 
-  scale_args_t args = {
-      (const float *)device_in,
-      (float *)device_out,
-      alpha,
-      n,
-  };
   lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
-  status = lr_launch(kernel, &config, &args, sizeof(args));
-  if (!expect_status(status, LR_SUCCESS, "lr_launch")) {
-    lr_module_destroy(module);
-    lr_free(device, device_out);
-    lr_free(device, device_in);
-    lr_shutdown();
-    return 1;
-  }
+  for (size_t iteration = 0; iteration < sizeof(alphas) / sizeof(alphas[0]);
+       ++iteration) {
+    scale_args_t args = {
+        (const float *)device_in,
+        (float *)device_out,
+        alphas[iteration],
+        n,
+    };
+    status = lr_launch(kernel, &config, &args, sizeof(args));
+    if (!expect_status(status, LR_SUCCESS, "lr_launch")) {
+      lr_module_destroy(module);
+      lr_free(device, device_out);
+      lr_free(device, device_in);
+      lr_shutdown();
+      return 1;
+    }
 
-  status = lr_synchronize(device);
-  if (!expect_status(status, LR_SUCCESS, "lr_synchronize")) {
-    lr_module_destroy(module);
-    lr_free(device, device_out);
-    lr_free(device, device_in);
-    lr_shutdown();
-    return 1;
+    status = lr_synchronize(device);
+    if (!expect_status(status, LR_SUCCESS, "lr_synchronize")) {
+      lr_module_destroy(module);
+      lr_free(device, device_out);
+      lr_free(device, device_in);
+      lr_shutdown();
+      return 1;
+    }
   }
 
   status = lr_memcpy(device, out, device_out, sizeof(out),
@@ -179,7 +183,7 @@ int main(void) {
   }
 
   for (int i = 0; i < n; ++i) {
-    float expected = alpha * in[i];
+    float expected = final_alpha * in[i];
     if (fabsf(out[i] - expected) > 0.001f) {
       fprintf(stderr, "scale mismatch at %d: got %f expected %f\n", i,
               out[i], expected);
