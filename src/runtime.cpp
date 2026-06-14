@@ -38,6 +38,11 @@ namespace {
 std::atomic<bool> g_initialized{false};
 
 #if LRRT_ENABLE_HSA
+struct PendingDispatch {
+  hsa_signal_t completion_signal;
+  void *kernarg;
+};
+
 struct DeviceState {
   hsa_agent_t agent;
   hsa_region_t global_region;
@@ -45,6 +50,7 @@ struct DeviceState {
   bool has_global_region;
   bool has_kernarg_region;
   hsa_queue_t *queue;
+  std::vector<PendingDispatch> pending_dispatches;
 };
 
 struct SymbolSearch {
@@ -232,6 +238,29 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
   return reader_status;
 }
 
+lr_status_t drain_device_locked(DeviceState *device) {
+  lr_status_t result = LR_SUCCESS;
+  for (const PendingDispatch &dispatch : device->pending_dispatches) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        dispatch.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+        HSA_WAIT_STATE_BLOCKED);
+    hsa_status_t destroy_status =
+        hsa_signal_destroy(dispatch.completion_signal);
+    hsa_status_t free_status = hsa_memory_free(dispatch.kernarg);
+    if (value != 0 && result == LR_SUCCESS) {
+      result = LR_ERROR_RUNTIME;
+    }
+    if (destroy_status != HSA_STATUS_SUCCESS && result == LR_SUCCESS) {
+      result = to_lr_status(destroy_status);
+    }
+    if (free_status != HSA_STATUS_SUCCESS && result == LR_SUCCESS) {
+      result = to_lr_status(free_status);
+    }
+  }
+  device->pending_dispatches.clear();
+  return result;
+}
+
 bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
   auto allocation = g_allocations.find(ptr);
   if (allocation == g_allocations.end()) {
@@ -313,6 +342,14 @@ lr_status_t lr_shutdown(void) {
 #if LRRT_ENABLE_HSA
   {
     std::lock_guard<std::mutex> lock(g_devices_mutex);
+    lr_status_t drain_status = LR_SUCCESS;
+    for (DeviceState &device : g_devices) {
+      lr_status_t status = drain_device_locked(&device);
+      if (status != LR_SUCCESS && drain_status == LR_SUCCESS) {
+        drain_status = status;
+      }
+    }
+
     for (lr_module_t *module : g_modules) {
       destroy_module_resources(module);
     }
@@ -330,6 +367,11 @@ lr_status_t lr_shutdown(void) {
     }
     g_allocations.clear();
     g_devices.clear();
+
+    if (drain_status != LR_SUCCESS) {
+      hsa_shut_down();
+      return drain_status;
+    }
   }
 
   hsa_status_t status = hsa_shut_down();
@@ -449,6 +491,11 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+  lr_status_t drain_status = drain_device_locked(&g_devices[device.index]);
+  if (drain_status != LR_SUCCESS) {
+    return drain_status;
+  }
+
   hsa_status_t status = hsa_memory_free(ptr);
   if (status != HSA_STATUS_SUCCESS) {
     return to_lr_status(status);
@@ -492,6 +539,11 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
         !valid_allocation(const_cast<void *>(src), device, size)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
+  }
+
+  lr_status_t drain_status = drain_device_locked(&g_devices[device.index]);
+  if (drain_status != LR_SUCCESS) {
+    return drain_status;
   }
 
   return to_lr_status(hsa_memory_copy(dst, src, size));
@@ -582,6 +634,15 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
   auto module_entry = g_modules.find(module);
   if (module_entry == g_modules.end()) {
     return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  if (module->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  lr_status_t drain_status =
+      drain_device_locked(&g_devices[module->device.index]);
+  if (drain_status != LR_SUCCESS) {
+    return drain_status;
   }
 
   g_modules.erase(module_entry);
@@ -699,6 +760,12 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
       args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  if (state.pending_dispatches.size() >= state.queue->size) {
+    lr_status_t drain_status = drain_device_locked(&state);
+    if (drain_status != LR_SUCCESS) {
+      return drain_status;
+    }
+  }
 
   void *kernarg = nullptr;
   hsa_status_t status =
@@ -738,18 +805,8 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
   packet->header = packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
 
   hsa_signal_store_screlease(state.queue->doorbell_signal, index);
-  hsa_signal_value_t value = hsa_signal_wait_scacquire(
-      signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-
-  hsa_status_t destroy_status = hsa_signal_destroy(signal);
-  hsa_status_t free_status = hsa_memory_free(kernarg);
-  if (value != 0) {
-    return LR_ERROR_RUNTIME;
-  }
-  if (destroy_status != HSA_STATUS_SUCCESS) {
-    return to_lr_status(destroy_status);
-  }
-  return to_lr_status(free_status);
+  state.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -764,7 +821,7 @@ lr_status_t lr_synchronize(lr_device_t device) {
   if (device.index >= g_devices.size() || !g_devices[device.index].queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return LR_SUCCESS;
+  return drain_device_locked(&g_devices[device.index]);
 #else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;

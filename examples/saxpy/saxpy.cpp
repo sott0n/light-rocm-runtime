@@ -55,6 +55,7 @@ int main(void) {
     };
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     lrrt::launch(kernel, config, args);
+    device.synchronize();
     lrrt::copy_to_host(y, device_y);
 
     for (int i = 0; i < n; ++i) {

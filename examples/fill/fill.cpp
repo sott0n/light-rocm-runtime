@@ -39,6 +39,7 @@ int main(void) {
     fill_args_t args = {(float *)device_out.data(), value, n};
     lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     lrrt::launch(kernel, config, args);
+    device.synchronize();
     lrrt::copy_to_host(out, device_out);
 
     for (int i = 0; i < n; ++i) {

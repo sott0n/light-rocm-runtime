@@ -159,6 +159,15 @@ int main(void) {
     return 1;
   }
 
+  status = lr_synchronize(device);
+  if (!expect_status(status, LR_SUCCESS, "lr_synchronize")) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
   status = lr_memcpy(device, out, device_out, sizeof(out),
                      LR_MEMCPY_DEVICE_TO_HOST);
   if (!expect_status(status, LR_SUCCESS, "copy out")) {

@@ -34,10 +34,17 @@ public:
 
   lr_device_t get() const { return device_; }
   uint32_t index() const { return device_.index; }
+  void synchronize() const {
+    check(lr_synchronize(device_), "lr_synchronize");
+  }
 
 private:
   lr_device_t device_;
 };
+
+inline void synchronize(Device device) {
+  check(lr_synchronize(device.get()), "lr_synchronize");
+}
 
 class Runtime {
 public:
