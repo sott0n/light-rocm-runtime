@@ -3,6 +3,13 @@
 A small experimental runtime for launching AMD GPU kernels from ROCm code
 objects.
 
+`light-rocm-runtime` aims to stay small while providing a low-overhead
+dispatcher and predictable resource manager for compiler-generated AMD GPU
+workloads. Compiler or executor layers are expected to own operator lowering,
+kernel generation, scheduling, and tensor graph semantics; this runtime owns the
+execution path for loading code objects, managing resources, dispatching
+kernels, and synchronizing work.
+
 The first target is intentionally narrow:
 
 - Linux with AMDGPU and an installed ROCm stack
@@ -14,6 +21,12 @@ The first target is intentionally narrow:
 
 This project is not trying to replace the full HIP runtime. The implementation
 uses the HSA/ROCr API directly and keeps a small public C ABI.
+
+In the longer compiler-oriented stack, the runtime is the boundary between
+generated kernel bundles and the AMD GPU. Its performance role is to keep
+dispatch, code object, memory, and synchronization overhead predictable; kernel
+math performance and pipeline scheduling remain the responsibility of compiler
+and executor layers.
 
 ## Build
 
