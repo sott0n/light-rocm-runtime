@@ -89,6 +89,70 @@ The initial manifest does not need to be a general graph IR. It only needs to
 describe enough information for an executor to bind arguments and dispatch
 kernels safely.
 
+### Current manifest schema
+
+The current Triton examples use a narrow JSON schema that describes one or more
+independent kernel entries. The schema is intentionally launch-oriented: it
+describes the code object, symbol, kernarg layout, and launch shape needed by an
+lrrt-based executor.
+
+Top-level fields:
+
+- `target`: AMDGPU target architecture, such as `gfx1101`. This must match the
+  code object target reported by the HSACO metadata.
+- `kernels`: array of kernel entries. Each entry describes one dispatchable
+  kernel inside a code object.
+
+Kernel entry fields:
+
+- `name`: stable logical name used by examples or an executor.
+- `symbol`: kernel entry symbol to resolve with `lrrt::Module::kernel`. The
+  generated HSACO may also contain the descriptor symbol with a `.kd` suffix,
+  but the lrrt lookup path accepts the entry symbol name.
+- `code_object`: relative path to the HSACO file inside the bundle directory.
+- `args`: ordered kernarg ABI description. Each argument includes:
+  - `name`: logical argument name.
+  - `type`: compact type label such as `ptr`, `i32`, or `fp32`.
+  - `offset`: byte offset in the packed kernarg buffer.
+  - `size`: byte size in the packed kernarg buffer.
+  - `optional`: optional boolean for compiler-internal arguments that may be
+    bound to null by small examples, such as Triton scratch pointers.
+- `kernarg_size`: total byte size of the packed kernarg buffer.
+- `block`: HSA workgroup size `[x, y, z]` used as `lr_launch_config_t.block`.
+- `grid`: manifest expression for deriving the HSA total grid size
+  `[x, y, z]`.
+- `triton`: optional producer metadata such as Triton version, block size, and
+  number of warps. This is useful for debugging and consistency checks, but it
+  is not required by the runtime core.
+- `workspace_bytes`: optional per-dispatch workspace requirement. The current
+  examples use `0`.
+
+Important launch convention: lrrt's `grid` is the HSA total grid size, not the
+Triton program count. For the current Triton examples, the manifest writes
+`grid[0]` as an expression like `ceil_div(n, 256) * 128`, where `ceil_div(n,
+256)` is the Triton program count and `128` is the workgroup size. The
+example-side launcher converts that expression into `lr_launch_config_t.grid`.
+
+The manifest is an ABI description, not a tensor or operator IR. It should not
+encode high-level graph semantics, tensor ownership, scheduling policy, or
+framework-specific concepts. Those belong in a compiler or executor layer above
+the runtime.
+
+### Consistency checks
+
+The Triton example build verifies that `manifest.json` matches HSACO metadata:
+
+- `target` matches `amdhsa.target`
+- `symbol` matches the kernel metadata name and descriptor symbol
+- `kernarg_size` matches `.kernarg_segment_size`
+- `block[0]` matches `.max_flat_workgroup_size`
+- each manifest argument offset and size matches the HSACO argument metadata
+
+These checks are intentionally outside the runtime core. They protect the
+example bundle ABI from Triton version drift while keeping `light-rocm-runtime`
+focused on loading code objects, managing resources, dispatching kernels, and
+synchronizing work.
+
 ## Milestones
 
 ### M0: Hand-written bundle
