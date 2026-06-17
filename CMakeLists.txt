@@ -60,9 +60,9 @@ function(lrrt_add_hsaco_kernel name source output_var)
   endif()
 endfunction()
 
-function(lrrt_add_triton_vector_add output_hsaco_var output_manifest_var)
+function(lrrt_add_triton_bundle name script output_hsaco_var output_manifest_var)
   if(UV_EXECUTABLE)
-    set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/triton_vector_add_bundle")
+    set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/${name}_bundle")
     set(hsaco "${output_dir}/kernels.hsaco")
     set(manifest "${output_dir}/manifest.json")
 
@@ -75,14 +75,14 @@ function(lrrt_add_triton_vector_add output_hsaco_var output_manifest_var)
         "UV_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/uv-cache"
         "${UV_EXECUTABLE}" run --no-project --with-requirements
         "${CMAKE_CURRENT_SOURCE_DIR}/examples/triton/requirements.txt" python
-        "${CMAKE_CURRENT_SOURCE_DIR}/examples/triton/vector_add_kernel.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/${script}"
         "--arch=${LRRT_AMDGPU_TARGET}" "--output-dir=${output_dir}"
       DEPENDS
         examples/triton/requirements.txt
-        examples/triton/vector_add_kernel.py
+        "${script}"
       VERBATIM
     )
-    add_custom_target(triton_vector_add_bundle DEPENDS "${hsaco}" "${manifest}")
+    add_custom_target(${name}_bundle DEPENDS "${hsaco}" "${manifest}")
     set(${output_hsaco_var} "${hsaco}" PARENT_SCOPE)
     set(${output_manifest_var} "${manifest}" PARENT_SCOPE)
   endif()
@@ -121,6 +121,10 @@ target_link_libraries(lrrt_fill PRIVATE lrrt::lrrt)
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   add_executable(lrrt_triton_vector_add examples/triton/triton_vector_add.cpp)
   target_link_libraries(lrrt_triton_vector_add PRIVATE lrrt::lrrt)
+  add_executable(lrrt_triton_saxpy examples/triton/triton_saxpy.cpp)
+  target_link_libraries(lrrt_triton_saxpy PRIVATE lrrt::lrrt)
+  add_executable(lrrt_triton_scale examples/triton/triton_scale.cpp)
+  target_link_libraries(lrrt_triton_scale PRIVATE lrrt::lrrt)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -157,8 +161,18 @@ lrrt_add_hsaco_kernel(fill_kernel examples/fill/fill_kernel.cpp FILL_HSACO)
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
 lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
 if(LRRT_ENABLE_TRITON_EXAMPLES)
-  lrrt_add_triton_vector_add(TRITON_VECTOR_ADD_HSACO
-                             TRITON_VECTOR_ADD_MANIFEST)
+  lrrt_add_triton_bundle(
+    triton_vector_add examples/triton/vector_add_kernel.py
+    TRITON_VECTOR_ADD_HSACO TRITON_VECTOR_ADD_MANIFEST
+  )
+  lrrt_add_triton_bundle(
+    triton_saxpy examples/triton/saxpy_kernel.py
+    TRITON_SAXPY_HSACO TRITON_SAXPY_MANIFEST
+  )
+  lrrt_add_triton_bundle(
+    triton_scale examples/triton/scale_kernel.py
+    TRITON_SCALE_HSACO TRITON_SCALE_MANIFEST
+  )
 endif()
 
 if(VECTOR_ADD_HSACO)
@@ -216,6 +230,20 @@ if(TRITON_VECTOR_ADD_HSACO)
       LRRT_TRITON_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
   )
 endif()
+if(TRITON_SAXPY_HSACO)
+  add_dependencies(lrrt_triton_saxpy triton_saxpy_bundle)
+  target_compile_definitions(
+    lrrt_triton_saxpy
+    PRIVATE LRRT_TRITON_SAXPY_MANIFEST="${TRITON_SAXPY_MANIFEST}"
+  )
+endif()
+if(TRITON_SCALE_HSACO)
+  add_dependencies(lrrt_triton_scale triton_scale_bundle)
+  target_compile_definitions(
+    lrrt_triton_scale
+    PRIVATE LRRT_TRITON_SCALE_MANIFEST="${TRITON_SCALE_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -227,14 +255,40 @@ add_test(NAME lrrt_event_timing_tests COMMAND lrrt_event_timing_tests)
 add_test(NAME lrrt_cpp_wrapper_tests COMMAND lrrt_cpp_wrapper_tests)
 if(TARGET lrrt_triton_vector_add)
   add_test(NAME lrrt_triton_vector_add COMMAND lrrt_triton_vector_add)
+endif()
+if(TARGET lrrt_triton_saxpy)
+  add_test(NAME lrrt_triton_saxpy COMMAND lrrt_triton_saxpy)
+endif()
+if(TARGET lrrt_triton_scale)
+  add_test(NAME lrrt_triton_scale COMMAND lrrt_triton_scale)
+endif()
+if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   if(PYTHON_EXECUTABLE AND LLVM_READELF)
     add_test(
-      NAME lrrt_triton_bundle_consistency
+      NAME lrrt_triton_vector_add_bundle_consistency
       COMMAND
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_VECTOR_ADD_MANIFEST}"
         "--hsaco=${TRITON_VECTOR_ADD_HSACO}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_saxpy_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_SAXPY_MANIFEST}"
+        "--hsaco=${TRITON_SAXPY_HSACO}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_scale_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_SCALE_MANIFEST}"
+        "--hsaco=${TRITON_SCALE_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()
