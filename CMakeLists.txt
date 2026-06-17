@@ -22,9 +22,15 @@ find_library(
 )
 find_program(AMDCLANGXX amdclang++ HINTS /opt/rocm/bin /opt/rocm/llvm/bin)
 find_program(UV_EXECUTABLE uv HINTS "$ENV{HOME}/.local/bin")
+find_program(PYTHON_EXECUTABLE python3)
 find_program(
   CLANG_OFFLOAD_BUNDLER
   clang-offload-bundler
+  HINTS /opt/rocm/llvm/bin
+)
+find_program(
+  LLVM_READELF
+  llvm-readelf
   HINTS /opt/rocm/llvm/bin
 )
 
@@ -221,4 +227,17 @@ add_test(NAME lrrt_event_timing_tests COMMAND lrrt_event_timing_tests)
 add_test(NAME lrrt_cpp_wrapper_tests COMMAND lrrt_cpp_wrapper_tests)
 if(TARGET lrrt_triton_vector_add)
   add_test(NAME lrrt_triton_vector_add COMMAND lrrt_triton_vector_add)
+  if(PYTHON_EXECUTABLE AND LLVM_READELF)
+    add_test(
+      NAME lrrt_triton_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_VECTOR_ADD_MANIFEST}"
+        "--hsaco=${TRITON_VECTOR_ADD_HSACO}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+  else()
+    message(STATUS "python3 or llvm-readelf not found; skipping Triton bundle consistency test")
+  endif()
 endif()
