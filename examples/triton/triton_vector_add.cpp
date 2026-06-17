@@ -1,13 +1,11 @@
 #include "../common/example_utils.h"
+#include "triton_manifest.h"
 #include "lrrt/lrrt.hpp"
 
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
-
-#ifndef LRRT_TRITON_VECTOR_ADD_HSACO
-#define LRRT_TRITON_VECTOR_ADD_HSACO "kernels.hsaco"
-#endif
+#include <string>
 
 #ifndef LRRT_TRITON_VECTOR_ADD_MANIFEST
 #define LRRT_TRITON_VECTOR_ADD_MANIFEST "manifest.json"
@@ -26,8 +24,14 @@ typedef struct triton_vector_add_args_t {
 static_assert(sizeof(triton_vector_add_args_t) == 48,
               "Triton vector_add kernarg layout must match manifest");
 
-static uint32_t ceil_div(uint32_t value, uint32_t divisor) {
-  return (value + divisor - 1) / divisor;
+static std::string bundle_file_path(const char *manifest_path,
+                                    const std::string &file_name) {
+  std::string path(manifest_path);
+  size_t slash = path.find_last_of('/');
+  if (slash == std::string::npos) {
+    return file_name;
+  }
+  return path.substr(0, slash + 1) + file_name;
 }
 
 int main(void) {
@@ -61,12 +65,33 @@ int main(void) {
 
     std::vector<unsigned char> manifest =
         lrrt_example::read_file(LRRT_TRITON_VECTOR_ADD_MANIFEST);
-    printf("loaded Triton manifest: %zu bytes\n", manifest.size());
+    lrrt_example::triton::KernelManifest kernel_manifest =
+        lrrt_example::triton::parse_first_kernel_manifest(manifest);
+    if (kernel_manifest.kernarg_size != sizeof(triton_vector_add_args_t) ||
+        kernel_manifest.arg_offsets.size() != 6 ||
+        kernel_manifest.arg_offsets[0] !=
+            offsetof(triton_vector_add_args_t, x) ||
+        kernel_manifest.arg_offsets[1] !=
+            offsetof(triton_vector_add_args_t, y) ||
+        kernel_manifest.arg_offsets[2] !=
+            offsetof(triton_vector_add_args_t, out) ||
+        kernel_manifest.arg_offsets[3] !=
+            offsetof(triton_vector_add_args_t, n) ||
+        kernel_manifest.arg_offsets[4] !=
+            offsetof(triton_vector_add_args_t, triton_scratch_0) ||
+        kernel_manifest.arg_offsets[5] !=
+            offsetof(triton_vector_add_args_t, triton_scratch_1)) {
+      throw std::runtime_error("Triton manifest does not match C++ kernarg");
+    }
+    printf("loaded Triton manifest for kernel: %s\n",
+           kernel_manifest.name.c_str());
 
+    std::string hsaco_path = bundle_file_path(LRRT_TRITON_VECTOR_ADD_MANIFEST,
+                                              kernel_manifest.code_object);
     std::vector<unsigned char> hsaco =
-        lrrt_example::read_file(LRRT_TRITON_VECTOR_ADD_HSACO);
+        lrrt_example::read_file(hsaco_path.c_str());
     lrrt::Module module(device, hsaco);
-    lrrt::Kernel kernel = module.kernel("vector_add_kernel");
+    lrrt::Kernel kernel = module.kernel(kernel_manifest.symbol.c_str());
 
     triton_vector_add_args_t kernel_args = {
         (const float *)device_x.data(),
@@ -78,13 +103,8 @@ int main(void) {
         nullptr,
     };
 
-    const uint32_t workgroup_size = 128;
-    const uint32_t program_count = ceil_div(n, 256);
-    lr_launch_config_t config = {
-        {program_count * workgroup_size, 1, 1},
-        {workgroup_size, 1, 1},
-        0,
-    };
+    lr_launch_config_t config =
+        lrrt_example::triton::launch_config_from_manifest(kernel_manifest, n);
     lrrt::launch(kernel, config, kernel_args);
     device.synchronize();
     lrrt::copy_to_host(out, device_out);

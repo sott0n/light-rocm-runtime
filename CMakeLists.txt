@@ -207,7 +207,6 @@ if(TRITON_VECTOR_ADD_HSACO)
   target_compile_definitions(
     lrrt_triton_vector_add
     PRIVATE
-      LRRT_TRITON_VECTOR_ADD_HSACO="${TRITON_VECTOR_ADD_HSACO}"
       LRRT_TRITON_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
   )
 endif()
