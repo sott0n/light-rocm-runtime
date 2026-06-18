@@ -126,6 +126,8 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   target_link_libraries(lrrt_triton_saxpy PRIVATE lrrt::lrrt)
   add_executable(lrrt_triton_scale examples/triton/triton_scale.cpp)
   target_link_libraries(lrrt_triton_scale PRIVATE lrrt::lrrt)
+  add_executable(lrrt_triton_rmsnorm examples/triton/triton_rmsnorm.cpp)
+  target_link_libraries(lrrt_triton_rmsnorm PRIVATE lrrt::lrrt)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -173,6 +175,10 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
   lrrt_add_triton_bundle(
     triton_scale examples/triton/scale_kernel.py
     TRITON_SCALE_HSACO TRITON_SCALE_MANIFEST
+  )
+  lrrt_add_triton_bundle(
+    triton_rmsnorm examples/triton/rmsnorm_kernel.py
+    TRITON_RMSNORM_HSACO TRITON_RMSNORM_MANIFEST
   )
 endif()
 
@@ -245,6 +251,13 @@ if(TRITON_SCALE_HSACO)
     PRIVATE LRRT_TRITON_SCALE_MANIFEST="${TRITON_SCALE_MANIFEST}"
   )
 endif()
+if(TRITON_RMSNORM_HSACO)
+  add_dependencies(lrrt_triton_rmsnorm triton_rmsnorm_bundle)
+  target_compile_definitions(
+    lrrt_triton_rmsnorm
+    PRIVATE LRRT_TRITON_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -262,6 +275,9 @@ if(TARGET lrrt_triton_saxpy)
 endif()
 if(TARGET lrrt_triton_scale)
   add_test(NAME lrrt_triton_scale COMMAND lrrt_triton_scale)
+endif()
+if(TARGET lrrt_triton_rmsnorm)
+  add_test(NAME lrrt_triton_rmsnorm COMMAND lrrt_triton_rmsnorm)
 endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   if(PYTHON_EXECUTABLE AND LLVM_READELF)
@@ -290,6 +306,15 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_SCALE_MANIFEST}"
         "--hsaco=${TRITON_SCALE_HSACO}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_rmsnorm_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_RMSNORM_MANIFEST}"
+        "--hsaco=${TRITON_RMSNORM_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()
