@@ -14,8 +14,8 @@ typedef struct triton_saxpy_args_t {
   const float *x;
   const float *y;
   float *out;
+  float a;
   int32_t n;
-  int32_t padding;
   void *triton_scratch_0;
   void *triton_scratch_1;
 } triton_saxpy_args_t;
@@ -62,6 +62,7 @@ int main(void) {
             offsetof(triton_saxpy_args_t, x),
             offsetof(triton_saxpy_args_t, y),
             offsetof(triton_saxpy_args_t, out),
+            offsetof(triton_saxpy_args_t, a),
             offsetof(triton_saxpy_args_t, n),
             offsetof(triton_saxpy_args_t, triton_scratch_0),
             offsetof(triton_saxpy_args_t, triton_scratch_1),
@@ -73,8 +74,8 @@ int main(void) {
         (const float *)device_x.data(),
         (const float *)device_y.data(),
         (float *)device_out.data(),
+        a,
         (int32_t)n,
-        0,
         nullptr,
         nullptr,
     };

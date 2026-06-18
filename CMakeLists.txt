@@ -3,6 +3,7 @@ cmake_minimum_required(VERSION 3.18)
 project(light_rocm_runtime VERSION 0.1.0 LANGUAGES C CXX)
 
 set(LRRT_AMDGPU_TARGET "gfx1101" CACHE STRING "AMDGPU target for examples")
+set(LRRT_TRITON_PYTHON "3.13" CACHE STRING "Python version or interpreter for Triton examples")
 option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -73,7 +74,7 @@ function(lrrt_add_triton_bundle name script output_hsaco_var output_manifest_var
         "${CMAKE_COMMAND}" -E env
         "TRITON_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/triton-cache"
         "UV_CACHE_DIR=${CMAKE_CURRENT_BINARY_DIR}/uv-cache"
-        "${UV_EXECUTABLE}" run --no-project --with-requirements
+        "${UV_EXECUTABLE}" run --python "${LRRT_TRITON_PYTHON}" --no-project --with-requirements
         "${CMAKE_CURRENT_SOURCE_DIR}/examples/triton/requirements.txt" python
         "${CMAKE_CURRENT_SOURCE_DIR}/${script}"
         "--arch=${LRRT_AMDGPU_TARGET}" "--output-dir=${output_dir}"

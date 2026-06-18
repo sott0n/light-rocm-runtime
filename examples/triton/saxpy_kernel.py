@@ -8,13 +8,13 @@ from triton.backends.compiler import GPUTarget
 
 
 @triton.jit
-def saxpy_kernel(x, y, out, n, BLOCK_SIZE: tl.constexpr):
+def saxpy_kernel(x, y, out, a, n, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n
     xv = tl.load(x + offsets, mask=mask, other=0.0)
     yv = tl.load(y + offsets, mask=mask, other=0.0)
-    result = xv + xv + yv
+    result = a * xv + yv
     tl.store(out + offsets, result, mask=mask)
 
 
@@ -35,6 +35,7 @@ def main():
             "x": "*fp32",
             "y": "*fp32",
             "out": "*fp32",
+            "a": "fp32",
             "n": "i32",
             "BLOCK_SIZE": "constexpr",
         },
@@ -61,7 +62,8 @@ def main():
                     {"name": "x", "type": "ptr", "offset": 0, "size": 8},
                     {"name": "y", "type": "ptr", "offset": 8, "size": 8},
                     {"name": "out", "type": "ptr", "offset": 16, "size": 8},
-                    {"name": "n", "type": "i32", "offset": 24, "size": 4},
+                    {"name": "a", "type": "fp32", "offset": 24, "size": 4},
+                    {"name": "n", "type": "i32", "offset": 28, "size": 4},
                     {
                         "name": "_triton_scratch_0",
                         "type": "ptr",
@@ -83,7 +85,6 @@ def main():
                 "triton": {
                     "version": triton.__version__,
                     "block_size": block_size,
-                    "a": 2.0,
                     "num_warps": num_warps,
                 },
                 "workspace_bytes": 0,
