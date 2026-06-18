@@ -37,6 +37,12 @@ The first Triton integration target is:
 This keeps Triton responsible for code generation and keeps
 `light-rocm-runtime` responsible for execution.
 
+The in-repository Triton examples are opt-in through
+`LRRT_ENABLE_TRITON_EXAMPLES=ON`. They use `uv` to install the pinned Triton
+dependency from `examples/triton/requirements.txt` and compile bundles with
+Python 3.13 by default through `LRRT_TRITON_PYTHON`. The default lrrt build does
+not create Triton bundle targets or download Triton dependencies.
+
 ### IREE next
 
 IREE is the second compiler target because it is better suited for whole graph

@@ -38,6 +38,19 @@ cmake --build build
 The runtime uses the HSA/ROCr API directly for device memory, code object
 loading, and kernel dispatch.
 
+Triton examples are opt-in and are not part of the default build. They use `uv`
+to resolve `examples/triton/requirements.txt` and compile Triton kernels with
+Python 3.13 by default:
+
+```sh
+cmake -S . -B build-triton -DLRRT_ENABLE_TRITON_EXAMPLES=ON
+cmake --build build-triton
+ctest --test-dir build-triton --output-on-failure -R lrrt_triton
+```
+
+Use `-DLRRT_TRITON_PYTHON=/path/to/python3.13` or another `uv --python` value
+to override the Python used for Triton bundle generation.
+
 ## Execution Semantics
 
 `lr_launch` is asynchronous with respect to the host. A successful return means
