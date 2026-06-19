@@ -8,14 +8,14 @@ from triton.backends.compiler import GPUTarget
 
 
 @triton.jit
-def rmsnorm_kernel(x, weight, out, eps, rows, BLOCK_SIZE: tl.constexpr):
+def rmsnorm_kernel(x, weight, out, eps, rows, hidden, BLOCK_SIZE: tl.constexpr):
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_SIZE)
-    mask = row < rows
-    base = row * BLOCK_SIZE + offsets
+    mask = (row < rows) & (offsets < hidden)
+    base = row * hidden + offsets
     xv = tl.load(x + base, mask=mask, other=0.0)
-    wv = tl.load(weight + offsets)
-    mean_square = tl.sum(xv * xv, axis=0) / BLOCK_SIZE
+    wv = tl.load(weight + offsets, mask=offsets < hidden, other=0.0)
+    mean_square = tl.sum(xv * xv, axis=0) / hidden
     scale = tl.rsqrt(mean_square + eps)
     tl.store(out + base, xv * scale * wv, mask=mask)
 
@@ -39,6 +39,7 @@ def main():
             "out": "*fp32",
             "eps": "fp32",
             "rows": "i32",
+            "hidden": "i32",
             "BLOCK_SIZE": "constexpr",
         },
         constexprs={"BLOCK_SIZE": block_size},
@@ -66,28 +67,30 @@ def main():
                     {"name": "out", "type": "ptr", "offset": 16, "size": 8},
                     {"name": "eps", "type": "fp32", "offset": 24, "size": 4},
                     {"name": "rows", "type": "i32", "offset": 28, "size": 4},
+                    {"name": "hidden", "type": "i32", "offset": 32, "size": 4},
                     {
                         "name": "_triton_global_scratch",
                         "type": "ptr",
-                        "offset": 32,
+                        "offset": 40,
                         "size": 8,
                         "optional": True,
                     },
                     {
                         "name": "_triton_profile_scratch",
                         "type": "ptr",
-                        "offset": 40,
+                        "offset": 48,
                         "size": 8,
                         "optional": True,
                     },
                 ],
-                "kernarg_size": 48,
+                "kernarg_size": 56,
                 "block": [workgroup_size, 1, 1],
                 "grid": ["ceil_div(n, 1) * 128", 1, 1],
                 "shared_memory_bytes": compiled.metadata.shared,
                 "triton": {
                     "version": triton.__version__,
                     "block_size": block_size,
+                    "max_hidden_size": block_size,
                     "num_warps": num_warps,
                 },
                 "workspace_bytes": 0,
