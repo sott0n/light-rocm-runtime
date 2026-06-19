@@ -28,9 +28,9 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    block_size = 128
-    num_warps = 1
-    workgroup_size = 32
+    block_size = 1024
+    num_warps = 4
+    workgroup_size = 128
     source = triton.compiler.ASTSource(
         rmsnorm_kernel,
         signature={
@@ -67,14 +67,14 @@ def main():
                     {"name": "eps", "type": "fp32", "offset": 24, "size": 4},
                     {"name": "rows", "type": "i32", "offset": 28, "size": 4},
                     {
-                        "name": "_triton_scratch_0",
+                        "name": "_triton_global_scratch",
                         "type": "ptr",
                         "offset": 32,
                         "size": 8,
                         "optional": True,
                     },
                     {
-                        "name": "_triton_scratch_1",
+                        "name": "_triton_profile_scratch",
                         "type": "ptr",
                         "offset": 40,
                         "size": 8,
@@ -83,7 +83,8 @@ def main():
                 ],
                 "kernarg_size": 48,
                 "block": [workgroup_size, 1, 1],
-                "grid": ["ceil_div(n, 1) * 32", 1, 1],
+                "grid": ["ceil_div(n, 1) * 128", 1, 1],
+                "shared_memory_bytes": compiled.metadata.shared,
                 "triton": {
                     "version": triton.__version__,
                     "block_size": block_size,

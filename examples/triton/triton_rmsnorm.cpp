@@ -16,8 +16,8 @@ typedef struct triton_rmsnorm_args_t {
   float *out;
   float eps;
   int32_t rows;
-  void *triton_scratch_0;
-  void *triton_scratch_1;
+  void *triton_global_scratch;
+  void *triton_profile_scratch;
 } triton_rmsnorm_args_t;
 
 static_assert(sizeof(triton_rmsnorm_args_t) == 48,
@@ -37,7 +37,7 @@ int main(void) {
     printf("opened device: %u\n", device.index());
 
     const uint32_t rows = 4;
-    const uint32_t hidden = 128;
+    const uint32_t hidden = 1024;
     const uint32_t elements = rows * hidden;
     const float eps = 1.0e-5f;
     float x[elements];
@@ -68,8 +68,8 @@ int main(void) {
             offsetof(triton_rmsnorm_args_t, out),
             offsetof(triton_rmsnorm_args_t, eps),
             offsetof(triton_rmsnorm_args_t, rows),
-            offsetof(triton_rmsnorm_args_t, triton_scratch_0),
-            offsetof(triton_rmsnorm_args_t, triton_scratch_1),
+            offsetof(triton_rmsnorm_args_t, triton_global_scratch),
+            offsetof(triton_rmsnorm_args_t, triton_profile_scratch),
         });
     printf("loaded Triton manifest for kernel: %s\n",
            kernel_manifest.name.c_str());

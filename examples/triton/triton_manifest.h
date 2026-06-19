@@ -21,6 +21,7 @@ struct KernelManifest {
   uint32_t grid_multiplier;
   uint32_t grid_divisor;
   size_t kernarg_size;
+  uint32_t shared_memory_bytes;
   std::vector<size_t> arg_offsets;
 };
 
@@ -42,6 +43,13 @@ public:
     manifest.symbol = read_string("symbol", kernel);
     manifest.code_object = read_string("code_object", kernel);
     manifest.kernarg_size = read_size("kernarg_size", kernel);
+    const size_t shared_memory_bytes =
+        read_optional_size("shared_memory_bytes", kernel, 0);
+    if (shared_memory_bytes > UINT32_MAX) {
+      throw std::runtime_error("Triton shared memory requirement is too large");
+    }
+    manifest.shared_memory_bytes =
+        static_cast<uint32_t>(shared_memory_bytes);
     read_u32_array("block", kernel, manifest.block);
     read_grid_expr(kernel, &manifest.grid_divisor, &manifest.grid_multiplier);
     manifest.arg_offsets = read_arg_offsets(kernel);
@@ -107,6 +115,21 @@ private:
     }
     return static_cast<size_t>(
         std::stoull(text_.substr(position, end - position)));
+  }
+
+  size_t read_optional_size(const char *field, size_t from,
+                            size_t default_value) const {
+    std::string key = std::string("\"") + field + "\"";
+    size_t field_position = text_.find(key, from);
+    size_t current_symbol = text_.find("\"symbol\"", from);
+    size_t next_symbol = current_symbol == std::string::npos
+                             ? std::string::npos
+                             : text_.find("\"symbol\"", current_symbol + 1);
+    if (field_position == std::string::npos ||
+        (next_symbol != std::string::npos && field_position > next_symbol)) {
+      return default_value;
+    }
+    return read_size(field, from);
   }
 
   void read_u32_array(const char *field, size_t from, uint32_t out[3]) const {
@@ -221,7 +244,7 @@ inline lr_launch_config_t launch_config_from_manifest(
   return {
       {programs * manifest.grid_multiplier, 1, 1},
       {manifest.block[0], manifest.block[1], manifest.block[2]},
-      0,
+      manifest.shared_memory_bytes,
   };
 }
 

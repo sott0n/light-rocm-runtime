@@ -127,6 +127,9 @@ Kernel entry fields:
 - `block`: HSA workgroup size `[x, y, z]` used as `lr_launch_config_t.block`.
 - `grid`: manifest expression for deriving the HSA total grid size
   `[x, y, z]`.
+- `shared_memory_bytes`: optional dynamic shared-memory requirement passed to
+  `lr_launch_config_t.shared_memory_bytes`. Kernels that perform multi-warp
+  reductions may require this even when the HSACO fixed group segment is zero.
 - `triton`: optional producer metadata such as Triton version, block size, and
   number of warps. This is useful for debugging and consistency checks, but it
   is not required by the runtime core.
