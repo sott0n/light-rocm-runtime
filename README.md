@@ -28,6 +28,10 @@ dispatch, code object, memory, and synchronization overhead predictable; kernel
 math performance and pipeline scheduling remain the responsibility of compiler
 and executor layers.
 
+The C/HSA runtime remains available as `lrrt::lrrt`. Compiler integrations can
+use the separate `lrrt::bundle` C++ target, which parses the kernel manifest,
+loads its HSACO, validates the kernarg layout, and derives the launch config.
+
 ## Build
 
 ```sh

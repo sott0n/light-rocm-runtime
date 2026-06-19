@@ -1,4 +1,4 @@
-#include "triton_bundle.h"
+#include "lrrt/bundle.hpp"
 #include "lrrt/lrrt.hpp"
 
 #include <math.h>
@@ -57,10 +57,9 @@ int main(void) {
     lrrt::copy_to_device(device_x, x);
     lrrt::copy_to_device(device_weight, weight);
 
-    lrrt_example::triton::Bundle bundle(device, LRRT_TRITON_RMSNORM_MANIFEST);
-    const lrrt_example::triton::KernelManifest &kernel_manifest =
-        bundle.manifest();
-    lrrt_example::triton::require_kernarg_layout(
+    lrrt::Bundle bundle(device, LRRT_TRITON_RMSNORM_MANIFEST);
+    const lrrt::KernelManifest &kernel_manifest = bundle.manifest();
+    lrrt::require_kernarg_layout(
         kernel_manifest, sizeof(triton_rmsnorm_args_t),
         {
             offsetof(triton_rmsnorm_args_t, x),

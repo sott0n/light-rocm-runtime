@@ -92,6 +92,10 @@ endfunction()
 add_library(lrrt src/runtime.cpp)
 add_library(lrrt::lrrt ALIAS lrrt)
 
+add_library(lrrt_bundle src/bundle.cpp)
+add_library(lrrt::bundle ALIAS lrrt_bundle)
+target_link_libraries(lrrt_bundle PUBLIC lrrt::lrrt)
+
 target_include_directories(
   lrrt
   PUBLIC
@@ -121,13 +125,13 @@ target_link_libraries(lrrt_fill PRIVATE lrrt::lrrt)
 
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   add_executable(lrrt_triton_vector_add examples/triton/triton_vector_add.cpp)
-  target_link_libraries(lrrt_triton_vector_add PRIVATE lrrt::lrrt)
+  target_link_libraries(lrrt_triton_vector_add PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_saxpy examples/triton/triton_saxpy.cpp)
-  target_link_libraries(lrrt_triton_saxpy PRIVATE lrrt::lrrt)
+  target_link_libraries(lrrt_triton_saxpy PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_scale examples/triton/triton_scale.cpp)
-  target_link_libraries(lrrt_triton_scale PRIVATE lrrt::lrrt)
+  target_link_libraries(lrrt_triton_scale PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_rmsnorm examples/triton/triton_rmsnorm.cpp)
-  target_link_libraries(lrrt_triton_rmsnorm PRIVATE lrrt::lrrt)
+  target_link_libraries(lrrt_triton_rmsnorm PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -154,6 +158,9 @@ target_link_libraries(lrrt_event_timing_tests PRIVATE lrrt::lrrt)
 
 add_executable(lrrt_cpp_wrapper_tests tests/cpp_wrapper.cpp)
 target_link_libraries(lrrt_cpp_wrapper_tests PRIVATE lrrt::lrrt)
+
+add_executable(lrrt_bundle_tests tests/bundle.cpp)
+target_link_libraries(lrrt_bundle_tests PRIVATE lrrt::bundle)
 
 lrrt_add_hsaco_kernel(
   vector_add_kernel examples/vector_add/vector_add_kernel.cpp
@@ -267,6 +274,7 @@ add_test(NAME lrrt_scale_tests COMMAND lrrt_scale_tests)
 add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)
 add_test(NAME lrrt_event_timing_tests COMMAND lrrt_event_timing_tests)
 add_test(NAME lrrt_cpp_wrapper_tests COMMAND lrrt_cpp_wrapper_tests)
+add_test(NAME lrrt_bundle_tests COMMAND lrrt_bundle_tests)
 if(TARGET lrrt_triton_vector_add)
   add_test(NAME lrrt_triton_vector_add COMMAND lrrt_triton_vector_add)
 endif()

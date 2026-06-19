@@ -1,0 +1,410 @@
+#include "lrrt/bundle.hpp"
+
+#include <stdio.h>
+
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace {
+
+std::vector<unsigned char> read_file(const char *path) {
+  if (!path || path[0] == '\0') {
+    throw std::invalid_argument("bundle path is empty");
+  }
+
+  FILE *file = fopen(path, "rb");
+  if (!file) {
+    throw std::runtime_error(std::string("failed to open ") + path);
+  }
+  if (fseek(file, 0, SEEK_END) != 0) {
+    fclose(file);
+    throw std::runtime_error(std::string("failed to seek ") + path);
+  }
+  long length = ftell(file);
+  if (length <= 0) {
+    fclose(file);
+    throw std::runtime_error(std::string("empty file ") + path);
+  }
+  rewind(file);
+
+  std::vector<unsigned char> data(static_cast<size_t>(length));
+  if (fread(data.data(), 1, data.size(), file) != data.size()) {
+    fclose(file);
+    throw std::runtime_error(std::string("failed to read ") + path);
+  }
+  fclose(file);
+  return data;
+}
+
+bool has_parent_component(const std::string &path) {
+  size_t begin = 0;
+  while (begin <= path.size()) {
+    size_t end = path.find('/', begin);
+    if (path.substr(begin, end - begin) == "..") {
+      return true;
+    }
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return false;
+}
+
+std::string bundle_file_path(const char *manifest_path,
+                             const std::string &file_name) {
+  if (file_name.empty() || file_name[0] == '/' ||
+      has_parent_component(file_name)) {
+    throw std::runtime_error("bundle code object path must stay in bundle");
+  }
+
+  std::string path(manifest_path);
+  size_t slash = path.find_last_of('/');
+  if (slash == std::string::npos) {
+    return file_name;
+  }
+  return path.substr(0, slash + 1) + file_name;
+}
+
+class ManifestParser {
+public:
+  ManifestParser(const void *data, size_t size)
+      : text_(data ? static_cast<const char *>(data) : "", size) {
+    if (!data || size == 0) {
+      throw std::invalid_argument("bundle manifest is empty");
+    }
+  }
+
+  lrrt::KernelManifest parse_first_kernel() const {
+    lrrt::KernelManifest manifest{};
+    const size_t kernels = require("\"kernels\"", 0, text_.size());
+    const size_t kernel_begin = require("{", kernels, text_.size());
+    const size_t kernel_end = matching_brace(kernel_begin);
+
+    manifest.name = read_string("name", kernel_begin, kernel_end);
+    manifest.symbol = read_string("symbol", kernel_begin, kernel_end);
+    manifest.code_object = read_string("code_object", kernel_begin, kernel_end);
+    manifest.kernarg_size = read_size("kernarg_size", kernel_begin, kernel_end);
+
+    const size_t shared_memory_bytes =
+        read_optional_size("shared_memory_bytes", kernel_begin, kernel_end, 0);
+    if (shared_memory_bytes > UINT32_MAX) {
+      throw std::runtime_error("bundle shared memory requirement is too large");
+    }
+    manifest.shared_memory_bytes = static_cast<uint32_t>(shared_memory_bytes);
+
+    read_u32_array("block", kernel_begin, kernel_end, manifest.block);
+    read_grid_expr(kernel_begin, kernel_end, &manifest.grid_divisor,
+                   &manifest.grid_multiplier);
+    manifest.arg_offsets = read_arg_offsets(kernel_begin, kernel_end);
+
+    if (manifest.name.empty() || manifest.symbol.empty() ||
+        manifest.code_object.empty() || manifest.kernarg_size == 0 ||
+        manifest.block[0] == 0 || manifest.block[1] == 0 ||
+        manifest.block[2] == 0 || manifest.grid_divisor == 0 ||
+        manifest.grid_multiplier == 0) {
+      throw std::runtime_error("invalid bundle manifest");
+    }
+    return manifest;
+  }
+
+private:
+  size_t require(const char *needle, size_t from, size_t limit) const {
+    size_t position = text_.find(needle, from);
+    if (position == std::string::npos || position >= limit) {
+      throw std::runtime_error(std::string("missing manifest token ") + needle);
+    }
+    return position;
+  }
+
+  size_t matching_brace(size_t begin) const {
+    size_t depth = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (size_t i = begin; i < text_.size(); ++i) {
+      char value = text_[i];
+      if (in_string) {
+        if (escaped) {
+          escaped = false;
+        } else if (value == '\\') {
+          escaped = true;
+        } else if (value == '"') {
+          in_string = false;
+        }
+        continue;
+      }
+      if (value == '"') {
+        in_string = true;
+      } else if (value == '{') {
+        ++depth;
+      } else if (value == '}') {
+        if (--depth == 0) {
+          return i + 1;
+        }
+      }
+    }
+    throw std::runtime_error("unterminated kernel manifest object");
+  }
+
+  size_t skip_space(size_t position, size_t limit) const {
+    while (position < limit &&
+           (text_[position] == ' ' || text_[position] == '\n' ||
+            text_[position] == '\r' || text_[position] == '\t')) {
+      ++position;
+    }
+    return position;
+  }
+
+  size_t field_value(const char *field, size_t from, size_t limit) const {
+    std::string key = std::string("\"") + field + "\"";
+    size_t key_position = require(key.c_str(), from, limit);
+    size_t colon = require(":", key_position + key.size(), limit);
+    return skip_space(colon + 1, limit);
+  }
+
+  std::string read_string(const char *field, size_t from, size_t limit) const {
+    size_t position = field_value(field, from, limit);
+    if (position >= limit || text_[position] != '"') {
+      throw std::runtime_error(std::string("manifest field is not string: ") +
+                               field);
+    }
+    ++position;
+    size_t end = position;
+    while (end < limit && text_[end] != '"') {
+      if (text_[end] == '\\') {
+        throw std::runtime_error("escaped manifest strings are unsupported");
+      }
+      ++end;
+    }
+    if (end >= limit) {
+      throw std::runtime_error(std::string("unterminated manifest string: ") +
+                               field);
+    }
+    return text_.substr(position, end - position);
+  }
+
+  size_t read_size_at(size_t position, size_t limit, const char *field) const {
+    size_t end = position;
+    while (end < limit && text_[end] >= '0' && text_[end] <= '9') {
+      ++end;
+    }
+    if (end == position) {
+      throw std::runtime_error(std::string("manifest field is not integer: ") +
+                               field);
+    }
+    if (end < limit && text_[end] != ' ' && text_[end] != '\n' &&
+        text_[end] != '\r' && text_[end] != '\t' && text_[end] != ',' &&
+        text_[end] != ']' && text_[end] != '}') {
+      throw std::runtime_error(std::string("invalid manifest integer: ") +
+                               field);
+    }
+    return static_cast<size_t>(
+        std::stoull(text_.substr(position, end - position)));
+  }
+
+  size_t read_size(const char *field, size_t from, size_t limit) const {
+    return read_size_at(field_value(field, from, limit), limit, field);
+  }
+
+  size_t read_optional_size(const char *field, size_t from, size_t limit,
+                            size_t default_value) const {
+    std::string key = std::string("\"") + field + "\"";
+    size_t position = text_.find(key, from);
+    if (position == std::string::npos || position >= limit) {
+      return default_value;
+    }
+    return read_size(field, from, limit);
+  }
+
+  uint32_t read_u32_at(size_t position, size_t limit, const char *field) const {
+    size_t value = read_size_at(position, limit, field);
+    if (value > UINT32_MAX) {
+      throw std::runtime_error(std::string("manifest field is too large: ") +
+                               field);
+    }
+    return static_cast<uint32_t>(value);
+  }
+
+  void read_u32_array(const char *field, size_t from, size_t limit,
+                      uint32_t out[3]) const {
+    size_t position = field_value(field, from, limit);
+    if (position >= limit || text_[position] != '[') {
+      throw std::runtime_error(std::string("manifest field is not array: ") +
+                               field);
+    }
+    ++position;
+    for (size_t i = 0; i < 3; ++i) {
+      position = skip_space(position, limit);
+      out[i] = read_u32_at(position, limit, field);
+      while (position < limit && text_[position] >= '0' &&
+             text_[position] <= '9') {
+        ++position;
+      }
+      position = skip_space(position, limit);
+      if (i < 2) {
+        if (position >= limit || text_[position] != ',') {
+          throw std::runtime_error(std::string("invalid manifest array: ") +
+                                   field);
+        }
+        ++position;
+      }
+    }
+    position = skip_space(position, limit);
+    if (position >= limit || text_[position] != ']') {
+      throw std::runtime_error(std::string("invalid manifest array: ") + field);
+    }
+  }
+
+  std::string read_first_grid_string(size_t from, size_t limit) const {
+    size_t position = field_value("grid", from, limit);
+    if (position >= limit || text_[position] != '[') {
+      throw std::runtime_error("manifest grid is not array");
+    }
+    position = skip_space(position + 1, limit);
+    if (position >= limit || text_[position] != '"') {
+      throw std::runtime_error("manifest grid[0] is not expression string");
+    }
+    ++position;
+    size_t end = text_.find('"', position);
+    if (end == std::string::npos || end >= limit) {
+      throw std::runtime_error("unterminated manifest grid expression");
+    }
+    return text_.substr(position, end - position);
+  }
+
+  void read_grid_expr(size_t from, size_t limit, uint32_t *divisor,
+                      uint32_t *multiplier) const {
+    const std::string expr = read_first_grid_string(from, limit);
+    const std::string prefix = "ceil_div(n, ";
+    if (expr.compare(0, prefix.size(), prefix) != 0) {
+      throw std::runtime_error("unsupported bundle grid expression");
+    }
+    size_t divisor_begin = prefix.size();
+    size_t divisor_end = expr.find(')', divisor_begin);
+    if (divisor_end == std::string::npos) {
+      throw std::runtime_error("unsupported bundle grid expression");
+    }
+    size_t multiply = divisor_end + 1;
+    while (multiply < expr.size() && expr[multiply] == ' ') {
+      ++multiply;
+    }
+    if (multiply >= expr.size() || expr[multiply] != '*') {
+      throw std::runtime_error("unsupported bundle grid expression");
+    }
+    size_t multiplier_begin = multiply + 1;
+    while (multiplier_begin < expr.size() && expr[multiplier_begin] == ' ') {
+      ++multiplier_begin;
+    }
+
+    *divisor = parse_grid_integer(expr, divisor_begin, divisor_end);
+    *multiplier = parse_grid_integer(expr, multiplier_begin, expr.size());
+  }
+
+  uint32_t parse_grid_integer(const std::string &expr, size_t begin,
+                              size_t end) const {
+    while (begin < end && expr[begin] == ' ') {
+      ++begin;
+    }
+    while (end > begin && expr[end - 1] == ' ') {
+      --end;
+    }
+    if (begin == end) {
+      throw std::runtime_error("unsupported bundle grid expression");
+    }
+
+    uint64_t value = 0;
+    for (size_t i = begin; i < end; ++i) {
+      if (expr[i] < '0' || expr[i] > '9') {
+        throw std::runtime_error("unsupported bundle grid expression");
+      }
+      value = value * 10 + static_cast<uint64_t>(expr[i] - '0');
+      if (value > UINT32_MAX) {
+        throw std::runtime_error("bundle grid expression is too large");
+      }
+    }
+    return static_cast<uint32_t>(value);
+  }
+
+  std::vector<size_t> read_arg_offsets(size_t from, size_t limit) const {
+    std::vector<size_t> offsets;
+    size_t args = field_value("args", from, limit);
+    size_t args_end = require("\"kernarg_size\"", args, limit);
+    size_t position = args;
+    while (true) {
+      size_t offset_field = text_.find("\"offset\"", position);
+      if (offset_field == std::string::npos || offset_field >= args_end) {
+        break;
+      }
+      size_t colon = require(":", offset_field, args_end);
+      size_t value = skip_space(colon + 1, args_end);
+      offsets.push_back(read_size_at(value, args_end, "offset"));
+      position = value + 1;
+    }
+    if (offsets.empty()) {
+      throw std::runtime_error("bundle manifest has no argument offsets");
+    }
+    return offsets;
+  }
+
+  std::string text_;
+};
+
+} // namespace
+
+namespace lrrt {
+
+KernelManifest parse_bundle_manifest(const void *data, size_t size) {
+  return ManifestParser(data, size).parse_first_kernel();
+}
+
+lr_launch_config_t launch_config_from_manifest(const KernelManifest &manifest,
+                                               uint32_t n) {
+  if (manifest.grid_divisor == 0 || manifest.grid_multiplier == 0) {
+    throw std::runtime_error("invalid bundle launch configuration");
+  }
+  const uint64_t programs =
+      (static_cast<uint64_t>(n) + manifest.grid_divisor - 1) /
+      manifest.grid_divisor;
+  const uint64_t grid_x = programs * manifest.grid_multiplier;
+  if (grid_x > UINT32_MAX) {
+    throw std::runtime_error("bundle grid size is too large");
+  }
+  return {
+      {static_cast<uint32_t>(grid_x), 1, 1},
+      {manifest.block[0], manifest.block[1], manifest.block[2]},
+      manifest.shared_memory_bytes,
+  };
+}
+
+void require_kernarg_layout(const KernelManifest &manifest, size_t kernarg_size,
+                            const std::vector<size_t> &arg_offsets) {
+  if (manifest.kernarg_size != kernarg_size ||
+      manifest.arg_offsets != arg_offsets) {
+    throw std::runtime_error("bundle manifest does not match kernarg layout");
+  }
+}
+
+Bundle::Bundle(Device device, const char *manifest_path)
+    : manifest_(load_manifest(manifest_path)),
+      module_(device, read_code_object(manifest_path, manifest_)),
+      kernel_(module_.kernel(manifest_.symbol.c_str())) {}
+
+lr_launch_config_t Bundle::launch_config(uint32_t n) const {
+  return launch_config_from_manifest(manifest_, n);
+}
+
+KernelManifest Bundle::load_manifest(const char *manifest_path) {
+  std::vector<unsigned char> data = read_file(manifest_path);
+  return parse_bundle_manifest(data);
+}
+
+std::vector<unsigned char>
+Bundle::read_code_object(const char *manifest_path,
+                         const KernelManifest &manifest) {
+  std::string hsaco_path =
+      bundle_file_path(manifest_path, manifest.code_object);
+  return read_file(hsaco_path.c_str());
+}
+
+} // namespace lrrt

@@ -97,10 +97,11 @@ kernels safely.
 
 ### Current manifest schema
 
-The current Triton examples use a narrow JSON schema that describes one or more
-independent kernel entries. The schema is intentionally launch-oriented: it
-describes the code object, symbol, kernarg layout, and launch shape needed by an
-lrrt-based executor.
+The `lrrt::bundle` C++ library uses a narrow JSON schema that describes one or
+more independent kernel entries. The schema is intentionally launch-oriented:
+it describes the code object, symbol, kernarg layout, and launch shape needed
+by an lrrt-based executor. The current `lrrt::Bundle` API selects the first
+kernel entry; selecting among multiple entries remains future work.
 
 Top-level fields:
 
@@ -140,7 +141,7 @@ Important launch convention: lrrt's `grid` is the HSA total grid size, not the
 Triton program count. For the current Triton examples, the manifest writes
 `grid[0]` as an expression like `ceil_div(n, 256) * 128`, where `ceil_div(n,
 256)` is the Triton program count and `128` is the workgroup size. The
-example-side launcher converts that expression into `lr_launch_config_t.grid`.
+`lrrt::Bundle` converts that expression into `lr_launch_config_t.grid`.
 
 The manifest is an ABI description, not a tensor or operator IR. It should not
 encode high-level graph semantics, tensor ownership, scheduling policy, or
@@ -157,10 +158,9 @@ The Triton example build verifies that `manifest.json` matches HSACO metadata:
 - `block[0]` matches `.max_flat_workgroup_size`
 - each manifest argument offset and size matches the HSACO argument metadata
 
-These checks are intentionally outside the runtime core. They protect the
-example bundle ABI from Triton version drift while keeping `light-rocm-runtime`
-focused on loading code objects, managing resources, dispatching kernels, and
-synchronizing work.
+These checks are intentionally outside the C/HSA runtime core. They protect the
+bundle ABI from Triton version drift while the separate `lrrt::bundle` layer
+owns manifest parsing and launch derivation.
 
 ## Milestones
 
@@ -172,10 +172,10 @@ synchronizing work.
 
 ### M1: Manifest-driven launcher
 
-- Add an example-side launcher that reads the manifest.
+- Add the `lrrt::bundle` C++ layer that reads the manifest.
 - Resolve kernel symbols from manifest entries.
 - Bind arguments explicitly from host-side values and `DeviceBuffer` handles.
-- Keep manifest parsing outside the runtime core until the ABI shape settles.
+- Keep manifest parsing separate from the C/HSA runtime core.
 
 ### M2: Triton-generated HSACO
 
