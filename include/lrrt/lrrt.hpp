@@ -34,9 +34,7 @@ public:
 
   lr_device_t get() const { return device_; }
   uint32_t index() const { return device_.index; }
-  void synchronize() const {
-    check(lr_synchronize(device_), "lr_synchronize");
-  }
+  void synchronize() const { check(lr_synchronize(device_), "lr_synchronize"); }
 
 private:
   lr_device_t device_;
@@ -170,8 +168,9 @@ private:
 };
 
 inline void copy_to_device(DeviceBuffer &dst, const void *src, size_t size) {
-  check(lr_memcpy(dst.device(), dst.data(), src, size, LR_MEMCPY_HOST_TO_DEVICE),
-        "lr_memcpy host to device");
+  check(
+      lr_memcpy(dst.device(), dst.data(), src, size, LR_MEMCPY_HOST_TO_DEVICE),
+      "lr_memcpy host to device");
 }
 
 inline void copy_to_device_async(DeviceBuffer &dst, const void *src,
@@ -210,8 +209,9 @@ inline void copy_to_device_async(DeviceBuffer &dst, const std::vector<T> &src,
 }
 
 inline void copy_to_host(void *dst, const DeviceBuffer &src, size_t size) {
-  check(lr_memcpy(src.device(), dst, src.data(), size, LR_MEMCPY_DEVICE_TO_HOST),
-        "lr_memcpy device to host");
+  check(
+      lr_memcpy(src.device(), dst, src.data(), size, LR_MEMCPY_DEVICE_TO_HOST),
+      "lr_memcpy device to host");
 }
 
 inline void copy_to_host_async(void *dst, const DeviceBuffer &src, size_t size,

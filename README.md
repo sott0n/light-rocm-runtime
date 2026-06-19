@@ -55,6 +55,22 @@ ctest --test-dir build-triton --output-on-failure -R lrrt_triton
 Use `-DLRRT_TRITON_PYTHON=/path/to/python3.13` or another `uv --python` value
 to override the Python used for Triton bundle generation.
 
+## Development
+
+Install the pre-commit runner and enable the repository hooks:
+
+```sh
+uv tool install pre-commit
+pre-commit install
+```
+
+The hooks run Ruff linting and formatting for Python, clang-format for C/C++,
+and basic file checks. Run the complete set manually with:
+
+```sh
+pre-commit run --all-files
+```
+
 ## Execution Semantics
 
 `lr_launch` is asynchronous with respect to the host. A successful return means

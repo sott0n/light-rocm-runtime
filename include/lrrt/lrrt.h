@@ -101,8 +101,7 @@ LRRT_API lr_status_t lr_memcpy_async(lr_device_t device, void *dst,
                                      const void *src, size_t size,
                                      lr_memcpy_kind_t kind, lr_event_t *event);
 
-LRRT_API lr_status_t lr_module_load_hsaco(lr_device_t device,
-                                          const void *image,
+LRRT_API lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
                                           size_t image_size,
                                           lr_module_t **module);
 
@@ -128,4 +127,4 @@ LRRT_API lr_status_t lr_synchronize(lr_device_t device);
 }
 #endif
 
-#endif  // LRRT_LRRT_H_
+#endif // LRRT_LRRT_H_

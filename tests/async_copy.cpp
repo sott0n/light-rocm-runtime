@@ -60,8 +60,8 @@ int main(void) {
     return 1;
   }
 
-  status = lr_memcpy(device, device_src, in, sizeof(in),
-                     LR_MEMCPY_HOST_TO_DEVICE);
+  status =
+      lr_memcpy(device, device_src, in, sizeof(in), LR_MEMCPY_HOST_TO_DEVICE);
   if (!expect_status(status, LR_SUCCESS, "copy in")) {
     lr_free(device, device_dst);
     lr_free(device, device_src);
@@ -97,8 +97,8 @@ int main(void) {
     return 1;
   }
 
-  status = lr_memcpy(device, out, device_dst, sizeof(out),
-                     LR_MEMCPY_DEVICE_TO_HOST);
+  status =
+      lr_memcpy(device, out, device_dst, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
   if (!expect_status(status, LR_SUCCESS, "copy out")) {
     lr_event_destroy(event);
     lr_free(device, device_dst);

@@ -76,16 +76,10 @@ void test_parse_manifest() {
   expect(config.shared_memory_bytes == 16, "launch dynamic shared memory");
 
   lrrt::require_kernarg_layout(manifest, 16, {0, 8});
-  expect_throw(
-      [&] {
-        lrrt::require_kernarg_layout(manifest, 24, {0, 8});
-      },
-      "kernarg size mismatch must fail");
-  expect_throw(
-      [&] {
-        lrrt::require_kernarg_layout(manifest, 16, {0, 16});
-      },
-      "kernarg offset mismatch must fail");
+  expect_throw([&] { lrrt::require_kernarg_layout(manifest, 24, {0, 8}); },
+               "kernarg size mismatch must fail");
+  expect_throw([&] { lrrt::require_kernarg_layout(manifest, 16, {0, 16}); },
+               "kernarg offset mismatch must fail");
 }
 
 void test_optional_field_stays_in_first_kernel() {

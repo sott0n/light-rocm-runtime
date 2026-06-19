@@ -1,9 +1,9 @@
 #include "lrrt/lrrt.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <algorithm>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -173,9 +173,8 @@ hsa_status_t populate_device_regions() {
 
 hsa_status_t create_default_queue(DeviceState *device) {
   uint32_t max_queue_size = 0;
-  hsa_status_t status =
-      hsa_agent_get_info(device->agent, HSA_AGENT_INFO_QUEUE_MAX_SIZE,
-                         &max_queue_size);
+  hsa_status_t status = hsa_agent_get_info(
+      device->agent, HSA_AGENT_INFO_QUEUE_MAX_SIZE, &max_queue_size);
   if (status != HSA_STATUS_SUCCESS) {
     return status;
   }
@@ -191,9 +190,9 @@ hsa_status_t create_default_queue(DeviceState *device) {
     queue_size = 1;
   }
 
-  status = hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
-                            nullptr, nullptr, UINT32_MAX, UINT32_MAX,
-                            &device->queue);
+  status =
+      hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI, nullptr,
+                       nullptr, UINT32_MAX, UINT32_MAX, &device->queue);
   if (status != HSA_STATUS_SUCCESS) {
     return status;
   }
@@ -220,7 +219,7 @@ uint16_t barrier_packet_header(hsa_packet_type_t type) {
 
 uint16_t packet_setup(uint16_t dimensions) {
   return static_cast<uint16_t>(dimensions
-                              << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
+                               << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
 }
 
 uint16_t dispatch_dimensions(const lr_launch_config_t *config) {
@@ -287,9 +286,9 @@ lr_status_t event_wait_locked(lr_event_t *event) {
   }
 
   DeviceState &device = g_devices[event->device.index];
-  hsa_signal_value_t value = hsa_signal_wait_scacquire(
-      event->signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-      HSA_WAIT_STATE_BLOCKED);
+  hsa_signal_value_t value =
+      hsa_signal_wait_scacquire(event->signal, HSA_SIGNAL_CONDITION_LT, 1,
+                                UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
   auto pending = std::find(device.pending_events.begin(),
                            device.pending_events.end(), event);
   if (pending != device.pending_events.end()) {
@@ -437,24 +436,24 @@ bool valid_device(lr_device_t device) {
 #endif
 }
 
-}  // namespace
+} // namespace
 
 extern "C" {
 
 const char *lr_status_string(lr_status_t status) {
   switch (status) {
-    case LR_SUCCESS:
-      return "success";
-    case LR_ERROR_INVALID_ARGUMENT:
-      return "invalid argument";
-    case LR_ERROR_NOT_INITIALIZED:
-      return "runtime is not initialized";
-    case LR_ERROR_ALREADY_INITIALIZED:
-      return "runtime is already initialized";
-    case LR_ERROR_NOT_SUPPORTED:
-      return "operation is not supported by this build";
-    case LR_ERROR_RUNTIME:
-      return "runtime error";
+  case LR_SUCCESS:
+    return "success";
+  case LR_ERROR_INVALID_ARGUMENT:
+    return "invalid argument";
+  case LR_ERROR_NOT_INITIALIZED:
+    return "runtime is not initialized";
+  case LR_ERROR_ALREADY_INITIALIZED:
+    return "runtime is already initialized";
+  case LR_ERROR_NOT_SUPPORTED:
+    return "operation is not supported by this build";
+  case LR_ERROR_RUNTIME:
+    return "runtime error";
   }
   return "unknown status";
 }
@@ -645,7 +644,8 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
   auto event_entry = g_events.find(event);
-  if (event_entry == g_events.end() || event->device.index >= g_devices.size()) {
+  if (event_entry == g_events.end() ||
+      event->device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
@@ -773,10 +773,8 @@ lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
   }
 
   uint64_t ticks = end->completion_tick - start->completion_tick;
-  *elapsed_ns =
-      static_cast<uint64_t>((static_cast<unsigned __int128>(ticks) *
-                             1000000000ULL) /
-                            frequency);
+  *elapsed_ns = static_cast<uint64_t>(
+      (static_cast<unsigned __int128>(ticks) * 1000000000ULL) / frequency);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -809,8 +807,7 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
     return to_lr_status(status);
   }
 
-  status = hsa_memory_assign_agent(*ptr, state.agent,
-                                   HSA_ACCESS_PERMISSION_RW);
+  status = hsa_memory_assign_agent(*ptr, state.agent, HSA_ACCESS_PERMISSION_RW);
   if (status != HSA_STATUS_SUCCESS) {
     hsa_memory_free(*ptr);
     *ptr = nullptr;
@@ -1013,16 +1010,16 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
   auto *loaded_module = new lr_module_t{};
   loaded_module->device = device;
 
-  status = hsa_code_object_reader_create_from_memory(
-      image, image_size, &loaded_module->reader);
+  status = hsa_code_object_reader_create_from_memory(image, image_size,
+                                                     &loaded_module->reader);
   if (status != HSA_STATUS_SUCCESS) {
     delete loaded_module;
     return to_lr_status(status);
   }
 
-  status = hsa_executable_create_alt(
-      profile, HSA_DEFAULT_FLOAT_ROUNDING_MODE_NEAR, nullptr,
-      &loaded_module->executable);
+  status =
+      hsa_executable_create_alt(profile, HSA_DEFAULT_FLOAT_ROUNDING_MODE_NEAR,
+                                nullptr, &loaded_module->executable);
   if (status != HSA_STATUS_SUCCESS) {
     hsa_code_object_reader_destroy(loaded_module->reader);
     delete loaded_module;
@@ -1266,4 +1263,4 @@ lr_status_t lr_synchronize(lr_device_t device) {
 #endif
 }
 
-}  // extern "C"
+} // extern "C"

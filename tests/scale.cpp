@@ -172,8 +172,8 @@ int main(void) {
     }
   }
 
-  status = lr_memcpy(device, out, device_out, sizeof(out),
-                     LR_MEMCPY_DEVICE_TO_HOST);
+  status =
+      lr_memcpy(device, out, device_out, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
   if (!expect_status(status, LR_SUCCESS, "copy out")) {
     lr_module_destroy(module);
     lr_free(device, device_out);
@@ -185,8 +185,8 @@ int main(void) {
   for (int i = 0; i < n; ++i) {
     float expected = final_alpha * in[i];
     if (fabsf(out[i] - expected) > 0.001f) {
-      fprintf(stderr, "scale mismatch at %d: got %f expected %f\n", i,
-              out[i], expected);
+      fprintf(stderr, "scale mismatch at %d: got %f expected %f\n", i, out[i],
+              expected);
       lr_module_destroy(module);
       lr_free(device, device_out);
       lr_free(device, device_in);

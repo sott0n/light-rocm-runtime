@@ -161,8 +161,8 @@ int main(void) {
     return 1;
   }
 
-  status = lr_memcpy(device, out, device_out, sizeof(out),
-                     LR_MEMCPY_DEVICE_TO_HOST);
+  status =
+      lr_memcpy(device, out, device_out, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
   if (!expect_status(status, LR_SUCCESS, "copy out")) {
     lr_module_destroy(module);
     lr_free(device, device_out);
