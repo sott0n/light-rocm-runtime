@@ -13,8 +13,8 @@ def rmsnorm_kernel(x, weight, out, eps, rows, hidden, BLOCK_SIZE: tl.constexpr):
     offsets = tl.arange(0, BLOCK_SIZE)
     mask = (row < rows) & (offsets < hidden)
     base = row * hidden + offsets
-    xv = tl.load(x + base, mask=mask, other=0.0)
-    wv = tl.load(weight + offsets, mask=offsets < hidden, other=0.0)
+    xv = tl.load(x + base, mask=mask, other=0.0).to(tl.float32)
+    wv = tl.load(weight + offsets, mask=offsets < hidden, other=0.0).to(tl.float32)
     mean_square = tl.sum(xv * xv, axis=0) / hidden
     scale = tl.rsqrt(mean_square + eps)
     tl.store(out + base, xv * scale * wv, mask=mask)
@@ -50,56 +50,66 @@ def main():
             "optional": True,
         },
     ]
-    specializations = [
-        (1024, 4, "kernels.hsaco"),
-        (2048, 8, "kernels_2048.hsaco"),
-        (4096, 8, "kernels_4096.hsaco"),
+    data_types = [
+        ("fp32", "*fp32"),
+        ("fp16", "*fp16"),
+        ("bf16", "*bf16"),
+    ]
+    hidden_specializations = [
+        (1024, 4),
+        (2048, 8),
+        (4096, 8),
     ]
     kernels = []
-    for block_size, num_warps, code_object in specializations:
-        workgroup_size = num_warps * 32
-        source = triton.compiler.ASTSource(
-            rmsnorm_kernel,
-            signature={
-                "x": "*fp32",
-                "weight": "*fp32",
-                "out": "*fp32",
-                "eps": "fp32",
-                "rows": "i32",
-                "hidden": "i32",
-                "BLOCK_SIZE": "constexpr",
-            },
-            constexprs={"BLOCK_SIZE": block_size},
-        )
-        compiled = triton.compile(
-            source,
-            target=GPUTarget("hip", args.arch, 64),
-            options={"num_warps": num_warps, "num_stages": 2},
-        )
-
-        hsaco_path = os.path.join(args.output_dir, code_object)
-        with open(hsaco_path, "wb") as hsaco_file:
-            hsaco_file.write(compiled.asm["hsaco"])
-
-        kernels.append(
-            {
-                "name": f"rmsnorm_{block_size}",
-                "symbol": "rmsnorm_kernel",
-                "code_object": code_object,
-                "args": kernel_args,
-                "kernarg_size": 56,
-                "block": [workgroup_size, 1, 1],
-                "grid": [f"ceil_div(n, 1) * {workgroup_size}", 1, 1],
-                "shared_memory_bytes": compiled.metadata.shared,
-                "triton": {
-                    "version": triton.__version__,
-                    "block_size": block_size,
-                    "max_hidden_size": block_size,
-                    "num_warps": num_warps,
+    for dtype, pointer_type in data_types:
+        for block_size, num_warps in hidden_specializations:
+            workgroup_size = num_warps * 32
+            code_object = f"kernels_{dtype}_{block_size}.hsaco"
+            if dtype == "fp32" and block_size == 1024:
+                code_object = "kernels.hsaco"
+            source = triton.compiler.ASTSource(
+                rmsnorm_kernel,
+                signature={
+                    "x": pointer_type,
+                    "weight": pointer_type,
+                    "out": pointer_type,
+                    "eps": "fp32",
+                    "rows": "i32",
+                    "hidden": "i32",
+                    "BLOCK_SIZE": "constexpr",
                 },
-                "workspace_bytes": 0,
-            }
-        )
+                constexprs={"BLOCK_SIZE": block_size},
+            )
+            compiled = triton.compile(
+                source,
+                target=GPUTarget("hip", args.arch, 64),
+                options={"num_warps": num_warps, "num_stages": 2},
+            )
+
+            hsaco_path = os.path.join(args.output_dir, code_object)
+            with open(hsaco_path, "wb") as hsaco_file:
+                hsaco_file.write(compiled.asm["hsaco"])
+
+            kernels.append(
+                {
+                    "name": f"rmsnorm_{dtype}_{block_size}",
+                    "symbol": "rmsnorm_kernel",
+                    "code_object": code_object,
+                    "args": kernel_args,
+                    "kernarg_size": 56,
+                    "block": [workgroup_size, 1, 1],
+                    "grid": [f"ceil_div(n, 1) * {workgroup_size}", 1, 1],
+                    "shared_memory_bytes": compiled.metadata.shared,
+                    "triton": {
+                        "version": triton.__version__,
+                        "dtype": dtype,
+                        "block_size": block_size,
+                        "max_hidden_size": block_size,
+                        "num_warps": num_warps,
+                    },
+                    "workspace_bytes": 0,
+                }
+            )
 
     manifest = {"target": args.arch, "kernels": kernels}
     manifest_path = os.path.join(args.output_dir, "manifest.json")

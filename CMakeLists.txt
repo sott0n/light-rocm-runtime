@@ -136,6 +136,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   target_link_libraries(lrrt_triton_scale PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_rmsnorm examples/triton/triton_rmsnorm.cpp)
   target_link_libraries(lrrt_triton_rmsnorm PRIVATE lrrt::bundle)
+  add_executable(
+    lrrt_triton_rmsnorm_precision_tests
+    tests/triton_rmsnorm_precision.cpp
+  )
+  target_link_libraries(lrrt_triton_rmsnorm_precision_tests PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_rope examples/triton/triton_rope.cpp)
   target_link_libraries(lrrt_triton_rope PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_silu_mul examples/triton/triton_silu_mul.cpp)
@@ -194,7 +199,9 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
   lrrt_add_triton_bundle(
     triton_rmsnorm examples/triton/rmsnorm_kernel.py
     TRITON_RMSNORM_HSACO TRITON_RMSNORM_MANIFEST
-    kernels_2048.hsaco kernels_4096.hsaco
+    kernels_fp32_2048.hsaco kernels_fp32_4096.hsaco
+    kernels_fp16_1024.hsaco kernels_fp16_2048.hsaco kernels_fp16_4096.hsaco
+    kernels_bf16_1024.hsaco kernels_bf16_2048.hsaco kernels_bf16_4096.hsaco
   )
   lrrt_add_triton_bundle(
     triton_rope examples/triton/rope_kernel.py
@@ -278,8 +285,13 @@ if(TRITON_SCALE_HSACO)
 endif()
 if(TRITON_RMSNORM_HSACO)
   add_dependencies(lrrt_triton_rmsnorm triton_rmsnorm_bundle)
+  add_dependencies(lrrt_triton_rmsnorm_precision_tests triton_rmsnorm_bundle)
   target_compile_definitions(
     lrrt_triton_rmsnorm
+    PRIVATE LRRT_TRITON_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
+  )
+  target_compile_definitions(
+    lrrt_triton_rmsnorm_precision_tests
     PRIVATE LRRT_TRITON_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
   )
 endif()
@@ -318,6 +330,12 @@ if(TARGET lrrt_triton_scale)
 endif()
 if(TARGET lrrt_triton_rmsnorm)
   add_test(NAME lrrt_triton_rmsnorm COMMAND lrrt_triton_rmsnorm)
+endif()
+if(TARGET lrrt_triton_rmsnorm_precision_tests)
+  add_test(
+    NAME lrrt_triton_rmsnorm_precision_tests
+    COMMAND lrrt_triton_rmsnorm_precision_tests
+  )
 endif()
 if(TARGET lrrt_triton_rope)
   add_test(NAME lrrt_triton_rope COMMAND lrrt_triton_rope)

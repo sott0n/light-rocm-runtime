@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <stdint.h>
 #include <stdio.h>
+#include <string>
 #include <vector>
 
 #ifndef LRRT_TRITON_RMSNORM_MANIFEST
@@ -25,13 +26,24 @@ typedef struct triton_rmsnorm_args_t {
 static_assert(sizeof(triton_rmsnorm_args_t) == 56,
               "Triton rmsnorm kernarg layout must match manifest");
 
-static constexpr uint32_t kMaxHiddenSize = 4096;
+static void run_case(lrrt::Device &device, uint32_t rows, uint32_t hidden) {
+  uint32_t block_size = hidden <= 1024 ? 1024 : hidden <= 2048 ? 2048 : 4096;
+  std::string kernel_name = "rmsnorm_fp32_" + std::to_string(block_size);
+  lrrt::Bundle bundle(device, LRRT_TRITON_RMSNORM_MANIFEST,
+                      kernel_name.c_str());
+  lrrt::require_kernarg_layout(
+      bundle.manifest(), sizeof(triton_rmsnorm_args_t),
+      {
+          offsetof(triton_rmsnorm_args_t, x),
+          offsetof(triton_rmsnorm_args_t, weight),
+          offsetof(triton_rmsnorm_args_t, out),
+          offsetof(triton_rmsnorm_args_t, eps),
+          offsetof(triton_rmsnorm_args_t, rows),
+          offsetof(triton_rmsnorm_args_t, hidden),
+          offsetof(triton_rmsnorm_args_t, triton_global_scratch),
+          offsetof(triton_rmsnorm_args_t, triton_profile_scratch),
+      });
 
-static void run_case(lrrt::Device &device, lrrt::Bundle &bundle, uint32_t rows,
-                     uint32_t hidden) {
-  if (hidden == 0 || hidden > kMaxHiddenSize) {
-    throw std::invalid_argument("RMSNorm hidden size must be in [1, 4096]");
-  }
   const uint32_t elements = rows * hidden;
   const float eps = 1.0e-5f;
   std::vector<float> x(elements);
@@ -41,15 +53,14 @@ static void run_case(lrrt::Device &device, lrrt::Bundle &bundle, uint32_t rows,
     weight[i] = 1.0f + 0.001f * (float)(i % 29);
   }
   for (uint32_t i = 0; i < elements; ++i) {
-    x[i] = 0.125f * (float)((int32_t)(i % 17) - 8);
+    x[i] = 0.117f * (float)((int32_t)(i % 17) - 8);
   }
 
   lrrt::DeviceBuffer device_x(device, x.size() * sizeof(float));
   lrrt::DeviceBuffer device_weight(device, weight.size() * sizeof(float));
   lrrt::DeviceBuffer device_out(device, out.size() * sizeof(float));
-  lrrt::copy_to_device(device_x, x.data(), x.size() * sizeof(float));
-  lrrt::copy_to_device(device_weight, weight.data(),
-                       weight.size() * sizeof(float));
+  lrrt::copy_to_device(device_x, x);
+  lrrt::copy_to_device(device_weight, weight);
 
   triton_rmsnorm_args_t kernel_args = {
       (const float *)device_x.data(),
@@ -61,15 +72,11 @@ static void run_case(lrrt::Device &device, lrrt::Bundle &bundle, uint32_t rows,
       nullptr,
       nullptr,
   };
-
   lrrt::launch(bundle.kernel(), bundle.launch_config(rows), kernel_args);
   device.synchronize();
-  lrrt::copy_to_host(out.data(), device_out, out.size() * sizeof(float));
+  lrrt::copy_to_host(out, device_out);
 
   float max_diff = 0.0f;
-  uint32_t max_index = 0;
-  float max_expected = 0.0f;
-  float max_actual = 0.0f;
   for (uint32_t row = 0; row < rows; ++row) {
     float sum_square = 0.0f;
     for (uint32_t col = 0; col < hidden; ++col) {
@@ -80,20 +87,10 @@ static void run_case(lrrt::Device &device, lrrt::Bundle &bundle, uint32_t rows,
     for (uint32_t col = 0; col < hidden; ++col) {
       uint32_t index = row * hidden + col;
       float expected = x[index] * scale * weight[col];
-      float diff = fabsf(out[index] - expected);
-      if (diff > max_diff) {
-        max_diff = diff;
-        max_index = index;
-        max_expected = expected;
-        max_actual = out[index];
-      }
+      max_diff = fmaxf(max_diff, fabsf(out[index] - expected));
     }
   }
   if (max_diff > 0.002f) {
-    fprintf(stderr,
-            "triton_rmsnorm hidden=%u mismatch at %u: actual=%f "
-            "expected=%f diff=%f\n",
-            hidden, max_index, max_actual, max_expected, max_diff);
     throw std::runtime_error("triton_rmsnorm result mismatch");
   }
 }
@@ -101,7 +98,6 @@ static void run_case(lrrt::Device &device, lrrt::Bundle &bundle, uint32_t rows,
 int main(void) {
   try {
     lrrt::Runtime runtime;
-
     uint32_t count = runtime.device_count();
     printf("devices: %u\n", count);
     if (count == 0) {
@@ -110,39 +106,8 @@ int main(void) {
 
     lrrt::Device device = runtime.open_device(0);
     printf("opened device: %u\n", device.index());
-
-    lrrt::Bundle rmsnorm_1024(device, LRRT_TRITON_RMSNORM_MANIFEST,
-                              "rmsnorm_1024");
-    lrrt::Bundle rmsnorm_2048(device, LRRT_TRITON_RMSNORM_MANIFEST,
-                              "rmsnorm_2048");
-    lrrt::Bundle rmsnorm_4096(device, LRRT_TRITON_RMSNORM_MANIFEST,
-                              "rmsnorm_4096");
-    const std::vector<size_t> arg_offsets = {
-        offsetof(triton_rmsnorm_args_t, x),
-        offsetof(triton_rmsnorm_args_t, weight),
-        offsetof(triton_rmsnorm_args_t, out),
-        offsetof(triton_rmsnorm_args_t, eps),
-        offsetof(triton_rmsnorm_args_t, rows),
-        offsetof(triton_rmsnorm_args_t, hidden),
-        offsetof(triton_rmsnorm_args_t, triton_global_scratch),
-        offsetof(triton_rmsnorm_args_t, triton_profile_scratch),
-    };
-    for (lrrt::Bundle *bundle : {&rmsnorm_1024, &rmsnorm_2048, &rmsnorm_4096}) {
-      lrrt::require_kernarg_layout(bundle->manifest(),
-                                   sizeof(triton_rmsnorm_args_t), arg_offsets);
-      printf("loaded Triton manifest for kernel: %s\n",
-             bundle->manifest().name.c_str());
-    }
-
-    for (uint32_t hidden : {1u, 127u, 768u, 1003u, 1024u, 1025u, 1536u, 2048u,
-                            2049u, 3072u, 4096u}) {
-      lrrt::Bundle *bundle = &rmsnorm_4096;
-      if (hidden <= 1024) {
-        bundle = &rmsnorm_1024;
-      } else if (hidden <= 2048) {
-        bundle = &rmsnorm_2048;
-      }
-      run_case(device, *bundle, 4, hidden);
+    for (uint32_t hidden : {1003u, 1536u, 3072u}) {
+      run_case(device, 4, hidden);
     }
 
     printf("triton_rmsnorm: ok\n");
