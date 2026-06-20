@@ -24,10 +24,25 @@ struct KernelManifest {
 };
 
 LRRT_API KernelManifest parse_bundle_manifest(const void *data, size_t size);
+LRRT_API KernelManifest parse_bundle_manifest(const void *data, size_t size,
+                                              const char *kernel_name);
+LRRT_API std::vector<KernelManifest> parse_bundle_manifests(const void *data,
+                                                            size_t size);
 
 inline KernelManifest
 parse_bundle_manifest(const std::vector<unsigned char> &data) {
   return parse_bundle_manifest(data.data(), data.size());
+}
+
+inline KernelManifest
+parse_bundle_manifest(const std::vector<unsigned char> &data,
+                      const char *kernel_name) {
+  return parse_bundle_manifest(data.data(), data.size(), kernel_name);
+}
+
+inline std::vector<KernelManifest>
+parse_bundle_manifests(const std::vector<unsigned char> &data) {
+  return parse_bundle_manifests(data.data(), data.size());
 }
 
 LRRT_API lr_launch_config_t
@@ -40,13 +55,15 @@ LRRT_API void require_kernarg_layout(const KernelManifest &manifest,
 class LRRT_API Bundle {
 public:
   Bundle(Device device, const char *manifest_path);
+  Bundle(Device device, const char *manifest_path, const char *kernel_name);
 
   const KernelManifest &manifest() const { return manifest_; }
   Kernel kernel() const { return kernel_; }
   lr_launch_config_t launch_config(uint32_t n) const;
 
 private:
-  static KernelManifest load_manifest(const char *manifest_path);
+  static KernelManifest load_manifest(const char *manifest_path,
+                                      const char *kernel_name);
   static std::vector<unsigned char>
   read_code_object(const char *manifest_path, const KernelManifest &manifest);
 

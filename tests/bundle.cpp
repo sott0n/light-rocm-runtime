@@ -32,6 +32,10 @@ lrrt::KernelManifest parse(const char *json) {
   return lrrt::parse_bundle_manifest(json, strlen(json));
 }
 
+lrrt::KernelManifest parse(const char *json, const char *kernel_name) {
+  return lrrt::parse_bundle_manifest(json, strlen(json), kernel_name);
+}
+
 const char *kManifest = R"json(
 {
   "target": "gfx1101",
@@ -82,7 +86,7 @@ void test_parse_manifest() {
                "kernarg offset mismatch must fail");
 }
 
-void test_optional_field_stays_in_first_kernel() {
+void test_multiple_kernels() {
   const char *json = R"json(
   {
     "kernels": [
@@ -113,11 +117,44 @@ void test_optional_field_stays_in_first_kernel() {
   expect(manifest.name == "first", "first kernel is selected");
   expect(manifest.shared_memory_bytes == 0,
          "missing shared memory defaults to zero");
+
+  std::vector<lrrt::KernelManifest> manifests =
+      lrrt::parse_bundle_manifests(json, strlen(json));
+  expect(manifests.size() == 2, "all kernels are parsed");
+  expect(manifests[0].name == "first" && manifests[1].name == "second",
+         "kernel manifest order is preserved");
+
+  lrrt::KernelManifest second = parse(json, "second");
+  expect(second.name == "second", "kernel is selected by name");
+  expect(second.symbol == "second_kernel", "selected kernel symbol");
+  expect(second.code_object == "second.hsaco", "selected code object");
+  expect(second.shared_memory_bytes == 64,
+         "selected kernel shared memory size");
+
+  expect_throw([&] { parse(json, "missing"); },
+               "missing kernel name must fail");
+  expect_throw([&] { parse(json, ""); }, "empty kernel name must fail");
 }
 
 void test_invalid_manifests() {
   expect_throw([] { lrrt::parse_bundle_manifest(nullptr, 0); },
                "empty manifest must fail");
+  expect_throw([] { parse(R"json({"kernels":[]})json"); },
+               "empty kernel array must fail");
+  expect_throw(
+      [] {
+        parse(R"json(
+          {"kernels":[
+            {"name":"same","symbol":"a","code_object":"a.hsaco",
+             "args":[{"offset":0}],"kernarg_size":8,
+             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]},
+            {"name":"same","symbol":"b","code_object":"b.hsaco",
+             "args":[{"offset":0}],"kernarg_size":8,
+             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]}
+          ]}
+        )json");
+      },
+      "duplicate kernel names must fail");
   expect_throw(
       [] { parse(R"json({"kernels":[{"name":"bad","symbol":"k"}]})json"); },
       "missing required fields must fail");
@@ -182,7 +219,7 @@ void test_grid_overflow() {
 
 int main() {
   test_parse_manifest();
-  test_optional_field_stays_in_first_kernel();
+  test_multiple_kernels();
   test_invalid_manifests();
   test_grid_overflow();
 

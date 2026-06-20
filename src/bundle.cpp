@@ -4,6 +4,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -76,11 +77,48 @@ public:
     }
   }
 
-  lrrt::KernelManifest parse_first_kernel() const {
-    lrrt::KernelManifest manifest{};
+  std::vector<lrrt::KernelManifest> parse_kernels() const {
+    std::vector<lrrt::KernelManifest> manifests;
     const size_t kernels = require("\"kernels\"", 0, text_.size());
-    const size_t kernel_begin = require("{", kernels, text_.size());
-    const size_t kernel_end = matching_brace(kernel_begin);
+    size_t position = field_value("kernels", kernels, text_.size());
+    if (position >= text_.size() || text_[position] != '[') {
+      throw std::runtime_error("manifest kernels is not array");
+    }
+
+    position = skip_space(position + 1, text_.size());
+    while (position < text_.size() && text_[position] != ']') {
+      if (text_[position] != '{') {
+        throw std::runtime_error("invalid kernel manifest array");
+      }
+      const size_t kernel_end = matching_brace(position);
+      lrrt::KernelManifest manifest = parse_kernel(position, kernel_end);
+      for (const lrrt::KernelManifest &existing : manifests) {
+        if (existing.name == manifest.name) {
+          throw std::runtime_error("duplicate kernel name in bundle manifest");
+        }
+      }
+      manifests.push_back(std::move(manifest));
+
+      position = skip_space(kernel_end, text_.size());
+      if (position < text_.size() && text_[position] == ',') {
+        position = skip_space(position + 1, text_.size());
+        if (position >= text_.size() || text_[position] == ']') {
+          throw std::runtime_error("invalid kernel manifest array");
+        }
+      } else if (position >= text_.size() || text_[position] != ']') {
+        throw std::runtime_error("invalid kernel manifest array");
+      }
+    }
+    if (position >= text_.size() || manifests.empty()) {
+      throw std::runtime_error("bundle manifest has no kernels");
+    }
+    return manifests;
+  }
+
+private:
+  lrrt::KernelManifest parse_kernel(size_t kernel_begin,
+                                    size_t kernel_end) const {
+    lrrt::KernelManifest manifest{};
 
     manifest.name = read_string("name", kernel_begin, kernel_end);
     manifest.symbol = read_string("symbol", kernel_begin, kernel_end);
@@ -109,7 +147,6 @@ public:
     return manifest;
   }
 
-private:
   size_t require(const char *needle, size_t from, size_t limit) const {
     size_t position = text_.find(needle, from);
     if (position == std::string::npos || position >= limit) {
@@ -355,7 +392,26 @@ private:
 namespace lrrt {
 
 KernelManifest parse_bundle_manifest(const void *data, size_t size) {
-  return ManifestParser(data, size).parse_first_kernel();
+  return parse_bundle_manifests(data, size).front();
+}
+
+KernelManifest parse_bundle_manifest(const void *data, size_t size,
+                                     const char *kernel_name) {
+  if (!kernel_name || kernel_name[0] == '\0') {
+    throw std::invalid_argument("bundle kernel name is empty");
+  }
+  for (KernelManifest &manifest : parse_bundle_manifests(data, size)) {
+    if (manifest.name == kernel_name) {
+      return std::move(manifest);
+    }
+  }
+  throw std::runtime_error(std::string("bundle kernel not found: ") +
+                           kernel_name);
+}
+
+std::vector<KernelManifest> parse_bundle_manifests(const void *data,
+                                                   size_t size) {
+  return ManifestParser(data, size).parse_kernels();
 }
 
 lr_launch_config_t launch_config_from_manifest(const KernelManifest &manifest,
@@ -386,7 +442,13 @@ void require_kernarg_layout(const KernelManifest &manifest, size_t kernarg_size,
 }
 
 Bundle::Bundle(Device device, const char *manifest_path)
-    : manifest_(load_manifest(manifest_path)),
+    : manifest_(load_manifest(manifest_path, nullptr)),
+      module_(device, read_code_object(manifest_path, manifest_)),
+      kernel_(module_.kernel(manifest_.symbol.c_str())) {}
+
+Bundle::Bundle(Device device, const char *manifest_path,
+               const char *kernel_name)
+    : manifest_(load_manifest(manifest_path, kernel_name)),
       module_(device, read_code_object(manifest_path, manifest_)),
       kernel_(module_.kernel(manifest_.symbol.c_str())) {}
 
@@ -394,8 +456,12 @@ lr_launch_config_t Bundle::launch_config(uint32_t n) const {
   return launch_config_from_manifest(manifest_, n);
 }
 
-KernelManifest Bundle::load_manifest(const char *manifest_path) {
+KernelManifest Bundle::load_manifest(const char *manifest_path,
+                                     const char *kernel_name) {
   std::vector<unsigned char> data = read_file(manifest_path);
+  if (kernel_name) {
+    return parse_bundle_manifest(data, kernel_name);
+  }
   return parse_bundle_manifest(data);
 }
 

@@ -100,8 +100,11 @@ kernels safely.
 The `lrrt::bundle` C++ library uses a narrow JSON schema that describes one or
 more independent kernel entries. The schema is intentionally launch-oriented:
 it describes the code object, symbol, kernarg layout, and launch shape needed
-by an lrrt-based executor. The current `lrrt::Bundle` API selects the first
-kernel entry; selecting among multiple entries remains future work.
+by an lrrt-based executor. `lrrt::Bundle(device, manifest_path)` selects the
+first kernel entry for compatibility, while `lrrt::Bundle(device,
+manifest_path, kernel_name)` selects an entry by its logical `name`. Kernel
+names must be unique within a manifest. Each selected entry may reference the
+same HSACO or a different code object in the bundle directory.
 
 Top-level fields:
 
