@@ -136,6 +136,8 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   target_link_libraries(lrrt_triton_scale PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_rmsnorm examples/triton/triton_rmsnorm.cpp)
   target_link_libraries(lrrt_triton_rmsnorm PRIVATE lrrt::bundle)
+  add_executable(lrrt_triton_rope examples/triton/triton_rope.cpp)
+  target_link_libraries(lrrt_triton_rope PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_silu_mul examples/triton/triton_silu_mul.cpp)
   target_link_libraries(lrrt_triton_silu_mul PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
@@ -193,6 +195,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
     triton_rmsnorm examples/triton/rmsnorm_kernel.py
     TRITON_RMSNORM_HSACO TRITON_RMSNORM_MANIFEST
     kernels_2048.hsaco kernels_4096.hsaco
+  )
+  lrrt_add_triton_bundle(
+    triton_rope examples/triton/rope_kernel.py
+    TRITON_ROPE_HSACO TRITON_ROPE_MANIFEST
+    kernels_128.hsaco
   )
   lrrt_add_triton_bundle(
     triton_silu_mul examples/triton/silu_mul_kernel.py
@@ -276,6 +283,13 @@ if(TRITON_RMSNORM_HSACO)
     PRIVATE LRRT_TRITON_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
   )
 endif()
+if(TRITON_ROPE_HSACO)
+  add_dependencies(lrrt_triton_rope triton_rope_bundle)
+  target_compile_definitions(
+    lrrt_triton_rope
+    PRIVATE LRRT_TRITON_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
+  )
+endif()
 if(TRITON_SILU_MUL_HSACO)
   add_dependencies(lrrt_triton_silu_mul triton_silu_mul_bundle)
   target_compile_definitions(
@@ -304,6 +318,9 @@ if(TARGET lrrt_triton_scale)
 endif()
 if(TARGET lrrt_triton_rmsnorm)
   add_test(NAME lrrt_triton_rmsnorm COMMAND lrrt_triton_rmsnorm)
+endif()
+if(TARGET lrrt_triton_rope)
+  add_test(NAME lrrt_triton_rope COMMAND lrrt_triton_rope)
 endif()
 if(TARGET lrrt_triton_silu_mul)
   add_test(NAME lrrt_triton_silu_mul COMMAND lrrt_triton_silu_mul)
@@ -340,6 +357,14 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_RMSNORM_MANIFEST}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_rope_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_ROPE_MANIFEST}"
         "--llvm-readelf=${LLVM_READELF}"
     )
     add_test(
