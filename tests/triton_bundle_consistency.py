@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -65,21 +66,33 @@ def assert_equal(name, actual, expected):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True)
-    parser.add_argument("--hsaco", required=True)
     parser.add_argument("--llvm-readelf", required=True)
     args = parser.parse_args()
 
     with open(args.manifest, "r", encoding="utf-8") as manifest_file:
         manifest = json.load(manifest_file)
 
-    kernel = manifest["kernels"][0]
-    notes = run_readelf(args.llvm_readelf, "--notes", args.hsaco)
-    symbols = run_readelf(args.llvm_readelf, "--symbols", args.hsaco)
+    kernels = manifest["kernels"]
+    if not kernels:
+        raise AssertionError("manifest has no kernels")
+
+    manifest_dir = os.path.dirname(os.path.abspath(args.manifest))
+    for kernel in kernels:
+        hsaco = os.path.join(manifest_dir, kernel["code_object"])
+        check_kernel(args.llvm_readelf, manifest["target"], kernel, hsaco)
+
+    print("triton_bundle_consistency: ok")
+    return 0
+
+
+def check_kernel(llvm_readelf, target, kernel, hsaco):
+    notes = run_readelf(llvm_readelf, "--notes", hsaco)
+    symbols = run_readelf(llvm_readelf, "--symbols", hsaco)
 
     assert_equal(
         "target",
         metadata_value(notes, "amdhsa.target"),
-        f"amdgcn-amd-amdhsa--{manifest['target']}",
+        f"amdgcn-amd-amdhsa--{target}",
     )
     assert_equal("kernel name", metadata_value(notes, ".name"), kernel["symbol"])
     assert_equal(
@@ -110,9 +123,6 @@ def main():
     descriptor = f"{kernel['symbol']}.kd"
     if not re.search(rf"\b{re.escape(descriptor)}\b", symbols):
         raise AssertionError(f"missing kernel descriptor symbol: {descriptor}")
-
-    print("triton_bundle_consistency: ok")
-    return 0
 
 
 if __name__ == "__main__":

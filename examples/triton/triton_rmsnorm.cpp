@@ -25,12 +25,12 @@ typedef struct triton_rmsnorm_args_t {
 static_assert(sizeof(triton_rmsnorm_args_t) == 56,
               "Triton rmsnorm kernarg layout must match manifest");
 
-static constexpr uint32_t kMaxHiddenSize = 1024;
+static constexpr uint32_t kMaxHiddenSize = 4096;
 
 static void run_case(lrrt::Device &device, lrrt::Bundle &bundle, uint32_t rows,
                      uint32_t hidden) {
   if (hidden == 0 || hidden > kMaxHiddenSize) {
-    throw std::invalid_argument("RMSNorm hidden size must be in [1, 1024]");
+    throw std::invalid_argument("RMSNorm hidden size must be in [1, 4096]");
   }
   const uint32_t elements = rows * hidden;
   const float eps = 1.0e-5f;
@@ -111,25 +111,38 @@ int main(void) {
     lrrt::Device device = runtime.open_device(0);
     printf("opened device: %u\n", device.index());
 
-    lrrt::Bundle bundle(device, LRRT_TRITON_RMSNORM_MANIFEST);
-    const lrrt::KernelManifest &kernel_manifest = bundle.manifest();
-    lrrt::require_kernarg_layout(
-        kernel_manifest, sizeof(triton_rmsnorm_args_t),
-        {
-            offsetof(triton_rmsnorm_args_t, x),
-            offsetof(triton_rmsnorm_args_t, weight),
-            offsetof(triton_rmsnorm_args_t, out),
-            offsetof(triton_rmsnorm_args_t, eps),
-            offsetof(triton_rmsnorm_args_t, rows),
-            offsetof(triton_rmsnorm_args_t, hidden),
-            offsetof(triton_rmsnorm_args_t, triton_global_scratch),
-            offsetof(triton_rmsnorm_args_t, triton_profile_scratch),
-        });
-    printf("loaded Triton manifest for kernel: %s\n",
-           kernel_manifest.name.c_str());
+    lrrt::Bundle rmsnorm_1024(device, LRRT_TRITON_RMSNORM_MANIFEST,
+                              "rmsnorm_1024");
+    lrrt::Bundle rmsnorm_2048(device, LRRT_TRITON_RMSNORM_MANIFEST,
+                              "rmsnorm_2048");
+    lrrt::Bundle rmsnorm_4096(device, LRRT_TRITON_RMSNORM_MANIFEST,
+                              "rmsnorm_4096");
+    const std::vector<size_t> arg_offsets = {
+        offsetof(triton_rmsnorm_args_t, x),
+        offsetof(triton_rmsnorm_args_t, weight),
+        offsetof(triton_rmsnorm_args_t, out),
+        offsetof(triton_rmsnorm_args_t, eps),
+        offsetof(triton_rmsnorm_args_t, rows),
+        offsetof(triton_rmsnorm_args_t, hidden),
+        offsetof(triton_rmsnorm_args_t, triton_global_scratch),
+        offsetof(triton_rmsnorm_args_t, triton_profile_scratch),
+    };
+    for (lrrt::Bundle *bundle : {&rmsnorm_1024, &rmsnorm_2048, &rmsnorm_4096}) {
+      lrrt::require_kernarg_layout(bundle->manifest(),
+                                   sizeof(triton_rmsnorm_args_t), arg_offsets);
+      printf("loaded Triton manifest for kernel: %s\n",
+             bundle->manifest().name.c_str());
+    }
 
-    for (uint32_t hidden : {1u, 127u, 768u, 1003u, 1024u}) {
-      run_case(device, bundle, 4, hidden);
+    for (uint32_t hidden : {1u, 127u, 768u, 1003u, 1024u, 1025u, 1536u, 2048u,
+                            2049u, 3072u, 4096u}) {
+      lrrt::Bundle *bundle = &rmsnorm_4096;
+      if (hidden <= 1024) {
+        bundle = &rmsnorm_1024;
+      } else if (hidden <= 2048) {
+        bundle = &rmsnorm_2048;
+      }
+      run_case(device, *bundle, 4, hidden);
     }
 
     printf("triton_rmsnorm: ok\n");

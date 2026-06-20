@@ -28,64 +28,68 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    block_size = 1024
-    num_warps = 4
-    workgroup_size = 128
-    source = triton.compiler.ASTSource(
-        rmsnorm_kernel,
-        signature={
-            "x": "*fp32",
-            "weight": "*fp32",
-            "out": "*fp32",
-            "eps": "fp32",
-            "rows": "i32",
-            "hidden": "i32",
-            "BLOCK_SIZE": "constexpr",
+    kernel_args = [
+        {"name": "x", "type": "ptr", "offset": 0, "size": 8},
+        {"name": "weight", "type": "ptr", "offset": 8, "size": 8},
+        {"name": "out", "type": "ptr", "offset": 16, "size": 8},
+        {"name": "eps", "type": "fp32", "offset": 24, "size": 4},
+        {"name": "rows", "type": "i32", "offset": 28, "size": 4},
+        {"name": "hidden", "type": "i32", "offset": 32, "size": 4},
+        {
+            "name": "_triton_global_scratch",
+            "type": "ptr",
+            "offset": 40,
+            "size": 8,
+            "optional": True,
         },
-        constexprs={"BLOCK_SIZE": block_size},
-    )
-    compiled = triton.compile(
-        source,
-        target=GPUTarget("hip", args.arch, 64),
-        options={"num_warps": num_warps, "num_stages": 2},
-    )
+        {
+            "name": "_triton_profile_scratch",
+            "type": "ptr",
+            "offset": 48,
+            "size": 8,
+            "optional": True,
+        },
+    ]
+    specializations = [
+        (1024, 4, "kernels.hsaco"),
+        (2048, 8, "kernels_2048.hsaco"),
+        (4096, 8, "kernels_4096.hsaco"),
+    ]
+    kernels = []
+    for block_size, num_warps, code_object in specializations:
+        workgroup_size = num_warps * 32
+        source = triton.compiler.ASTSource(
+            rmsnorm_kernel,
+            signature={
+                "x": "*fp32",
+                "weight": "*fp32",
+                "out": "*fp32",
+                "eps": "fp32",
+                "rows": "i32",
+                "hidden": "i32",
+                "BLOCK_SIZE": "constexpr",
+            },
+            constexprs={"BLOCK_SIZE": block_size},
+        )
+        compiled = triton.compile(
+            source,
+            target=GPUTarget("hip", args.arch, 64),
+            options={"num_warps": num_warps, "num_stages": 2},
+        )
 
-    hsaco_path = os.path.join(args.output_dir, "kernels.hsaco")
-    with open(hsaco_path, "wb") as hsaco_file:
-        hsaco_file.write(compiled.asm["hsaco"])
+        hsaco_path = os.path.join(args.output_dir, code_object)
+        with open(hsaco_path, "wb") as hsaco_file:
+            hsaco_file.write(compiled.asm["hsaco"])
 
-    manifest = {
-        "target": args.arch,
-        "kernels": [
+        kernels.append(
             {
-                "name": "rmsnorm",
+                "name": f"rmsnorm_{block_size}",
                 "symbol": "rmsnorm_kernel",
-                "code_object": "kernels.hsaco",
-                "args": [
-                    {"name": "x", "type": "ptr", "offset": 0, "size": 8},
-                    {"name": "weight", "type": "ptr", "offset": 8, "size": 8},
-                    {"name": "out", "type": "ptr", "offset": 16, "size": 8},
-                    {"name": "eps", "type": "fp32", "offset": 24, "size": 4},
-                    {"name": "rows", "type": "i32", "offset": 28, "size": 4},
-                    {"name": "hidden", "type": "i32", "offset": 32, "size": 4},
-                    {
-                        "name": "_triton_global_scratch",
-                        "type": "ptr",
-                        "offset": 40,
-                        "size": 8,
-                        "optional": True,
-                    },
-                    {
-                        "name": "_triton_profile_scratch",
-                        "type": "ptr",
-                        "offset": 48,
-                        "size": 8,
-                        "optional": True,
-                    },
-                ],
+                "code_object": code_object,
+                "args": kernel_args,
                 "kernarg_size": 56,
                 "block": [workgroup_size, 1, 1],
-                "grid": ["ceil_div(n, 1) * 128", 1, 1],
+                "grid": [f"ceil_div(n, 1) * {workgroup_size}", 1, 1],
                 "shared_memory_bytes": compiled.metadata.shared,
                 "triton": {
                     "version": triton.__version__,
@@ -95,8 +99,9 @@ def main():
                 },
                 "workspace_bytes": 0,
             }
-        ],
-    }
+        )
+
+    manifest = {"target": args.arch, "kernels": kernels}
     manifest_path = os.path.join(args.output_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as manifest_file:
         json.dump(manifest, manifest_file, indent=2)

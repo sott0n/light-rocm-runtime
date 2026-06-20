@@ -66,9 +66,13 @@ function(lrrt_add_triton_bundle name script output_hsaco_var output_manifest_var
     set(output_dir "${CMAKE_CURRENT_BINARY_DIR}/${name}_bundle")
     set(hsaco "${output_dir}/kernels.hsaco")
     set(manifest "${output_dir}/manifest.json")
+    set(outputs "${hsaco}" "${manifest}")
+    foreach(byproduct IN LISTS ARGN)
+      list(APPEND outputs "${output_dir}/${byproduct}")
+    endforeach()
 
     add_custom_command(
-      OUTPUT "${hsaco}" "${manifest}"
+      OUTPUT ${outputs}
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${output_dir}"
       COMMAND
         "${CMAKE_COMMAND}" -E env
@@ -83,7 +87,7 @@ function(lrrt_add_triton_bundle name script output_hsaco_var output_manifest_var
         "${script}"
       VERBATIM
     )
-    add_custom_target(${name}_bundle DEPENDS "${hsaco}" "${manifest}")
+    add_custom_target(${name}_bundle DEPENDS ${outputs})
     set(${output_hsaco_var} "${hsaco}" PARENT_SCOPE)
     set(${output_manifest_var} "${manifest}" PARENT_SCOPE)
   endif()
@@ -188,6 +192,7 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
   lrrt_add_triton_bundle(
     triton_rmsnorm examples/triton/rmsnorm_kernel.py
     TRITON_RMSNORM_HSACO TRITON_RMSNORM_MANIFEST
+    kernels_2048.hsaco kernels_4096.hsaco
   )
   lrrt_add_triton_bundle(
     triton_silu_mul examples/triton/silu_mul_kernel.py
@@ -311,7 +316,6 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_VECTOR_ADD_MANIFEST}"
-        "--hsaco=${TRITON_VECTOR_ADD_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
     add_test(
@@ -320,7 +324,6 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_SAXPY_MANIFEST}"
-        "--hsaco=${TRITON_SAXPY_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
     add_test(
@@ -329,7 +332,6 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_SCALE_MANIFEST}"
-        "--hsaco=${TRITON_SCALE_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
     add_test(
@@ -338,7 +340,6 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_RMSNORM_MANIFEST}"
-        "--hsaco=${TRITON_RMSNORM_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
     add_test(
@@ -347,7 +348,6 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_SILU_MUL_MANIFEST}"
-        "--hsaco=${TRITON_SILU_MUL_HSACO}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()
