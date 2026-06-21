@@ -5,6 +5,7 @@ project(light_rocm_runtime VERSION 0.1.0 LANGUAGES C CXX)
 set(LRRT_AMDGPU_TARGET "gfx1101" CACHE STRING "AMDGPU target for examples")
 set(LRRT_TRITON_PYTHON "3.13" CACHE STRING "Python version or interpreter for Triton examples")
 option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
+option(LRRT_BUILD_BENCHMARKS "Build runtime benchmarks" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -127,6 +128,14 @@ target_link_libraries(lrrt_saxpy PRIVATE lrrt::lrrt)
 add_executable(lrrt_fill examples/fill/fill.cpp)
 target_link_libraries(lrrt_fill PRIVATE lrrt::lrrt)
 
+if(LRRT_BUILD_BENCHMARKS)
+  add_executable(
+    lrrt_launch_overhead_benchmark
+    benchmarks/launch_overhead.cpp
+  )
+  target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
+endif()
+
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   add_executable(lrrt_triton_vector_add examples/triton/triton_vector_add.cpp)
   target_link_libraries(lrrt_triton_vector_add PRIVATE lrrt::bundle)
@@ -183,6 +192,12 @@ lrrt_add_hsaco_kernel(saxpy_kernel examples/saxpy/saxpy_kernel.cpp SAXPY_HSACO)
 lrrt_add_hsaco_kernel(fill_kernel examples/fill/fill_kernel.cpp FILL_HSACO)
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
 lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
+if(LRRT_BUILD_BENCHMARKS)
+  lrrt_add_hsaco_kernel(
+    launch_benchmark_kernel benchmarks/launch_kernel.cpp
+    LAUNCH_BENCHMARK_HSACO
+  )
+endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES)
   lrrt_add_triton_bundle(
     triton_vector_add examples/triton/vector_add_kernel.py
@@ -259,6 +274,16 @@ if(COPY_HSACO)
   target_compile_definitions(
     lrrt_copy_kernel_tests
     PRIVATE LRRT_COPY_HSACO="${COPY_HSACO}"
+  )
+endif()
+if(LAUNCH_BENCHMARK_HSACO)
+  add_dependencies(
+    lrrt_launch_overhead_benchmark
+    launch_benchmark_kernel_hsaco
+  )
+  target_compile_definitions(
+    lrrt_launch_overhead_benchmark
+    PRIVATE LRRT_LAUNCH_BENCHMARK_HSACO="${LAUNCH_BENCHMARK_HSACO}"
   )
 endif()
 if(TRITON_VECTOR_ADD_HSACO)

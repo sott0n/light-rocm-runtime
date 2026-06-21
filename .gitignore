@@ -1,4 +1,5 @@
 build/
+build-bench/
 *.o
 *.a
 *.so

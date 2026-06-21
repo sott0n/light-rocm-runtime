@@ -55,6 +55,34 @@ ctest --test-dir build-triton --output-on-failure -R lrrt_triton
 Use `-DLRRT_TRITON_PYTHON=/path/to/python3.13` or another `uv --python` value
 to override the Python used for Triton bundle generation.
 
+## Launch Overhead Benchmark
+
+The launch benchmark is opt-in and uses a minimal pre-built kernel to separate
+host enqueue cost, synchronization cost, sustained dispatch throughput, and
+device-side batch time:
+
+```sh
+cmake -S . -B build-bench -DLRRT_BUILD_BENCHMARKS=ON
+cmake --build build-bench
+./build-bench/lrrt_launch_overhead_benchmark
+```
+
+Pass an optional dispatch count to replace the default `10000` iterations.
+Results are printed as a table with microseconds per launch and sustained
+launches per second for straightforward comparison across runtime changes.
+Interactive terminal output uses color; set `NO_COLOR=1` to disable it. Color
+is disabled automatically when output is redirected or `TERM=dumb`.
+
+- **Idle synchronize**: host cost of synchronizing an idle device
+- **Host enqueue**: host enqueue cost while the queue has capacity
+- **Device batch interval**: device event interval across a dispatch batch
+- **Submit and synchronize**: sustained batched dispatch cost
+- **Launch round trip**: serialized launch and synchronization cost
+
+The values depend on the GPU, CPU, system load, and ROCm version. The benchmark
+does not enforce performance thresholds; use repeated runs in the same
+environment when comparing runtime changes.
+
 ## Development
 
 Install the pre-commit runner and enable the repository hooks:
