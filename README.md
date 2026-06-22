@@ -65,6 +65,7 @@ device-side batch time:
 cmake -S . -B build-bench -DLRRT_BUILD_BENCHMARKS=ON
 cmake --build build-bench
 ./build-bench/lrrt_launch_overhead_benchmark
+./build-bench/lrrt_async_copy_launch_benchmark
 ```
 
 Pass an optional dispatch count to replace the default `10000` iterations.
@@ -82,6 +83,11 @@ is disabled automatically when output is redirected or `TERM=dumb`.
 The values depend on the GPU, CPU, system load, and ROCm version. The benchmark
 does not enforce performance thresholds; use repeated runs in the same
 environment when comparing runtime changes.
+
+The async copy-to-launch benchmark compares an explicit host event wait with
+the device-side dependency path. It reports both the time from copy submission
+to launch return and the complete copy, launch, and synchronization round trip.
+Pass an optional iteration count; the default is `100` with a 4 MiB D2D copy.
 
 ## Development
 
@@ -131,9 +137,10 @@ markers.
 
 Asynchronous copies are currently ordered conservatively with kernel dispatches:
 the runtime drains earlier queued work before starting an async copy, and
-`lr_launch` waits for pending async copies before enqueueing a kernel. This
-keeps buffer lifetime and data visibility predictable until explicit event
-dependencies between copies and dispatches are added.
+`lr_launch` inserts HSA barrier packets for pending async-copy signals before
+enqueueing a kernel. The launch therefore does not wait for copy completion on
+the host. Destroying or re-recording an event that is still referenced by a
+queued dependency drains the device before reusing its signal.
 
 ## C++ Usage
 

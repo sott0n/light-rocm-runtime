@@ -134,6 +134,11 @@ if(LRRT_BUILD_BENCHMARKS)
     benchmarks/launch_overhead.cpp
   )
   target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
+  add_executable(
+    lrrt_async_copy_launch_benchmark
+    benchmarks/async_copy_launch.cpp
+  )
+  target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
 endif()
 
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
@@ -166,6 +171,9 @@ target_link_libraries(lrrt_memory_bounds_tests PRIVATE lrrt::lrrt)
 add_executable(lrrt_async_copy_tests tests/async_copy.cpp)
 target_link_libraries(lrrt_async_copy_tests PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_async_copy_launch_tests tests/async_copy_launch.cpp)
+target_link_libraries(lrrt_async_copy_launch_tests PRIVATE lrrt::lrrt)
+
 add_executable(lrrt_handle_registry_tests tests/handle_registry.cpp)
 target_link_libraries(lrrt_handle_registry_tests PRIVATE lrrt::lrrt)
 
@@ -192,10 +200,19 @@ lrrt_add_hsaco_kernel(saxpy_kernel examples/saxpy/saxpy_kernel.cpp SAXPY_HSACO)
 lrrt_add_hsaco_kernel(fill_kernel examples/fill/fill_kernel.cpp FILL_HSACO)
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
 lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
+lrrt_add_hsaco_kernel(
+  async_copy_launch_kernel tests/async_copy_launch_kernel.cpp
+  ASYNC_COPY_LAUNCH_HSACO
+)
 if(LRRT_BUILD_BENCHMARKS)
   lrrt_add_hsaco_kernel(
     launch_benchmark_kernel benchmarks/launch_kernel.cpp
     LAUNCH_BENCHMARK_HSACO
+  )
+  lrrt_add_hsaco_kernel(
+    async_copy_launch_benchmark_kernel
+    benchmarks/async_copy_launch_kernel.cpp
+    ASYNC_COPY_LAUNCH_BENCHMARK_HSACO
   )
 endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES)
@@ -269,6 +286,13 @@ if(SCALE_HSACO)
     PRIVATE LRRT_SCALE_HSACO="${SCALE_HSACO}"
   )
 endif()
+if(ASYNC_COPY_LAUNCH_HSACO)
+  add_dependencies(lrrt_async_copy_launch_tests async_copy_launch_kernel_hsaco)
+  target_compile_definitions(
+    lrrt_async_copy_launch_tests
+    PRIVATE LRRT_ASYNC_COPY_LAUNCH_HSACO="${ASYNC_COPY_LAUNCH_HSACO}"
+  )
+endif()
 if(COPY_HSACO)
   add_dependencies(lrrt_copy_kernel_tests copy_kernel_hsaco)
   target_compile_definitions(
@@ -284,6 +308,17 @@ if(LAUNCH_BENCHMARK_HSACO)
   target_compile_definitions(
     lrrt_launch_overhead_benchmark
     PRIVATE LRRT_LAUNCH_BENCHMARK_HSACO="${LAUNCH_BENCHMARK_HSACO}"
+  )
+endif()
+if(ASYNC_COPY_LAUNCH_BENCHMARK_HSACO)
+  add_dependencies(
+    lrrt_async_copy_launch_benchmark
+    async_copy_launch_benchmark_kernel_hsaco
+  )
+  target_compile_definitions(
+    lrrt_async_copy_launch_benchmark
+    PRIVATE
+      LRRT_ASYNC_COPY_LAUNCH_BENCHMARK_HSACO="${ASYNC_COPY_LAUNCH_BENCHMARK_HSACO}"
   )
 endif()
 if(TRITON_VECTOR_ADD_HSACO)
@@ -338,6 +373,7 @@ endif()
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
 add_test(NAME lrrt_async_copy_tests COMMAND lrrt_async_copy_tests)
+add_test(NAME lrrt_async_copy_launch_tests COMMAND lrrt_async_copy_launch_tests)
 add_test(NAME lrrt_handle_registry_tests COMMAND lrrt_handle_registry_tests)
 add_test(NAME lrrt_scale_tests COMMAND lrrt_scale_tests)
 add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)

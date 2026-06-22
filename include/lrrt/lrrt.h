@@ -94,8 +94,9 @@ LRRT_API lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
 /*
  * Starts an asynchronous copy and records completion in event. The event must
  * belong to the same device. The runtime waits for earlier queued work before
- * starting the copy, and later lr_launch calls wait for pending async copies.
- * Use lr_event_synchronize to wait for copy completion.
+ * starting the copy. Later lr_launch calls enqueue device-side dependencies
+ * for pending async copies instead of waiting on the host. Use
+ * lr_event_synchronize to wait for copy completion explicitly.
  */
 LRRT_API lr_status_t lr_memcpy_async(lr_device_t device, void *dst,
                                      const void *src, size_t size,

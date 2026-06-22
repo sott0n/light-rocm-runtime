@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #if LRRT_ENABLE_HSA
@@ -28,6 +29,7 @@ struct lr_event_t {
   Kind kind;
   bool pending;
   bool completed;
+  bool dependency_enqueued;
   uint64_t completion_tick;
 #endif
 };
@@ -67,6 +69,11 @@ struct PendingDispatch {
   KernargBuffer kernarg;
 };
 
+struct PendingBarrier {
+  hsa_signal_t completion_signal;
+  std::vector<lr_event_t *> dependencies;
+};
+
 struct DeviceState {
   hsa_agent_t agent;
   hsa_region_t global_region;
@@ -75,6 +82,7 @@ struct DeviceState {
   bool has_kernarg_region;
   hsa_queue_t *queue;
   std::vector<PendingDispatch> pending_dispatches;
+  std::vector<PendingBarrier> pending_barriers;
   std::vector<lr_event_t *> pending_events;
   std::vector<hsa_signal_t> signal_pool;
   std::vector<KernargBuffer> kernarg_pool;
@@ -217,6 +225,10 @@ uint16_t barrier_packet_header(hsa_packet_type_t type) {
                                (1 << HSA_PACKET_HEADER_BARRIER));
 }
 
+void publish_packet_header(uint16_t *header, uint16_t value) {
+  __atomic_store_n(header, value, __ATOMIC_RELEASE);
+}
+
 uint16_t packet_setup(uint16_t dimensions) {
   return static_cast<uint16_t>(dimensions
                                << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
@@ -328,6 +340,21 @@ lr_status_t event_wait_locked(lr_event_t *event) {
 
 lr_status_t drain_device_locked(DeviceState *device) {
   lr_status_t result = LR_SUCCESS;
+  for (const PendingBarrier &barrier : device->pending_barriers) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        barrier.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+        HSA_WAIT_STATE_BLOCKED);
+    if (value != 0 && result == LR_SUCCESS) {
+      result = LR_ERROR_RUNTIME;
+    }
+    hsa_signal_store_relaxed(barrier.completion_signal, 1);
+    device->signal_pool.push_back(barrier.completion_signal);
+    for (lr_event_t *event : barrier.dependencies) {
+      event->dependency_enqueued = false;
+    }
+  }
+  device->pending_barriers.clear();
+
   for (const PendingDispatch &dispatch : device->pending_dispatches) {
     hsa_signal_value_t value = hsa_signal_wait_scacquire(
         dispatch.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
@@ -366,7 +393,8 @@ lr_status_t drain_async_copies_locked(DeviceState *device) {
 }
 
 lr_status_t ensure_queue_slot_locked(DeviceState *device) {
-  if (device->pending_dispatches.size() + device->pending_events.size() <
+  if (device->pending_dispatches.size() + device->pending_barriers.size() +
+          device->pending_events.size() <
       device->queue->size) {
     return LR_SUCCESS;
   }
@@ -415,6 +443,76 @@ hsa_status_t acquire_kernarg_locked(DeviceState *device, size_t size,
   kernarg->ptr = nullptr;
   kernarg->size = size;
   return hsa_memory_allocate(device->kernarg_region, size, &kernarg->ptr);
+}
+
+void reap_completed_barriers_locked(DeviceState *device) {
+  size_t index = 0;
+  while (index < device->pending_barriers.size()) {
+    PendingBarrier &barrier = device->pending_barriers[index];
+    if (hsa_signal_load_scacquire(barrier.completion_signal) != 0) {
+      ++index;
+      continue;
+    }
+
+    hsa_signal_store_relaxed(barrier.completion_signal, 1);
+    device->signal_pool.push_back(barrier.completion_signal);
+    for (lr_event_t *event : barrier.dependencies) {
+      event->dependency_enqueued = false;
+    }
+    if (index + 1 != device->pending_barriers.size()) {
+      barrier = std::move(device->pending_barriers.back());
+    }
+    device->pending_barriers.pop_back();
+  }
+}
+
+lr_status_t enqueue_async_copy_dependencies_locked(DeviceState *device) {
+  while (true) {
+    reap_completed_barriers_locked(device);
+    lr_status_t slot_status = ensure_queue_slot_locked(device);
+    if (slot_status != LR_SUCCESS) {
+      return slot_status;
+    }
+
+    std::vector<lr_event_t *> dependencies;
+    for (lr_event_t *event : device->pending_events) {
+      if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy &&
+          !event->dependency_enqueued &&
+          hsa_signal_load_scacquire(event->signal) != 0) {
+        dependencies.push_back(event);
+        if (dependencies.size() == 5) {
+          break;
+        }
+      }
+    }
+    if (dependencies.empty()) {
+      return LR_SUCCESS;
+    }
+
+    hsa_signal_t completion_signal{};
+    hsa_status_t status = acquire_signal_locked(device, &completion_signal);
+    if (status != HSA_STATUS_SUCCESS) {
+      return to_lr_status(status);
+    }
+
+    const uint64_t index =
+        hsa_queue_add_write_index_scacq_screl(device->queue, 1);
+    auto *packets =
+        static_cast<hsa_barrier_and_packet_t *>(device->queue->base_address);
+    hsa_barrier_and_packet_t *packet =
+        &packets[index & (device->queue->size - 1)];
+    std::memset(packet, 0, sizeof(*packet));
+    for (size_t i = 0; i < dependencies.size(); ++i) {
+      packet->dep_signal[i] = dependencies[i]->signal;
+      dependencies[i]->dependency_enqueued = true;
+    }
+    packet->completion_signal = completion_signal;
+    publish_packet_header(&packet->header,
+                          barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+    device->pending_barriers.push_back(
+        PendingBarrier{completion_signal, std::move(dependencies)});
+    hsa_signal_store_screlease(device->queue->doorbell_signal, index);
+  }
 }
 
 bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
@@ -624,6 +722,7 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   created_event->kind = lr_event_t::Kind::None;
   created_event->pending = false;
   created_event->completed = false;
+  created_event->dependency_enqueued = false;
   created_event->completion_tick = 0;
   g_events.insert(created_event);
   *event = created_event;
@@ -652,6 +751,13 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
   lr_status_t wait_status = event_wait_locked(event);
   if (wait_status != LR_SUCCESS) {
     return wait_status;
+  }
+  if (event->dependency_enqueued) {
+    lr_status_t drain_status =
+        drain_device_locked(&g_devices[event->device.index]);
+    if (drain_status != LR_SUCCESS) {
+      return drain_status;
+    }
   }
 
   hsa_status_t status = hsa_signal_destroy(event->signal);
@@ -691,6 +797,12 @@ lr_status_t lr_event_record(lr_event_t *event) {
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
+  if (event->dependency_enqueued) {
+    lr_status_t drain_status = drain_device_locked(&state);
+    if (drain_status != LR_SUCCESS) {
+      return drain_status;
+    }
+  }
   lr_status_t copy_status = drain_async_copies_locked(&state);
   if (copy_status != LR_SUCCESS) {
     return copy_status;
@@ -703,6 +815,7 @@ lr_status_t lr_event_record(lr_event_t *event) {
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
+  event->dependency_enqueued = false;
   event->completion_tick = 0;
 
   const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
@@ -711,7 +824,8 @@ lr_status_t lr_event_record(lr_event_t *event) {
   hsa_barrier_and_packet_t *packet = &packets[index & (state.queue->size - 1)];
   std::memset(packet, 0, sizeof(*packet));
   packet->completion_signal = event->signal;
-  packet->header = barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND);
+  publish_packet_header(&packet->header,
+                        barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
 
   event->pending = true;
   state.pending_events.push_back(event);
@@ -966,6 +1080,7 @@ lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::AsyncCopy;
   event->completed = false;
+  event->dependency_enqueued = false;
   event->completion_tick = 0;
 
   status = hsa_amd_memory_async_copy(dst, dst_agent, src, src_agent, size, 0,
@@ -1191,9 +1306,10 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
       args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  lr_status_t copy_status = drain_async_copies_locked(&state);
-  if (copy_status != LR_SUCCESS) {
-    return copy_status;
+  lr_status_t dependency_status =
+      enqueue_async_copy_dependencies_locked(&state);
+  if (dependency_status != LR_SUCCESS) {
+    return dependency_status;
   }
   lr_status_t slot_status = ensure_queue_slot_locked(&state);
   if (slot_status != LR_SUCCESS) {
@@ -1235,7 +1351,11 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
   packet->kernel_object = kernel->object;
   packet->kernarg_address = kernarg.ptr;
   packet->completion_signal = signal;
-  packet->header = packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
+  uint16_t header =
+      state.pending_barriers.empty()
+          ? packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH)
+          : barrier_packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
+  publish_packet_header(&packet->header, header);
 
   hsa_signal_store_screlease(state.queue->doorbell_signal, index);
   state.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
