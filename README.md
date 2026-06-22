@@ -84,10 +84,11 @@ The values depend on the GPU, CPU, system load, and ROCm version. The benchmark
 does not enforce performance thresholds; use repeated runs in the same
 environment when comparing runtime changes.
 
-The async copy-to-launch benchmark compares an explicit host event wait with
-the device-side dependency path. It reports both the time from copy submission
-to launch return and the complete copy, launch, and synchronization round trip.
-Pass an optional iteration count; the default is `100` with a 4 MiB D2D copy.
+The async dependency benchmark compares explicit host waits with device-side
+dependencies in both copy-to-launch and launch-to-copy directions. It reports
+submission time and the complete operation round trip. Pass an optional
+iteration count; the default is `100` with a 4 MiB D2D copy in the
+copy-to-launch direction.
 
 ## Development
 
@@ -118,8 +119,8 @@ that must drain pending work for safety.
 The current memory and lifetime APIs are conservative:
 
 - `lr_memcpy` waits for pending work before copying
-- `lr_memcpy_async` waits for earlier queued work, starts the copy, and reports
-  copy completion through an event
+- `lr_memcpy_async` adds device-side dependencies on earlier kernel dispatches,
+  starts the copy, and reports completion through an event
 - `lr_free` waits before releasing a runtime-managed allocation
 - `lr_module_destroy` waits before destroying code object state for that device
 - `lr_shutdown` waits for all devices before releasing runtime resources
@@ -135,12 +136,12 @@ event's device, `lr_event_synchronize` waits for that marker, and
 `lr_event_elapsed_time_ns` reports the nanoseconds between two completed
 markers.
 
-Asynchronous copies are currently ordered conservatively with kernel dispatches:
-the runtime drains earlier queued work before starting an async copy, and
-`lr_launch` inserts HSA barrier packets for pending async-copy signals before
-enqueueing a kernel. The launch therefore does not wait for copy completion on
-the host. Destroying or re-recording an event that is still referenced by a
-queued dependency drains the device before reusing its signal.
+Asynchronous copies and kernel dispatches are ordered through device-side
+signals. `lr_memcpy_async` passes pending dispatch completion signals to HSA as
+copy dependencies, while `lr_launch` inserts HSA barrier packets for pending
+async-copy signals. Neither direction waits for completion on the host.
+Destroying or re-recording an event that is still referenced by a queued
+dependency drains the device before reusing its signal.
 
 ## C++ Usage
 

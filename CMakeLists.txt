@@ -174,6 +174,9 @@ target_link_libraries(lrrt_async_copy_tests PRIVATE lrrt::lrrt)
 add_executable(lrrt_async_copy_launch_tests tests/async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_tests PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_launch_async_copy_tests tests/launch_async_copy.cpp)
+target_link_libraries(lrrt_launch_async_copy_tests PRIVATE lrrt::lrrt)
+
 add_executable(lrrt_handle_registry_tests tests/handle_registry.cpp)
 target_link_libraries(lrrt_handle_registry_tests PRIVATE lrrt::lrrt)
 
@@ -288,8 +291,13 @@ if(SCALE_HSACO)
 endif()
 if(ASYNC_COPY_LAUNCH_HSACO)
   add_dependencies(lrrt_async_copy_launch_tests async_copy_launch_kernel_hsaco)
+  add_dependencies(lrrt_launch_async_copy_tests async_copy_launch_kernel_hsaco)
   target_compile_definitions(
     lrrt_async_copy_launch_tests
+    PRIVATE LRRT_ASYNC_COPY_LAUNCH_HSACO="${ASYNC_COPY_LAUNCH_HSACO}"
+  )
+  target_compile_definitions(
+    lrrt_launch_async_copy_tests
     PRIVATE LRRT_ASYNC_COPY_LAUNCH_HSACO="${ASYNC_COPY_LAUNCH_HSACO}"
   )
 endif()
@@ -374,6 +382,7 @@ enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
 add_test(NAME lrrt_async_copy_tests COMMAND lrrt_async_copy_tests)
 add_test(NAME lrrt_async_copy_launch_tests COMMAND lrrt_async_copy_launch_tests)
+add_test(NAME lrrt_launch_async_copy_tests COMMAND lrrt_launch_async_copy_tests)
 add_test(NAME lrrt_handle_registry_tests COMMAND lrrt_handle_registry_tests)
 add_test(NAME lrrt_scale_tests COMMAND lrrt_scale_tests)
 add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)

@@ -341,6 +341,14 @@ lr_status_t event_wait_locked(lr_event_t *event) {
 
 lr_status_t drain_device_locked(DeviceState *device) {
   lr_status_t result = LR_SUCCESS;
+  std::vector<lr_event_t *> pending_events = device->pending_events;
+  for (lr_event_t *event : pending_events) {
+    lr_status_t status = event_wait_locked(event);
+    if (status != LR_SUCCESS && result == LR_SUCCESS) {
+      result = status;
+    }
+  }
+
   for (const PendingBarrier &barrier : device->pending_barriers) {
     hsa_signal_value_t value = hsa_signal_wait_scacquire(
         barrier.retirement_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
@@ -366,14 +374,6 @@ lr_status_t drain_device_locked(DeviceState *device) {
     device->kernarg_pool.push_back(dispatch.kernarg);
   }
   device->pending_dispatches.clear();
-
-  std::vector<lr_event_t *> pending_events = device->pending_events;
-  for (lr_event_t *event : pending_events) {
-    lr_status_t status = event_wait_locked(event);
-    if (status != LR_SUCCESS && result == LR_SUCCESS) {
-      result = status;
-    }
-  }
   return result;
 }
 
@@ -1057,9 +1057,11 @@ lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
   }
 
   DeviceState &state = g_devices[device.index];
-  lr_status_t drain_status = drain_device_locked(&state);
-  if (drain_status != LR_SUCCESS) {
-    return drain_status;
+  if (event->dependency_enqueued) {
+    lr_status_t drain_status = drain_device_locked(&state);
+    if (drain_status != LR_SUCCESS) {
+      return drain_status;
+    }
   }
 
   hsa_status_t status = hsa_amd_profiling_async_copy_enable(true);
@@ -1085,8 +1087,14 @@ lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
   event->dependency_enqueued = false;
   event->completion_tick = 0;
 
-  status = hsa_amd_memory_async_copy(dst, dst_agent, src, src_agent, size, 0,
-                                     nullptr, event->signal);
+  std::vector<hsa_signal_t> dependencies;
+  dependencies.reserve(state.pending_dispatches.size());
+  for (const PendingDispatch &dispatch : state.pending_dispatches) {
+    dependencies.push_back(dispatch.completion_signal);
+  }
+  status = hsa_amd_memory_async_copy(dst, dst_agent, src, src_agent, size,
+                                     static_cast<uint32_t>(dependencies.size()),
+                                     dependencies.data(), event->signal);
   if (status != HSA_STATUS_SUCCESS) {
     event->kind = lr_event_t::Kind::None;
     return to_lr_status(status);

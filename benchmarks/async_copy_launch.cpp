@@ -157,6 +157,94 @@ Comparison compare_paths(lrrt::Device device, lrrt::DeviceBuffer &staging,
   return totals;
 }
 
+Measurements measure_launch_copy_once(
+    lrrt::Device device, lrrt::DeviceBuffer &copy_output,
+    const lrrt::DeviceBuffer &kernel_output, const lrrt::Kernel &kernel,
+    const lr_launch_config_t &config, const KernelArgs &args,
+    lrrt::Event &copy_complete, bool host_wait) {
+  auto round_trip_begin = Clock::now();
+  lrrt::launch(kernel, config, args);
+  auto submission_begin = Clock::now();
+  if (host_wait) {
+    device.synchronize();
+  }
+  lrrt::copy_device_to_device_async(copy_output, kernel_output, sizeof(float),
+                                    copy_complete);
+  auto submission_end = Clock::now();
+  copy_complete.synchronize();
+  auto round_trip_end = Clock::now();
+  device.synchronize();
+  return {elapsed_ns(submission_begin, submission_end),
+          elapsed_ns(round_trip_begin, round_trip_end)};
+}
+
+Comparison compare_launch_copy_paths(lrrt::Device device,
+                                     lrrt::DeviceBuffer &copy_output,
+                                     const lrrt::DeviceBuffer &kernel_output,
+                                     const lrrt::Kernel &kernel,
+                                     const lr_launch_config_t &config,
+                                     const KernelArgs &args,
+                                     uint32_t iterations) {
+  lrrt::Event host_wait_event(device);
+  lrrt::Event device_dependency_event(device);
+  Comparison totals{};
+
+  auto add = [](Measurements *total, Measurements sample) {
+    total->submission_ns += sample.submission_ns;
+    total->round_trip_ns += sample.round_trip_ns;
+  };
+  auto run_host_wait = [&] {
+    add(&totals.host_wait,
+        measure_launch_copy_once(device, copy_output, kernel_output, kernel,
+                                 config, args, host_wait_event, true));
+  };
+  auto run_device_dependency = [&] {
+    add(&totals.device_dependency,
+        measure_launch_copy_once(device, copy_output, kernel_output, kernel,
+                                 config, args, device_dependency_event, false));
+  };
+
+  for (uint32_t i = 0; i < iterations; ++i) {
+    if (i % 2 == 0) {
+      run_host_wait();
+      run_device_dependency();
+    } else {
+      run_device_dependency();
+      run_host_wait();
+    }
+  }
+
+  const double count = static_cast<double>(iterations);
+  totals.host_wait.submission_ns /= count;
+  totals.host_wait.round_trip_ns /= count;
+  totals.device_dependency.submission_ns /= count;
+  totals.device_dependency.round_trip_ns /= count;
+  return totals;
+}
+
+void print_comparison(const char *title, const Comparison &comparison,
+                      const Colors &colors) {
+  double submission_speedup = comparison.host_wait.submission_ns /
+                              comparison.device_dependency.submission_ns;
+  double round_trip_speedup = comparison.host_wait.round_trip_ns /
+                              comparison.device_dependency.round_trip_ns;
+  printf("%s%s%s\n", colors.label, title, colors.reset);
+  printf("%-24s %14s %14s\n", "Path", "Submission", "End-to-end");
+  printf("%-24s %14s %14s\n", "------------------------", "--------------",
+         "--------------");
+  printf("%-24s %s%11.3f us%s %s%11.3f us%s\n", "Explicit host wait",
+         colors.time, comparison.host_wait.submission_ns / 1.0e3, colors.reset,
+         colors.time, comparison.host_wait.round_trip_ns / 1.0e3, colors.reset);
+  printf("%-24s %s%11.3f us%s %s%11.3f us%s\n", "Device dependency",
+         colors.time, comparison.device_dependency.submission_ns / 1.0e3,
+         colors.reset, colors.time,
+         comparison.device_dependency.round_trip_ns / 1.0e3, colors.reset);
+  printf("%sSubmission speedup: %.2fx%s\n", colors.speedup, submission_speedup,
+         colors.reset);
+  printf("%sEnd-to-end speedup: %.2fx%s\n\n", colors.speedup,
+         round_trip_speedup, colors.reset);
+}
+
 void verify_result(lrrt::DeviceBuffer &result, float expected) {
   float actual = 0.0f;
   lrrt::copy_to_host(&actual, result, sizeof(actual));
@@ -186,6 +274,7 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer source(device, copy_bytes);
     lrrt::DeviceBuffer staging(device, copy_bytes);
     lrrt::DeviceBuffer result(device, sizeof(float));
+    lrrt::DeviceBuffer copied_result(device, sizeof(float));
     lrrt::copy_to_device(source, input);
 
     std::vector<unsigned char> hsaco =
@@ -205,38 +294,24 @@ int main(int argc, char **argv) {
     Comparison comparison = compare_paths(device, staging, source, kernel,
                                           config, args, iterations);
     verify_result(result, input.back() * alpha);
-
-    double submission_speedup = comparison.host_wait.submission_ns /
-                                comparison.device_dependency.submission_ns;
-    double round_trip_speedup = comparison.host_wait.round_trip_ns /
-                                comparison.device_dependency.round_trip_ns;
+    compare_launch_copy_paths(device, copied_result, result, kernel, config,
+                              args, warmup_iterations);
+    Comparison launch_copy = compare_launch_copy_paths(
+        device, copied_result, result, kernel, config, args, iterations);
+    verify_result(copied_result, input.back() * alpha);
     const Colors colors = output_colors();
 
-    printf("\n%sLRRT Async Copy -> Launch Benchmark%s\n", colors.title,
+    printf("\n%sLRRT Async Dependency Benchmark%s\n", colors.title,
            colors.reset);
-    printf("%s===================================%s\n", colors.title,
-           colors.reset);
+    printf("%s===============================%s\n", colors.title, colors.reset);
     printf("Device index:       %u\n", device.index());
-    printf("Copy size:          %.1f MiB\n",
+    printf("Copy -> launch:     %.1f MiB D2D\n",
            static_cast<double>(copy_bytes) / (1024.0 * 1024.0));
+    printf("Launch -> copy:     %zu B D2D\n", sizeof(float));
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per path\n\n", warmup_iterations);
-    printf("%s%-24s %14s %14s%s\n", colors.label, "Path", "Submission",
-           "End-to-end", colors.reset);
-    printf("%-24s %14s %14s\n", "------------------------", "--------------",
-           "--------------");
-    printf("%-24s %s%11.3f us%s %s%11.3f us%s\n", "Host event wait",
-           colors.time, comparison.host_wait.submission_ns / 1.0e3,
-           colors.reset, colors.time,
-           comparison.host_wait.round_trip_ns / 1.0e3, colors.reset);
-    printf("%-24s %s%11.3f us%s %s%11.3f us%s\n", "Device dependency",
-           colors.time, comparison.device_dependency.submission_ns / 1.0e3,
-           colors.reset, colors.time,
-           comparison.device_dependency.round_trip_ns / 1.0e3, colors.reset);
-    printf("\n%sSubmission speedup: %.2fx%s\n", colors.speedup,
-           submission_speedup, colors.reset);
-    printf("%sEnd-to-end speedup: %.2fx%s\n\n", colors.speedup,
-           round_trip_speedup, colors.reset);
+    print_comparison("Copy -> launch", comparison, colors);
+    print_comparison("Launch -> copy", launch_copy, colors);
     return 0;
   } catch (const std::exception &error) {
     fprintf(stderr, "%s\n", error.what());
