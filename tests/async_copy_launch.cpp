@@ -36,6 +36,17 @@ std::vector<unsigned char> read_file(const char *path) {
   return data;
 }
 
+void expect_result(lrrt::DeviceBuffer &result, float expected,
+                   const char *scenario) {
+  float output = 0.0f;
+  lrrt::copy_to_host(&output, result, sizeof(output));
+  if (output != expected) {
+    fprintf(stderr, "async_copy_launch %s mismatch: actual=%f expected=%f\n",
+            scenario, output, expected);
+    throw std::runtime_error("async-copy launch result mismatch");
+  }
+}
+
 } // namespace
 
 int main() {
@@ -76,15 +87,29 @@ int main() {
     lrrt::launch(kernel, config, args);
     lrrt::launch(kernel, config, args);
     device.synchronize();
-    float output = 0.0f;
-    lrrt::copy_to_host(&output, result, sizeof(output));
+    const float expected = input.back() * alpha;
+    expect_result(result, expected, "multiple launch");
 
-    float expected = input.back() * alpha;
-    if (output != expected) {
-      fprintf(stderr, "async_copy_launch mismatch: actual=%f expected=%f\n",
-              output, expected);
-      return 1;
+    lr_event_t *destroyed_early = nullptr;
+    lrrt::check(lr_event_create(device.get(), &destroyed_early),
+                "lr_event_create");
+    lrrt::check(lr_memcpy_async(device.get(), staging.data(), source.data(),
+                                staging.size(), LR_MEMCPY_DEVICE_TO_DEVICE,
+                                destroyed_early),
+                "lr_memcpy_async");
+    lrrt::launch(kernel, config, args);
+    lrrt::check(lr_event_destroy(destroyed_early), "lr_event_destroy");
+    expect_result(result, expected, "early event destroy");
+
+    constexpr uint32_t stress_launches = 2048;
+    lrrt::Event stress_copy(device);
+    lrrt::copy_device_to_device_async(staging, source, staging.size(),
+                                      stress_copy);
+    for (uint32_t i = 0; i < stress_launches; ++i) {
+      lrrt::launch(kernel, config, args);
     }
+    device.synchronize();
+    expect_result(result, expected, "queue stress");
 
     printf("async_copy_launch: ok\n");
     return 0;

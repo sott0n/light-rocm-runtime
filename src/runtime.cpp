@@ -70,7 +70,8 @@ struct PendingDispatch {
 };
 
 struct PendingBarrier {
-  hsa_signal_t completion_signal;
+  // Completion of the following dispatch proves the barrier was consumed.
+  hsa_signal_t retirement_signal;
   std::vector<lr_event_t *> dependencies;
 };
 
@@ -342,13 +343,11 @@ lr_status_t drain_device_locked(DeviceState *device) {
   lr_status_t result = LR_SUCCESS;
   for (const PendingBarrier &barrier : device->pending_barriers) {
     hsa_signal_value_t value = hsa_signal_wait_scacquire(
-        barrier.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+        barrier.retirement_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
         HSA_WAIT_STATE_BLOCKED);
     if (value != 0 && result == LR_SUCCESS) {
       result = LR_ERROR_RUNTIME;
     }
-    hsa_signal_store_relaxed(barrier.completion_signal, 1);
-    device->signal_pool.push_back(barrier.completion_signal);
     for (lr_event_t *event : barrier.dependencies) {
       event->dependency_enqueued = false;
     }
@@ -449,13 +448,11 @@ void reap_completed_barriers_locked(DeviceState *device) {
   size_t index = 0;
   while (index < device->pending_barriers.size()) {
     PendingBarrier &barrier = device->pending_barriers[index];
-    if (hsa_signal_load_scacquire(barrier.completion_signal) != 0) {
+    if (hsa_signal_load_scacquire(barrier.retirement_signal) != 0) {
       ++index;
       continue;
     }
 
-    hsa_signal_store_relaxed(barrier.completion_signal, 1);
-    device->signal_pool.push_back(barrier.completion_signal);
     for (lr_event_t *event : barrier.dependencies) {
       event->dependency_enqueued = false;
     }
@@ -466,13 +463,11 @@ void reap_completed_barriers_locked(DeviceState *device) {
   }
 }
 
-lr_status_t enqueue_async_copy_dependencies_locked(DeviceState *device) {
+lr_status_t
+enqueue_async_copy_dependencies_locked(DeviceState *device,
+                                       hsa_signal_t retirement_signal) {
   while (true) {
     reap_completed_barriers_locked(device);
-    lr_status_t slot_status = ensure_queue_slot_locked(device);
-    if (slot_status != LR_SUCCESS) {
-      return slot_status;
-    }
 
     std::vector<lr_event_t *> dependencies;
     for (lr_event_t *event : device->pending_events) {
@@ -480,38 +475,45 @@ lr_status_t enqueue_async_copy_dependencies_locked(DeviceState *device) {
           !event->dependency_enqueued &&
           hsa_signal_load_scacquire(event->signal) != 0) {
         dependencies.push_back(event);
-        if (dependencies.size() == 5) {
-          break;
-        }
       }
     }
-    if (dependencies.empty()) {
-      return LR_SUCCESS;
+
+    const size_t barrier_count = (dependencies.size() + 4) / 5;
+    const size_t pending_packets = device->pending_dispatches.size() +
+                                   device->pending_barriers.size() +
+                                   device->pending_events.size();
+    if (pending_packets + barrier_count + 1 > device->queue->size) {
+      lr_status_t drain_status = drain_device_locked(device);
+      if (drain_status != LR_SUCCESS) {
+        return drain_status;
+      }
+      continue;
     }
 
-    hsa_signal_t completion_signal{};
-    hsa_status_t status = acquire_signal_locked(device, &completion_signal);
-    if (status != HSA_STATUS_SUCCESS) {
-      return to_lr_status(status);
-    }
+    for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
+      const uint64_t index =
+          hsa_queue_add_write_index_scacq_screl(device->queue, 1);
+      auto *packets =
+          static_cast<hsa_barrier_and_packet_t *>(device->queue->base_address);
+      hsa_barrier_and_packet_t *packet =
+          &packets[index & (device->queue->size - 1)];
+      std::memset(packet, 0, sizeof(*packet));
 
-    const uint64_t index =
-        hsa_queue_add_write_index_scacq_screl(device->queue, 1);
-    auto *packets =
-        static_cast<hsa_barrier_and_packet_t *>(device->queue->base_address);
-    hsa_barrier_and_packet_t *packet =
-        &packets[index & (device->queue->size - 1)];
-    std::memset(packet, 0, sizeof(*packet));
-    for (size_t i = 0; i < dependencies.size(); ++i) {
-      packet->dep_signal[i] = dependencies[i]->signal;
-      dependencies[i]->dependency_enqueued = true;
+      std::vector<lr_event_t *> packet_dependencies;
+      const size_t end = std::min(offset + 5, dependencies.size());
+      packet_dependencies.reserve(end - offset);
+      for (size_t i = offset; i < end; ++i) {
+        packet->dep_signal[i - offset] = dependencies[i]->signal;
+        dependencies[i]->dependency_enqueued = true;
+        packet_dependencies.push_back(dependencies[i]);
+      }
+      publish_packet_header(&packet->header,
+                            barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+      device->pending_barriers.push_back(
+          PendingBarrier{retirement_signal, std::move(packet_dependencies)});
+      hsa_signal_store_screlease(device->queue->doorbell_signal, index);
     }
-    packet->completion_signal = completion_signal;
-    publish_packet_header(&packet->header,
-                          barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
-    device->pending_barriers.push_back(
-        PendingBarrier{completion_signal, std::move(dependencies)});
-    hsa_signal_store_screlease(device->queue->doorbell_signal, index);
+    return LR_SUCCESS;
   }
 }
 
@@ -1306,16 +1308,6 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
       args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  lr_status_t dependency_status =
-      enqueue_async_copy_dependencies_locked(&state);
-  if (dependency_status != LR_SUCCESS) {
-    return dependency_status;
-  }
-  lr_status_t slot_status = ensure_queue_slot_locked(&state);
-  if (slot_status != LR_SUCCESS) {
-    return slot_status;
-  }
-
   KernargBuffer kernarg{};
   hsa_status_t status =
       acquire_kernarg_locked(&state, kernel->kernarg_size, &kernarg);
@@ -1330,6 +1322,13 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
   if (status != HSA_STATUS_SUCCESS) {
     state.kernarg_pool.push_back(kernarg);
     return to_lr_status(status);
+  }
+  lr_status_t dependency_status =
+      enqueue_async_copy_dependencies_locked(&state, signal);
+  if (dependency_status != LR_SUCCESS) {
+    state.signal_pool.push_back(signal);
+    state.kernarg_pool.push_back(kernarg);
+    return dependency_status;
   }
 
   const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
