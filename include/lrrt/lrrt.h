@@ -34,6 +34,7 @@ typedef struct lr_device_t {
 } lr_device_t;
 
 typedef struct lr_event_t lr_event_t;
+typedef struct lr_queue_t lr_queue_t;
 typedef struct lr_module_t lr_module_t;
 typedef struct lr_kernel_t lr_kernel_t;
 
@@ -59,6 +60,12 @@ LRRT_API lr_status_t lr_shutdown(void);
 LRRT_API lr_status_t lr_device_count(uint32_t *count);
 LRRT_API lr_status_t lr_device_open(uint32_t index, lr_device_t *device);
 
+LRRT_API lr_status_t lr_queue_create(lr_device_t device, lr_queue_t **queue);
+/* Waits for queue work before releasing the queue. */
+LRRT_API lr_status_t lr_queue_destroy(lr_queue_t *queue);
+/* Waits for work submitted to queue. */
+LRRT_API lr_status_t lr_queue_synchronize(lr_queue_t *queue);
+
 LRRT_API lr_status_t lr_event_create(lr_device_t device, lr_event_t **event);
 
 /*
@@ -71,6 +78,10 @@ LRRT_API lr_status_t lr_event_destroy(lr_event_t *event);
  * device. Re-recording a pending event waits for the previous marker first.
  */
 LRRT_API lr_status_t lr_event_record(lr_event_t *event);
+
+/* Enqueues an event marker after work previously submitted to queue. */
+LRRT_API lr_status_t lr_event_record_on_queue(lr_event_t *event,
+                                              lr_queue_t *queue);
 
 /* Waits for a recorded event marker to complete. */
 LRRT_API lr_status_t lr_event_synchronize(lr_event_t *event);
@@ -139,6 +150,17 @@ LRRT_API lr_status_t lr_launch(lr_kernel_t *kernel,
 LRRT_API lr_status_t lr_launch_with_dependencies(
     lr_kernel_t *kernel, const lr_launch_config_t *config, const void *args,
     size_t args_size, lr_event_t *const *dependencies, size_t dependency_count);
+
+/* Enqueues a kernel on queue without implicit dependencies. */
+LRRT_API lr_status_t lr_launch_on_queue(lr_queue_t *queue, lr_kernel_t *kernel,
+                                        const lr_launch_config_t *config,
+                                        const void *args, size_t args_size);
+
+/* Enqueues a kernel on queue after the listed events complete. */
+LRRT_API lr_status_t lr_launch_on_queue_with_dependencies(
+    lr_queue_t *queue, lr_kernel_t *kernel, const lr_launch_config_t *config,
+    const void *args, size_t args_size, lr_event_t *const *dependencies,
+    size_t dependency_count);
 
 /* Waits for all previously enqueued work on the device. */
 LRRT_API lr_status_t lr_synchronize(lr_device_t device);

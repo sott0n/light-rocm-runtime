@@ -116,6 +116,13 @@ Use `lr_synchronize` to wait for all previously enqueued work on a device.
 Kernel execution errors are reported by `lr_synchronize` or by a later API call
 that must drain pending work for safety.
 
+Additional compute queues can be created with `lr_queue_create`. Kernels
+submitted with `lr_launch_on_queue` do not receive implicit dependencies, so
+independent queues can make progress concurrently. Cross-queue ordering is
+expressed by recording an event with `lr_event_record_on_queue` and passing it
+to `lr_launch_on_queue_with_dependencies`. `lr_queue_synchronize` waits for one
+queue, while `lr_synchronize` remains the device-wide synchronization point.
+
 The current memory and lifetime APIs are conservative:
 
 - `lr_memcpy` waits for pending work before copying

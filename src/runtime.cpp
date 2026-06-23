@@ -16,6 +16,33 @@
 #include <hsa/hsa_ext_amd.h>
 #endif
 
+#if LRRT_ENABLE_HSA
+struct KernargBuffer {
+  void *ptr;
+  size_t size;
+};
+
+struct PendingDispatch {
+  hsa_signal_t completion_signal;
+  KernargBuffer kernarg;
+};
+
+struct PendingBarrier {
+  // Completion of the following dispatch proves the barrier was consumed.
+  hsa_signal_t retirement_signal;
+  std::vector<lr_event_t *> dependencies;
+};
+
+struct QueueState {
+  hsa_queue_t *queue;
+  std::vector<PendingDispatch> pending_dispatches;
+  std::vector<PendingBarrier> pending_barriers;
+  std::vector<lr_event_t *> pending_events;
+  std::vector<hsa_signal_t> signal_pool;
+  std::vector<KernargBuffer> kernarg_pool;
+};
+#endif
+
 struct lr_event_t {
   lr_device_t device;
 #if LRRT_ENABLE_HSA
@@ -29,10 +56,19 @@ struct lr_event_t {
   Kind kind;
   bool pending;
   bool completed;
-  bool queue_dependency_enqueued;
+  std::unordered_set<QueueState *> dependency_queues;
   size_t dependency_count;
   uint64_t completion_tick;
   std::vector<lr_event_t *> dependencies;
+  QueueState *recorded_queue;
+#endif
+};
+
+struct lr_queue_t {
+  lr_device_t device;
+  bool is_default;
+#if LRRT_ENABLE_HSA
+  QueueState state;
 #endif
 };
 
@@ -61,34 +97,15 @@ namespace {
 std::atomic<bool> g_initialized{false};
 
 #if LRRT_ENABLE_HSA
-struct KernargBuffer {
-  void *ptr;
-  size_t size;
-};
-
-struct PendingDispatch {
-  hsa_signal_t completion_signal;
-  KernargBuffer kernarg;
-};
-
-struct PendingBarrier {
-  // Completion of the following dispatch proves the barrier was consumed.
-  hsa_signal_t retirement_signal;
-  std::vector<lr_event_t *> dependencies;
-};
-
 struct DeviceState {
   hsa_agent_t agent;
   hsa_region_t global_region;
   hsa_region_t kernarg_region;
   bool has_global_region;
   bool has_kernarg_region;
-  hsa_queue_t *queue;
-  std::vector<PendingDispatch> pending_dispatches;
-  std::vector<PendingBarrier> pending_barriers;
+  lr_queue_t *default_queue;
+  std::vector<lr_queue_t *> queues;
   std::vector<lr_event_t *> pending_events;
-  std::vector<hsa_signal_t> signal_pool;
-  std::vector<KernargBuffer> kernarg_pool;
 };
 
 struct SymbolSearch {
@@ -107,6 +124,7 @@ std::mutex g_devices_mutex;
 std::vector<DeviceState> g_devices;
 std::unordered_map<void *, AllocationInfo> g_allocations;
 std::unordered_set<lr_event_t *> g_events;
+std::unordered_set<lr_queue_t *> g_queues;
 std::unordered_set<lr_module_t *> g_modules;
 std::unordered_set<lr_kernel_t *> g_kernels;
 
@@ -182,7 +200,8 @@ hsa_status_t populate_device_regions() {
   return HSA_STATUS_SUCCESS;
 }
 
-hsa_status_t create_default_queue(DeviceState *device) {
+hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
+                          bool is_default, lr_queue_t **queue) {
   uint32_t max_queue_size = 0;
   hsa_status_t status = hsa_agent_get_info(
       device->agent, HSA_AGENT_INFO_QUEUE_MAX_SIZE, &max_queue_size);
@@ -201,19 +220,28 @@ hsa_status_t create_default_queue(DeviceState *device) {
     queue_size = 1;
   }
 
-  status =
-      hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI, nullptr,
-                       nullptr, UINT32_MAX, UINT32_MAX, &device->queue);
+  auto *created_queue = new lr_queue_t{};
+  created_queue->device = device_handle;
+  created_queue->is_default = is_default;
+  status = hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
+                            nullptr, nullptr, UINT32_MAX, UINT32_MAX,
+                            &created_queue->state.queue);
   if (status != HSA_STATUS_SUCCESS) {
+    delete created_queue;
     return status;
   }
 
-  status = hsa_amd_profiling_set_profiler_enabled(device->queue, 1);
+  status =
+      hsa_amd_profiling_set_profiler_enabled(created_queue->state.queue, 1);
   if (status != HSA_STATUS_SUCCESS) {
-    hsa_queue_destroy(device->queue);
-    device->queue = nullptr;
+    hsa_queue_destroy(created_queue->state.queue);
+    delete created_queue;
+    return status;
   }
-  return status;
+  device->queues.push_back(created_queue);
+  g_queues.insert(created_queue);
+  *queue = created_queue;
+  return HSA_STATUS_SUCCESS;
 }
 
 uint16_t packet_header(hsa_packet_type_t type) {
@@ -310,6 +338,16 @@ lr_status_t event_wait_locked(lr_event_t *event) {
     *pending = device.pending_events.back();
     device.pending_events.pop_back();
   }
+  if (event->recorded_queue) {
+    auto queue_pending =
+        std::find(event->recorded_queue->pending_events.begin(),
+                  event->recorded_queue->pending_events.end(), event);
+    if (queue_pending != event->recorded_queue->pending_events.end()) {
+      *queue_pending = event->recorded_queue->pending_events.back();
+      event->recorded_queue->pending_events.pop_back();
+    }
+    event->recorded_queue = nullptr;
+  }
 
   event->pending = false;
   lr_status_t result = value == 0 ? LR_SUCCESS : LR_ERROR_RUNTIME;
@@ -345,6 +383,50 @@ lr_status_t event_wait_locked(lr_event_t *event) {
   return result;
 }
 
+lr_status_t drain_queue_work_locked(QueueState *queue) {
+  lr_status_t result = LR_SUCCESS;
+  for (const PendingBarrier &barrier : queue->pending_barriers) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        barrier.retirement_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+        HSA_WAIT_STATE_BLOCKED);
+    if (value != 0 && result == LR_SUCCESS) {
+      result = LR_ERROR_RUNTIME;
+    }
+    for (lr_event_t *event : barrier.dependencies) {
+      --event->dependency_count;
+      event->dependency_queues.erase(queue);
+    }
+  }
+  queue->pending_barriers.clear();
+
+  for (const PendingDispatch &dispatch : queue->pending_dispatches) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        dispatch.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+        HSA_WAIT_STATE_BLOCKED);
+    if (value != 0 && result == LR_SUCCESS) {
+      result = LR_ERROR_RUNTIME;
+    }
+    hsa_signal_store_relaxed(dispatch.completion_signal, 1);
+    queue->signal_pool.push_back(dispatch.completion_signal);
+    queue->kernarg_pool.push_back(dispatch.kernarg);
+  }
+  queue->pending_dispatches.clear();
+  return result;
+}
+
+lr_status_t drain_queue_locked(QueueState *queue) {
+  lr_status_t result = LR_SUCCESS;
+  std::vector<lr_event_t *> pending_events = queue->pending_events;
+  for (lr_event_t *event : pending_events) {
+    lr_status_t status = event_wait_locked(event);
+    if (status != LR_SUCCESS && result == LR_SUCCESS) {
+      result = status;
+    }
+  }
+  lr_status_t status = drain_queue_work_locked(queue);
+  return result == LR_SUCCESS ? status : result;
+}
+
 lr_status_t drain_device_locked(DeviceState *device) {
   lr_status_t result = LR_SUCCESS;
   std::vector<lr_event_t *> pending_events = device->pending_events;
@@ -354,33 +436,12 @@ lr_status_t drain_device_locked(DeviceState *device) {
       result = status;
     }
   }
-
-  for (const PendingBarrier &barrier : device->pending_barriers) {
-    hsa_signal_value_t value = hsa_signal_wait_scacquire(
-        barrier.retirement_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-        HSA_WAIT_STATE_BLOCKED);
-    if (value != 0 && result == LR_SUCCESS) {
-      result = LR_ERROR_RUNTIME;
-    }
-    for (lr_event_t *event : barrier.dependencies) {
-      --event->dependency_count;
-      event->queue_dependency_enqueued = false;
+  for (lr_queue_t *queue : device->queues) {
+    lr_status_t status = drain_queue_work_locked(&queue->state);
+    if (status != LR_SUCCESS && result == LR_SUCCESS) {
+      result = status;
     }
   }
-  device->pending_barriers.clear();
-
-  for (const PendingDispatch &dispatch : device->pending_dispatches) {
-    hsa_signal_value_t value = hsa_signal_wait_scacquire(
-        dispatch.completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-        HSA_WAIT_STATE_BLOCKED);
-    if (value != 0 && result == LR_SUCCESS) {
-      result = LR_ERROR_RUNTIME;
-    }
-    hsa_signal_store_relaxed(dispatch.completion_signal, 1);
-    device->signal_pool.push_back(dispatch.completion_signal);
-    device->kernarg_pool.push_back(dispatch.kernarg);
-  }
-  device->pending_dispatches.clear();
   return result;
 }
 
@@ -398,63 +459,63 @@ lr_status_t drain_async_copies_locked(DeviceState *device) {
   return result;
 }
 
-lr_status_t ensure_queue_slot_locked(DeviceState *device) {
-  if (device->pending_dispatches.size() + device->pending_barriers.size() +
-          device->pending_events.size() <
-      device->queue->size) {
+lr_status_t ensure_queue_slot_locked(DeviceState *device, QueueState *queue) {
+  if (queue->pending_dispatches.size() + queue->pending_barriers.size() +
+          queue->pending_events.size() <
+      queue->queue->size) {
     return LR_SUCCESS;
   }
   return drain_device_locked(device);
 }
 
-void release_device_pools_locked(DeviceState *device, lr_status_t *result) {
-  for (hsa_signal_t signal : device->signal_pool) {
+void release_queue_pools_locked(QueueState *queue, lr_status_t *result) {
+  for (hsa_signal_t signal : queue->signal_pool) {
     hsa_status_t status = hsa_signal_destroy(signal);
     if (status != HSA_STATUS_SUCCESS && *result == LR_SUCCESS) {
       *result = to_lr_status(status);
     }
   }
-  device->signal_pool.clear();
+  queue->signal_pool.clear();
 
-  for (KernargBuffer kernarg : device->kernarg_pool) {
+  for (KernargBuffer kernarg : queue->kernarg_pool) {
     hsa_status_t status = hsa_memory_free(kernarg.ptr);
     if (status != HSA_STATUS_SUCCESS && *result == LR_SUCCESS) {
       *result = to_lr_status(status);
     }
   }
-  device->kernarg_pool.clear();
+  queue->kernarg_pool.clear();
 }
 
-hsa_status_t acquire_signal_locked(DeviceState *device, hsa_signal_t *signal) {
-  if (!device->signal_pool.empty()) {
-    *signal = device->signal_pool.back();
-    device->signal_pool.pop_back();
+hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal) {
+  if (!queue->signal_pool.empty()) {
+    *signal = queue->signal_pool.back();
+    queue->signal_pool.pop_back();
     hsa_signal_store_relaxed(*signal, 1);
     return HSA_STATUS_SUCCESS;
   }
   return hsa_signal_create(1, 0, nullptr, signal);
 }
 
-hsa_status_t acquire_kernarg_locked(DeviceState *device, size_t size,
-                                    KernargBuffer *kernarg) {
-  for (size_t i = 0; i < device->kernarg_pool.size(); ++i) {
-    if (device->kernarg_pool[i].size >= size) {
-      *kernarg = device->kernarg_pool[i];
-      device->kernarg_pool[i] = device->kernarg_pool.back();
-      device->kernarg_pool.pop_back();
+hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
+                                    size_t size, KernargBuffer *kernarg) {
+  for (size_t i = 0; i < queue->kernarg_pool.size(); ++i) {
+    if (queue->kernarg_pool[i].size >= size) {
+      *kernarg = queue->kernarg_pool[i];
+      queue->kernarg_pool[i] = queue->kernarg_pool.back();
+      queue->kernarg_pool.pop_back();
       return HSA_STATUS_SUCCESS;
     }
   }
 
   kernarg->ptr = nullptr;
   kernarg->size = size;
-  return hsa_memory_allocate(device->kernarg_region, size, &kernarg->ptr);
+  return hsa_memory_allocate(region, size, &kernarg->ptr);
 }
 
-void reap_completed_barriers_locked(DeviceState *device) {
+void reap_completed_barriers_locked(QueueState *queue) {
   size_t index = 0;
-  while (index < device->pending_barriers.size()) {
-    PendingBarrier &barrier = device->pending_barriers[index];
+  while (index < queue->pending_barriers.size()) {
+    PendingBarrier &barrier = queue->pending_barriers[index];
     if (hsa_signal_load_scacquire(barrier.retirement_signal) != 0) {
       ++index;
       continue;
@@ -462,25 +523,25 @@ void reap_completed_barriers_locked(DeviceState *device) {
 
     for (lr_event_t *event : barrier.dependencies) {
       --event->dependency_count;
-      event->queue_dependency_enqueued = false;
+      event->dependency_queues.erase(queue);
     }
-    if (index + 1 != device->pending_barriers.size()) {
-      barrier = std::move(device->pending_barriers.back());
+    if (index + 1 != queue->pending_barriers.size()) {
+      barrier = std::move(queue->pending_barriers.back());
     }
-    device->pending_barriers.pop_back();
+    queue->pending_barriers.pop_back();
   }
 }
 
 lr_status_t enqueue_event_dependencies_locked(
-    DeviceState *device, hsa_signal_t retirement_signal,
+    DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies) {
   while (true) {
-    reap_completed_barriers_locked(device);
+    reap_completed_barriers_locked(queue);
 
     std::vector<lr_event_t *> dependencies;
     if (explicit_dependencies) {
       for (lr_event_t *event : *explicit_dependencies) {
-        if (event->pending && !event->queue_dependency_enqueued &&
+        if (event->pending && event->dependency_queues.count(queue) == 0 &&
             hsa_signal_load_scacquire(event->signal) != 0) {
           dependencies.push_back(event);
         }
@@ -488,7 +549,7 @@ lr_status_t enqueue_event_dependencies_locked(
     } else {
       for (lr_event_t *event : device->pending_events) {
         if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy &&
-            !event->queue_dependency_enqueued &&
+            event->dependency_queues.count(queue) == 0 &&
             hsa_signal_load_scacquire(event->signal) != 0) {
           dependencies.push_back(event);
         }
@@ -496,10 +557,10 @@ lr_status_t enqueue_event_dependencies_locked(
     }
 
     const size_t barrier_count = (dependencies.size() + 4) / 5;
-    const size_t pending_packets = device->pending_dispatches.size() +
-                                   device->pending_barriers.size() +
-                                   device->pending_events.size();
-    if (pending_packets + barrier_count + 1 > device->queue->size) {
+    const size_t pending_packets = queue->pending_dispatches.size() +
+                                   queue->pending_barriers.size() +
+                                   queue->pending_events.size();
+    if (pending_packets + barrier_count + 1 > queue->queue->size) {
       lr_status_t drain_status = drain_device_locked(device);
       if (drain_status != LR_SUCCESS) {
         return drain_status;
@@ -509,11 +570,11 @@ lr_status_t enqueue_event_dependencies_locked(
 
     for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
       const uint64_t index =
-          hsa_queue_add_write_index_scacq_screl(device->queue, 1);
+          hsa_queue_add_write_index_scacq_screl(queue->queue, 1);
       auto *packets =
-          static_cast<hsa_barrier_and_packet_t *>(device->queue->base_address);
+          static_cast<hsa_barrier_and_packet_t *>(queue->queue->base_address);
       hsa_barrier_and_packet_t *packet =
-          &packets[index & (device->queue->size - 1)];
+          &packets[index & (queue->queue->size - 1)];
       std::memset(packet, 0, sizeof(*packet));
 
       std::vector<lr_event_t *> packet_dependencies;
@@ -522,14 +583,14 @@ lr_status_t enqueue_event_dependencies_locked(
       for (size_t i = offset; i < end; ++i) {
         packet->dep_signal[i - offset] = dependencies[i]->signal;
         ++dependencies[i]->dependency_count;
-        dependencies[i]->queue_dependency_enqueued = true;
+        dependencies[i]->dependency_queues.insert(queue);
         packet_dependencies.push_back(dependencies[i]);
       }
       publish_packet_header(&packet->header,
                             barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
-      device->pending_barriers.push_back(
+      queue->pending_barriers.push_back(
           PendingBarrier{retirement_signal, std::move(packet_dependencies)});
-      hsa_signal_store_screlease(device->queue->doorbell_signal, index);
+      hsa_signal_store_screlease(queue->queue->doorbell_signal, index);
     }
     return LR_SUCCESS;
   }
@@ -653,7 +714,9 @@ lr_status_t lr_shutdown(void) {
       if (status != LR_SUCCESS && drain_status == LR_SUCCESS) {
         drain_status = status;
       }
-      release_device_pools_locked(&device, &drain_status);
+      for (lr_queue_t *queue : device.queues) {
+        release_queue_pools_locked(&queue->state, &drain_status);
+      }
     }
 
     for (lr_module_t *module : g_modules) {
@@ -669,11 +732,15 @@ lr_status_t lr_shutdown(void) {
     g_events.clear();
 
     for (DeviceState &device : g_devices) {
-      if (device.queue) {
-        hsa_queue_destroy(device.queue);
-        device.queue = nullptr;
+      for (lr_queue_t *queue : device.queues) {
+        hsa_queue_destroy(queue->state.queue);
+        g_queues.erase(queue);
+        delete queue;
       }
+      device.queues.clear();
+      device.default_queue = nullptr;
     }
+    g_queues.clear();
     for (const auto &allocation : g_allocations) {
       hsa_memory_free(allocation.first);
     }
@@ -728,8 +795,10 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
     if (index >= g_devices.size()) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
-    if (!g_devices[index].queue) {
-      hsa_status_t status = create_default_queue(&g_devices[index]);
+    if (!g_devices[index].default_queue) {
+      lr_device_t opened_device = {index};
+      hsa_status_t status = create_queue(opened_device, &g_devices[index], true,
+                                         &g_devices[index].default_queue);
       if (status != HSA_STATUS_SUCCESS) {
         return to_lr_status(status);
       }
@@ -746,6 +815,84 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
   return LR_SUCCESS;
 }
 
+lr_status_t lr_queue_create(lr_device_t device, lr_queue_t **queue) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  *queue = nullptr;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() ||
+      !g_devices[device.index].default_queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  hsa_status_t status =
+      create_queue(device, &g_devices[device.index], false, queue);
+  return to_lr_status(status);
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_queue_destroy(lr_queue_t *queue) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  auto queue_entry = g_queues.find(queue);
+  if (queue_entry == g_queues.end() || queue->is_default ||
+      queue->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  DeviceState &device = g_devices[queue->device.index];
+  lr_status_t result = drain_queue_locked(&queue->state);
+  release_queue_pools_locked(&queue->state, &result);
+  if (result != LR_SUCCESS) {
+    return result;
+  }
+  hsa_status_t status = hsa_queue_destroy(queue->state.queue);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+  auto device_queue =
+      std::find(device.queues.begin(), device.queues.end(), queue);
+  if (device_queue != device.queues.end()) {
+    device.queues.erase(device_queue);
+  }
+  g_queues.erase(queue_entry);
+  delete queue;
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_queues.find(queue) == g_queues.end() ||
+      queue->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return drain_queue_locked(&queue->state);
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
 lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
@@ -757,7 +904,8 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   *event = nullptr;
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
-  if (device.index >= g_devices.size() || !g_devices[device.index].queue) {
+  if (device.index >= g_devices.size() ||
+      !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
@@ -773,9 +921,9 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   created_event->kind = lr_event_t::Kind::None;
   created_event->pending = false;
   created_event->completed = false;
-  created_event->queue_dependency_enqueued = false;
   created_event->dependency_count = 0;
   created_event->completion_tick = 0;
+  created_event->recorded_queue = nullptr;
   g_events.insert(created_event);
   *event = created_event;
   return LR_SUCCESS;
@@ -825,7 +973,8 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
 #endif
 }
 
-lr_status_t lr_event_record(lr_event_t *event) {
+static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
+                                     bool use_default_queue) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
@@ -840,26 +989,33 @@ lr_status_t lr_event_record(lr_event_t *event) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-  DeviceState &state = g_devices[event->device.index];
-  if (!state.queue) {
+  DeviceState &device = g_devices[event->device.index];
+  if (use_default_queue) {
+    queue = device.default_queue;
+  }
+  if (!queue || g_queues.find(queue) == g_queues.end() ||
+      queue->device.index != event->device.index) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  QueueState &state = queue->state;
 
   lr_status_t wait_status = event_wait_locked(event);
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
   if (event->dependency_count != 0) {
-    lr_status_t drain_status = drain_device_locked(&state);
+    lr_status_t drain_status = drain_device_locked(&device);
     if (drain_status != LR_SUCCESS) {
       return drain_status;
     }
   }
-  lr_status_t copy_status = drain_async_copies_locked(&state);
-  if (copy_status != LR_SUCCESS) {
-    return copy_status;
+  if (use_default_queue) {
+    lr_status_t copy_status = drain_async_copies_locked(&device);
+    if (copy_status != LR_SUCCESS) {
+      return copy_status;
+    }
   }
-  lr_status_t slot_status = ensure_queue_slot_locked(&state);
+  lr_status_t slot_status = ensure_queue_slot_locked(&device, &state);
   if (slot_status != LR_SUCCESS) {
     return slot_status;
   }
@@ -867,8 +1023,9 @@ lr_status_t lr_event_record(lr_event_t *event) {
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
-  event->queue_dependency_enqueued = false;
+  event->dependency_queues.clear();
   event->completion_tick = 0;
+  event->recorded_queue = &state;
 
   const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
   auto *packets =
@@ -881,11 +1038,20 @@ lr_status_t lr_event_record(lr_event_t *event) {
 
   event->pending = true;
   state.pending_events.push_back(event);
+  device.pending_events.push_back(event);
   hsa_signal_store_screlease(state.queue->doorbell_signal, index);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
+}
+
+lr_status_t lr_event_record(lr_event_t *event) {
+  return event_record_impl(event, nullptr, true);
+}
+
+lr_status_t lr_event_record_on_queue(lr_event_t *event, lr_queue_t *queue) {
+  return event_record_impl(event, queue, false);
 }
 
 lr_status_t lr_event_synchronize(lr_event_t *event) {
@@ -1147,13 +1313,15 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::AsyncCopy;
   event->completed = false;
-  event->queue_dependency_enqueued = false;
+  event->dependency_queues.clear();
   event->completion_tick = 0;
+  event->recorded_queue = nullptr;
 
   std::vector<hsa_signal_t> dependencies;
   if (use_implicit_dependencies) {
-    dependencies.reserve(state.pending_dispatches.size());
-    for (const PendingDispatch &dispatch : state.pending_dispatches) {
+    QueueState &default_queue = state.default_queue->state;
+    dependencies.reserve(default_queue.pending_dispatches.size());
+    for (const PendingDispatch &dispatch : default_queue.pending_dispatches) {
       dependencies.push_back(dispatch.completion_signal);
     }
   } else {
@@ -1370,12 +1538,11 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
 #endif
 }
 
-static lr_status_t launch_impl(lr_kernel_t *kernel,
-                               const lr_launch_config_t *config,
-                               const void *args, size_t args_size,
-                               lr_event_t *const *explicit_dependencies,
-                               size_t dependency_count,
-                               bool use_implicit_dependencies) {
+static lr_status_t
+launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
+            const void *args, size_t args_size, lr_queue_t *execution_queue,
+            bool use_default_queue, lr_event_t *const *explicit_dependencies,
+            size_t dependency_count, bool use_implicit_dependencies) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
@@ -1407,10 +1574,15 @@ static lr_status_t launch_impl(lr_kernel_t *kernel,
   }
 
   DeviceState &state = g_devices[device.index];
-  if (!state.queue || !state.has_kernarg_region ||
-      args_size > kernel->kernarg_size) {
+  if (use_default_queue) {
+    execution_queue = state.default_queue;
+  }
+  if (!execution_queue || g_queues.find(execution_queue) == g_queues.end() ||
+      execution_queue->device.index != device.index ||
+      !state.has_kernarg_region || args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  QueueState &queue = execution_queue->state;
   std::vector<lr_event_t *> event_dependencies;
   if (!use_implicit_dependencies) {
     lr_status_t dependency_status = collect_event_dependencies_locked(
@@ -1421,8 +1593,8 @@ static lr_status_t launch_impl(lr_kernel_t *kernel,
     }
   }
   KernargBuffer kernarg{};
-  hsa_status_t status =
-      acquire_kernarg_locked(&state, kernel->kernarg_size, &kernarg);
+  hsa_status_t status = acquire_kernarg_locked(&queue, state.kernarg_region,
+                                               kernel->kernarg_size, &kernarg);
   if (status != HSA_STATUS_SUCCESS) {
     return to_lr_status(status);
   }
@@ -1430,29 +1602,29 @@ static lr_status_t launch_impl(lr_kernel_t *kernel,
   std::memcpy(kernarg.ptr, args, args_size);
 
   hsa_signal_t signal{};
-  status = acquire_signal_locked(&state, &signal);
+  status = acquire_signal_locked(&queue, &signal);
   if (status != HSA_STATUS_SUCCESS) {
-    state.kernarg_pool.push_back(kernarg);
+    queue.kernarg_pool.push_back(kernarg);
     return to_lr_status(status);
   }
   const std::vector<lr_event_t *> *dependencies =
       use_implicit_dependencies ? nullptr : &event_dependencies;
   lr_status_t dependency_status =
-      enqueue_event_dependencies_locked(&state, signal, dependencies);
+      enqueue_event_dependencies_locked(&state, &queue, signal, dependencies);
   if (dependency_status != LR_SUCCESS) {
-    state.signal_pool.push_back(signal);
-    state.kernarg_pool.push_back(kernarg);
+    queue.signal_pool.push_back(signal);
+    queue.kernarg_pool.push_back(kernarg);
     return dependency_status;
   }
   const bool wait_for_dependencies = use_implicit_dependencies
-                                         ? !state.pending_barriers.empty()
+                                         ? !queue.pending_barriers.empty()
                                          : !event_dependencies.empty();
 
-  const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
+  const uint64_t index = hsa_queue_add_write_index_scacq_screl(queue.queue, 1);
   auto *packets =
-      static_cast<hsa_kernel_dispatch_packet_t *>(state.queue->base_address);
+      static_cast<hsa_kernel_dispatch_packet_t *>(queue.queue->base_address);
   hsa_kernel_dispatch_packet_t *packet =
-      &packets[index & (state.queue->size - 1)];
+      &packets[index & (queue.queue->size - 1)];
   std::memset(packet, 0, sizeof(*packet));
   packet->setup = packet_setup(dispatch_dimensions(config));
   packet->workgroup_size_x = static_cast<uint16_t>(config->block.x);
@@ -1472,8 +1644,8 @@ static lr_status_t launch_impl(lr_kernel_t *kernel,
                         : packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
   publish_packet_header(&packet->header, header);
 
-  hsa_signal_store_screlease(state.queue->doorbell_signal, index);
-  state.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
+  hsa_signal_store_screlease(queue.queue->doorbell_signal, index);
+  queue.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -1482,7 +1654,8 @@ static lr_status_t launch_impl(lr_kernel_t *kernel,
 
 lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
                       const void *args, size_t args_size) {
-  return launch_impl(kernel, config, args, args_size, nullptr, 0, true);
+  return launch_impl(kernel, config, args, args_size, nullptr, true, nullptr, 0,
+                     true);
 }
 
 lr_status_t lr_launch_with_dependencies(lr_kernel_t *kernel,
@@ -1490,8 +1663,23 @@ lr_status_t lr_launch_with_dependencies(lr_kernel_t *kernel,
                                         const void *args, size_t args_size,
                                         lr_event_t *const *dependencies,
                                         size_t dependency_count) {
-  return launch_impl(kernel, config, args, args_size, dependencies,
-                     dependency_count, false);
+  return launch_impl(kernel, config, args, args_size, nullptr, true,
+                     dependencies, dependency_count, false);
+}
+
+lr_status_t lr_launch_on_queue(lr_queue_t *queue, lr_kernel_t *kernel,
+                               const lr_launch_config_t *config,
+                               const void *args, size_t args_size) {
+  return launch_impl(kernel, config, args, args_size, queue, false, nullptr, 0,
+                     false);
+}
+
+lr_status_t lr_launch_on_queue_with_dependencies(
+    lr_queue_t *queue, lr_kernel_t *kernel, const lr_launch_config_t *config,
+    const void *args, size_t args_size, lr_event_t *const *dependencies,
+    size_t dependency_count) {
+  return launch_impl(kernel, config, args, args_size, queue, false,
+                     dependencies, dependency_count, false);
 }
 
 lr_status_t lr_synchronize(lr_device_t device) {
@@ -1500,7 +1688,8 @@ lr_status_t lr_synchronize(lr_device_t device) {
   }
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
-  if (device.index >= g_devices.size() || !g_devices[device.index].queue) {
+  if (device.index >= g_devices.size() ||
+      !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   return drain_device_locked(&g_devices[device.index]);

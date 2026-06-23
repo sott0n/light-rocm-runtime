@@ -44,6 +44,49 @@ inline void synchronize(Device device) {
   check(lr_synchronize(device.get()), "lr_synchronize");
 }
 
+class Queue {
+public:
+  explicit Queue(lr_device_t device) : queue_(nullptr) {
+    check(lr_queue_create(device, &queue_), "lr_queue_create");
+  }
+
+  explicit Queue(Device device) : Queue(device.get()) {}
+
+  ~Queue() { reset(); }
+
+  Queue(Queue &&other) noexcept : queue_(other.queue_) {
+    other.queue_ = nullptr;
+  }
+
+  Queue(const Queue &) = delete;
+  Queue &operator=(const Queue &) = delete;
+
+  Queue &operator=(Queue &&other) noexcept {
+    if (this != &other) {
+      reset();
+      queue_ = other.queue_;
+      other.queue_ = nullptr;
+    }
+    return *this;
+  }
+
+  lr_queue_t *get() const { return queue_; }
+
+  void synchronize() const {
+    check(lr_queue_synchronize(queue_), "lr_queue_synchronize");
+  }
+
+private:
+  void reset() noexcept {
+    if (queue_) {
+      lr_queue_destroy(queue_);
+      queue_ = nullptr;
+    }
+  }
+
+  lr_queue_t *queue_;
+};
+
 class Event {
 public:
   explicit Event(lr_device_t device) : event_(nullptr) {
@@ -73,6 +116,11 @@ public:
   lr_event_t *get() const { return event_; }
 
   void record() const { check(lr_event_record(event_), "lr_event_record"); }
+
+  void record(const Queue &queue) const {
+    check(lr_event_record_on_queue(event_, queue.get()),
+          "lr_event_record_on_queue");
+  }
 
   void synchronize() const {
     check(lr_event_synchronize(event_), "lr_event_synchronize");
@@ -322,6 +370,29 @@ inline void launch(lr_kernel_t *kernel, const lr_launch_config_t &config,
   check(lr_launch(kernel, &config, args, args_size), "lr_launch");
 }
 
+inline void launch(const Queue &queue, lr_kernel_t *kernel,
+                   const lr_launch_config_t &config, const void *args,
+                   size_t args_size,
+                   const std::vector<const Event *> &dependencies = {}) {
+  if (dependencies.empty()) {
+    check(lr_launch_on_queue(queue.get(), kernel, &config, args, args_size),
+          "lr_launch_on_queue");
+    return;
+  }
+  std::vector<lr_event_t *> handles = event_handles(dependencies);
+  check(lr_launch_on_queue_with_dependencies(queue.get(), kernel, &config, args,
+                                             args_size, handles.data(),
+                                             handles.size()),
+        "lr_launch_on_queue_with_dependencies");
+}
+
+template <typename Args>
+inline void launch(const Queue &queue, lr_kernel_t *kernel,
+                   const lr_launch_config_t &config, const Args &args,
+                   const std::vector<const Event *> &dependencies = {}) {
+  launch(queue, kernel, config, &args, sizeof(args), dependencies);
+}
+
 inline void launch(lr_kernel_t *kernel, const lr_launch_config_t &config,
                    const void *args, size_t args_size,
                    const std::vector<const Event *> &dependencies) {
@@ -349,6 +420,13 @@ inline void launch(const Kernel &kernel, const lr_launch_config_t &config,
   launch(kernel.get(), config, args, args_size);
 }
 
+inline void launch(const Queue &queue, const Kernel &kernel,
+                   const lr_launch_config_t &config, const void *args,
+                   size_t args_size,
+                   const std::vector<const Event *> &dependencies = {}) {
+  launch(queue, kernel.get(), config, args, args_size, dependencies);
+}
+
 inline void launch(const Kernel &kernel, const lr_launch_config_t &config,
                    const void *args, size_t args_size,
                    const std::vector<const Event *> &dependencies) {
@@ -359,6 +437,13 @@ template <typename Args>
 inline void launch(const Kernel &kernel, const lr_launch_config_t &config,
                    const Args &args) {
   launch(kernel.get(), config, args);
+}
+
+template <typename Args>
+inline void launch(const Queue &queue, const Kernel &kernel,
+                   const lr_launch_config_t &config, const Args &args,
+                   const std::vector<const Event *> &dependencies = {}) {
+  launch(queue, kernel.get(), config, args, dependencies);
 }
 
 template <typename Args>
