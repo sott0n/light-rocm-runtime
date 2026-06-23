@@ -1,6 +1,7 @@
 #include "lrrt/bundle.hpp"
 
 #include <stdio.h>
+#include <string.h>
 
 #include <stdexcept>
 #include <string>
@@ -505,6 +506,35 @@ void require_kernarg_layout(const KernelManifest &manifest, size_t kernarg_size,
       manifest.arg_offsets != arg_offsets) {
     throw std::runtime_error("bundle manifest does not match kernarg layout");
   }
+}
+
+KernargBuffer::KernargBuffer(const KernelManifest &manifest)
+    : data_(manifest.kernarg_size, 0), offsets_(manifest.arg_offsets) {
+  if (data_.empty() || offsets_.empty()) {
+    throw std::runtime_error("invalid bundle kernarg layout");
+  }
+}
+
+void KernargBuffer::set_raw(size_t index, const void *value,
+                            size_t value_size) {
+  if (!value && value_size != 0) {
+    throw std::invalid_argument("bundle kernarg value is null");
+  }
+  if (index >= offsets_.size()) {
+    throw std::out_of_range("bundle kernarg index is out of range");
+  }
+
+  const size_t offset = offsets_[index];
+  const size_t next_offset =
+      index + 1 < offsets_.size() ? offsets_[index + 1] : data_.size();
+  if (offset > data_.size() || next_offset > data_.size() ||
+      offset > next_offset) {
+    throw std::runtime_error("invalid bundle kernarg offset");
+  }
+  if (value_size > next_offset - offset) {
+    throw std::runtime_error("bundle kernarg value exceeds argument slot");
+  }
+  memcpy(data_.data() + offset, value, value_size);
 }
 
 Bundle::Bundle(Device device, const char *manifest_path)

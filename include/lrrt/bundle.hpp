@@ -53,6 +53,26 @@ LRRT_API void require_kernarg_layout(const KernelManifest &manifest,
                                      size_t kernarg_size,
                                      const std::vector<size_t> &arg_offsets);
 
+class LRRT_API KernargBuffer {
+public:
+  explicit KernargBuffer(const KernelManifest &manifest);
+
+  void set_raw(size_t index, const void *value, size_t value_size);
+
+  template <typename T> void set(size_t index, const T &value) {
+    set_raw(index, &value, sizeof(T));
+  }
+
+  const void *data() const { return data_.data(); }
+  void *data() { return data_.data(); }
+  size_t size() const { return data_.size(); }
+  const std::vector<unsigned char> &bytes() const { return data_; }
+
+private:
+  std::vector<unsigned char> data_;
+  std::vector<size_t> offsets_;
+};
+
 class LRRT_API Bundle {
 public:
   Bundle(Device device, const char *manifest_path);

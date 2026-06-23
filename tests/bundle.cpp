@@ -87,6 +87,31 @@ void test_parse_manifest() {
                "kernarg offset mismatch must fail");
 }
 
+void test_kernarg_buffer() {
+  lrrt::KernelManifest manifest = parse(kManifest);
+  lrrt::KernargBuffer args(manifest);
+
+  const float *x = (const float *)0x1000;
+  float *out = (float *)0x2000;
+  args.set(0, x);
+  args.set(1, out);
+
+  expect(args.size() == 16, "kernarg buffer size");
+  const unsigned char *bytes = static_cast<const unsigned char *>(args.data());
+  const float *copied_x = nullptr;
+  float *copied_out = nullptr;
+  memcpy(&copied_x, bytes + 0, sizeof(copied_x));
+  memcpy(&copied_out, bytes + 8, sizeof(copied_out));
+  expect(copied_x == x, "first kernarg is packed");
+  expect(copied_out == out, "second kernarg is packed");
+
+  expect_throw([&] { args.set(2, out); },
+               "out-of-range kernarg index must fail");
+  const uint64_t too_large[2] = {};
+  expect_throw([&] { args.set(1, too_large); },
+               "oversized kernarg value must fail");
+}
+
 void test_multiple_kernels() {
   const char *json = R"json(
   {
@@ -267,6 +292,7 @@ void test_grid_overflow() {
 
 int main() {
   test_parse_manifest();
+  test_kernarg_buffer();
   test_multiple_kernels();
   test_invalid_manifests();
   test_grid_overflow();

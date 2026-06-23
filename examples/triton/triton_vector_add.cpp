@@ -10,19 +10,6 @@
 #define LRRT_TRITON_VECTOR_ADD_MANIFEST "manifest.json"
 #endif
 
-typedef struct triton_vector_add_args_t {
-  const float *x;
-  const float *y;
-  float *out;
-  int32_t n;
-  int32_t padding;
-  void *triton_scratch_0;
-  void *triton_scratch_1;
-} triton_vector_add_args_t;
-
-static_assert(sizeof(triton_vector_add_args_t) == 48,
-              "Triton vector_add kernarg layout must match manifest");
-
 int main(void) {
   try {
     lrrt::Runtime runtime;
@@ -54,30 +41,20 @@ int main(void) {
 
     lrrt::Bundle bundle(device, LRRT_TRITON_VECTOR_ADD_MANIFEST);
     const lrrt::KernelManifest &kernel_manifest = bundle.manifest();
-    lrrt::require_kernarg_layout(
-        kernel_manifest, sizeof(triton_vector_add_args_t),
-        {
-            offsetof(triton_vector_add_args_t, x),
-            offsetof(triton_vector_add_args_t, y),
-            offsetof(triton_vector_add_args_t, out),
-            offsetof(triton_vector_add_args_t, n),
-            offsetof(triton_vector_add_args_t, triton_scratch_0),
-            offsetof(triton_vector_add_args_t, triton_scratch_1),
-        });
     printf("loaded Triton manifest for kernel: %s\n",
            kernel_manifest.name.c_str());
 
-    triton_vector_add_args_t kernel_args = {
-        (const float *)device_x.data(),
-        (const float *)device_y.data(),
-        (float *)device_out.data(),
-        (int32_t)n,
-        0,
-        nullptr,
-        nullptr,
-    };
+    lrrt::KernargBuffer kernel_args(kernel_manifest);
+    kernel_args.set(0, (const float *)device_x.data());
+    kernel_args.set(1, (const float *)device_y.data());
+    kernel_args.set(2, (float *)device_out.data());
+    kernel_args.set(3, (int32_t)n);
+    void *scratch = nullptr;
+    kernel_args.set(4, scratch);
+    kernel_args.set(5, scratch);
 
-    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args);
+    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args.data(),
+                 kernel_args.size());
     device.synchronize();
     lrrt::copy_to_host(out, device_out);
 

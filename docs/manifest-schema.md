@@ -106,6 +106,11 @@ strictly increasing and each offset must be smaller than `kernarg_size`.
 Argument type and size consistency is checked by bundle consistency tests
 against HSACO metadata.
 
+`lrrt::KernargBuffer` can use these offsets to pack values by argument index
+without requiring the caller to define a matching C++ struct. The helper still
+uses raw ABI bytes: it does not interpret tensor types, allocate buffers, or
+convert data formats.
+
 ### `kernarg_size`
 
 Required integer. Total byte size of the packed kernarg buffer.
