@@ -102,6 +102,16 @@ LRRT_API lr_status_t lr_memcpy_async(lr_device_t device, void *dst,
                                      const void *src, size_t size,
                                      lr_memcpy_kind_t kind, lr_event_t *event);
 
+/*
+ * Starts an asynchronous copy after the listed events complete. Unlike
+ * lr_memcpy_async, this function does not implicitly depend on earlier kernel
+ * dispatches. dependencies may be NULL when dependency_count is zero.
+ */
+LRRT_API lr_status_t lr_memcpy_async_with_dependencies(
+    lr_device_t device, void *dst, const void *src, size_t size,
+    lr_memcpy_kind_t kind, lr_event_t *event, lr_event_t *const *dependencies,
+    size_t dependency_count);
+
 LRRT_API lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
                                           size_t image_size,
                                           lr_module_t **module);
@@ -120,6 +130,15 @@ LRRT_API lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
 LRRT_API lr_status_t lr_launch(lr_kernel_t *kernel,
                                const lr_launch_config_t *config,
                                const void *args, size_t args_size);
+
+/*
+ * Enqueues a kernel after the listed events complete. Unlike lr_launch, this
+ * function does not implicitly depend on other pending async copies.
+ * dependencies may be NULL when dependency_count is zero.
+ */
+LRRT_API lr_status_t lr_launch_with_dependencies(
+    lr_kernel_t *kernel, const lr_launch_config_t *config, const void *args,
+    size_t args_size, lr_event_t *const *dependencies, size_t dependency_count);
 
 /* Waits for all previously enqueued work on the device. */
 LRRT_API lr_status_t lr_synchronize(lr_device_t device);

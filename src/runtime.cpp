@@ -29,8 +29,10 @@ struct lr_event_t {
   Kind kind;
   bool pending;
   bool completed;
-  bool dependency_enqueued;
+  bool queue_dependency_enqueued;
+  size_t dependency_count;
   uint64_t completion_tick;
+  std::vector<lr_event_t *> dependencies;
 #endif
 };
 
@@ -310,33 +312,37 @@ lr_status_t event_wait_locked(lr_event_t *event) {
   }
 
   event->pending = false;
-  if (value != 0) {
-    return LR_ERROR_RUNTIME;
-  }
-
-  if (event->kind == lr_event_t::Kind::Marker) {
+  lr_status_t result = value == 0 ? LR_SUCCESS : LR_ERROR_RUNTIME;
+  if (result == LR_SUCCESS && event->kind == lr_event_t::Kind::Marker) {
     hsa_amd_profiling_dispatch_time_t time{};
     hsa_status_t status =
         hsa_amd_profiling_get_dispatch_time(device.agent, event->signal, &time);
     if (status != HSA_STATUS_SUCCESS) {
-      return to_lr_status(status);
+      result = to_lr_status(status);
+    } else {
+      event->completion_tick = time.end;
     }
-    event->completion_tick = time.end;
-  } else if (event->kind == lr_event_t::Kind::AsyncCopy) {
+  } else if (result == LR_SUCCESS &&
+             event->kind == lr_event_t::Kind::AsyncCopy) {
     hsa_amd_profiling_async_copy_time_t time{};
     hsa_status_t status =
         hsa_amd_profiling_get_async_copy_time(event->signal, &time);
     if (status != HSA_STATUS_SUCCESS) {
-      return to_lr_status(status);
+      result = to_lr_status(status);
+    } else {
+      event->completion_tick = time.end;
     }
-    event->completion_tick = time.end;
-  } else {
-    return LR_ERROR_INVALID_ARGUMENT;
+  } else if (result == LR_SUCCESS) {
+    result = LR_ERROR_INVALID_ARGUMENT;
   }
 
+  for (lr_event_t *dependency : event->dependencies) {
+    --dependency->dependency_count;
+  }
+  event->dependencies.clear();
   event->kind = lr_event_t::Kind::None;
-  event->completed = true;
-  return LR_SUCCESS;
+  event->completed = result == LR_SUCCESS;
+  return result;
 }
 
 lr_status_t drain_device_locked(DeviceState *device) {
@@ -357,7 +363,8 @@ lr_status_t drain_device_locked(DeviceState *device) {
       result = LR_ERROR_RUNTIME;
     }
     for (lr_event_t *event : barrier.dependencies) {
-      event->dependency_enqueued = false;
+      --event->dependency_count;
+      event->queue_dependency_enqueued = false;
     }
   }
   device->pending_barriers.clear();
@@ -454,7 +461,8 @@ void reap_completed_barriers_locked(DeviceState *device) {
     }
 
     for (lr_event_t *event : barrier.dependencies) {
-      event->dependency_enqueued = false;
+      --event->dependency_count;
+      event->queue_dependency_enqueued = false;
     }
     if (index + 1 != device->pending_barriers.size()) {
       barrier = std::move(device->pending_barriers.back());
@@ -463,18 +471,27 @@ void reap_completed_barriers_locked(DeviceState *device) {
   }
 }
 
-lr_status_t
-enqueue_async_copy_dependencies_locked(DeviceState *device,
-                                       hsa_signal_t retirement_signal) {
+lr_status_t enqueue_event_dependencies_locked(
+    DeviceState *device, hsa_signal_t retirement_signal,
+    const std::vector<lr_event_t *> *explicit_dependencies) {
   while (true) {
     reap_completed_barriers_locked(device);
 
     std::vector<lr_event_t *> dependencies;
-    for (lr_event_t *event : device->pending_events) {
-      if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy &&
-          !event->dependency_enqueued &&
-          hsa_signal_load_scacquire(event->signal) != 0) {
-        dependencies.push_back(event);
+    if (explicit_dependencies) {
+      for (lr_event_t *event : *explicit_dependencies) {
+        if (event->pending && !event->queue_dependency_enqueued &&
+            hsa_signal_load_scacquire(event->signal) != 0) {
+          dependencies.push_back(event);
+        }
+      }
+    } else {
+      for (lr_event_t *event : device->pending_events) {
+        if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy &&
+            !event->queue_dependency_enqueued &&
+            hsa_signal_load_scacquire(event->signal) != 0) {
+          dependencies.push_back(event);
+        }
       }
     }
 
@@ -504,7 +521,8 @@ enqueue_async_copy_dependencies_locked(DeviceState *device,
       packet_dependencies.reserve(end - offset);
       for (size_t i = offset; i < end; ++i) {
         packet->dep_signal[i - offset] = dependencies[i]->signal;
-        dependencies[i]->dependency_enqueued = true;
+        ++dependencies[i]->dependency_count;
+        dependencies[i]->queue_dependency_enqueued = true;
         packet_dependencies.push_back(dependencies[i]);
       }
       publish_packet_header(&packet->header,
@@ -515,6 +533,37 @@ enqueue_async_copy_dependencies_locked(DeviceState *device,
     }
     return LR_SUCCESS;
   }
+}
+
+lr_status_t collect_event_dependencies_locked(
+    lr_device_t device, lr_event_t *const *dependencies,
+    size_t dependency_count, const lr_event_t *completion_event,
+    std::vector<lr_event_t *> *pending_dependencies) {
+  if (dependency_count != 0 && !dependencies) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (dependency_count > UINT32_MAX) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::unordered_set<lr_event_t *> unique_dependencies;
+  pending_dependencies->clear();
+  pending_dependencies->reserve(dependency_count);
+  for (size_t i = 0; i < dependency_count; ++i) {
+    lr_event_t *dependency = dependencies[i];
+    if (!dependency || dependency == completion_event ||
+        g_events.find(dependency) == g_events.end() ||
+        dependency->device.index != device.index ||
+        (!dependency->pending && !dependency->completed) ||
+        !unique_dependencies.insert(dependency).second) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (dependency->pending &&
+        hsa_signal_load_scacquire(dependency->signal) != 0) {
+      pending_dependencies->push_back(dependency);
+    }
+  }
+  return LR_SUCCESS;
 }
 
 bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
@@ -724,7 +773,8 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   created_event->kind = lr_event_t::Kind::None;
   created_event->pending = false;
   created_event->completed = false;
-  created_event->dependency_enqueued = false;
+  created_event->queue_dependency_enqueued = false;
+  created_event->dependency_count = 0;
   created_event->completion_tick = 0;
   g_events.insert(created_event);
   *event = created_event;
@@ -754,7 +804,7 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
-  if (event->dependency_enqueued) {
+  if (event->dependency_count != 0) {
     lr_status_t drain_status =
         drain_device_locked(&g_devices[event->device.index]);
     if (drain_status != LR_SUCCESS) {
@@ -799,7 +849,7 @@ lr_status_t lr_event_record(lr_event_t *event) {
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
-  if (event->dependency_enqueued) {
+  if (event->dependency_count != 0) {
     lr_status_t drain_status = drain_device_locked(&state);
     if (drain_status != LR_SUCCESS) {
       return drain_status;
@@ -817,7 +867,7 @@ lr_status_t lr_event_record(lr_event_t *event) {
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
-  event->dependency_enqueued = false;
+  event->queue_dependency_enqueued = false;
   event->completion_tick = 0;
 
   const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
@@ -1014,9 +1064,12 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
 #endif
 }
 
-lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
-                            size_t size, lr_memcpy_kind_t kind,
-                            lr_event_t *event) {
+static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
+                                     const void *src, size_t size,
+                                     lr_memcpy_kind_t kind, lr_event_t *event,
+                                     lr_event_t *const *explicit_dependencies,
+                                     size_t dependency_count,
+                                     bool use_implicit_dependencies) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
@@ -1057,10 +1110,20 @@ lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
   }
 
   DeviceState &state = g_devices[device.index];
-  if (event->dependency_enqueued) {
+  if (event->dependency_count != 0) {
     lr_status_t drain_status = drain_device_locked(&state);
     if (drain_status != LR_SUCCESS) {
       return drain_status;
+    }
+  }
+
+  std::vector<lr_event_t *> event_dependencies;
+  if (!use_implicit_dependencies) {
+    lr_status_t dependency_status = collect_event_dependencies_locked(
+        device, explicit_dependencies, dependency_count, event,
+        &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
     }
   }
 
@@ -1084,13 +1147,20 @@ lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::AsyncCopy;
   event->completed = false;
-  event->dependency_enqueued = false;
+  event->queue_dependency_enqueued = false;
   event->completion_tick = 0;
 
   std::vector<hsa_signal_t> dependencies;
-  dependencies.reserve(state.pending_dispatches.size());
-  for (const PendingDispatch &dispatch : state.pending_dispatches) {
-    dependencies.push_back(dispatch.completion_signal);
+  if (use_implicit_dependencies) {
+    dependencies.reserve(state.pending_dispatches.size());
+    for (const PendingDispatch &dispatch : state.pending_dispatches) {
+      dependencies.push_back(dispatch.completion_signal);
+    }
+  } else {
+    dependencies.reserve(event_dependencies.size());
+    for (lr_event_t *dependency : event_dependencies) {
+      dependencies.push_back(dependency->signal);
+    }
   }
   status = hsa_amd_memory_async_copy(dst, dst_agent, src, src_agent, size,
                                      static_cast<uint32_t>(dependencies.size()),
@@ -1100,12 +1170,33 @@ lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
     return to_lr_status(status);
   }
 
+  event->dependencies = std::move(event_dependencies);
+  for (lr_event_t *dependency : event->dependencies) {
+    ++dependency->dependency_count;
+  }
   event->pending = true;
   state.pending_events.push_back(event);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
+}
+
+lr_status_t lr_memcpy_async(lr_device_t device, void *dst, const void *src,
+                            size_t size, lr_memcpy_kind_t kind,
+                            lr_event_t *event) {
+  return memcpy_async_impl(device, dst, src, size, kind, event, nullptr, 0,
+                           true);
+}
+
+lr_status_t lr_memcpy_async_with_dependencies(lr_device_t device, void *dst,
+                                              const void *src, size_t size,
+                                              lr_memcpy_kind_t kind,
+                                              lr_event_t *event,
+                                              lr_event_t *const *dependencies,
+                                              size_t dependency_count) {
+  return memcpy_async_impl(device, dst, src, size, kind, event, dependencies,
+                           dependency_count, false);
 }
 
 lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
@@ -1279,8 +1370,12 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
 #endif
 }
 
-lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
-                      const void *args, size_t args_size) {
+static lr_status_t launch_impl(lr_kernel_t *kernel,
+                               const lr_launch_config_t *config,
+                               const void *args, size_t args_size,
+                               lr_event_t *const *explicit_dependencies,
+                               size_t dependency_count,
+                               bool use_implicit_dependencies) {
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
@@ -1316,6 +1411,15 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
       args_size > kernel->kernarg_size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  std::vector<lr_event_t *> event_dependencies;
+  if (!use_implicit_dependencies) {
+    lr_status_t dependency_status = collect_event_dependencies_locked(
+        device, explicit_dependencies, dependency_count, nullptr,
+        &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
+    }
+  }
   KernargBuffer kernarg{};
   hsa_status_t status =
       acquire_kernarg_locked(&state, kernel->kernarg_size, &kernarg);
@@ -1331,13 +1435,18 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
     state.kernarg_pool.push_back(kernarg);
     return to_lr_status(status);
   }
+  const std::vector<lr_event_t *> *dependencies =
+      use_implicit_dependencies ? nullptr : &event_dependencies;
   lr_status_t dependency_status =
-      enqueue_async_copy_dependencies_locked(&state, signal);
+      enqueue_event_dependencies_locked(&state, signal, dependencies);
   if (dependency_status != LR_SUCCESS) {
     state.signal_pool.push_back(signal);
     state.kernarg_pool.push_back(kernarg);
     return dependency_status;
   }
+  const bool wait_for_dependencies = use_implicit_dependencies
+                                         ? !state.pending_barriers.empty()
+                                         : !event_dependencies.empty();
 
   const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
   auto *packets =
@@ -1358,10 +1467,9 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
   packet->kernel_object = kernel->object;
   packet->kernarg_address = kernarg.ptr;
   packet->completion_signal = signal;
-  uint16_t header =
-      state.pending_barriers.empty()
-          ? packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH)
-          : barrier_packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
+  uint16_t header = wait_for_dependencies
+                        ? barrier_packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH)
+                        : packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
   publish_packet_header(&packet->header, header);
 
   hsa_signal_store_screlease(state.queue->doorbell_signal, index);
@@ -1370,6 +1478,20 @@ lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
+}
+
+lr_status_t lr_launch(lr_kernel_t *kernel, const lr_launch_config_t *config,
+                      const void *args, size_t args_size) {
+  return launch_impl(kernel, config, args, args_size, nullptr, 0, true);
+}
+
+lr_status_t lr_launch_with_dependencies(lr_kernel_t *kernel,
+                                        const lr_launch_config_t *config,
+                                        const void *args, size_t args_size,
+                                        lr_event_t *const *dependencies,
+                                        size_t dependency_count) {
+  return launch_impl(kernel, config, args, args_size, dependencies,
+                     dependency_count, false);
 }
 
 lr_status_t lr_synchronize(lr_device_t device) {
