@@ -97,8 +97,12 @@ void test_kernarg_buffer() {
 
   const float *x = (const float *)0x1000;
   float *out = (float *)0x2000;
+  expect_throw([&] { args.validate(); }, "missing required kernarg must fail");
   args.set(size_t{0}, x);
+  expect_throw([&] { args.validate(); },
+               "partially bound kernarg buffer must fail");
   args.set("out", out);
+  args.validate();
 
   expect(args.size() == 16, "kernarg buffer size");
   const unsigned char *bytes = static_cast<const unsigned char *>(args.data());
@@ -116,6 +120,11 @@ void test_kernarg_buffer() {
   const uint64_t too_large[2] = {};
   expect_throw([&] { args.set(1, too_large); },
                "oversized kernarg value must fail");
+
+  manifest.args[1].optional = true;
+  lrrt::KernargBuffer optional_args(manifest);
+  optional_args.set("x", x);
+  optional_args.validate();
 }
 
 void test_multiple_kernels() {

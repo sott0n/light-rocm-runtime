@@ -88,6 +88,8 @@ public:
     set_raw(name.c_str(), &value, sizeof(T));
   }
 
+  void validate() const;
+
   const void *data() const { return data_.data(); }
   void *data() { return data_.data(); }
   size_t size() const { return data_.size(); }
@@ -96,6 +98,7 @@ public:
 private:
   std::vector<unsigned char> data_;
   std::vector<KernelArgument> args_;
+  std::vector<bool> bound_;
 };
 
 class LRRT_API Bundle {

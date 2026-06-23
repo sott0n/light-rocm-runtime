@@ -111,6 +111,10 @@ argument index without requiring the caller to define a matching C++ struct. The
 helper still uses raw ABI bytes: it does not interpret tensor types, allocate
 buffers, or convert data formats.
 
+Call `KernargBuffer::validate()` before dispatch to catch missing required
+arguments. Arguments marked with `optional: true` may remain unset and keep
+their zero-initialized bytes.
+
 ### `kernarg_size`
 
 Required integer. Total byte size of the packed kernarg buffer.
