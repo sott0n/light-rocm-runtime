@@ -12,6 +12,7 @@
 namespace lrrt {
 
 struct KernelManifest {
+  std::string target;
   std::string name;
   std::string symbol;
   std::string code_object;

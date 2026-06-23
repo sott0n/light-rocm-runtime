@@ -79,6 +79,11 @@ public:
 
   std::vector<lrrt::KernelManifest> parse_kernels() const {
     std::vector<lrrt::KernelManifest> manifests;
+    const std::string target = read_string("target", 0, text_.size());
+    if (target.empty()) {
+      throw std::runtime_error("bundle manifest target is empty");
+    }
+
     const size_t kernels = require("\"kernels\"", 0, text_.size());
     size_t position = field_value("kernels", kernels, text_.size());
     if (position >= text_.size() || text_[position] != '[') {
@@ -92,6 +97,7 @@ public:
       }
       const size_t kernel_end = matching_brace(position);
       lrrt::KernelManifest manifest = parse_kernel(position, kernel_end);
+      manifest.target = target;
       for (const lrrt::KernelManifest &existing : manifests) {
         if (existing.name == manifest.name) {
           throw std::runtime_error("duplicate kernel name in bundle manifest");
@@ -123,6 +129,10 @@ private:
     manifest.name = read_string("name", kernel_begin, kernel_end);
     manifest.symbol = read_string("symbol", kernel_begin, kernel_end);
     manifest.code_object = read_string("code_object", kernel_begin, kernel_end);
+    if (manifest.code_object.empty() || manifest.code_object[0] == '/' ||
+        has_parent_component(manifest.code_object)) {
+      throw std::runtime_error("bundle code object path must stay in bundle");
+    }
     manifest.kernarg_size = read_size("kernarg_size", kernel_begin, kernel_end);
 
     const size_t shared_memory_bytes =
@@ -136,12 +146,12 @@ private:
     read_grid_expr(kernel_begin, kernel_end, &manifest.grid_divisor,
                    &manifest.grid_multiplier);
     manifest.arg_offsets = read_arg_offsets(kernel_begin, kernel_end);
+    validate_arg_offsets(manifest.arg_offsets, manifest.kernarg_size);
 
     if (manifest.name.empty() || manifest.symbol.empty() ||
-        manifest.code_object.empty() || manifest.kernarg_size == 0 ||
-        manifest.block[0] == 0 || manifest.block[1] == 0 ||
-        manifest.block[2] == 0 || manifest.grid_divisor == 0 ||
-        manifest.grid_multiplier == 0) {
+        manifest.kernarg_size == 0 || manifest.block[0] == 0 ||
+        manifest.block[1] == 0 || manifest.block[2] == 0 ||
+        manifest.grid_divisor == 0 || manifest.grid_multiplier == 0) {
       throw std::runtime_error("invalid bundle manifest");
     }
     return manifest;
@@ -293,7 +303,7 @@ private:
     }
   }
 
-  std::string read_first_grid_string(size_t from, size_t limit) const {
+  std::string read_grid_string(size_t from, size_t limit) const {
     size_t position = field_value("grid", from, limit);
     if (position >= limit || text_[position] != '[') {
       throw std::runtime_error("manifest grid is not array");
@@ -307,12 +317,44 @@ private:
     if (end == std::string::npos || end >= limit) {
       throw std::runtime_error("unterminated manifest grid expression");
     }
-    return text_.substr(position, end - position);
+    std::string expr = text_.substr(position, end - position);
+
+    position = skip_space(end + 1, limit);
+    if (position >= limit || text_[position] != ',') {
+      throw std::runtime_error("invalid manifest grid array");
+    }
+    position = skip_space(position + 1, limit);
+    if (read_u32_at(position, limit, "grid") != 1) {
+      throw std::runtime_error("bundle grid y dimension must be 1");
+    }
+    while (position < limit && text_[position] >= '0' &&
+           text_[position] <= '9') {
+      ++position;
+    }
+
+    position = skip_space(position, limit);
+    if (position >= limit || text_[position] != ',') {
+      throw std::runtime_error("invalid manifest grid array");
+    }
+    position = skip_space(position + 1, limit);
+    if (read_u32_at(position, limit, "grid") != 1) {
+      throw std::runtime_error("bundle grid z dimension must be 1");
+    }
+    while (position < limit && text_[position] >= '0' &&
+           text_[position] <= '9') {
+      ++position;
+    }
+
+    position = skip_space(position, limit);
+    if (position >= limit || text_[position] != ']') {
+      throw std::runtime_error("invalid manifest grid array");
+    }
+    return expr;
   }
 
   void read_grid_expr(size_t from, size_t limit, uint32_t *divisor,
                       uint32_t *multiplier) const {
-    const std::string expr = read_first_grid_string(from, limit);
+    const std::string expr = read_grid_string(from, limit);
     const std::string prefix = "ceil_div(n, ";
     if (expr.compare(0, prefix.size(), prefix) != 0) {
       throw std::runtime_error("unsupported bundle grid expression");
@@ -366,22 +408,46 @@ private:
   std::vector<size_t> read_arg_offsets(size_t from, size_t limit) const {
     std::vector<size_t> offsets;
     size_t args = field_value("args", from, limit);
-    size_t args_end = require("\"kernarg_size\"", args, limit);
-    size_t position = args;
-    while (true) {
-      size_t offset_field = text_.find("\"offset\"", position);
-      if (offset_field == std::string::npos || offset_field >= args_end) {
-        break;
+    if (args >= limit || text_[args] != '[') {
+      throw std::runtime_error("manifest args is not array");
+    }
+    size_t position = skip_space(args + 1, limit);
+    while (position < limit && text_[position] != ']') {
+      if (text_[position] != '{') {
+        throw std::runtime_error("invalid manifest args array");
       }
-      size_t colon = require(":", offset_field, args_end);
-      size_t value = skip_space(colon + 1, args_end);
-      offsets.push_back(read_size_at(value, args_end, "offset"));
-      position = value + 1;
+      const size_t arg_end = matching_brace(position);
+      offsets.push_back(read_size("offset", position, arg_end));
+
+      position = skip_space(arg_end, limit);
+      if (position < limit && text_[position] == ',') {
+        position = skip_space(position + 1, limit);
+        if (position >= limit || text_[position] == ']') {
+          throw std::runtime_error("invalid manifest args array");
+        }
+      } else if (position >= limit || text_[position] != ']') {
+        throw std::runtime_error("invalid manifest args array");
+      }
     }
     if (offsets.empty()) {
       throw std::runtime_error("bundle manifest has no argument offsets");
     }
     return offsets;
+  }
+
+  void validate_arg_offsets(const std::vector<size_t> &offsets,
+                            size_t kernarg_size) const {
+    size_t previous = 0;
+    for (size_t i = 0; i < offsets.size(); ++i) {
+      if (offsets[i] >= kernarg_size) {
+        throw std::runtime_error("bundle argument offset exceeds kernarg size");
+      }
+      if (i > 0 && offsets[i] <= previous) {
+        throw std::runtime_error(
+            "bundle argument offsets must be strictly increasing");
+      }
+      previous = offsets[i];
+    }
   }
 
   std::string text_;

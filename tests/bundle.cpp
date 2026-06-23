@@ -59,6 +59,7 @@ const char *kManifest = R"json(
 
 void test_parse_manifest() {
   lrrt::KernelManifest manifest = parse(kManifest);
+  expect(manifest.target == "gfx1101", "target arch");
   expect(manifest.name == "scale", "kernel name");
   expect(manifest.symbol == "scale_kernel", "kernel symbol");
   expect(manifest.code_object == "kernels.hsaco", "code object path");
@@ -89,6 +90,7 @@ void test_parse_manifest() {
 void test_multiple_kernels() {
   const char *json = R"json(
   {
+    "target": "gfx1101",
     "kernels": [
       {
         "name": "first",
@@ -139,12 +141,14 @@ void test_multiple_kernels() {
 void test_invalid_manifests() {
   expect_throw([] { lrrt::parse_bundle_manifest(nullptr, 0); },
                "empty manifest must fail");
-  expect_throw([] { parse(R"json({"kernels":[]})json"); },
+  expect_throw([] { parse(R"json({"target":"gfx1101","kernels":[]})json"); },
                "empty kernel array must fail");
+  expect_throw([] { parse(R"json({"kernels":[]})json"); },
+               "missing target must fail");
   expect_throw(
       [] {
         parse(R"json(
-          {"kernels":[
+          {"target":"gfx1101","kernels":[
             {"name":"same","symbol":"a","code_object":"a.hsaco",
              "args":[{"offset":0}],"kernarg_size":8,
              "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]},
@@ -161,7 +165,51 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"kernels":[{
+          {"target":"gfx1101","kernels":[{
+            "name":"bad","symbol":"k","code_object":"k.hsaco",
+            "args":[{"offset":0}],"kernarg_size":8,
+            "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",2,1]
+          }]}
+        )json");
+      },
+      "non-unit grid y dimension must fail");
+  expect_throw(
+      [] {
+        parse(R"json(
+          {"target":"gfx1101","kernels":[{
+            "name":"bad","symbol":"k","code_object":"../k.hsaco",
+            "args":[{"offset":0}],"kernarg_size":8,
+            "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
+          }]}
+        )json");
+      },
+      "code object outside bundle must fail");
+  expect_throw(
+      [] {
+        parse(R"json(
+          {"target":"gfx1101","kernels":[{
+            "name":"bad","symbol":"k","code_object":"k.hsaco",
+            "args":[{"offset":0},{"offset":0}],"kernarg_size":8,
+            "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
+          }]}
+        )json");
+      },
+      "duplicate argument offsets must fail");
+  expect_throw(
+      [] {
+        parse(R"json(
+          {"target":"gfx1101","kernels":[{
+            "name":"bad","symbol":"k","code_object":"k.hsaco",
+            "args":[{"offset":8}],"kernarg_size":8,
+            "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
+          }]}
+        )json");
+      },
+      "argument offset outside kernarg size must fail");
+  expect_throw(
+      [] {
+        parse(R"json(
+          {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"offset":0}],"kernarg_size":8,
             "block":[64,1,1],"grid":["n * 64",1,1]
@@ -172,7 +220,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"kernels":[{
+          {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"offset":0}],"kernarg_size":8,
             "block":[64,1,1],
@@ -184,7 +232,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"kernels":[{
+          {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"offset":0}],"kernarg_size":8,
             "block":[64,1,1,2],
@@ -196,7 +244,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"kernels":[{
+          {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"offset":0}],"kernarg_size":8,
             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1],
