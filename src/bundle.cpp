@@ -146,8 +146,11 @@ private:
     read_u32_array("block", kernel_begin, kernel_end, manifest.block);
     read_grid_expr(kernel_begin, kernel_end, &manifest.grid_divisor,
                    &manifest.grid_multiplier);
-    manifest.arg_offsets = read_arg_offsets(kernel_begin, kernel_end);
-    validate_arg_offsets(manifest.arg_offsets, manifest.kernarg_size);
+    manifest.args = read_args(kernel_begin, kernel_end);
+    for (const lrrt::KernelArgument &arg : manifest.args) {
+      manifest.arg_offsets.push_back(arg.offset);
+    }
+    validate_args(manifest.args, manifest.kernarg_size);
 
     if (manifest.name.empty() || manifest.symbol.empty() ||
         manifest.kernarg_size == 0 || manifest.block[0] == 0 ||
@@ -263,6 +266,24 @@ private:
       return default_value;
     }
     return read_size(field, from, limit);
+  }
+
+  bool read_optional_bool(const char *field, size_t from, size_t limit,
+                          bool default_value) const {
+    std::string key = std::string("\"") + field + "\"";
+    size_t key_position = text_.find(key, from);
+    if (key_position == std::string::npos || key_position >= limit) {
+      return default_value;
+    }
+    size_t position = field_value(field, from, limit);
+    if (text_.compare(position, 4, "true") == 0) {
+      return true;
+    }
+    if (text_.compare(position, 5, "false") == 0) {
+      return false;
+    }
+    throw std::runtime_error(std::string("manifest field is not boolean: ") +
+                             field);
   }
 
   uint32_t read_u32_at(size_t position, size_t limit, const char *field) const {
@@ -406,8 +427,8 @@ private:
     return static_cast<uint32_t>(value);
   }
 
-  std::vector<size_t> read_arg_offsets(size_t from, size_t limit) const {
-    std::vector<size_t> offsets;
+  std::vector<lrrt::KernelArgument> read_args(size_t from, size_t limit) const {
+    std::vector<lrrt::KernelArgument> args_out;
     size_t args = field_value("args", from, limit);
     if (args >= limit || text_[args] != '[') {
       throw std::runtime_error("manifest args is not array");
@@ -418,7 +439,13 @@ private:
         throw std::runtime_error("invalid manifest args array");
       }
       const size_t arg_end = matching_brace(position);
-      offsets.push_back(read_size("offset", position, arg_end));
+      lrrt::KernelArgument arg{};
+      arg.name = read_string("name", position, arg_end);
+      arg.type = read_string("type", position, arg_end);
+      arg.offset = read_size("offset", position, arg_end);
+      arg.size = read_size("size", position, arg_end);
+      arg.optional = read_optional_bool("optional", position, arg_end, false);
+      args_out.push_back(std::move(arg));
 
       position = skip_space(arg_end, limit);
       if (position < limit && text_[position] == ',') {
@@ -430,24 +457,34 @@ private:
         throw std::runtime_error("invalid manifest args array");
       }
     }
-    if (offsets.empty()) {
-      throw std::runtime_error("bundle manifest has no argument offsets");
+    if (args_out.empty()) {
+      throw std::runtime_error("bundle manifest has no arguments");
     }
-    return offsets;
+    return args_out;
   }
 
-  void validate_arg_offsets(const std::vector<size_t> &offsets,
-                            size_t kernarg_size) const {
+  void validate_args(const std::vector<lrrt::KernelArgument> &args,
+                     size_t kernarg_size) const {
     size_t previous = 0;
-    for (size_t i = 0; i < offsets.size(); ++i) {
-      if (offsets[i] >= kernarg_size) {
+    for (size_t i = 0; i < args.size(); ++i) {
+      const lrrt::KernelArgument &arg = args[i];
+      if (arg.name.empty() || arg.type.empty() || arg.size == 0) {
+        throw std::runtime_error("invalid bundle argument manifest");
+      }
+      if (arg.offset >= kernarg_size || arg.size > kernarg_size ||
+          arg.offset + arg.size > kernarg_size) {
         throw std::runtime_error("bundle argument offset exceeds kernarg size");
       }
-      if (i > 0 && offsets[i] <= previous) {
+      if (i > 0 && arg.offset <= previous) {
         throw std::runtime_error(
             "bundle argument offsets must be strictly increasing");
       }
-      previous = offsets[i];
+      for (size_t j = 0; j < i; ++j) {
+        if (args[j].name == arg.name) {
+          throw std::runtime_error("duplicate bundle argument name");
+        }
+      }
+      previous = arg.offset;
     }
   }
 
@@ -509,8 +546,8 @@ void require_kernarg_layout(const KernelManifest &manifest, size_t kernarg_size,
 }
 
 KernargBuffer::KernargBuffer(const KernelManifest &manifest)
-    : data_(manifest.kernarg_size, 0), offsets_(manifest.arg_offsets) {
-  if (data_.empty() || offsets_.empty()) {
+    : data_(manifest.kernarg_size, 0), args_(manifest.args) {
+  if (data_.empty() || args_.empty()) {
     throw std::runtime_error("invalid bundle kernarg layout");
   }
 }
@@ -520,21 +557,33 @@ void KernargBuffer::set_raw(size_t index, const void *value,
   if (!value && value_size != 0) {
     throw std::invalid_argument("bundle kernarg value is null");
   }
-  if (index >= offsets_.size()) {
+  if (index >= args_.size()) {
     throw std::out_of_range("bundle kernarg index is out of range");
   }
 
-  const size_t offset = offsets_[index];
-  const size_t next_offset =
-      index + 1 < offsets_.size() ? offsets_[index + 1] : data_.size();
-  if (offset > data_.size() || next_offset > data_.size() ||
-      offset > next_offset) {
+  const KernelArgument &arg = args_[index];
+  if (arg.offset > data_.size() || arg.size > data_.size() ||
+      arg.offset + arg.size > data_.size()) {
     throw std::runtime_error("invalid bundle kernarg offset");
   }
-  if (value_size > next_offset - offset) {
+  if (value_size > arg.size) {
     throw std::runtime_error("bundle kernarg value exceeds argument slot");
   }
-  memcpy(data_.data() + offset, value, value_size);
+  memcpy(data_.data() + arg.offset, value, value_size);
+}
+
+void KernargBuffer::set_raw(const char *name, const void *value,
+                            size_t value_size) {
+  if (!name || name[0] == '\0') {
+    throw std::invalid_argument("bundle kernarg name is empty");
+  }
+  for (size_t i = 0; i < args_.size(); ++i) {
+    if (args_[i].name == name) {
+      set_raw(i, value, value_size);
+      return;
+    }
+  }
+  throw std::out_of_range(std::string("bundle kernarg not found: ") + name);
 }
 
 Bundle::Bundle(Device device, const char *manifest_path)

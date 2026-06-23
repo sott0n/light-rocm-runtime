@@ -14,20 +14,6 @@
 #define LRRT_TRITON_RMSNORM_MANIFEST "manifest.json"
 #endif
 
-typedef struct triton_rmsnorm_args_t {
-  const void *x;
-  const void *weight;
-  void *out;
-  float eps;
-  int32_t rows;
-  int32_t hidden;
-  void *triton_global_scratch;
-  void *triton_profile_scratch;
-} triton_rmsnorm_args_t;
-
-static_assert(sizeof(triton_rmsnorm_args_t) == 56,
-              "Triton rmsnorm kernarg layout must match manifest");
-
 using lrrt_test::data_type_name;
 using lrrt_test::data_type_size;
 using lrrt_test::DataType;
@@ -43,18 +29,6 @@ static void run_case(lrrt::Device &device, DataType data_type, uint32_t rows,
                             std::to_string(block_size);
   lrrt::Bundle bundle(device, LRRT_TRITON_RMSNORM_MANIFEST,
                       kernel_name.c_str());
-  lrrt::require_kernarg_layout(
-      bundle.manifest(), sizeof(triton_rmsnorm_args_t),
-      {
-          offsetof(triton_rmsnorm_args_t, x),
-          offsetof(triton_rmsnorm_args_t, weight),
-          offsetof(triton_rmsnorm_args_t, out),
-          offsetof(triton_rmsnorm_args_t, eps),
-          offsetof(triton_rmsnorm_args_t, rows),
-          offsetof(triton_rmsnorm_args_t, hidden),
-          offsetof(triton_rmsnorm_args_t, triton_global_scratch),
-          offsetof(triton_rmsnorm_args_t, triton_profile_scratch),
-      });
 
   const uint32_t elements = rows * hidden;
   const float eps = 1.0e-5f;
@@ -75,11 +49,18 @@ static void run_case(lrrt::Device &device, DataType data_type, uint32_t rows,
   lrrt::copy_to_device(device_x, x.data(), x.size());
   lrrt::copy_to_device(device_weight, weight.data(), weight.size());
 
-  triton_rmsnorm_args_t kernel_args = {
-      device_x.data(), device_weight.data(), device_out.data(), eps,
-      (int32_t)rows,   (int32_t)hidden,      nullptr,           nullptr,
-  };
-  lrrt::launch(bundle.kernel(), bundle.launch_config(rows), kernel_args);
+  lrrt::KernargBuffer kernel_args(bundle.manifest());
+  kernel_args.set("x", device_x.data());
+  kernel_args.set("weight", device_weight.data());
+  kernel_args.set("out", device_out.data());
+  kernel_args.set("eps", eps);
+  kernel_args.set("rows", (int32_t)rows);
+  kernel_args.set("hidden", (int32_t)hidden);
+  void *scratch = nullptr;
+  kernel_args.set("_triton_global_scratch", scratch);
+  kernel_args.set("_triton_profile_scratch", scratch);
+  lrrt::launch(bundle.kernel(), bundle.launch_config(rows), kernel_args.data(),
+               kernel_args.size());
   device.synchronize();
   lrrt::copy_to_host(out.data(), device_out, out.size());
 

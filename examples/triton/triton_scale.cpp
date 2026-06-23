@@ -10,18 +10,6 @@
 #define LRRT_TRITON_SCALE_MANIFEST "manifest.json"
 #endif
 
-typedef struct triton_scale_args_t {
-  const float *x;
-  float *out;
-  float factor;
-  int32_t n;
-  void *triton_scratch_0;
-  void *triton_scratch_1;
-} triton_scale_args_t;
-
-static_assert(sizeof(triton_scale_args_t) == 40,
-              "Triton scale kernarg layout must match manifest");
-
 int main(void) {
   try {
     lrrt::Runtime runtime;
@@ -50,29 +38,20 @@ int main(void) {
 
     lrrt::Bundle bundle(device, LRRT_TRITON_SCALE_MANIFEST);
     const lrrt::KernelManifest &kernel_manifest = bundle.manifest();
-    lrrt::require_kernarg_layout(
-        kernel_manifest, sizeof(triton_scale_args_t),
-        {
-            offsetof(triton_scale_args_t, x),
-            offsetof(triton_scale_args_t, out),
-            offsetof(triton_scale_args_t, factor),
-            offsetof(triton_scale_args_t, n),
-            offsetof(triton_scale_args_t, triton_scratch_0),
-            offsetof(triton_scale_args_t, triton_scratch_1),
-        });
     printf("loaded Triton manifest for kernel: %s\n",
            kernel_manifest.name.c_str());
 
-    triton_scale_args_t kernel_args = {
-        (const float *)device_x.data(),
-        (float *)device_out.data(),
-        factor,
-        (int32_t)n,
-        nullptr,
-        nullptr,
-    };
+    lrrt::KernargBuffer kernel_args(kernel_manifest);
+    kernel_args.set("x", (const float *)device_x.data());
+    kernel_args.set("out", (float *)device_out.data());
+    kernel_args.set("factor", factor);
+    kernel_args.set("n", (int32_t)n);
+    void *scratch = nullptr;
+    kernel_args.set("_triton_scratch_0", scratch);
+    kernel_args.set("_triton_scratch_1", scratch);
 
-    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args);
+    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args.data(),
+                 kernel_args.size());
     device.synchronize();
     lrrt::copy_to_host(out, device_out);
 

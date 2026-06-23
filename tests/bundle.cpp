@@ -72,6 +72,10 @@ void test_parse_manifest() {
   expect(manifest.shared_memory_bytes == 16, "shared memory size");
   expect(manifest.arg_offsets == std::vector<size_t>({0, 8}),
          "argument offsets");
+  expect(manifest.args.size() == 2, "argument count");
+  expect(manifest.args[0].name == "x" && manifest.args[0].type == "ptr" &&
+             manifest.args[0].offset == 0 && manifest.args[0].size == 8,
+         "first argument metadata");
 
   lr_launch_config_t config = lrrt::launch_config_from_manifest(manifest, 513);
   expect(config.grid.x == 384 && config.grid.y == 1 && config.grid.z == 1,
@@ -93,8 +97,8 @@ void test_kernarg_buffer() {
 
   const float *x = (const float *)0x1000;
   float *out = (float *)0x2000;
-  args.set(0, x);
-  args.set(1, out);
+  args.set(size_t{0}, x);
+  args.set("out", out);
 
   expect(args.size() == 16, "kernarg buffer size");
   const unsigned char *bytes = static_cast<const unsigned char *>(args.data());
@@ -107,6 +111,8 @@ void test_kernarg_buffer() {
 
   expect_throw([&] { args.set(2, out); },
                "out-of-range kernarg index must fail");
+  expect_throw([&] { args.set("missing", out); },
+               "missing kernarg name must fail");
   const uint64_t too_large[2] = {};
   expect_throw([&] { args.set(1, too_large); },
                "oversized kernarg value must fail");
@@ -121,7 +127,7 @@ void test_multiple_kernels() {
         "name": "first",
         "symbol": "first_kernel",
         "code_object": "first.hsaco",
-        "args": [{"offset": 0}],
+        "args": [{"name": "x", "type": "ptr", "offset": 0, "size": 8}],
         "kernarg_size": 8,
         "block": [64, 1, 1],
         "grid": ["ceil_div(n, 64) * 64", 1, 1]
@@ -130,7 +136,7 @@ void test_multiple_kernels() {
         "name": "second",
         "symbol": "second_kernel",
         "code_object": "second.hsaco",
-        "args": [{"offset": 0}],
+        "args": [{"name": "x", "type": "ptr", "offset": 0, "size": 8}],
         "kernarg_size": 8,
         "block": [64, 1, 1],
         "grid": ["ceil_div(n, 64) * 64", 1, 1],
@@ -175,10 +181,12 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[
             {"name":"same","symbol":"a","code_object":"a.hsaco",
-             "args":[{"offset":0}],"kernarg_size":8,
+             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+             "kernarg_size":8,
              "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]},
             {"name":"same","symbol":"b","code_object":"b.hsaco",
-             "args":[{"offset":0}],"kernarg_size":8,
+             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+             "kernarg_size":8,
              "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]}
           ]}
         )json");
@@ -192,7 +200,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":0}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",2,1]
           }]}
         )json");
@@ -203,7 +212,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"../k.hsaco",
-            "args":[{"offset":0}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
           }]}
         )json");
@@ -214,7 +224,10 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":0},{"offset":0}],"kernarg_size":8,
+            "args":[
+              {"name":"x","type":"ptr","offset":0,"size":8},
+              {"name":"y","type":"ptr","offset":0,"size":8}
+            ],"kernarg_size":8,
             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
           }]}
         )json");
@@ -225,7 +238,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":8}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":8,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
           }]}
         )json");
@@ -236,7 +250,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":0}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1],"grid":["n * 64",1,1]
           }]}
         )json");
@@ -247,7 +262,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":0}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1],
             "grid":["ceil_div(n, 64) * 64garbage",1,1]
           }]}
@@ -259,7 +275,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":0}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1,2],
             "grid":["ceil_div(n, 64) * 64",1,1]
           }]}
@@ -271,7 +288,8 @@ void test_invalid_manifests() {
         parse(R"json(
           {"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
-            "args":[{"offset":0}],"kernarg_size":8,
+            "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
+            "kernarg_size":8,
             "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1],
             "shared_memory_bytes":4294967296
           }]}

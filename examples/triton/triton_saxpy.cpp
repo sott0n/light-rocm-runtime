@@ -10,19 +10,6 @@
 #define LRRT_TRITON_SAXPY_MANIFEST "manifest.json"
 #endif
 
-typedef struct triton_saxpy_args_t {
-  const float *x;
-  const float *y;
-  float *out;
-  float a;
-  int32_t n;
-  void *triton_scratch_0;
-  void *triton_scratch_1;
-} triton_saxpy_args_t;
-
-static_assert(sizeof(triton_saxpy_args_t) == 48,
-              "Triton saxpy kernarg layout must match manifest");
-
 int main(void) {
   try {
     lrrt::Runtime runtime;
@@ -55,31 +42,21 @@ int main(void) {
 
     lrrt::Bundle bundle(device, LRRT_TRITON_SAXPY_MANIFEST);
     const lrrt::KernelManifest &kernel_manifest = bundle.manifest();
-    lrrt::require_kernarg_layout(
-        kernel_manifest, sizeof(triton_saxpy_args_t),
-        {
-            offsetof(triton_saxpy_args_t, x),
-            offsetof(triton_saxpy_args_t, y),
-            offsetof(triton_saxpy_args_t, out),
-            offsetof(triton_saxpy_args_t, a),
-            offsetof(triton_saxpy_args_t, n),
-            offsetof(triton_saxpy_args_t, triton_scratch_0),
-            offsetof(triton_saxpy_args_t, triton_scratch_1),
-        });
     printf("loaded Triton manifest for kernel: %s\n",
            kernel_manifest.name.c_str());
 
-    triton_saxpy_args_t kernel_args = {
-        (const float *)device_x.data(),
-        (const float *)device_y.data(),
-        (float *)device_out.data(),
-        a,
-        (int32_t)n,
-        nullptr,
-        nullptr,
-    };
+    lrrt::KernargBuffer kernel_args(kernel_manifest);
+    kernel_args.set("x", (const float *)device_x.data());
+    kernel_args.set("y", (const float *)device_y.data());
+    kernel_args.set("out", (float *)device_out.data());
+    kernel_args.set("a", a);
+    kernel_args.set("n", (int32_t)n);
+    void *scratch = nullptr;
+    kernel_args.set("_triton_scratch_0", scratch);
+    kernel_args.set("_triton_scratch_1", scratch);
 
-    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args);
+    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args.data(),
+                 kernel_args.size());
     device.synchronize();
     lrrt::copy_to_host(out, device_out);
 

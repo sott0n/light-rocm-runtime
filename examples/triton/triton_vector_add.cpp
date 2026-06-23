@@ -45,13 +45,13 @@ int main(void) {
            kernel_manifest.name.c_str());
 
     lrrt::KernargBuffer kernel_args(kernel_manifest);
-    kernel_args.set(0, (const float *)device_x.data());
-    kernel_args.set(1, (const float *)device_y.data());
-    kernel_args.set(2, (float *)device_out.data());
-    kernel_args.set(3, (int32_t)n);
+    kernel_args.set("x", (const float *)device_x.data());
+    kernel_args.set("y", (const float *)device_y.data());
+    kernel_args.set("out", (float *)device_out.data());
+    kernel_args.set("n", (int32_t)n);
     void *scratch = nullptr;
-    kernel_args.set(4, scratch);
-    kernel_args.set(5, scratch);
+    kernel_args.set("_triton_scratch_0", scratch);
+    kernel_args.set("_triton_scratch_1", scratch);
 
     lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args.data(),
                  kernel_args.size());

@@ -11,6 +11,14 @@
 
 namespace lrrt {
 
+struct KernelArgument {
+  std::string name;
+  std::string type;
+  size_t offset;
+  size_t size;
+  bool optional;
+};
+
 struct KernelManifest {
   std::string target;
   std::string name;
@@ -22,6 +30,7 @@ struct KernelManifest {
   size_t kernarg_size;
   uint32_t shared_memory_bytes;
   std::vector<size_t> arg_offsets;
+  std::vector<KernelArgument> args;
 };
 
 LRRT_API KernelManifest parse_bundle_manifest(const void *data, size_t size);
@@ -58,9 +67,25 @@ public:
   explicit KernargBuffer(const KernelManifest &manifest);
 
   void set_raw(size_t index, const void *value, size_t value_size);
+  void set_raw(const char *name, const void *value, size_t value_size);
 
   template <typename T> void set(size_t index, const T &value) {
     set_raw(index, &value, sizeof(T));
+  }
+
+  template <typename T> void set(int index, const T &value) {
+    if (index < 0) {
+      throw std::out_of_range("bundle kernarg index is out of range");
+    }
+    set_raw(static_cast<size_t>(index), &value, sizeof(T));
+  }
+
+  template <typename T> void set(const char *name, const T &value) {
+    set_raw(name, &value, sizeof(T));
+  }
+
+  template <typename T> void set(const std::string &name, const T &value) {
+    set_raw(name.c_str(), &value, sizeof(T));
   }
 
   const void *data() const { return data_.data(); }
@@ -70,7 +95,7 @@ public:
 
 private:
   std::vector<unsigned char> data_;
-  std::vector<size_t> offsets_;
+  std::vector<KernelArgument> args_;
 };
 
 class LRRT_API Bundle {
