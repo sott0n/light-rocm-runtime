@@ -117,6 +117,8 @@ their zero-initialized bytes.
 
 `Bundle::launch(n, args)` calls `validate()` before submitting the kernel, so it
 is the preferred path when launching a bundle directly.
+Use `Bundle::launch(queue, n, args, dependencies)` when dispatching a bundle on
+an explicit queue with event dependencies.
 
 ### `kernarg_size`
 
@@ -208,6 +210,7 @@ inspecting HSACO metadata:
 - manifest `symbol` matches the HSACO kernel metadata
 - `kernarg_size` matches `.kernarg_segment_size`
 - manifest argument offsets and sizes match HSACO argument metadata
+- manifest argument types match HSACO value kind and address-space metadata
 - `shared_memory_bytes` matches the dynamic shared-memory requirement expected
   by generated kernels
 

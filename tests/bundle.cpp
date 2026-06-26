@@ -127,6 +127,14 @@ void test_kernarg_buffer() {
   optional_args.validate();
 }
 
+void compile_bundle_launch_overloads(lrrt::Bundle &bundle, lrrt::Queue &queue,
+                                     lrrt::KernargBuffer &args,
+                                     lrrt::Event &event) {
+  std::vector<const lrrt::Event *> dependencies = {&event};
+  bundle.launch(1, args, dependencies);
+  bundle.launch(queue, 1, args, dependencies);
+}
+
 void test_multiple_kernels() {
   const char *json = R"json(
   {

@@ -617,6 +617,20 @@ void Bundle::launch(uint32_t n, const KernargBuffer &args) const {
   lrrt::launch(kernel_, launch_config(n), args.data(), args.size());
 }
 
+void Bundle::launch(uint32_t n, const KernargBuffer &args,
+                    const std::vector<const Event *> &dependencies) const {
+  args.validate();
+  lrrt::launch(kernel_, launch_config(n), args.data(), args.size(),
+               dependencies);
+}
+
+void Bundle::launch(const Queue &queue, uint32_t n, const KernargBuffer &args,
+                    const std::vector<const Event *> &dependencies) const {
+  args.validate();
+  lrrt::launch(queue, kernel_, launch_config(n), args.data(), args.size(),
+               dependencies);
+}
+
 KernelManifest Bundle::load_manifest(const char *manifest_path,
                                      const char *kernel_name) {
   std::vector<unsigned char> data = read_file(manifest_path);

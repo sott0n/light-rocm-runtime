@@ -110,6 +110,10 @@ public:
   Kernel kernel() const { return kernel_; }
   lr_launch_config_t launch_config(uint32_t n) const;
   void launch(uint32_t n, const KernargBuffer &args) const;
+  void launch(uint32_t n, const KernargBuffer &args,
+              const std::vector<const Event *> &dependencies) const;
+  void launch(const Queue &queue, uint32_t n, const KernargBuffer &args,
+              const std::vector<const Event *> &dependencies = {}) const;
 
 private:
   static KernelManifest load_manifest(const char *manifest_path,
