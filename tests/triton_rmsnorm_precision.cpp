@@ -59,9 +59,7 @@ static void run_case(lrrt::Device &device, DataType data_type, uint32_t rows,
   void *scratch = nullptr;
   kernel_args.set("_triton_global_scratch", scratch);
   kernel_args.set("_triton_profile_scratch", scratch);
-  kernel_args.validate();
-  lrrt::launch(bundle.kernel(), bundle.launch_config(rows), kernel_args.data(),
-               kernel_args.size());
+  bundle.launch(rows, kernel_args);
   device.synchronize();
   lrrt::copy_to_host(out.data(), device_out, out.size());
 

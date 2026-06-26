@@ -612,6 +612,11 @@ lr_launch_config_t Bundle::launch_config(uint32_t n) const {
   return launch_config_from_manifest(manifest_, n);
 }
 
+void Bundle::launch(uint32_t n, const KernargBuffer &args) const {
+  args.validate();
+  lrrt::launch(kernel_, launch_config(n), args.data(), args.size());
+}
+
 KernelManifest Bundle::load_manifest(const char *manifest_path,
                                      const char *kernel_name) {
   std::vector<unsigned char> data = read_file(manifest_path);

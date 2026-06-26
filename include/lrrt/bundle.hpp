@@ -109,6 +109,7 @@ public:
   const KernelManifest &manifest() const { return manifest_; }
   Kernel kernel() const { return kernel_; }
   lr_launch_config_t launch_config(uint32_t n) const;
+  void launch(uint32_t n, const KernargBuffer &args) const;
 
 private:
   static KernelManifest load_manifest(const char *manifest_path,

@@ -51,10 +51,8 @@ int main(void) {
     void *scratch = nullptr;
     kernel_args.set("_triton_scratch_0", scratch);
     kernel_args.set("_triton_scratch_1", scratch);
-    kernel_args.validate();
 
-    lrrt::launch(bundle.kernel(), bundle.launch_config(n), kernel_args.data(),
-                 kernel_args.size());
+    bundle.launch(n, kernel_args);
     device.synchronize();
     lrrt::copy_to_host(out, device_out);
 

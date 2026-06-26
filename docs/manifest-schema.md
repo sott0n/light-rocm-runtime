@@ -115,6 +115,9 @@ Call `KernargBuffer::validate()` before dispatch to catch missing required
 arguments. Arguments marked with `optional: true` may remain unset and keep
 their zero-initialized bytes.
 
+`Bundle::launch(n, args)` calls `validate()` before submitting the kernel, so it
+is the preferred path when launching a bundle directly.
+
 ### `kernarg_size`
 
 Required integer. Total byte size of the packed kernarg buffer.
