@@ -187,9 +187,14 @@ This is separate from fixed group segment usage encoded in the HSACO metadata.
 
 Optional integer. Per-dispatch temporary workspace requirement.
 
-The current runtime does not allocate workspace from this field. It is reserved
-for an executor layer or a future bundle launcher that owns temporary buffer
-management.
+Missing values default to `0`. The value is parsed into
+`KernelManifest::workspace_bytes` so a higher-level executor can plan temporary
+device memory before dispatching the kernel.
+
+The current runtime core and `Bundle::launch(...)` do not allocate, reuse, or
+bind workspace automatically. If a compiler-generated kernel needs explicit
+workspace, the executor or caller must allocate that buffer and bind it through
+the normal kernarg ABI.
 
 ### Producer Metadata
 
@@ -219,6 +224,7 @@ Example:
 - `block` has exactly three non-zero dimensions
 - `grid` uses the supported one-dimensional expression form
 - argument offsets are present, strictly increasing, and inside `kernarg_size`
+- `workspace_bytes` is parsed as an optional non-negative integer
 - `Bundle::launch_config(n)` rejects zero-sized grids, workgroups that exceed
   HSA packet limits, and grids that are smaller than the workgroup
 - `Bundle::launch(...)` rejects `KernargBuffer` instances whose layout does not

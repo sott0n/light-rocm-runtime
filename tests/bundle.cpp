@@ -67,7 +67,8 @@ const char *kManifest = R"json(
       "kernarg_size": 16,
       "block": [128, 1, 1],
       "grid": ["ceil_div(n, 256) * 128", 1, 1],
-      "shared_memory_bytes": 16
+      "shared_memory_bytes": 16,
+      "workspace_bytes": 4096
     }
   ]
 }
@@ -88,6 +89,7 @@ void test_parse_manifest() {
   expect(manifest.grid_divisor == 256, "grid divisor");
   expect(manifest.grid_multiplier == 128, "grid multiplier");
   expect(manifest.shared_memory_bytes == 16, "shared memory size");
+  expect(manifest.workspace_bytes == 4096, "workspace size");
   expect(manifest.arg_offsets == std::vector<size_t>({0, 8}),
          "argument offsets");
   expect(manifest.args.size() == 2, "argument count");
@@ -223,6 +225,7 @@ void test_multiple_kernels() {
   expect(manifest.name == "first", "first kernel is selected");
   expect(manifest.shared_memory_bytes == 0,
          "missing shared memory defaults to zero");
+  expect(manifest.workspace_bytes == 0, "missing workspace defaults to zero");
 
   std::vector<lrrt::KernelManifest> manifests =
       lrrt::parse_bundle_manifests(json, strlen(json));
@@ -236,6 +239,7 @@ void test_multiple_kernels() {
   expect(second.code_object == "second.hsaco", "selected code object");
   expect(second.shared_memory_bytes == 64,
          "selected kernel shared memory size");
+  expect(second.workspace_bytes == 0, "selected kernel workspace default");
 
   expect_throw([&] { parse(json, "missing"); },
                "missing kernel name must fail");

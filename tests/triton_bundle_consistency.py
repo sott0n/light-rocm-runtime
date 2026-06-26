@@ -143,6 +143,7 @@ def validate_kernel_manifest(index, kernel):
     require_relative_bundle_path(kernel.get("code_object"))
     require_int("kernarg_size", kernel.get("kernarg_size"), 1)
     require_int("shared_memory_bytes", kernel.get("shared_memory_bytes", 0), 0)
+    require_int("workspace_bytes", kernel.get("workspace_bytes", 0), 0)
 
     block = kernel.get("block")
     require_array("block", block)

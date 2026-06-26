@@ -32,6 +32,7 @@ struct KernelManifest {
   uint32_t grid_divisor;
   size_t kernarg_size;
   uint32_t shared_memory_bytes;
+  uint64_t workspace_bytes;
   std::vector<size_t> arg_offsets;
   std::vector<KernelArgument> args;
 };

@@ -177,6 +177,8 @@ private:
       throw std::runtime_error("bundle shared memory requirement is too large");
     }
     manifest.shared_memory_bytes = static_cast<uint32_t>(shared_memory_bytes);
+    manifest.workspace_bytes = static_cast<uint64_t>(
+        read_optional_size("workspace_bytes", kernel_begin, kernel_end, 0));
 
     read_u32_array("block", kernel_begin, kernel_end, manifest.block);
     read_grid_expr(kernel_begin, kernel_end, &manifest.grid_divisor,

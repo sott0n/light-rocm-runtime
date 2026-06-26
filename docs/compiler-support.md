@@ -97,6 +97,10 @@ The manifest should describe the execution contract that the runtime needs:
 The initial manifest does not need to be a general graph IR. It only needs to
 describe enough information for an executor to bind arguments and dispatch
 kernels safely.
+Workspace requirements should stay in the manifest as dispatch metadata. A
+higher-level executor can allocate and bind that temporary memory while the
+runtime core remains focused on loading, dispatch, synchronization, and resource
+handles.
 
 ### Schema reference
 
