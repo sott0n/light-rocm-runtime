@@ -117,6 +117,11 @@ def validate_grid(kernel):
 
 def validate_manifest(manifest):
     require_object("manifest", manifest)
+    require_int("manifest_version", manifest.get("manifest_version"), 1)
+    if manifest["manifest_version"] != 1:
+        raise AssertionError(
+            f"unsupported manifest_version: {manifest['manifest_version']}"
+        )
     require_string("target", manifest.get("target"))
     kernels = manifest.get("kernels")
     require_array("kernels", kernels)

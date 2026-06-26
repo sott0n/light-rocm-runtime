@@ -95,6 +95,14 @@ public:
 
   std::vector<lrrt::KernelManifest> parse_kernels() const {
     std::vector<lrrt::KernelManifest> manifests;
+    const uint32_t manifest_version =
+        read_u32_at(field_value("manifest_version", 0, text_.size()),
+                    text_.size(), "manifest_version");
+    if (manifest_version != lrrt::kSupportedBundleManifestVersion) {
+      throw std::runtime_error(
+          std::string("unsupported bundle manifest_version: ") +
+          std::to_string(manifest_version));
+    }
     const std::string target = read_string("target", 0, text_.size());
     if (target.empty()) {
       throw std::runtime_error("bundle manifest target is empty");
@@ -121,6 +129,7 @@ public:
             kernel_context(kernel_index, position, kernel_end) + ": " +
             error.what());
       }
+      manifest.manifest_version = manifest_version;
       manifest.target = target;
       for (const lrrt::KernelManifest &existing : manifests) {
         if (existing.name == manifest.name) {

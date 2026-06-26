@@ -50,6 +50,7 @@ def main():
         hsaco_file.write(compiled.asm["hsaco"])
 
     manifest = {
+        "manifest_version": 1,
         "target": args.arch,
         "kernels": [
             {

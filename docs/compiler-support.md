@@ -72,6 +72,7 @@ The manifest should describe the execution contract that the runtime needs:
 
 ```json
 {
+  "manifest_version": 1,
   "target": "gfx1101",
   "kernels": [
     {

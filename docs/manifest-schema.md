@@ -28,6 +28,7 @@ reference different code objects in the same bundle directory.
 
 ```json
 {
+  "manifest_version": 1,
   "target": "gfx1101",
   "kernels": [
     {
@@ -51,6 +52,15 @@ reference different code objects in the same bundle directory.
 ```
 
 ## Top-Level Fields
+
+### `manifest_version`
+
+Required integer. Schema version for the bundle manifest.
+
+The current runtime supports only `manifest_version: 1`. Missing or unsupported
+versions are rejected before any kernel entry is selected. This field is the
+compatibility gate for future compiler integrations that need to extend the
+bundle ABI.
 
 ### `target`
 
@@ -202,6 +212,7 @@ Example:
 
 `lrrt::bundle` performs lightweight runtime-facing validation:
 
+- `manifest_version` is present and supported
 - required `target` and kernel fields are present
 - kernel names are unique
 - `code_object` stays inside the bundle directory

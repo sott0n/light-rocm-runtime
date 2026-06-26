@@ -53,6 +53,7 @@ lrrt::KernelManifest parse(const char *json, const char *kernel_name) {
 
 const char *kManifest = R"json(
 {
+  "manifest_version": 1,
   "target": "gfx1101",
   "kernels": [
     {
@@ -74,6 +75,8 @@ const char *kManifest = R"json(
 
 void test_parse_manifest() {
   lrrt::KernelManifest manifest = parse(kManifest);
+  expect(manifest.manifest_version == lrrt::kSupportedBundleManifestVersion,
+         "manifest version");
   expect(manifest.target == "gfx1101", "target arch");
   expect(manifest.name == "scale", "kernel name");
   expect(manifest.symbol == "scale_kernel", "kernel symbol");
@@ -190,6 +193,7 @@ void compile_bundle_launch_overloads(lrrt::Bundle &bundle, lrrt::Queue &queue,
 void test_multiple_kernels() {
   const char *json = R"json(
   {
+    "manifest_version": 1,
     "target": "gfx1101",
     "kernels": [
       {
@@ -241,14 +245,27 @@ void test_multiple_kernels() {
 void test_invalid_manifests() {
   expect_throw([] { lrrt::parse_bundle_manifest(nullptr, 0); },
                "empty manifest must fail");
+  expect_throw(
+      [] {
+        parse(
+            R"json({"manifest_version":1,"target":"gfx1101","kernels":[]})json");
+      },
+      "empty kernel array must fail");
   expect_throw([] { parse(R"json({"target":"gfx1101","kernels":[]})json"); },
-               "empty kernel array must fail");
-  expect_throw([] { parse(R"json({"kernels":[]})json"); },
+               "missing manifest version must fail");
+  expect_throw_contains(
+      [] {
+        parse(
+            R"json({"manifest_version":2,"target":"gfx1101","kernels":[]})json");
+      },
+      "unsupported bundle manifest_version: 2",
+      "unsupported manifest version must fail");
+  expect_throw([] { parse(R"json({"manifest_version":1,"kernels":[]})json"); },
                "missing target must fail");
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[
+          {"manifest_version":1,"target":"gfx1101","kernels":[
             {"name":"same","symbol":"a","code_object":"a.hsaco",
              "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
              "kernarg_size":8,
@@ -262,12 +279,18 @@ void test_invalid_manifests() {
       },
       "duplicate kernel names must fail");
   expect_throw(
-      [] { parse(R"json({"kernels":[{"name":"bad","symbol":"k"}]})json"); },
+      [] {
+        parse(R"json(
+          {"manifest_version":1,"target":"gfx1101","kernels":[
+            {"name":"bad","symbol":"k"}
+          ]}
+        )json");
+      },
       "missing required fields must fail");
   expect_throw_contains(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0}],
             "kernarg_size":8,
@@ -281,7 +304,7 @@ void test_invalid_manifests() {
   expect_throw_contains(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[
               {"name":"x","type":"ptr","offset":0,"size":8},
@@ -297,7 +320,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
             "kernarg_size":8,
@@ -309,7 +332,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"../k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
             "kernarg_size":8,
@@ -321,7 +344,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[
               {"name":"x","type":"ptr","offset":0,"size":8},
@@ -335,7 +358,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":8,"size":8}],
             "kernarg_size":8,
@@ -347,7 +370,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
             "kernarg_size":8,
@@ -359,7 +382,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
             "kernarg_size":8,
@@ -372,7 +395,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
             "kernarg_size":8,
@@ -385,7 +408,7 @@ void test_invalid_manifests() {
   expect_throw(
       [] {
         parse(R"json(
-          {"target":"gfx1101","kernels":[{
+          {"manifest_version":1,"target":"gfx1101","kernels":[{
             "name":"bad","symbol":"k","code_object":"k.hsaco",
             "args":[{"name":"x","type":"ptr","offset":0,"size":8}],
             "kernarg_size":8,

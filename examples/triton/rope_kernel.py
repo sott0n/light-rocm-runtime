@@ -118,7 +118,7 @@ def main():
             }
         )
 
-    manifest = {"target": args.arch, "kernels": kernels}
+    manifest = {"manifest_version": 1, "target": args.arch, "kernels": kernels}
     manifest_path = os.path.join(args.output_dir, "manifest.json")
     with open(manifest_path, "w", encoding="utf-8") as manifest_file:
         json.dump(manifest, manifest_file, indent=2)

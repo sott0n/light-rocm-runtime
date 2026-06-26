@@ -11,6 +11,8 @@
 
 namespace lrrt {
 
+static constexpr uint32_t kSupportedBundleManifestVersion = 1;
+
 struct KernelArgument {
   std::string name;
   std::string type;
@@ -20,6 +22,7 @@ struct KernelArgument {
 };
 
 struct KernelManifest {
+  uint32_t manifest_version;
   std::string target;
   std::string name;
   std::string symbol;
