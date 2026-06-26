@@ -92,19 +92,30 @@ public:
     }
 
     position = skip_space(position + 1, text_.size());
+    size_t kernel_index = 0;
     while (position < text_.size() && text_[position] != ']') {
       if (text_[position] != '{') {
         throw std::runtime_error("invalid kernel manifest array");
       }
       const size_t kernel_end = matching_brace(position);
-      lrrt::KernelManifest manifest = parse_kernel(position, kernel_end);
+      lrrt::KernelManifest manifest{};
+      try {
+        manifest = parse_kernel(position, kernel_end);
+      } catch (const std::exception &error) {
+        throw std::runtime_error(
+            kernel_context(kernel_index, position, kernel_end) + ": " +
+            error.what());
+      }
       manifest.target = target;
       for (const lrrt::KernelManifest &existing : manifests) {
         if (existing.name == manifest.name) {
-          throw std::runtime_error("duplicate kernel name in bundle manifest");
+          throw std::runtime_error(
+              std::string("duplicate kernel name in bundle manifest: ") +
+              manifest.name);
         }
       }
       manifests.push_back(std::move(manifest));
+      ++kernel_index;
 
       position = skip_space(kernel_end, text_.size());
       if (position < text_.size() && text_[position] == ',') {
@@ -159,6 +170,19 @@ private:
       throw std::runtime_error("invalid bundle manifest");
     }
     return manifest;
+  }
+
+  std::string kernel_context(size_t index, size_t begin, size_t end) const {
+    std::string context =
+        std::string("bundle manifest kernels[") + std::to_string(index) + "]";
+    try {
+      std::string name = read_string("name", begin, end);
+      if (!name.empty()) {
+        context += " '" + name + "'";
+      }
+    } catch (const std::exception &) {
+    }
+    return context;
   }
 
   size_t require(const char *needle, size_t from, size_t limit) const {
@@ -434,18 +458,26 @@ private:
       throw std::runtime_error("manifest args is not array");
     }
     size_t position = skip_space(args + 1, limit);
+    size_t arg_index = 0;
     while (position < limit && text_[position] != ']') {
       if (text_[position] != '{') {
         throw std::runtime_error("invalid manifest args array");
       }
       const size_t arg_end = matching_brace(position);
       lrrt::KernelArgument arg{};
-      arg.name = read_string("name", position, arg_end);
-      arg.type = read_string("type", position, arg_end);
-      arg.offset = read_size("offset", position, arg_end);
-      arg.size = read_size("size", position, arg_end);
-      arg.optional = read_optional_bool("optional", position, arg_end, false);
+      try {
+        arg.name = read_string("name", position, arg_end);
+        arg.type = read_string("type", position, arg_end);
+        arg.offset = read_size("offset", position, arg_end);
+        arg.size = read_size("size", position, arg_end);
+        arg.optional = read_optional_bool("optional", position, arg_end, false);
+      } catch (const std::exception &error) {
+        throw std::runtime_error(std::string("args[") +
+                                 std::to_string(arg_index) +
+                                 "]: " + error.what());
+      }
       args_out.push_back(std::move(arg));
+      ++arg_index;
 
       position = skip_space(arg_end, limit);
       if (position < limit && text_[position] == ',') {
@@ -469,23 +501,35 @@ private:
     for (size_t i = 0; i < args.size(); ++i) {
       const lrrt::KernelArgument &arg = args[i];
       if (arg.name.empty() || arg.type.empty() || arg.size == 0) {
-        throw std::runtime_error("invalid bundle argument manifest");
+        throw std::runtime_error(arg_context(i, arg) +
+                                 ": invalid bundle argument manifest");
       }
       if (arg.offset >= kernarg_size || arg.size > kernarg_size ||
           arg.offset + arg.size > kernarg_size) {
-        throw std::runtime_error("bundle argument offset exceeds kernarg size");
+        throw std::runtime_error(arg_context(i, arg) +
+                                 ": argument range exceeds kernarg_size");
       }
       if (i > 0 && arg.offset <= previous) {
-        throw std::runtime_error(
-            "bundle argument offsets must be strictly increasing");
+        throw std::runtime_error(arg_context(i, arg) +
+                                 ": argument offsets must be strictly "
+                                 "increasing");
       }
       for (size_t j = 0; j < i; ++j) {
         if (args[j].name == arg.name) {
-          throw std::runtime_error("duplicate bundle argument name");
+          throw std::runtime_error(arg_context(i, arg) +
+                                   ": duplicate argument name");
         }
       }
       previous = arg.offset;
     }
+  }
+
+  std::string arg_context(size_t index, const lrrt::KernelArgument &arg) const {
+    std::string context = std::string("args[") + std::to_string(index) + "]";
+    if (!arg.name.empty()) {
+      context += " '" + arg.name + "'";
+    }
+    return context;
   }
 
   std::string text_;

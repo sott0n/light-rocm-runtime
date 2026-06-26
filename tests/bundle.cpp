@@ -28,6 +28,21 @@ void expect_throw(Function function, const char *message) {
   }
 }
 
+template <typename Function>
+void expect_throw_contains(Function function, const char *text,
+                           const char *message) {
+  try {
+    function();
+    fprintf(stderr, "FAIL: %s\n", message);
+    ++g_failures;
+  } catch (const std::exception &error) {
+    if (strstr(error.what(), text) == nullptr) {
+      fprintf(stderr, "FAIL: %s: got '%s'\n", message, error.what());
+      ++g_failures;
+    }
+  }
+}
+
 lrrt::KernelManifest parse(const char *json) {
   return lrrt::parse_bundle_manifest(json, strlen(json));
 }
@@ -212,6 +227,36 @@ void test_invalid_manifests() {
   expect_throw(
       [] { parse(R"json({"kernels":[{"name":"bad","symbol":"k"}]})json"); },
       "missing required fields must fail");
+  expect_throw_contains(
+      [] {
+        parse(R"json(
+          {"target":"gfx1101","kernels":[{
+            "name":"bad","symbol":"k","code_object":"k.hsaco",
+            "args":[{"name":"x","type":"ptr","offset":0}],
+            "kernarg_size":8,
+            "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
+          }]}
+        )json");
+      },
+      "bundle manifest kernels[0] 'bad': args[0]: missing manifest token "
+      "\"size\"",
+      "missing argument field error must include kernel and arg context");
+  expect_throw_contains(
+      [] {
+        parse(R"json(
+          {"target":"gfx1101","kernels":[{
+            "name":"bad","symbol":"k","code_object":"k.hsaco",
+            "args":[
+              {"name":"x","type":"ptr","offset":0,"size":8},
+              {"name":"x","type":"ptr","offset":8,"size":8}
+            ],
+            "kernarg_size":16,
+            "block":[64,1,1],"grid":["ceil_div(n, 64) * 64",1,1]
+          }]}
+        )json");
+      },
+      "bundle manifest kernels[0] 'bad': args[1] 'x': duplicate argument name",
+      "duplicate argument name error must include arg name");
   expect_throw(
       [] {
         parse(R"json(
