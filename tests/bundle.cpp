@@ -139,7 +139,19 @@ void test_kernarg_buffer() {
   manifest.args[1].optional = true;
   lrrt::KernargBuffer optional_args(manifest);
   optional_args.set("x", x);
+  optional_args.bind_optional_nulls();
   optional_args.validate();
+  const unsigned char *optional_bytes =
+      static_cast<const unsigned char *>(optional_args.data());
+  void *optional_out = (void *)0x1;
+  memcpy(&optional_out, optional_bytes + 8, sizeof(optional_out));
+  expect(optional_out == nullptr, "optional pointer is null-bound");
+
+  manifest.args[1].type = "i32";
+  lrrt::KernargBuffer invalid_optional_args(manifest);
+  invalid_optional_args.set("x", x);
+  expect_throw([&] { invalid_optional_args.bind_optional_nulls(); },
+               "optional non-pointer null bind must fail");
 }
 
 void compile_bundle_launch_overloads(lrrt::Bundle &bundle, lrrt::Queue &queue,

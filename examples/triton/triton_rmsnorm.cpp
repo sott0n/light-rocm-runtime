@@ -43,9 +43,7 @@ static void run_case(lrrt::Device &device, uint32_t rows, uint32_t hidden) {
   kernel_args.set("eps", eps);
   kernel_args.set("rows", (int32_t)rows);
   kernel_args.set("hidden", (int32_t)hidden);
-  void *scratch = nullptr;
-  kernel_args.set("_triton_global_scratch", scratch);
-  kernel_args.set("_triton_profile_scratch", scratch);
+  kernel_args.bind_optional_nulls();
   bundle.launch(rows, kernel_args);
   device.synchronize();
   lrrt::copy_to_host(out, device_out);

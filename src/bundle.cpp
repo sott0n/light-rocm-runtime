@@ -641,6 +641,21 @@ void KernargBuffer::validate() const {
   }
 }
 
+void KernargBuffer::bind_optional_nulls() {
+  void *null_pointer = nullptr;
+  for (size_t i = 0; i < args_.size(); ++i) {
+    if (!args_[i].optional || bound_[i]) {
+      continue;
+    }
+    if (args_[i].type != "ptr") {
+      throw std::runtime_error(
+          std::string("optional null binding requires ptr argument: ") +
+          args_[i].name);
+    }
+    set_raw(i, &null_pointer, sizeof(null_pointer));
+  }
+}
+
 Bundle::Bundle(Device device, const char *manifest_path)
     : manifest_(load_manifest(manifest_path, nullptr)),
       module_(device, read_code_object(manifest_path, manifest_)),

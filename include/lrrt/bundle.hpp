@@ -89,6 +89,7 @@ public:
   }
 
   void validate() const;
+  void bind_optional_nulls();
 
   const void *data() const { return data_.data(); }
   void *data() { return data_.data(); }

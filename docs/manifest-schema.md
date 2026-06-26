@@ -114,6 +114,8 @@ buffers, or convert data formats.
 Call `KernargBuffer::validate()` before dispatch to catch missing required
 arguments. Arguments marked with `optional: true` may remain unset and keep
 their zero-initialized bytes.
+Use `KernargBuffer::bind_optional_nulls()` to explicitly bind unset optional
+pointer arguments to null.
 
 Use `Bundle::make_args()` to create a `KernargBuffer` from the selected manifest
 entry. `Bundle::launch(n, args)` calls `validate()` before submitting the

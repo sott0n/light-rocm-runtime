@@ -46,9 +46,7 @@ int main(void) {
     kernel_args.set("out", (float *)device_out.data());
     kernel_args.set("factor", factor);
     kernel_args.set("n", (int32_t)n);
-    void *scratch = nullptr;
-    kernel_args.set("_triton_scratch_0", scratch);
-    kernel_args.set("_triton_scratch_1", scratch);
+    kernel_args.bind_optional_nulls();
 
     bundle.launch(n, kernel_args);
     device.synchronize();
