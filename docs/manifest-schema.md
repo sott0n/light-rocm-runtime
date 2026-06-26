@@ -116,9 +116,12 @@ arguments. Arguments marked with `optional: true` may remain unset and keep
 their zero-initialized bytes.
 Use `KernargBuffer::bind_optional_nulls()` to explicitly bind unset optional
 pointer arguments to null.
+Use `KernargBuffer::validate(manifest)` when the buffer must also be checked
+against a specific kernel entry's argument layout.
 
 Use `Bundle::make_args()` to create a `KernargBuffer` from the selected manifest
-entry. `Bundle::launch(n, args)` calls `validate()` before submitting the
+entry. `Bundle::launch(n, args)` checks that the buffer matches the selected
+kernel manifest and that all required arguments are bound before submitting the
 kernel, so it is the preferred path when launching a bundle directly.
 Use `Bundle::launch(queue, n, args, dependencies)` when dispatching a bundle on
 an explicit queue with event dependencies.
@@ -205,6 +208,10 @@ Example:
 - `block` has exactly three non-zero dimensions
 - `grid` uses the supported one-dimensional expression form
 - argument offsets are present, strictly increasing, and inside `kernarg_size`
+- `Bundle::launch_config(n)` rejects zero-sized grids, workgroups that exceed
+  HSA packet limits, and grids that are smaller than the workgroup
+- `Bundle::launch(...)` rejects `KernargBuffer` instances whose layout does not
+  match the selected kernel manifest
 
 The build and test layer performs producer consistency checks that require
 inspecting HSACO metadata:

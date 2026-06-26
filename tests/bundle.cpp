@@ -118,6 +118,7 @@ void test_kernarg_buffer() {
                "partially bound kernarg buffer must fail");
   args.set("out", out);
   args.validate();
+  args.validate(manifest);
 
   expect(args.size() == 16, "kernarg buffer size");
   const unsigned char *bytes = static_cast<const unsigned char *>(args.data());
@@ -152,6 +153,28 @@ void test_kernarg_buffer() {
   invalid_optional_args.set("x", x);
   expect_throw([&] { invalid_optional_args.bind_optional_nulls(); },
                "optional non-pointer null bind must fail");
+}
+
+void test_kernarg_buffer_manifest_validation() {
+  lrrt::KernelManifest manifest = parse(kManifest);
+  lrrt::KernargBuffer args(manifest);
+  const float *x = (const float *)0x1000;
+  float *out = (float *)0x2000;
+  args.set("x", x);
+  args.set("out", out);
+
+  lrrt::KernelManifest different_size = manifest;
+  different_size.kernarg_size = 24;
+  expect_throw_contains(
+      [&] { args.validate(different_size); }, "does not match kernel manifest",
+      "kernarg buffer size mismatch must fail manifest validation");
+
+  lrrt::KernelManifest different_arg_name = manifest;
+  different_arg_name.args[1].name = "y";
+  expect_throw_contains(
+      [&] { args.validate(different_arg_name); },
+      "does not match kernel manifest",
+      "kernarg buffer argument mismatch must fail manifest validation");
 }
 
 void compile_bundle_launch_overloads(lrrt::Bundle &bundle, lrrt::Queue &queue,
@@ -382,14 +405,35 @@ void test_grid_overflow() {
                "oversized launch grid must fail");
 }
 
+void test_launch_config_validation() {
+  lrrt::KernelManifest manifest = parse(kManifest);
+  expect_throw_contains([&] { lrrt::launch_config_from_manifest(manifest, 0); },
+                        "grid dimensions must be non-zero",
+                        "zero-sized launch must fail");
+
+  manifest = parse(kManifest);
+  manifest.block[0] = UINT16_MAX + 1u;
+  expect_throw_contains([&] { lrrt::launch_config_from_manifest(manifest, 1); },
+                        "exceed HSA packet limits",
+                        "oversized workgroup must fail");
+
+  manifest = parse(kManifest);
+  manifest.grid_multiplier = 64;
+  expect_throw_contains([&] { lrrt::launch_config_from_manifest(manifest, 1); },
+                        "cover the workgroup",
+                        "grid smaller than workgroup must fail");
+}
+
 } // namespace
 
 int main() {
   test_parse_manifest();
   test_kernarg_buffer();
+  test_kernarg_buffer_manifest_validation();
   test_multiple_kernels();
   test_invalid_manifests();
   test_grid_overflow();
+  test_launch_config_validation();
 
   if (g_failures != 0) {
     fprintf(stderr, "%d bundle tests failed\n", g_failures);

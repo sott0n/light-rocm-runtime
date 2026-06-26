@@ -54,6 +54,21 @@ bool has_parent_component(const std::string &path) {
   return false;
 }
 
+bool same_argument_layout(const std::vector<lrrt::KernelArgument> &left,
+                          const std::vector<lrrt::KernelArgument> &right) {
+  if (left.size() != right.size()) {
+    return false;
+  }
+  for (size_t i = 0; i < left.size(); ++i) {
+    if (left[i].name != right[i].name || left[i].type != right[i].type ||
+        left[i].offset != right[i].offset || left[i].size != right[i].size ||
+        left[i].optional != right[i].optional) {
+      return false;
+    }
+  }
+  return true;
+}
+
 std::string bundle_file_path(const char *manifest_path,
                              const std::string &file_name) {
   if (file_name.empty() || file_name[0] == '/' ||
@@ -564,6 +579,15 @@ std::vector<KernelManifest> parse_bundle_manifests(const void *data,
 
 lr_launch_config_t launch_config_from_manifest(const KernelManifest &manifest,
                                                uint32_t n) {
+  if (manifest.block[0] == 0 || manifest.block[1] == 0 ||
+      manifest.block[2] == 0) {
+    throw std::runtime_error("bundle launch block dimensions must be non-zero");
+  }
+  if (manifest.block[0] > UINT16_MAX || manifest.block[1] > UINT16_MAX ||
+      manifest.block[2] > UINT16_MAX) {
+    throw std::runtime_error(
+        "bundle launch block dimensions exceed HSA packet limits");
+  }
   if (manifest.grid_divisor == 0 || manifest.grid_multiplier == 0) {
     throw std::runtime_error("invalid bundle launch configuration");
   }
@@ -573,6 +597,13 @@ lr_launch_config_t launch_config_from_manifest(const KernelManifest &manifest,
   const uint64_t grid_x = programs * manifest.grid_multiplier;
   if (grid_x > UINT32_MAX) {
     throw std::runtime_error("bundle grid size is too large");
+  }
+  if (grid_x == 0) {
+    throw std::runtime_error("bundle launch grid dimensions must be non-zero");
+  }
+  if (grid_x < manifest.block[0]) {
+    throw std::runtime_error(
+        "bundle launch grid dimensions must cover the workgroup");
   }
   return {
       {static_cast<uint32_t>(grid_x), 1, 1},
@@ -641,6 +672,15 @@ void KernargBuffer::validate() const {
   }
 }
 
+void KernargBuffer::validate(const KernelManifest &manifest) const {
+  if (data_.size() != manifest.kernarg_size ||
+      !same_argument_layout(args_, manifest.args)) {
+    throw std::runtime_error(
+        "bundle kernarg buffer does not match kernel manifest");
+  }
+  validate();
+}
+
 void KernargBuffer::bind_optional_nulls() {
   void *null_pointer = nullptr;
   for (size_t i = 0; i < args_.size(); ++i) {
@@ -674,20 +714,20 @@ lr_launch_config_t Bundle::launch_config(uint32_t n) const {
 }
 
 void Bundle::launch(uint32_t n, const KernargBuffer &args) const {
-  args.validate();
+  args.validate(manifest_);
   lrrt::launch(kernel_, launch_config(n), args.data(), args.size());
 }
 
 void Bundle::launch(uint32_t n, const KernargBuffer &args,
                     const std::vector<const Event *> &dependencies) const {
-  args.validate();
+  args.validate(manifest_);
   lrrt::launch(kernel_, launch_config(n), args.data(), args.size(),
                dependencies);
 }
 
 void Bundle::launch(const Queue &queue, uint32_t n, const KernargBuffer &args,
                     const std::vector<const Event *> &dependencies) const {
-  args.validate();
+  args.validate(manifest_);
   lrrt::launch(queue, kernel_, launch_config(n), args.data(), args.size(),
                dependencies);
 }
