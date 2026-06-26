@@ -36,7 +36,7 @@ static void run_case(lrrt::Device &device, uint32_t rows, uint32_t hidden) {
   lrrt::copy_to_device(device_x, x);
   lrrt::copy_to_device(device_weight, weight);
 
-  lrrt::KernargBuffer kernel_args(bundle.manifest());
+  lrrt::KernargBuffer kernel_args = bundle.make_args();
   kernel_args.set("x", (const float *)device_x.data());
   kernel_args.set("weight", (const float *)device_weight.data());
   kernel_args.set("out", (float *)device_out.data());

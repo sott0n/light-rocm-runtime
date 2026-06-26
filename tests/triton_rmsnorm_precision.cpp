@@ -49,7 +49,7 @@ static void run_case(lrrt::Device &device, DataType data_type, uint32_t rows,
   lrrt::copy_to_device(device_x, x.data(), x.size());
   lrrt::copy_to_device(device_weight, weight.data(), weight.size());
 
-  lrrt::KernargBuffer kernel_args(bundle.manifest());
+  lrrt::KernargBuffer kernel_args = bundle.make_args();
   kernel_args.set("x", device_x.data());
   kernel_args.set("weight", device_weight.data());
   kernel_args.set("out", device_out.data());

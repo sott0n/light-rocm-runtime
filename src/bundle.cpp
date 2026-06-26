@@ -652,6 +652,8 @@ Bundle::Bundle(Device device, const char *manifest_path,
       module_(device, read_code_object(manifest_path, manifest_)),
       kernel_(module_.kernel(manifest_.symbol.c_str())) {}
 
+KernargBuffer Bundle::make_args() const { return KernargBuffer(manifest_); }
+
 lr_launch_config_t Bundle::launch_config(uint32_t n) const {
   return launch_config_from_manifest(manifest_, n);
 }

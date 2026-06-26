@@ -43,7 +43,7 @@ int main(void) {
     printf("loaded Triton manifest for kernel: %s\n",
            kernel_manifest.name.c_str());
 
-    lrrt::KernargBuffer kernel_args(kernel_manifest);
+    lrrt::KernargBuffer kernel_args = bundle.make_args();
     kernel_args.set("gate", (const float *)device_gate.data());
     kernel_args.set("up", (const float *)device_up.data());
     kernel_args.set("out", (float *)device_out.data());

@@ -47,7 +47,7 @@ static void run_case(lrrt::Device &device, lrrt::Bundle &bundle,
   lrrt::copy_to_device(device_cos, cos);
   lrrt::copy_to_device(device_sin, sin);
 
-  lrrt::KernargBuffer kernel_args(bundle.manifest());
+  lrrt::KernargBuffer kernel_args = bundle.make_args();
   kernel_args.set("x", (const float *)device_x.data());
   kernel_args.set("cos", (const float *)device_cos.data());
   kernel_args.set("sin", (const float *)device_sin.data());

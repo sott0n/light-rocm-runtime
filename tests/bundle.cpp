@@ -146,7 +146,9 @@ void compile_bundle_launch_overloads(lrrt::Bundle &bundle, lrrt::Queue &queue,
                                      lrrt::KernargBuffer &args,
                                      lrrt::Event &event) {
   std::vector<const lrrt::Event *> dependencies = {&event};
+  lrrt::KernargBuffer bundle_args = bundle.make_args();
   bundle.launch(1, args, dependencies);
+  bundle.launch(1, bundle_args, dependencies);
   bundle.launch(queue, 1, args, dependencies);
 }
 

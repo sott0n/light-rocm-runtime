@@ -115,8 +115,9 @@ Call `KernargBuffer::validate()` before dispatch to catch missing required
 arguments. Arguments marked with `optional: true` may remain unset and keep
 their zero-initialized bytes.
 
-`Bundle::launch(n, args)` calls `validate()` before submitting the kernel, so it
-is the preferred path when launching a bundle directly.
+Use `Bundle::make_args()` to create a `KernargBuffer` from the selected manifest
+entry. `Bundle::launch(n, args)` calls `validate()` before submitting the
+kernel, so it is the preferred path when launching a bundle directly.
 Use `Bundle::launch(queue, n, args, dependencies)` when dispatching a bundle on
 an explicit queue with event dependencies.
 

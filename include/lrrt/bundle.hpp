@@ -108,6 +108,7 @@ public:
 
   const KernelManifest &manifest() const { return manifest_; }
   Kernel kernel() const { return kernel_; }
+  KernargBuffer make_args() const;
   lr_launch_config_t launch_config(uint32_t n) const;
   void launch(uint32_t n, const KernargBuffer &args) const;
   void launch(uint32_t n, const KernargBuffer &args,
