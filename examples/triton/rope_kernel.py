@@ -1,10 +1,15 @@
-import argparse
-import json
-import os
-
-import triton
 import triton.language as tl
-from triton.backends.compiler import GPUTarget
+from manifest_utils import (
+    arg,
+    compile_kernel,
+    kernel_entry,
+    parse_generator_args,
+    profile_scratch_args,
+    triton,
+    triton_metadata,
+    write_code_object,
+    write_manifest,
+)
 
 
 @triton.jit
@@ -37,35 +42,17 @@ def rope_kernel(
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--arch", required=True)
-    parser.add_argument("--output-dir", required=True)
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
+    args = parse_generator_args()
 
     kernel_args = [
-        {"name": "x", "type": "ptr", "offset": 0, "size": 8},
-        {"name": "cos", "type": "ptr", "offset": 8, "size": 8},
-        {"name": "sin", "type": "ptr", "offset": 16, "size": 8},
-        {"name": "out", "type": "ptr", "offset": 24, "size": 8},
-        {"name": "rows", "type": "i32", "offset": 32, "size": 4},
-        {"name": "heads", "type": "i32", "offset": 36, "size": 4},
-        {"name": "head_dim", "type": "i32", "offset": 40, "size": 4},
-        {
-            "name": "_triton_global_scratch",
-            "type": "ptr",
-            "offset": 48,
-            "size": 8,
-            "optional": True,
-        },
-        {
-            "name": "_triton_profile_scratch",
-            "type": "ptr",
-            "offset": 56,
-            "size": 8,
-            "optional": True,
-        },
+        arg("x", "ptr", 0, 8),
+        arg("cos", "ptr", 8, 8),
+        arg("sin", "ptr", 16, 8),
+        arg("out", "ptr", 24, 8),
+        arg("rows", "i32", 32, 4),
+        arg("heads", "i32", 36, 4),
+        arg("head_dim", "i32", 40, 4),
+        *profile_scratch_args(48),
     ]
     specializations = [
         (64, 2, "kernels.hsaco"),
@@ -74,8 +61,9 @@ def main():
     kernels = []
     for block_size, num_warps, code_object in specializations:
         workgroup_size = num_warps * 32
-        source = triton.compiler.ASTSource(
+        compiled = compile_kernel(
             rope_kernel,
+            args.arch,
             signature={
                 "x": "*fp32",
                 "cos": "*fp32",
@@ -87,42 +75,29 @@ def main():
                 "BLOCK_SIZE": "constexpr",
             },
             constexprs={"BLOCK_SIZE": block_size},
+            num_warps=num_warps,
         )
-        compiled = triton.compile(
-            source,
-            target=GPUTarget("hip", args.arch, 64),
-            options={"num_warps": num_warps, "num_stages": 2},
-        )
-
-        hsaco_path = os.path.join(args.output_dir, code_object)
-        with open(hsaco_path, "wb") as hsaco_file:
-            hsaco_file.write(compiled.asm["hsaco"])
+        write_code_object(args.output_dir, code_object, compiled)
 
         kernels.append(
-            {
-                "name": f"rope_{block_size}",
-                "symbol": "rope_kernel",
-                "code_object": code_object,
-                "args": kernel_args,
-                "kernarg_size": 64,
-                "block": [workgroup_size, 1, 1],
-                "grid": [f"ceil_div(n, 1) * {workgroup_size}", 1, 1],
-                "shared_memory_bytes": compiled.metadata.shared,
-                "triton": {
-                    "version": triton.__version__,
-                    "block_size": block_size,
-                    "max_head_dim": block_size,
-                    "num_warps": num_warps,
-                },
-                "workspace_bytes": 0,
-            }
+            kernel_entry(
+                f"rope_{block_size}",
+                "rope_kernel",
+                code_object,
+                kernel_args,
+                64,
+                workgroup_size,
+                f"ceil_div(n, 1) * {workgroup_size}",
+                compiled,
+                triton_metadata(
+                    block_size=block_size,
+                    max_head_dim=block_size,
+                    num_warps=num_warps,
+                ),
+            )
         )
 
-    manifest = {"manifest_version": 1, "target": args.arch, "kernels": kernels}
-    manifest_path = os.path.join(args.output_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as manifest_file:
-        json.dump(manifest, manifest_file, indent=2)
-        manifest_file.write("\n")
+    write_manifest(args.output_dir, args.arch, kernels)
 
 
 if __name__ == "__main__":

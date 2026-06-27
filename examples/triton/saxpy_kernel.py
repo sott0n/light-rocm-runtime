@@ -1,10 +1,15 @@
-import argparse
-import json
-import os
-
-import triton
 import triton.language as tl
-from triton.backends.compiler import GPUTarget
+from manifest_utils import (
+    arg,
+    compile_kernel,
+    kernel_entry,
+    legacy_scratch_args,
+    parse_generator_args,
+    triton,
+    triton_metadata,
+    write_code_object,
+    write_manifest,
+)
 
 
 @triton.jit
@@ -19,18 +24,14 @@ def saxpy_kernel(x, y, out, a, n, BLOCK_SIZE: tl.constexpr):
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--arch", required=True)
-    parser.add_argument("--output-dir", required=True)
-    args = parser.parse_args()
-
-    os.makedirs(args.output_dir, exist_ok=True)
+    args = parse_generator_args()
 
     block_size = 256
     num_warps = 4
     workgroup_size = 128
-    source = triton.compiler.ASTSource(
+    compiled = compile_kernel(
         saxpy_kernel,
+        args.arch,
         signature={
             "x": "*fp32",
             "y": "*fp32",
@@ -40,62 +41,35 @@ def main():
             "BLOCK_SIZE": "constexpr",
         },
         constexprs={"BLOCK_SIZE": block_size},
+        num_warps=num_warps,
     )
-    compiled = triton.compile(
-        source,
-        target=GPUTarget("hip", args.arch, 64),
-        options={"num_warps": num_warps, "num_stages": 2},
-    )
+    write_code_object(args.output_dir, "kernels.hsaco", compiled)
 
-    hsaco_path = os.path.join(args.output_dir, "kernels.hsaco")
-    with open(hsaco_path, "wb") as hsaco_file:
-        hsaco_file.write(compiled.asm["hsaco"])
-
-    manifest = {
-        "manifest_version": 1,
-        "target": args.arch,
-        "kernels": [
-            {
-                "name": "saxpy",
-                "symbol": "saxpy_kernel",
-                "code_object": "kernels.hsaco",
-                "args": [
-                    {"name": "x", "type": "ptr", "offset": 0, "size": 8},
-                    {"name": "y", "type": "ptr", "offset": 8, "size": 8},
-                    {"name": "out", "type": "ptr", "offset": 16, "size": 8},
-                    {"name": "a", "type": "fp32", "offset": 24, "size": 4},
-                    {"name": "n", "type": "i32", "offset": 28, "size": 4},
-                    {
-                        "name": "_triton_scratch_0",
-                        "type": "ptr",
-                        "offset": 32,
-                        "size": 8,
-                        "optional": True,
-                    },
-                    {
-                        "name": "_triton_scratch_1",
-                        "type": "ptr",
-                        "offset": 40,
-                        "size": 8,
-                        "optional": True,
-                    },
-                ],
-                "kernarg_size": 48,
-                "block": [workgroup_size, 1, 1],
-                "grid": ["ceil_div(n, 256) * 128", 1, 1],
-                "triton": {
-                    "version": triton.__version__,
-                    "block_size": block_size,
-                    "num_warps": num_warps,
-                },
-                "workspace_bytes": 0,
-            }
+    kernel_args = [
+        arg("x", "ptr", 0, 8),
+        arg("y", "ptr", 8, 8),
+        arg("out", "ptr", 16, 8),
+        arg("a", "fp32", 24, 4),
+        arg("n", "i32", 28, 4),
+        *legacy_scratch_args(32),
+    ]
+    write_manifest(
+        args.output_dir,
+        args.arch,
+        [
+            kernel_entry(
+                "saxpy",
+                "saxpy_kernel",
+                "kernels.hsaco",
+                kernel_args,
+                48,
+                workgroup_size,
+                "ceil_div(n, 256) * 128",
+                compiled,
+                triton_metadata(block_size=block_size, num_warps=num_warps),
+            )
         ],
-    }
-    manifest_path = os.path.join(args.output_dir, "manifest.json")
-    with open(manifest_path, "w", encoding="utf-8") as manifest_file:
-        json.dump(manifest, manifest_file, indent=2)
-        manifest_file.write("\n")
+    )
 
 
 if __name__ == "__main__":
