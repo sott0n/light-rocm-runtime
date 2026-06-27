@@ -149,10 +149,12 @@ meaningful:
 
 ### P1: Thin Executor Prototype
 
-- Load a fixed list of bundles.
-- Allocate a few named buffers.
-- Launch two or three kernels in order on one queue.
-- Validate the final buffer against a CPU reference.
+- `triton_mini_attention` now contains a fixed-shape executor prototype.
+- It loads a fixed list of bundles, owns named device buffers, launches three
+  kernels in order on one queue, and validates the final buffer against a CPU
+  reference.
+- Keep the next step focused on generalizing only the parts that are repeated
+  by additional integration examples.
 
 ### P2: Causal Softmax
 

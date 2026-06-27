@@ -40,29 +40,123 @@ static uint32_t select_keys_block(uint32_t keys) {
   return 4096;
 }
 
+class MiniAttentionExecutor {
+public:
+  MiniAttentionExecutor(lrrt::Device &device, uint32_t keys, uint32_t head_dim)
+      : queue_(device), keys_(keys), head_dim_(head_dim),
+        scale_(1.0f / sqrtf((float)head_dim)),
+        score_kernel_name_(make_score_kernel_name(head_dim)),
+        softmax_kernel_name_(make_softmax_kernel_name(keys)),
+        aggregation_kernel_name_(make_aggregation_kernel_name(keys)),
+        score_bundle_(device, LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST,
+                      score_kernel_name_.c_str()),
+        softmax_bundle_(device, LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST,
+                        softmax_kernel_name_.c_str()),
+        aggregation_bundle_(device, LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST,
+                            aggregation_kernel_name_.c_str()),
+        q_(device, head_dim * sizeof(float)),
+        k_(device, keys * head_dim * sizeof(float)),
+        v_(device, keys * head_dim * sizeof(float)),
+        scores_(device, keys * sizeof(float)),
+        probs_(device, keys * sizeof(float)),
+        out_(device, head_dim * sizeof(float)) {}
+
+  void copy_inputs(const std::vector<float> &q, const std::vector<float> &k,
+                   const std::vector<float> &v) {
+    if (q.size() != head_dim_ || k.size() != keys_ * head_dim_ ||
+        v.size() != keys_ * head_dim_) {
+      throw std::runtime_error("mini attention input shape mismatch");
+    }
+
+    std::vector<float> scores(keys_, 0.0f);
+    std::vector<float> probs(keys_, 0.0f);
+    lrrt::copy_to_device(q_, q);
+    lrrt::copy_to_device(k_, k);
+    lrrt::copy_to_device(v_, v);
+    lrrt::copy_to_device(scores_, scores);
+    lrrt::copy_to_device(probs_, probs);
+  }
+
+  void run(uint32_t valid_keys) {
+    if (valid_keys == 0 || valid_keys > keys_) {
+      throw std::runtime_error("mini attention valid_keys is out of range");
+    }
+
+    lrrt::KernargBuffer score_args = score_bundle_.make_args();
+    score_args.set("q", (const float *)q_.data());
+    score_args.set("k", (const float *)k_.data());
+    score_args.set("out", (float *)scores_.data());
+    score_args.set("keys", (int32_t)keys_);
+    score_args.set("head_dim", (int32_t)head_dim_);
+    score_args.set("scale", scale_);
+    score_args.bind_optional_nulls();
+    score_bundle_.launch(queue_, keys_, score_args);
+
+    lrrt::KernargBuffer softmax_args = softmax_bundle_.make_args();
+    softmax_args.set("x", (const float *)scores_.data());
+    softmax_args.set("out", (float *)probs_.data());
+    softmax_args.set("rows", (int32_t)1);
+    softmax_args.set("hidden", (int32_t)keys_);
+    softmax_args.set("query_start", (int32_t)(valid_keys - 1));
+    softmax_args.bind_optional_nulls();
+    softmax_bundle_.launch(queue_, 1, softmax_args);
+
+    lrrt::KernargBuffer aggregation_args = aggregation_bundle_.make_args();
+    aggregation_args.set("probs", (const float *)probs_.data());
+    aggregation_args.set("v", (const float *)v_.data());
+    aggregation_args.set("out", (float *)out_.data());
+    aggregation_args.set("keys", (int32_t)keys_);
+    aggregation_args.set("head_dim", (int32_t)head_dim_);
+    aggregation_args.bind_optional_nulls();
+    aggregation_bundle_.launch(queue_, head_dim_, aggregation_args);
+  }
+
+  void synchronize() const { queue_.synchronize(); }
+
+  void copy_output(std::vector<float> &out) const {
+    if (out.size() != head_dim_) {
+      throw std::runtime_error("mini attention output shape mismatch");
+    }
+    lrrt::copy_to_host(out, out_);
+  }
+
+private:
+  static std::string make_score_kernel_name(uint32_t head_dim) {
+    return "attention_score_fp32_" +
+           std::to_string(select_head_block(head_dim));
+  }
+
+  static std::string make_softmax_kernel_name(uint32_t keys) {
+    return "causal_softmax_fp32_" + std::to_string(select_keys_block(keys));
+  }
+
+  static std::string make_aggregation_kernel_name(uint32_t keys) {
+    return "value_aggregation_fp32_" + std::to_string(select_keys_block(keys));
+  }
+
+  lrrt::Queue queue_;
+  uint32_t keys_;
+  uint32_t head_dim_;
+  float scale_;
+  std::string score_kernel_name_;
+  std::string softmax_kernel_name_;
+  std::string aggregation_kernel_name_;
+  lrrt::Bundle score_bundle_;
+  lrrt::Bundle softmax_bundle_;
+  lrrt::Bundle aggregation_bundle_;
+  lrrt::DeviceBuffer q_;
+  lrrt::DeviceBuffer k_;
+  lrrt::DeviceBuffer v_;
+  lrrt::DeviceBuffer scores_;
+  lrrt::DeviceBuffer probs_;
+  lrrt::DeviceBuffer out_;
+};
+
 static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
                      uint32_t valid_keys) {
-  uint32_t head_block = select_head_block(head_dim);
-  uint32_t keys_block = select_keys_block(keys);
-  std::string score_name = "attention_score_fp32_" + std::to_string(head_block);
-  std::string softmax_name =
-      "causal_softmax_fp32_" + std::to_string(keys_block);
-  std::string aggregation_name =
-      "value_aggregation_fp32_" + std::to_string(keys_block);
-
-  lrrt::Bundle score_bundle(device, LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST,
-                            score_name.c_str());
-  lrrt::Bundle softmax_bundle(device, LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST,
-                              softmax_name.c_str());
-  lrrt::Bundle aggregation_bundle(device,
-                                  LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST,
-                                  aggregation_name.c_str());
-
   std::vector<float> q(head_dim);
   std::vector<float> k(keys * head_dim);
   std::vector<float> v(keys * head_dim);
-  std::vector<float> scores(keys, 0.0f);
-  std::vector<float> probs(keys, 0.0f);
   std::vector<float> out(head_dim, 0.0f);
   const float scale = 1.0f / sqrtf((float)head_dim);
 
@@ -79,48 +173,11 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
     }
   }
 
-  lrrt::DeviceBuffer device_q(device, q.size() * sizeof(float));
-  lrrt::DeviceBuffer device_k(device, k.size() * sizeof(float));
-  lrrt::DeviceBuffer device_v(device, v.size() * sizeof(float));
-  lrrt::DeviceBuffer device_scores(device, scores.size() * sizeof(float));
-  lrrt::DeviceBuffer device_probs(device, probs.size() * sizeof(float));
-  lrrt::DeviceBuffer device_out(device, out.size() * sizeof(float));
-  lrrt::copy_to_device(device_q, q);
-  lrrt::copy_to_device(device_k, k);
-  lrrt::copy_to_device(device_v, v);
-  lrrt::copy_to_device(device_scores, scores);
-  lrrt::copy_to_device(device_probs, probs);
-
-  lrrt::KernargBuffer score_args = score_bundle.make_args();
-  score_args.set("q", (const float *)device_q.data());
-  score_args.set("k", (const float *)device_k.data());
-  score_args.set("out", (float *)device_scores.data());
-  score_args.set("keys", (int32_t)keys);
-  score_args.set("head_dim", (int32_t)head_dim);
-  score_args.set("scale", scale);
-  score_args.bind_optional_nulls();
-  score_bundle.launch(keys, score_args);
-
-  lrrt::KernargBuffer softmax_args = softmax_bundle.make_args();
-  softmax_args.set("x", (const float *)device_scores.data());
-  softmax_args.set("out", (float *)device_probs.data());
-  softmax_args.set("rows", (int32_t)1);
-  softmax_args.set("hidden", (int32_t)keys);
-  softmax_args.set("query_start", (int32_t)(valid_keys - 1));
-  softmax_args.bind_optional_nulls();
-  softmax_bundle.launch(1, softmax_args);
-
-  lrrt::KernargBuffer aggregation_args = aggregation_bundle.make_args();
-  aggregation_args.set("probs", (const float *)device_probs.data());
-  aggregation_args.set("v", (const float *)device_v.data());
-  aggregation_args.set("out", (float *)device_out.data());
-  aggregation_args.set("keys", (int32_t)keys);
-  aggregation_args.set("head_dim", (int32_t)head_dim);
-  aggregation_args.bind_optional_nulls();
-  aggregation_bundle.launch(head_dim, aggregation_args);
-
-  device.synchronize();
-  lrrt::copy_to_host(out, device_out);
+  MiniAttentionExecutor executor(device, keys, head_dim);
+  executor.copy_inputs(q, k, v);
+  executor.run(valid_keys);
+  executor.synchronize();
+  executor.copy_output(out);
 
   std::vector<float> reference_scores(keys, 0.0f);
   for (uint32_t row = 0; row < keys; ++row) {
