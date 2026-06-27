@@ -173,6 +173,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
     examples/triton/triton_attention_score.cpp
   )
   target_link_libraries(lrrt_triton_attention_score PRIVATE lrrt::bundle)
+  add_executable(
+    lrrt_triton_value_aggregation
+    examples/triton/triton_value_aggregation.cpp
+  )
+  target_link_libraries(lrrt_triton_value_aggregation PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -286,6 +291,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
     triton_attention_score examples/triton/attention_score_kernel.py
     TRITON_ATTENTION_SCORE_HSACO TRITON_ATTENTION_SCORE_MANIFEST
     kernels_128.hsaco kernels_256.hsaco
+  )
+  lrrt_add_triton_bundle(
+    triton_value_aggregation examples/triton/value_aggregation_kernel.py
+    TRITON_VALUE_AGGREGATION_HSACO TRITON_VALUE_AGGREGATION_MANIFEST
+    kernels_2048.hsaco kernels_4096.hsaco
   )
 endif()
 
@@ -458,6 +468,15 @@ if(TRITON_ATTENTION_SCORE_HSACO)
       LRRT_TRITON_ATTENTION_SCORE_MANIFEST="${TRITON_ATTENTION_SCORE_MANIFEST}"
   )
 endif()
+if(TRITON_VALUE_AGGREGATION_HSACO)
+  add_dependencies(lrrt_triton_value_aggregation
+                   triton_value_aggregation_bundle)
+  target_compile_definitions(
+    lrrt_triton_value_aggregation
+    PRIVATE
+      LRRT_TRITON_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -513,6 +532,12 @@ if(TARGET lrrt_triton_attention_score)
   add_test(
     NAME lrrt_triton_attention_score
     COMMAND lrrt_triton_attention_score
+  )
+endif()
+if(TARGET lrrt_triton_value_aggregation)
+  add_test(
+    NAME lrrt_triton_value_aggregation
+    COMMAND lrrt_triton_value_aggregation
   )
 endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
@@ -595,6 +620,14 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_ATTENTION_SCORE_MANIFEST}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_value_aggregation_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_VALUE_AGGREGATION_MANIFEST}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()

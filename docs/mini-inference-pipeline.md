@@ -38,7 +38,7 @@ decoder-style path, not by every example currently present in the repository.
 | RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits | Not yet connected to projection outputs or KV cache layout |
 | Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling | Not yet connected to causal softmax input |
 | Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Not yet connected to attention score output |
-| Value aggregation | ❌ | None | Needs softmax probabilities multiplied by V vectors |
+| Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors | Not yet connected to causal softmax output |
 | Residual add | ✅/❌ | `vector_add`, `saxpy`, and `scale` cover simple elementwise patterns | Needs a bundle-level residual integration point |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 | Not yet connected to MLP projection outputs |
 | Output projection | ✅/❌ | `matvec` can stand in for a small FP32 output projection | Needs larger/batched projection support and lower precision |
@@ -130,7 +130,9 @@ meaningful:
 
 - **Attention score integration**: Q/K score computation exists as a standalone
   bundle, but it is not yet connected to causal softmax in an executor path.
-- **Value aggregation**: softmax probabilities must multiply V vectors.
+- **Value aggregation integration**: weighted V aggregation exists as a
+  standalone bundle, but it is not yet connected to causal softmax in an
+  executor path.
 - **Residual add**: a simple vector add can cover this, but a bundle-level
   integration example is still useful.
 - **KV cache**: decode mode needs persistent K/V buffers and indexed writes.
