@@ -178,6 +178,9 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
     examples/triton/triton_value_aggregation.cpp
   )
   target_link_libraries(lrrt_triton_value_aggregation PRIVATE lrrt::bundle)
+  add_executable(lrrt_triton_mini_attention
+                 examples/triton/triton_mini_attention.cpp)
+  target_link_libraries(lrrt_triton_mini_attention PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -477,6 +480,22 @@ if(TRITON_VALUE_AGGREGATION_HSACO)
       LRRT_TRITON_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
   )
 endif()
+if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
+   TRITON_VALUE_AGGREGATION_HSACO)
+  add_dependencies(
+    lrrt_triton_mini_attention
+    triton_attention_score_bundle
+    triton_causal_softmax_bundle
+    triton_value_aggregation_bundle
+  )
+  target_compile_definitions(
+    lrrt_triton_mini_attention
+    PRIVATE
+      LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST="${TRITON_ATTENTION_SCORE_MANIFEST}"
+      LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST="${TRITON_CAUSAL_SOFTMAX_MANIFEST}"
+      LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -539,6 +558,9 @@ if(TARGET lrrt_triton_value_aggregation)
     NAME lrrt_triton_value_aggregation
     COMMAND lrrt_triton_value_aggregation
   )
+endif()
+if(TARGET lrrt_triton_mini_attention)
+  add_test(NAME lrrt_triton_mini_attention COMMAND lrrt_triton_mini_attention)
 endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   if(PYTHON_EXECUTABLE AND LLVM_READELF)

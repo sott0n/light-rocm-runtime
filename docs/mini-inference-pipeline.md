@@ -36,9 +36,9 @@ decoder-style path, not by every example currently present in the repository.
 | RMSNorm | ✅ | `rmsnorm` with FP32/FP16/BF16 input variants and FP32 reference validation | Not yet connected into a multi-kernel executor path |
 | Q/K/V projection | ✅/❌ | `matvec` covers one-vector FP32 projection | No batched projection, no tiled GEMM, no FP16/BF16 inputs yet |
 | RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits | Not yet connected to projection outputs or KV cache layout |
-| Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling | Not yet connected to causal softmax input |
-| Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Not yet connected to attention score output |
-| Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors | Not yet connected to causal softmax output |
+| Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling | Covered in the mini attention integration path |
+| Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Covered in the mini attention integration path |
+| Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors | Covered in the mini attention integration path |
 | Residual add | ✅/❌ | `vector_add`, `saxpy`, and `scale` cover simple elementwise patterns | Needs a bundle-level residual integration point |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 | Not yet connected to MLP projection outputs |
 | Output projection | ✅/❌ | `matvec` can stand in for a small FP32 output projection | Needs larger/batched projection support and lower precision |
@@ -128,11 +128,9 @@ management, not high-level model execution.
 The current operator examples leave several gaps before a Qwen-like path can be
 meaningful:
 
-- **Attention score integration**: Q/K score computation exists as a standalone
-  bundle, but it is not yet connected to causal softmax in an executor path.
-- **Value aggregation integration**: weighted V aggregation exists as a
-  standalone bundle, but it is not yet connected to causal softmax in an
-  executor path.
+- **Executor generalization**: the mini attention example connects attention
+  score, causal softmax, and value aggregation, but it is still a fixed example
+  rather than a reusable executor abstraction.
 - **Residual add**: a simple vector add can cover this, but a bundle-level
   integration example is still useful.
 - **KV cache**: decode mode needs persistent K/V buffers and indexed writes.
