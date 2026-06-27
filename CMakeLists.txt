@@ -161,6 +161,8 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   target_link_libraries(lrrt_triton_silu_mul PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_softmax examples/triton/triton_softmax.cpp)
   target_link_libraries(lrrt_triton_softmax PRIVATE lrrt::bundle)
+  add_executable(lrrt_triton_matvec examples/triton/triton_matvec.cpp)
+  target_link_libraries(lrrt_triton_matvec PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -258,6 +260,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
   lrrt_add_triton_bundle(
     triton_softmax examples/triton/softmax_kernel.py
     TRITON_SOFTMAX_HSACO TRITON_SOFTMAX_MANIFEST
+    kernels_2048.hsaco kernels_4096.hsaco
+  )
+  lrrt_add_triton_bundle(
+    triton_matvec examples/triton/matvec_kernel.py
+    TRITON_MATVEC_HSACO TRITON_MATVEC_MANIFEST
     kernels_2048.hsaco kernels_4096.hsaco
   )
 endif()
@@ -408,6 +415,13 @@ if(TRITON_SOFTMAX_HSACO)
     PRIVATE LRRT_TRITON_SOFTMAX_MANIFEST="${TRITON_SOFTMAX_MANIFEST}"
   )
 endif()
+if(TRITON_MATVEC_HSACO)
+  add_dependencies(lrrt_triton_matvec triton_matvec_bundle)
+  target_compile_definitions(
+    lrrt_triton_matvec
+    PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -449,6 +463,9 @@ if(TARGET lrrt_triton_silu_mul)
 endif()
 if(TARGET lrrt_triton_softmax)
   add_test(NAME lrrt_triton_softmax COMMAND lrrt_triton_softmax)
+endif()
+if(TARGET lrrt_triton_matvec)
+  add_test(NAME lrrt_triton_matvec COMMAND lrrt_triton_matvec)
 endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   if(PYTHON_EXECUTABLE AND LLVM_READELF)
@@ -506,6 +523,14 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_SOFTMAX_MANIFEST}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_matvec_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_MATVEC_MANIFEST}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()
