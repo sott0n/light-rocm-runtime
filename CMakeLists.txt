@@ -168,6 +168,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   target_link_libraries(lrrt_triton_causal_softmax PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_matvec examples/triton/triton_matvec.cpp)
   target_link_libraries(lrrt_triton_matvec PRIVATE lrrt::bundle)
+  add_executable(
+    lrrt_triton_attention_score
+    examples/triton/triton_attention_score.cpp
+  )
+  target_link_libraries(lrrt_triton_attention_score PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")
 else()
@@ -276,6 +281,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
     triton_matvec examples/triton/matvec_kernel.py
     TRITON_MATVEC_HSACO TRITON_MATVEC_MANIFEST
     kernels_2048.hsaco kernels_4096.hsaco
+  )
+  lrrt_add_triton_bundle(
+    triton_attention_score examples/triton/attention_score_kernel.py
+    TRITON_ATTENTION_SCORE_HSACO TRITON_ATTENTION_SCORE_MANIFEST
+    kernels_128.hsaco kernels_256.hsaco
   )
 endif()
 
@@ -440,6 +450,14 @@ if(TRITON_MATVEC_HSACO)
     PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
   )
 endif()
+if(TRITON_ATTENTION_SCORE_HSACO)
+  add_dependencies(lrrt_triton_attention_score triton_attention_score_bundle)
+  target_compile_definitions(
+    lrrt_triton_attention_score
+    PRIVATE
+      LRRT_TRITON_ATTENTION_SCORE_MANIFEST="${TRITON_ATTENTION_SCORE_MANIFEST}"
+  )
+endif()
 
 enable_testing()
 add_test(NAME lrrt_memory_bounds_tests COMMAND lrrt_memory_bounds_tests)
@@ -490,6 +508,12 @@ if(TARGET lrrt_triton_causal_softmax)
 endif()
 if(TARGET lrrt_triton_matvec)
   add_test(NAME lrrt_triton_matvec COMMAND lrrt_triton_matvec)
+endif()
+if(TARGET lrrt_triton_attention_score)
+  add_test(
+    NAME lrrt_triton_attention_score
+    COMMAND lrrt_triton_attention_score
+  )
 endif()
 if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   if(PYTHON_EXECUTABLE AND LLVM_READELF)
@@ -563,6 +587,14 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_MATVEC_MANIFEST}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_attention_score_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_ATTENTION_SCORE_MANIFEST}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()

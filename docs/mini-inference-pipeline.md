@@ -36,7 +36,7 @@ decoder-style path, not by every example currently present in the repository.
 | RMSNorm | ✅ | `rmsnorm` with FP32/FP16/BF16 input variants and FP32 reference validation | Not yet connected into a multi-kernel executor path |
 | Q/K/V projection | ✅/❌ | `matvec` covers one-vector FP32 projection | No batched projection, no tiled GEMM, no FP16/BF16 inputs yet |
 | RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits | Not yet connected to projection outputs or KV cache layout |
-| Attention score computation | ❌ | None | Needs Q x K-style dot product or small attention-score kernel |
+| Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling | Not yet connected to causal softmax input |
 | Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Not yet connected to attention score output |
 | Value aggregation | ❌ | None | Needs softmax probabilities multiplied by V vectors |
 | Residual add | ✅/❌ | `vector_add`, `saxpy`, and `scale` cover simple elementwise patterns | Needs a bundle-level residual integration point |
@@ -128,8 +128,8 @@ management, not high-level model execution.
 The current operator examples leave several gaps before a Qwen-like path can be
 meaningful:
 
-- **Attention score matmul**: Q/K score computation needs more than the current
-  one-vector `matvec` example.
+- **Attention score integration**: Q/K score computation exists as a standalone
+  bundle, but it is not yet connected to causal softmax in an executor path.
 - **Value aggregation**: softmax probabilities must multiply V vectors.
 - **Residual add**: a simple vector add can cover this, but a bundle-level
   integration example is still useful.
