@@ -1,5 +1,7 @@
 build/
 build-bench/
+build-triton/
+__pycache__/
 *.o
 *.a
 *.so
