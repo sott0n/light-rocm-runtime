@@ -37,7 +37,7 @@ decoder-style path, not by every example currently present in the repository.
 | Q/K/V projection | ✅/❌ | `matvec` covers one-vector FP32 projection | No batched projection, no tiled GEMM, no FP16/BF16 inputs yet |
 | RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits | Not yet connected to projection outputs or KV cache layout |
 | Attention score computation | ❌ | None | Needs Q x K-style dot product or small attention-score kernel |
-| Causal softmax | ✅/❌ | `softmax` covers row-wise FP32 softmax | Needs causal/future-token masking and attention-shape validation |
+| Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Not yet connected to attention score output |
 | Value aggregation | ❌ | None | Needs softmax probabilities multiplied by V vectors |
 | Residual add | ✅/❌ | `vector_add`, `saxpy`, and `scale` cover simple elementwise patterns | Needs a bundle-level residual integration point |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 | Not yet connected to MLP projection outputs |
@@ -128,7 +128,6 @@ management, not high-level model execution.
 The current operator examples leave several gaps before a Qwen-like path can be
 meaningful:
 
-- **Causal softmax**: attention softmax must support future-token masking.
 - **Attention score matmul**: Q/K score computation needs more than the current
   one-vector `matvec` example.
 - **Value aggregation**: softmax probabilities must multiply V vectors.
@@ -157,8 +156,8 @@ meaningful:
 
 ### P2: Causal Softmax
 
-- Add a Triton causal softmax bundle.
-- Validate masked rows against a CPU reference.
+- Keep the Triton causal softmax bundle validated against a CPU reference.
+- Connect masked softmax to attention score output in an executor path.
 - Keep mask behavior in the operator example, not the runtime core.
 
 ### P3: Projection Coverage
