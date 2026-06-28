@@ -174,6 +174,12 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   )
   target_link_libraries(lrrt_triton_matvec_precision_tests PRIVATE lrrt::bundle)
   add_executable(
+    lrrt_triton_qkv_projection
+    examples/triton/triton_qkv_projection.cpp
+  )
+  target_include_directories(lrrt_triton_qkv_projection PRIVATE executor/triton)
+  target_link_libraries(lrrt_triton_qkv_projection PRIVATE lrrt::bundle)
+  add_executable(
     lrrt_triton_attention_score
     examples/triton/triton_attention_score.cpp
   )
@@ -483,6 +489,7 @@ endif()
 if(TRITON_MATVEC_HSACO)
   add_dependencies(lrrt_triton_matvec triton_matvec_bundle)
   add_dependencies(lrrt_triton_matvec_precision_tests triton_matvec_bundle)
+  add_dependencies(lrrt_triton_qkv_projection triton_matvec_bundle)
   target_compile_definitions(
     lrrt_triton_matvec
     PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
@@ -490,6 +497,11 @@ if(TRITON_MATVEC_HSACO)
   target_compile_definitions(
     lrrt_triton_matvec_precision_tests
     PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+  )
+  target_compile_definitions(
+    lrrt_triton_qkv_projection
+    PRIVATE
+      LRRT_TRITON_QKV_PROJECTION_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
   )
 endif()
 if(TRITON_ATTENTION_SCORE_HSACO)
@@ -596,6 +608,9 @@ if(TARGET lrrt_triton_matvec_precision_tests)
     NAME lrrt_triton_matvec_precision_tests
     COMMAND lrrt_triton_matvec_precision_tests
   )
+endif()
+if(TARGET lrrt_triton_qkv_projection)
+  add_test(NAME lrrt_triton_qkv_projection COMMAND lrrt_triton_qkv_projection)
 endif()
 if(TARGET lrrt_triton_attention_score)
   add_test(
