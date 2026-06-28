@@ -20,6 +20,10 @@
 #define LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST "manifest.json"
 #endif
 
+#ifndef LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST
+#define LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST "manifest.json"
+#endif
+
 static uint32_t select_head_block(uint32_t head_dim) {
   if (head_dim <= 64) {
     return 64;
@@ -54,27 +58,36 @@ public:
                         softmax_kernel_name_.c_str()),
         aggregation_bundle_(device, LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST,
                             aggregation_kernel_name_.c_str()),
+        residual_add_bundle_(device, LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST,
+                             "vector_add"),
         q_(device, head_dim * sizeof(float)),
         k_(device, keys * head_dim * sizeof(float)),
         v_(device, keys * head_dim * sizeof(float)),
+        residual_(device, head_dim * sizeof(float)),
         scores_(device, keys * sizeof(float)),
         probs_(device, keys * sizeof(float)),
+        attention_out_(device, head_dim * sizeof(float)),
         out_(device, head_dim * sizeof(float)) {}
 
   void copy_inputs(const std::vector<float> &q, const std::vector<float> &k,
-                   const std::vector<float> &v) {
+                   const std::vector<float> &v,
+                   const std::vector<float> &residual) {
     if (q.size() != head_dim_ || k.size() != keys_ * head_dim_ ||
-        v.size() != keys_ * head_dim_) {
+        v.size() != keys_ * head_dim_ || residual.size() != head_dim_) {
       throw std::runtime_error("mini attention input shape mismatch");
     }
 
     std::vector<float> scores(keys_, 0.0f);
     std::vector<float> probs(keys_, 0.0f);
+    std::vector<float> out(head_dim_, 0.0f);
     lrrt::copy_to_device(q_, q);
     lrrt::copy_to_device(k_, k);
     lrrt::copy_to_device(v_, v);
+    lrrt::copy_to_device(residual_, residual);
     lrrt::copy_to_device(scores_, scores);
     lrrt::copy_to_device(probs_, probs);
+    lrrt::copy_to_device(attention_out_, out);
+    lrrt::copy_to_device(out_, out);
   }
 
   void run(uint32_t valid_keys) {
@@ -104,11 +117,19 @@ public:
     lrrt::KernargBuffer aggregation_args = aggregation_bundle_.make_args();
     aggregation_args.set("probs", (const float *)probs_.data());
     aggregation_args.set("v", (const float *)v_.data());
-    aggregation_args.set("out", (float *)out_.data());
+    aggregation_args.set("out", (float *)attention_out_.data());
     aggregation_args.set("keys", (int32_t)keys_);
     aggregation_args.set("head_dim", (int32_t)head_dim_);
     aggregation_args.bind_optional_nulls();
     aggregation_bundle_.launch(queue_, head_dim_, aggregation_args);
+
+    lrrt::KernargBuffer residual_add_args = residual_add_bundle_.make_args();
+    residual_add_args.set("x", (const float *)residual_.data());
+    residual_add_args.set("y", (const float *)attention_out_.data());
+    residual_add_args.set("out", (float *)out_.data());
+    residual_add_args.set("n", (int32_t)head_dim_);
+    residual_add_args.bind_optional_nulls();
+    residual_add_bundle_.launch(queue_, head_dim_, residual_add_args);
   }
 
   void synchronize() const { queue_.synchronize(); }
@@ -144,11 +165,14 @@ private:
   lrrt::Bundle score_bundle_;
   lrrt::Bundle softmax_bundle_;
   lrrt::Bundle aggregation_bundle_;
+  lrrt::Bundle residual_add_bundle_;
   lrrt::DeviceBuffer q_;
   lrrt::DeviceBuffer k_;
   lrrt::DeviceBuffer v_;
+  lrrt::DeviceBuffer residual_;
   lrrt::DeviceBuffer scores_;
   lrrt::DeviceBuffer probs_;
+  lrrt::DeviceBuffer attention_out_;
   lrrt::DeviceBuffer out_;
 };
 
@@ -157,11 +181,13 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
   std::vector<float> q(head_dim);
   std::vector<float> k(keys * head_dim);
   std::vector<float> v(keys * head_dim);
+  std::vector<float> residual(head_dim);
   std::vector<float> out(head_dim, 0.0f);
   const float scale = 1.0f / sqrtf((float)head_dim);
 
   for (uint32_t col = 0; col < head_dim; ++col) {
     q[col] = 0.03125f * (float)((int32_t)((col * 5) % 29) - 14);
+    residual[col] = 0.0625f * (float)((int32_t)((col * 7) % 23) - 11);
   }
   for (uint32_t row = 0; row < keys; ++row) {
     for (uint32_t col = 0; col < head_dim; ++col) {
@@ -174,7 +200,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
   }
 
   MiniAttentionExecutor executor(device, keys, head_dim);
-  executor.copy_inputs(q, k, v);
+  executor.copy_inputs(q, k, v, residual);
   executor.run(valid_keys);
   executor.synchronize();
   executor.copy_output(out);
@@ -211,6 +237,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
     for (uint32_t row = 0; row < keys; ++row) {
       expected += reference_probs[row] * v[row * head_dim + col];
     }
+    expected += residual[col];
 
     float diff = fabsf(out[col] - expected);
     if (diff > max_diff) {

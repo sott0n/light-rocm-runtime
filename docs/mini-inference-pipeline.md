@@ -39,7 +39,7 @@ decoder-style path, not by every example currently present in the repository.
 | Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling | Covered in the mini attention integration path |
 | Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Covered in the mini attention integration path |
 | Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors | Covered in the mini attention integration path |
-| Residual add | ✅/❌ | `vector_add`, `saxpy`, and `scale` cover simple elementwise patterns | Needs a bundle-level residual integration point |
+| Residual add | ✅ | `vector_add` is connected in the mini attention integration path | Needs reuse in a larger decoder-block path |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 | Not yet connected to MLP projection outputs |
 | Output projection | ✅/❌ | `matvec` can stand in for a small FP32 output projection | Needs larger/batched projection support and lower precision |
 | KV cache update/read | ❌ | None | Needs persistent K/V buffer layout and indexed read/write kernels |
@@ -129,10 +129,10 @@ The current operator examples leave several gaps before a Qwen-like path can be
 meaningful:
 
 - **Executor generalization**: the mini attention example connects attention
-  score, causal softmax, and value aggregation, but it is still a fixed example
-  rather than a reusable executor abstraction.
-- **Residual add**: a simple vector add can cover this, but a bundle-level
-  integration example is still useful.
+  score, causal softmax, value aggregation, and residual add, but it is still a
+  fixed example rather than a reusable executor abstraction.
+- **Residual add**: the mini attention path now covers attention output plus
+  residual stream, but this should be reused in a larger decoder-block example.
 - **KV cache**: decode mode needs persistent K/V buffers and indexed writes.
 - **FP16/BF16 matvec**: Qwen-style inference should use lower precision inputs
   with FP32 accumulation where appropriate.
@@ -151,8 +151,8 @@ meaningful:
 
 - `triton_mini_attention` now contains a fixed-shape executor prototype.
 - It loads a fixed list of bundles, owns named device buffers, launches three
-  kernels in order on one queue, and validates the final buffer against a CPU
-  reference.
+  attention kernels plus a residual-add kernel in order on one queue, and
+  validates the final buffer against a CPU reference.
 - Keep the next step focused on generalizing only the parts that are repeated
   by additional integration examples.
 
