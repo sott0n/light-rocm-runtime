@@ -1,4 +1,5 @@
-#include "lrrt/bundle.hpp"
+#include "triton_executor.hpp"
+
 #include "lrrt/lrrt.hpp"
 
 #include <math.h>
@@ -32,6 +33,8 @@
 #define LRRT_TRITON_MINI_ROPE_MANIFEST "manifest.json"
 #endif
 
+namespace tex = lrrt::executor::triton;
+
 static uint32_t select_head_block(uint32_t head_dim) {
   if (head_dim <= 64) {
     return 64;
@@ -55,39 +58,36 @@ static uint32_t select_keys_block(uint32_t keys) {
 class MiniAttentionExecutor {
 public:
   MiniAttentionExecutor(lrrt::Device &device, uint32_t keys, uint32_t head_dim)
-      : queue_(device), keys_(keys), head_dim_(head_dim),
-        scale_(1.0f / sqrtf((float)head_dim)),
-        score_kernel_name_(make_score_kernel_name(head_dim)),
-        softmax_kernel_name_(make_softmax_kernel_name(keys)),
-        aggregation_kernel_name_(make_aggregation_kernel_name(keys)),
-        kv_update_kernel_name_(make_kv_update_kernel_name(head_dim)),
-        rope_kernel_name_(make_rope_kernel_name(head_dim)),
-        score_bundle_(device, LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST,
-                      score_kernel_name_.c_str()),
-        softmax_bundle_(device, LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST,
-                        softmax_kernel_name_.c_str()),
-        aggregation_bundle_(device, LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST,
-                            aggregation_kernel_name_.c_str()),
-        residual_add_bundle_(device, LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST,
-                             "vector_add"),
-        kv_update_bundle_(device, LRRT_TRITON_MINI_KV_CACHE_MANIFEST,
-                          kv_update_kernel_name_.c_str()),
-        rope_bundle_(device, LRRT_TRITON_MINI_ROPE_MANIFEST,
-                     rope_kernel_name_.c_str()),
-        q_(device, head_dim * sizeof(float)),
-        q_rope_(device, head_dim * sizeof(float)),
-        source_k_(device, keys * head_dim * sizeof(float)),
-        source_v_(device, keys * head_dim * sizeof(float)),
-        k_rope_(device, head_dim * sizeof(float)),
-        k_cache_(device, keys * head_dim * sizeof(float)),
-        v_cache_(device, keys * head_dim * sizeof(float)),
-        cos_(device, keys * (head_dim / 2) * sizeof(float)),
-        sin_(device, keys * (head_dim / 2) * sizeof(float)),
-        residual_(device, head_dim * sizeof(float)),
-        scores_(device, keys * sizeof(float)),
-        probs_(device, keys * sizeof(float)),
-        attention_out_(device, head_dim * sizeof(float)),
-        out_(device, head_dim * sizeof(float)) {}
+      : queue_(device), bundles_(device), buffers_(device), keys_(keys),
+        head_dim_(head_dim), scale_(1.0f / sqrtf((float)head_dim)) {
+    bundles_.add("score", LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST,
+                 make_score_kernel_name(head_dim));
+    bundles_.add("softmax", LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST,
+                 make_softmax_kernel_name(keys));
+    bundles_.add("aggregation", LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST,
+                 make_aggregation_kernel_name(keys));
+    bundles_.add("residual_add", LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST,
+                 "vector_add");
+    bundles_.add("kv_update", LRRT_TRITON_MINI_KV_CACHE_MANIFEST,
+                 make_kv_update_kernel_name(head_dim));
+    bundles_.add("rope", LRRT_TRITON_MINI_ROPE_MANIFEST,
+                 make_rope_kernel_name(head_dim));
+
+    buffers_.allocate<float>("q", head_dim);
+    buffers_.allocate<float>("q_rope", head_dim);
+    buffers_.allocate<float>("source_k", keys * head_dim);
+    buffers_.allocate<float>("source_v", keys * head_dim);
+    buffers_.allocate<float>("k_rope", head_dim);
+    buffers_.allocate<float>("k_cache", keys * head_dim);
+    buffers_.allocate<float>("v_cache", keys * head_dim);
+    buffers_.allocate<float>("cos", keys * (head_dim / 2));
+    buffers_.allocate<float>("sin", keys * (head_dim / 2));
+    buffers_.allocate<float>("residual", head_dim);
+    buffers_.allocate<float>("scores", keys);
+    buffers_.allocate<float>("probs", keys);
+    buffers_.allocate<float>("attention_out", head_dim);
+    buffers_.allocate<float>("out", head_dim);
+  }
 
   void copy_inputs(const std::vector<float> &q, const std::vector<float> &k,
                    const std::vector<float> &v, const std::vector<float> &cos,
@@ -104,18 +104,18 @@ public:
     std::vector<float> scores(keys_, 0.0f);
     std::vector<float> probs(keys_, 0.0f);
     std::vector<float> out(head_dim_, 0.0f);
-    lrrt::copy_to_device(q_, q);
-    lrrt::copy_to_device(source_k_, k);
-    lrrt::copy_to_device(source_v_, v);
-    lrrt::copy_to_device(cos_, cos);
-    lrrt::copy_to_device(sin_, sin);
-    lrrt::copy_to_device(k_cache_, cache);
-    lrrt::copy_to_device(v_cache_, cache);
-    lrrt::copy_to_device(residual_, residual);
-    lrrt::copy_to_device(scores_, scores);
-    lrrt::copy_to_device(probs_, probs);
-    lrrt::copy_to_device(attention_out_, out);
-    lrrt::copy_to_device(out_, out);
+    buffers_.copy_to("q", q);
+    buffers_.copy_to("source_k", k);
+    buffers_.copy_to("source_v", v);
+    buffers_.copy_to("cos", cos);
+    buffers_.copy_to("sin", sin);
+    buffers_.copy_to("k_cache", cache);
+    buffers_.copy_to("v_cache", cache);
+    buffers_.copy_to("residual", residual);
+    buffers_.copy_to("scores", scores);
+    buffers_.copy_to("probs", probs);
+    buffers_.copy_to("attention_out", out);
+    buffers_.copy_to("out", out);
   }
 
   void run(uint32_t valid_keys) {
@@ -125,82 +125,80 @@ public:
 
     const uint32_t half = head_dim_ / 2;
     const uint32_t query_position = valid_keys - 1;
-    lrrt::KernargBuffer q_rope_args = rope_bundle_.make_args();
-    q_rope_args.set("x", (const float *)q_.data());
-    q_rope_args.set("cos", (const float *)cos_.data() + query_position * half);
-    q_rope_args.set("sin", (const float *)sin_.data() + query_position * half);
-    q_rope_args.set("out", (float *)q_rope_.data());
-    q_rope_args.set("rows", (int32_t)1);
-    q_rope_args.set("heads", (int32_t)1);
-    q_rope_args.set("head_dim", (int32_t)head_dim_);
-    q_rope_args.bind_optional_nulls();
-    rope_bundle_.launch(queue_, 1, q_rope_args);
+    tex::launch(
+        queue_, bundles_.get("rope"), 1,
+        {
+            tex::arg("x", buffers_.ptr<float>("q")),
+            tex::arg("cos", buffers_.ptr<float>("cos", query_position * half)),
+            tex::arg("sin", buffers_.ptr<float>("sin", query_position * half)),
+            tex::arg("out", buffers_.ptr<float>("q_rope")),
+            tex::arg("rows", (int32_t)1),
+            tex::arg("heads", (int32_t)1),
+            tex::arg("head_dim", (int32_t)head_dim_),
+        });
 
     for (uint32_t position = 0; position < valid_keys; ++position) {
-      lrrt::KernargBuffer k_rope_args = rope_bundle_.make_args();
-      const float *source_k =
-          (const float *)source_k_.data() + position * head_dim_;
-      const float *source_cos = (const float *)cos_.data() + position * half;
-      const float *source_sin = (const float *)sin_.data() + position * half;
-      k_rope_args.set("x", source_k);
-      k_rope_args.set("cos", source_cos);
-      k_rope_args.set("sin", source_sin);
-      k_rope_args.set("out", (float *)k_rope_.data());
-      k_rope_args.set("rows", (int32_t)1);
-      k_rope_args.set("heads", (int32_t)1);
-      k_rope_args.set("head_dim", (int32_t)head_dim_);
-      k_rope_args.bind_optional_nulls();
-      rope_bundle_.launch(queue_, 1, k_rope_args);
+      tex::launch(
+          queue_, bundles_.get("rope"), 1,
+          {
+              tex::arg("x",
+                       buffers_.ptr<float>("source_k", position * head_dim_)),
+              tex::arg("cos", buffers_.ptr<float>("cos", position * half)),
+              tex::arg("sin", buffers_.ptr<float>("sin", position * half)),
+              tex::arg("out", buffers_.ptr<float>("k_rope")),
+              tex::arg("rows", (int32_t)1),
+              tex::arg("heads", (int32_t)1),
+              tex::arg("head_dim", (int32_t)head_dim_),
+          });
 
-      lrrt::KernargBuffer kv_update_args = kv_update_bundle_.make_args();
-      const float *source_v =
-          (const float *)source_v_.data() + position * head_dim_;
-      kv_update_args.set("k", (const float *)k_rope_.data());
-      kv_update_args.set("v", source_v);
-      kv_update_args.set("k_cache", (float *)k_cache_.data());
-      kv_update_args.set("v_cache", (float *)v_cache_.data());
-      kv_update_args.set("position", (int32_t)position);
-      kv_update_args.set("max_tokens", (int32_t)keys_);
-      kv_update_args.set("head_dim", (int32_t)head_dim_);
-      kv_update_args.bind_optional_nulls();
-      kv_update_bundle_.launch(queue_, 1, kv_update_args);
+      tex::launch(queue_, bundles_.get("kv_update"), 1,
+                  {
+                      tex::arg("k", buffers_.ptr<float>("k_rope")),
+                      tex::arg("v", buffers_.ptr<float>("source_v",
+                                                        position * head_dim_)),
+                      tex::arg("k_cache", buffers_.ptr<float>("k_cache")),
+                      tex::arg("v_cache", buffers_.ptr<float>("v_cache")),
+                      tex::arg("position", (int32_t)position),
+                      tex::arg("max_tokens", (int32_t)keys_),
+                      tex::arg("head_dim", (int32_t)head_dim_),
+                  });
     }
 
-    lrrt::KernargBuffer score_args = score_bundle_.make_args();
-    score_args.set("q", (const float *)q_rope_.data());
-    score_args.set("k", (const float *)k_cache_.data());
-    score_args.set("out", (float *)scores_.data());
-    score_args.set("keys", (int32_t)keys_);
-    score_args.set("head_dim", (int32_t)head_dim_);
-    score_args.set("scale", scale_);
-    score_args.bind_optional_nulls();
-    score_bundle_.launch(queue_, keys_, score_args);
+    tex::launch(queue_, bundles_.get("score"), keys_,
+                {
+                    tex::arg("q", buffers_.ptr<float>("q_rope")),
+                    tex::arg("k", buffers_.ptr<float>("k_cache")),
+                    tex::arg("out", buffers_.ptr<float>("scores")),
+                    tex::arg("keys", (int32_t)keys_),
+                    tex::arg("head_dim", (int32_t)head_dim_),
+                    tex::arg("scale", scale_),
+                });
 
-    lrrt::KernargBuffer softmax_args = softmax_bundle_.make_args();
-    softmax_args.set("x", (const float *)scores_.data());
-    softmax_args.set("out", (float *)probs_.data());
-    softmax_args.set("rows", (int32_t)1);
-    softmax_args.set("hidden", (int32_t)keys_);
-    softmax_args.set("query_start", (int32_t)(valid_keys - 1));
-    softmax_args.bind_optional_nulls();
-    softmax_bundle_.launch(queue_, 1, softmax_args);
+    tex::launch(queue_, bundles_.get("softmax"), 1,
+                {
+                    tex::arg("x", buffers_.ptr<float>("scores")),
+                    tex::arg("out", buffers_.ptr<float>("probs")),
+                    tex::arg("rows", (int32_t)1),
+                    tex::arg("hidden", (int32_t)keys_),
+                    tex::arg("query_start", (int32_t)(valid_keys - 1)),
+                });
 
-    lrrt::KernargBuffer aggregation_args = aggregation_bundle_.make_args();
-    aggregation_args.set("probs", (const float *)probs_.data());
-    aggregation_args.set("v", (const float *)v_cache_.data());
-    aggregation_args.set("out", (float *)attention_out_.data());
-    aggregation_args.set("keys", (int32_t)keys_);
-    aggregation_args.set("head_dim", (int32_t)head_dim_);
-    aggregation_args.bind_optional_nulls();
-    aggregation_bundle_.launch(queue_, head_dim_, aggregation_args);
+    tex::launch(queue_, bundles_.get("aggregation"), head_dim_,
+                {
+                    tex::arg("probs", buffers_.ptr<float>("probs")),
+                    tex::arg("v", buffers_.ptr<float>("v_cache")),
+                    tex::arg("out", buffers_.ptr<float>("attention_out")),
+                    tex::arg("keys", (int32_t)keys_),
+                    tex::arg("head_dim", (int32_t)head_dim_),
+                });
 
-    lrrt::KernargBuffer residual_add_args = residual_add_bundle_.make_args();
-    residual_add_args.set("x", (const float *)residual_.data());
-    residual_add_args.set("y", (const float *)attention_out_.data());
-    residual_add_args.set("out", (float *)out_.data());
-    residual_add_args.set("n", (int32_t)head_dim_);
-    residual_add_args.bind_optional_nulls();
-    residual_add_bundle_.launch(queue_, head_dim_, residual_add_args);
+    tex::launch(queue_, bundles_.get("residual_add"), head_dim_,
+                {
+                    tex::arg("x", buffers_.ptr<float>("residual")),
+                    tex::arg("y", buffers_.ptr<float>("attention_out")),
+                    tex::arg("out", buffers_.ptr<float>("out")),
+                    tex::arg("n", (int32_t)head_dim_),
+                });
   }
 
   void synchronize() const { queue_.synchronize(); }
@@ -209,7 +207,7 @@ public:
     if (out.size() != head_dim_) {
       throw std::runtime_error("mini attention output shape mismatch");
     }
-    lrrt::copy_to_host(out, out_);
+    buffers_.copy_from(out, "out");
   }
 
 private:
@@ -236,34 +234,11 @@ private:
   }
 
   lrrt::Queue queue_;
+  tex::BundleSet bundles_;
+  tex::BufferSet buffers_;
   uint32_t keys_;
   uint32_t head_dim_;
   float scale_;
-  std::string score_kernel_name_;
-  std::string softmax_kernel_name_;
-  std::string aggregation_kernel_name_;
-  std::string kv_update_kernel_name_;
-  std::string rope_kernel_name_;
-  lrrt::Bundle score_bundle_;
-  lrrt::Bundle softmax_bundle_;
-  lrrt::Bundle aggregation_bundle_;
-  lrrt::Bundle residual_add_bundle_;
-  lrrt::Bundle kv_update_bundle_;
-  lrrt::Bundle rope_bundle_;
-  lrrt::DeviceBuffer q_;
-  lrrt::DeviceBuffer q_rope_;
-  lrrt::DeviceBuffer source_k_;
-  lrrt::DeviceBuffer source_v_;
-  lrrt::DeviceBuffer k_rope_;
-  lrrt::DeviceBuffer k_cache_;
-  lrrt::DeviceBuffer v_cache_;
-  lrrt::DeviceBuffer cos_;
-  lrrt::DeviceBuffer sin_;
-  lrrt::DeviceBuffer residual_;
-  lrrt::DeviceBuffer scores_;
-  lrrt::DeviceBuffer probs_;
-  lrrt::DeviceBuffer attention_out_;
-  lrrt::DeviceBuffer out_;
 };
 
 static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,

@@ -179,9 +179,14 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   )
   target_link_libraries(lrrt_triton_value_aggregation PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_kv_cache examples/triton/triton_kv_cache.cpp)
+  target_include_directories(lrrt_triton_kv_cache PRIVATE executor/triton)
   target_link_libraries(lrrt_triton_kv_cache PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_mini_attention
                  examples/triton/triton_mini_attention.cpp)
+  target_include_directories(
+    lrrt_triton_mini_attention
+    PRIVATE executor/triton
+  )
   target_link_libraries(lrrt_triton_mini_attention PRIVATE lrrt::bundle)
 elseif(LRRT_ENABLE_TRITON_EXAMPLES)
   message(STATUS "uv not found; skipping Triton example")

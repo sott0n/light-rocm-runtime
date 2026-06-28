@@ -1,4 +1,5 @@
-#include "lrrt/bundle.hpp"
+#include "triton_executor.hpp"
+
 #include "lrrt/lrrt.hpp"
 
 #include <math.h>
@@ -11,6 +12,8 @@
 #ifndef LRRT_TRITON_KV_CACHE_MANIFEST
 #define LRRT_TRITON_KV_CACHE_MANIFEST "manifest.json"
 #endif
+
+namespace tex = lrrt::executor::triton;
 
 static uint32_t select_block_size(uint32_t head_dim) {
   if (head_dim <= 64) {
@@ -58,10 +61,10 @@ static void run_case(lrrt::Device &device, uint32_t max_tokens,
   std::string update_name =
       "kv_cache_update_fp32_" + std::to_string(block_size);
   std::string read_name = "kv_cache_read_fp32_" + std::to_string(block_size);
-  lrrt::Bundle update_bundle(device, LRRT_TRITON_KV_CACHE_MANIFEST,
-                             update_name.c_str());
-  lrrt::Bundle read_bundle(device, LRRT_TRITON_KV_CACHE_MANIFEST,
-                           read_name.c_str());
+  lrrt::Queue queue(device);
+  tex::BundleSet bundles(device);
+  bundles.add("update", LRRT_TRITON_KV_CACHE_MANIFEST, update_name);
+  bundles.add("read", LRRT_TRITON_KV_CACHE_MANIFEST, read_name);
 
   std::vector<float> k(head_dim);
   std::vector<float> v(head_dim);
@@ -70,30 +73,31 @@ static void run_case(lrrt::Device &device, uint32_t max_tokens,
   std::vector<float> k_cache(max_tokens * head_dim, 0.0f);
   std::vector<float> v_cache(max_tokens * head_dim, 0.0f);
 
-  lrrt::DeviceBuffer device_k(device, k.size() * sizeof(float));
-  lrrt::DeviceBuffer device_v(device, v.size() * sizeof(float));
-  lrrt::DeviceBuffer device_k_read(device, k_read.size() * sizeof(float));
-  lrrt::DeviceBuffer device_v_read(device, v_read.size() * sizeof(float));
-  lrrt::DeviceBuffer device_k_cache(device, k_cache.size() * sizeof(float));
-  lrrt::DeviceBuffer device_v_cache(device, v_cache.size() * sizeof(float));
-  lrrt::copy_to_device(device_k_cache, k_cache);
-  lrrt::copy_to_device(device_v_cache, v_cache);
+  tex::BufferSet buffers(device);
+  buffers.allocate<float>("k", k.size());
+  buffers.allocate<float>("v", v.size());
+  buffers.allocate<float>("k_read", k_read.size());
+  buffers.allocate<float>("v_read", v_read.size());
+  buffers.allocate<float>("k_cache", k_cache.size());
+  buffers.allocate<float>("v_cache", v_cache.size());
+  buffers.copy_to("k_cache", k_cache);
+  buffers.copy_to("v_cache", v_cache);
 
   for (uint32_t position = 0; position < max_tokens; ++position) {
     fill_token(k, v, position, head_dim);
-    lrrt::copy_to_device(device_k, k);
-    lrrt::copy_to_device(device_v, v);
+    buffers.copy_to("k", k);
+    buffers.copy_to("v", v);
 
-    lrrt::KernargBuffer update_args = update_bundle.make_args();
-    update_args.set("k", (const float *)device_k.data());
-    update_args.set("v", (const float *)device_v.data());
-    update_args.set("k_cache", (float *)device_k_cache.data());
-    update_args.set("v_cache", (float *)device_v_cache.data());
-    update_args.set("position", (int32_t)position);
-    update_args.set("max_tokens", (int32_t)max_tokens);
-    update_args.set("head_dim", (int32_t)head_dim);
-    update_args.bind_optional_nulls();
-    update_bundle.launch(1, update_args);
+    tex::launch(queue, bundles.get("update"), 1,
+                {
+                    tex::arg("k", buffers.ptr<float>("k")),
+                    tex::arg("v", buffers.ptr<float>("v")),
+                    tex::arg("k_cache", buffers.ptr<float>("k_cache")),
+                    tex::arg("v_cache", buffers.ptr<float>("v_cache")),
+                    tex::arg("position", (int32_t)position),
+                    tex::arg("max_tokens", (int32_t)max_tokens),
+                    tex::arg("head_dim", (int32_t)head_dim),
+                });
 
     for (uint32_t col = 0; col < head_dim; ++col) {
       k_cache[position * head_dim + col] = k[col];
@@ -102,20 +106,20 @@ static void run_case(lrrt::Device &device, uint32_t max_tokens,
   }
 
   uint32_t read_position = max_tokens / 2;
-  lrrt::KernargBuffer read_args = read_bundle.make_args();
-  read_args.set("k_cache", (const float *)device_k_cache.data());
-  read_args.set("v_cache", (const float *)device_v_cache.data());
-  read_args.set("k", (float *)device_k_read.data());
-  read_args.set("v", (float *)device_v_read.data());
-  read_args.set("position", (int32_t)read_position);
-  read_args.set("max_tokens", (int32_t)max_tokens);
-  read_args.set("head_dim", (int32_t)head_dim);
-  read_args.bind_optional_nulls();
-  read_bundle.launch(1, read_args);
+  tex::launch(queue, bundles.get("read"), 1,
+              {
+                  tex::arg("k_cache", buffers.ptr<float>("k_cache")),
+                  tex::arg("v_cache", buffers.ptr<float>("v_cache")),
+                  tex::arg("k", buffers.ptr<float>("k_read")),
+                  tex::arg("v", buffers.ptr<float>("v_read")),
+                  tex::arg("position", (int32_t)read_position),
+                  tex::arg("max_tokens", (int32_t)max_tokens),
+                  tex::arg("head_dim", (int32_t)head_dim),
+              });
 
-  device.synchronize();
-  lrrt::copy_to_host(k_read, device_k_read);
-  lrrt::copy_to_host(v_read, device_v_read);
+  queue.synchronize();
+  buffers.copy_from(k_read, "k_read");
+  buffers.copy_from(v_read, "v_read");
 
   std::vector<float> expected_k(head_dim);
   std::vector<float> expected_v(head_dim);
@@ -128,8 +132,8 @@ static void run_case(lrrt::Device &device, uint32_t max_tokens,
 
   std::vector<float> actual_k_cache(k_cache.size(), 0.0f);
   std::vector<float> actual_v_cache(v_cache.size(), 0.0f);
-  lrrt::copy_to_host(actual_k_cache, device_k_cache);
-  lrrt::copy_to_host(actual_v_cache, device_v_cache);
+  buffers.copy_from(actual_k_cache, "k_cache");
+  buffers.copy_from(actual_v_cache, "v_cache");
   check_vector("k_cache", actual_k_cache, k_cache);
   check_vector("v_cache", actual_v_cache, v_cache);
 }
