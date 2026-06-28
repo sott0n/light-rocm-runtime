@@ -10,6 +10,7 @@ set(
 )
 option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
 option(LRRT_BUILD_BENCHMARKS "Build runtime benchmarks" OFF)
+option(LRRT_BUILD_TRITON_BENCHMARKS "Build Triton runtime benchmarks" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

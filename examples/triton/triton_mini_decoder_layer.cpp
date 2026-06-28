@@ -648,6 +648,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
   }
 }
 
+#ifndef LRRT_TRITON_MINI_DECODER_LAYER_NO_MAIN
 int main(void) {
   try {
     lrrt::Runtime runtime;
@@ -669,3 +670,4 @@ int main(void) {
     return 1;
   }
 }
+#endif
