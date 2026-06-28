@@ -24,6 +24,10 @@
 #define LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST "manifest.json"
 #endif
 
+#ifndef LRRT_TRITON_MINI_KV_CACHE_MANIFEST
+#define LRRT_TRITON_MINI_KV_CACHE_MANIFEST "manifest.json"
+#endif
+
 static uint32_t select_head_block(uint32_t head_dim) {
   if (head_dim <= 64) {
     return 64;
@@ -52,6 +56,7 @@ public:
         score_kernel_name_(make_score_kernel_name(head_dim)),
         softmax_kernel_name_(make_softmax_kernel_name(keys)),
         aggregation_kernel_name_(make_aggregation_kernel_name(keys)),
+        kv_update_kernel_name_(make_kv_update_kernel_name(head_dim)),
         score_bundle_(device, LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST,
                       score_kernel_name_.c_str()),
         softmax_bundle_(device, LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST,
@@ -60,9 +65,13 @@ public:
                             aggregation_kernel_name_.c_str()),
         residual_add_bundle_(device, LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST,
                              "vector_add"),
+        kv_update_bundle_(device, LRRT_TRITON_MINI_KV_CACHE_MANIFEST,
+                          kv_update_kernel_name_.c_str()),
         q_(device, head_dim * sizeof(float)),
-        k_(device, keys * head_dim * sizeof(float)),
-        v_(device, keys * head_dim * sizeof(float)),
+        source_k_(device, keys * head_dim * sizeof(float)),
+        source_v_(device, keys * head_dim * sizeof(float)),
+        k_cache_(device, keys * head_dim * sizeof(float)),
+        v_cache_(device, keys * head_dim * sizeof(float)),
         residual_(device, head_dim * sizeof(float)),
         scores_(device, keys * sizeof(float)),
         probs_(device, keys * sizeof(float)),
@@ -77,12 +86,15 @@ public:
       throw std::runtime_error("mini attention input shape mismatch");
     }
 
+    std::vector<float> cache(keys_ * head_dim_, 0.0f);
     std::vector<float> scores(keys_, 0.0f);
     std::vector<float> probs(keys_, 0.0f);
     std::vector<float> out(head_dim_, 0.0f);
     lrrt::copy_to_device(q_, q);
-    lrrt::copy_to_device(k_, k);
-    lrrt::copy_to_device(v_, v);
+    lrrt::copy_to_device(source_k_, k);
+    lrrt::copy_to_device(source_v_, v);
+    lrrt::copy_to_device(k_cache_, cache);
+    lrrt::copy_to_device(v_cache_, cache);
     lrrt::copy_to_device(residual_, residual);
     lrrt::copy_to_device(scores_, scores);
     lrrt::copy_to_device(probs_, probs);
@@ -95,9 +107,26 @@ public:
       throw std::runtime_error("mini attention valid_keys is out of range");
     }
 
+    for (uint32_t position = 0; position < valid_keys; ++position) {
+      lrrt::KernargBuffer kv_update_args = kv_update_bundle_.make_args();
+      const float *source_k =
+          (const float *)source_k_.data() + position * head_dim_;
+      const float *source_v =
+          (const float *)source_v_.data() + position * head_dim_;
+      kv_update_args.set("k", source_k);
+      kv_update_args.set("v", source_v);
+      kv_update_args.set("k_cache", (float *)k_cache_.data());
+      kv_update_args.set("v_cache", (float *)v_cache_.data());
+      kv_update_args.set("position", (int32_t)position);
+      kv_update_args.set("max_tokens", (int32_t)keys_);
+      kv_update_args.set("head_dim", (int32_t)head_dim_);
+      kv_update_args.bind_optional_nulls();
+      kv_update_bundle_.launch(queue_, 1, kv_update_args);
+    }
+
     lrrt::KernargBuffer score_args = score_bundle_.make_args();
     score_args.set("q", (const float *)q_.data());
-    score_args.set("k", (const float *)k_.data());
+    score_args.set("k", (const float *)k_cache_.data());
     score_args.set("out", (float *)scores_.data());
     score_args.set("keys", (int32_t)keys_);
     score_args.set("head_dim", (int32_t)head_dim_);
@@ -116,7 +145,7 @@ public:
 
     lrrt::KernargBuffer aggregation_args = aggregation_bundle_.make_args();
     aggregation_args.set("probs", (const float *)probs_.data());
-    aggregation_args.set("v", (const float *)v_.data());
+    aggregation_args.set("v", (const float *)v_cache_.data());
     aggregation_args.set("out", (float *)attention_out_.data());
     aggregation_args.set("keys", (int32_t)keys_);
     aggregation_args.set("head_dim", (int32_t)head_dim_);
@@ -155,6 +184,11 @@ private:
     return "value_aggregation_fp32_" + std::to_string(select_keys_block(keys));
   }
 
+  static std::string make_kv_update_kernel_name(uint32_t head_dim) {
+    return "kv_cache_update_fp32_" +
+           std::to_string(select_head_block(head_dim));
+  }
+
   lrrt::Queue queue_;
   uint32_t keys_;
   uint32_t head_dim_;
@@ -162,13 +196,17 @@ private:
   std::string score_kernel_name_;
   std::string softmax_kernel_name_;
   std::string aggregation_kernel_name_;
+  std::string kv_update_kernel_name_;
   lrrt::Bundle score_bundle_;
   lrrt::Bundle softmax_bundle_;
   lrrt::Bundle aggregation_bundle_;
   lrrt::Bundle residual_add_bundle_;
+  lrrt::Bundle kv_update_bundle_;
   lrrt::DeviceBuffer q_;
-  lrrt::DeviceBuffer k_;
-  lrrt::DeviceBuffer v_;
+  lrrt::DeviceBuffer source_k_;
+  lrrt::DeviceBuffer source_v_;
+  lrrt::DeviceBuffer k_cache_;
+  lrrt::DeviceBuffer v_cache_;
   lrrt::DeviceBuffer residual_;
   lrrt::DeviceBuffer scores_;
   lrrt::DeviceBuffer probs_;
