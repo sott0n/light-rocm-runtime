@@ -57,6 +57,7 @@ def main():
     specializations = [
         (64, 2, "kernels.hsaco"),
         (128, 4, "kernels_128.hsaco"),
+        (256, 8, "kernels_256.hsaco"),
     ]
     kernels = []
     for block_size, num_warps, code_object in specializations:

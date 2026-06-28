@@ -13,8 +13,8 @@
 
 static void run_case(lrrt::Device &device, lrrt::Bundle &bundle,
                      uint32_t tokens, uint32_t heads, uint32_t head_dim) {
-  if (head_dim == 0 || head_dim > 128 || head_dim % 2 != 0) {
-    throw std::invalid_argument("RoPE head dimension must be even and <= 128");
+  if (head_dim == 0 || head_dim > 256 || head_dim % 2 != 0) {
+    throw std::invalid_argument("RoPE head dimension must be even and <= 256");
   }
 
   const uint32_t rows = tokens * heads;
@@ -105,13 +105,16 @@ int main(void) {
 
     lrrt::Bundle rope_64(device, LRRT_TRITON_ROPE_MANIFEST, "rope_64");
     lrrt::Bundle rope_128(device, LRRT_TRITON_ROPE_MANIFEST, "rope_128");
-    for (lrrt::Bundle *bundle : {&rope_64, &rope_128}) {
+    lrrt::Bundle rope_256(device, LRRT_TRITON_ROPE_MANIFEST, "rope_256");
+    for (lrrt::Bundle *bundle : {&rope_64, &rope_128, &rope_256}) {
       printf("loaded Triton manifest for kernel: %s\n",
              bundle->manifest().name.c_str());
     }
 
-    for (uint32_t head_dim : {48u, 64u, 96u, 128u}) {
-      lrrt::Bundle &bundle = head_dim <= 64 ? rope_64 : rope_128;
+    for (uint32_t head_dim : {48u, 64u, 96u, 128u, 192u, 256u}) {
+      lrrt::Bundle &bundle = head_dim <= 64    ? rope_64
+                             : head_dim <= 128 ? rope_128
+                                               : rope_256;
       run_case(device, bundle, 5, 3, head_dim);
     }
 

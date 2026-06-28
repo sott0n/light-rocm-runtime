@@ -271,7 +271,7 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
   lrrt_add_triton_bundle(
     triton_rope examples/triton/rope_kernel.py
     TRITON_ROPE_HSACO TRITON_ROPE_MANIFEST
-    kernels_128.hsaco
+    kernels_128.hsaco kernels_256.hsaco
   )
   lrrt_add_triton_bundle(
     triton_silu_mul examples/triton/silu_mul_kernel.py
@@ -497,7 +497,7 @@ if(TRITON_KV_CACHE_HSACO)
 endif()
 if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
    TRITON_VALUE_AGGREGATION_HSACO AND TRITON_VECTOR_ADD_HSACO AND
-   TRITON_KV_CACHE_HSACO)
+   TRITON_KV_CACHE_HSACO AND TRITON_ROPE_HSACO)
   add_dependencies(
     lrrt_triton_mini_attention
     triton_attention_score_bundle
@@ -505,6 +505,7 @@ if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
     triton_value_aggregation_bundle
     triton_vector_add_bundle
     triton_kv_cache_bundle
+    triton_rope_bundle
   )
   target_compile_definitions(
     lrrt_triton_mini_attention
@@ -514,6 +515,7 @@ if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
       LRRT_TRITON_MINI_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
       LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
       LRRT_TRITON_MINI_KV_CACHE_MANIFEST="${TRITON_KV_CACHE_MANIFEST}"
+      LRRT_TRITON_MINI_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
   )
 endif()
 

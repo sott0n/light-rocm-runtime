@@ -35,14 +35,14 @@ decoder-style path, not by every example currently present in the repository.
 | --- | --- | --- | --- |
 | RMSNorm | ✅ | `rmsnorm` with FP32/FP16/BF16 input variants and FP32 reference validation | Not yet connected into a multi-kernel executor path |
 | Q/K/V projection | ✅/❌ | `matvec` covers one-vector FP32 projection | No batched projection, no tiled GEMM, no FP16/BF16 inputs yet |
-| RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits | Not yet connected to projection outputs or KV cache layout |
+| RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits | Connected in mini attention before K cache update; not yet connected to projection outputs |
 | Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling | Covered in the mini attention integration path |
 | Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets | Covered in the mini attention integration path |
 | Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors | Covered in the mini attention integration path |
 | Residual add | ✅ | `vector_add` is connected in the mini attention integration path | Needs reuse in a larger decoder-block path |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 | Not yet connected to MLP projection outputs |
 | Output projection | ✅/❌ | `matvec` can stand in for a small FP32 output projection | Needs larger/batched projection support and lower precision |
-| KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini attention reads K/V through cache buffers | Not yet connected to RoPE output |
+| KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini attention writes RoPE-applied K into cache and reads K/V through cache buffers | Still single-head row-major layout |
 
 ## Decoder Block Shape
 
@@ -133,9 +133,9 @@ meaningful:
   fixed example rather than a reusable executor abstraction.
 - **Residual add**: the mini attention path now covers attention output plus
   residual stream, but this should be reused in a larger decoder-block example.
-- **KV cache integration**: mini attention now stores K/V in cache buffers and
-  fills valid cache rows with `kv_cache_update`, but decode mode still needs
-  this connected to RoPE output.
+- **KV cache layout**: mini attention now stores RoPE-applied K and raw V in
+  cache buffers, but the layout is still a single-head row-major
+  `[max_tokens, head_dim]` buffer.
 - **FP16/BF16 matvec**: Qwen-style inference should use lower precision inputs
   with FP32 accumulation where appropriate.
 - **Shape metadata**: the current manifest describes launch ABI, not tensor
@@ -152,9 +152,10 @@ meaningful:
 ### P1: Thin Executor Prototype
 
 - `triton_mini_attention` now contains a fixed-shape executor prototype.
-- It loads a fixed list of bundles, owns named device buffers, fills valid K/V
-  cache rows, launches three attention kernels plus a residual-add kernel in
-  order on one queue, and validates the final buffer against a CPU reference.
+- It loads a fixed list of bundles, owns named device buffers, applies RoPE to
+  Q/K, fills valid K/V cache rows, launches three attention kernels plus a
+  residual-add kernel in order on one queue, and validates the final buffer
+  against a CPU reference.
 - Keep the next step focused on generalizing only the parts that are repeated
   by additional integration examples.
 
