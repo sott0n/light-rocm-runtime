@@ -1,68 +1,64 @@
-add_executable(lrrt_triton_vector_add triton_vector_add.cpp)
-target_link_libraries(lrrt_triton_vector_add PRIVATE lrrt::bundle)
+function(lrrt_add_triton_executable target source)
+  add_executable(${target} ${source})
+  target_link_libraries(${target} PRIVATE lrrt::bundle)
+  add_test(NAME ${target} COMMAND ${target})
+endfunction()
 
-add_executable(lrrt_triton_saxpy triton_saxpy.cpp)
-target_link_libraries(lrrt_triton_saxpy PRIVATE lrrt::bundle)
+function(lrrt_bind_triton_manifest target bundle_target manifest_define
+         manifest_path)
+  add_dependencies(${target} ${bundle_target})
+  target_compile_definitions(
+    ${target}
+    PRIVATE ${manifest_define}="${manifest_path}"
+  )
+endfunction()
 
-add_executable(lrrt_triton_scale triton_scale.cpp)
-target_link_libraries(lrrt_triton_scale PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_rmsnorm triton_rmsnorm.cpp)
-target_link_libraries(lrrt_triton_rmsnorm PRIVATE lrrt::bundle)
-
-add_executable(
+lrrt_add_triton_executable(lrrt_triton_vector_add triton_vector_add.cpp)
+lrrt_add_triton_executable(lrrt_triton_saxpy triton_saxpy.cpp)
+lrrt_add_triton_executable(lrrt_triton_scale triton_scale.cpp)
+lrrt_add_triton_executable(lrrt_triton_rmsnorm triton_rmsnorm.cpp)
+lrrt_add_triton_executable(
   lrrt_triton_rmsnorm_precision_tests
   "${PROJECT_SOURCE_DIR}/tests/triton_rmsnorm_precision.cpp"
 )
-target_link_libraries(lrrt_triton_rmsnorm_precision_tests PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_rope triton_rope.cpp)
-target_link_libraries(lrrt_triton_rope PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_silu_mul triton_silu_mul.cpp)
-target_link_libraries(lrrt_triton_silu_mul PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_softmax triton_softmax.cpp)
-target_link_libraries(lrrt_triton_softmax PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_causal_softmax triton_causal_softmax.cpp)
-target_link_libraries(lrrt_triton_causal_softmax PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_matvec triton_matvec.cpp)
-target_link_libraries(lrrt_triton_matvec PRIVATE lrrt::bundle)
-
-add_executable(
+lrrt_add_triton_executable(lrrt_triton_rope triton_rope.cpp)
+lrrt_add_triton_executable(lrrt_triton_silu_mul triton_silu_mul.cpp)
+lrrt_add_triton_executable(lrrt_triton_softmax triton_softmax.cpp)
+lrrt_add_triton_executable(
+  lrrt_triton_causal_softmax
+  triton_causal_softmax.cpp
+)
+lrrt_add_triton_executable(lrrt_triton_matvec triton_matvec.cpp)
+lrrt_add_triton_executable(
   lrrt_triton_matvec_precision_tests
   "${PROJECT_SOURCE_DIR}/tests/triton_matvec_precision.cpp"
 )
-target_link_libraries(lrrt_triton_matvec_precision_tests PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_qkv_projection triton_qkv_projection.cpp)
+lrrt_add_triton_executable(lrrt_triton_qkv_projection triton_qkv_projection.cpp)
 target_include_directories(
   lrrt_triton_qkv_projection
   PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
 )
-target_link_libraries(lrrt_triton_qkv_projection PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_attention_score triton_attention_score.cpp)
-target_link_libraries(lrrt_triton_attention_score PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_value_aggregation triton_value_aggregation.cpp)
-target_link_libraries(lrrt_triton_value_aggregation PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_kv_cache triton_kv_cache.cpp)
+lrrt_add_triton_executable(
+  lrrt_triton_attention_score
+  triton_attention_score.cpp
+)
+lrrt_add_triton_executable(
+  lrrt_triton_value_aggregation
+  triton_value_aggregation.cpp
+)
+lrrt_add_triton_executable(lrrt_triton_kv_cache triton_kv_cache.cpp)
 target_include_directories(
   lrrt_triton_kv_cache
   PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
 )
-target_link_libraries(lrrt_triton_kv_cache PRIVATE lrrt::bundle)
-
-add_executable(lrrt_triton_mini_attention triton_mini_attention.cpp)
+lrrt_add_triton_executable(
+  lrrt_triton_mini_attention
+  triton_mini_attention.cpp
+)
 target_include_directories(
   lrrt_triton_mini_attention
   PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
 )
-target_link_libraries(lrrt_triton_mini_attention PRIVATE lrrt::bundle)
 
 lrrt_add_triton_bundle(
   triton_vector_add examples/triton/vector_add_kernel.py
@@ -127,119 +123,128 @@ lrrt_add_triton_bundle(
 )
 
 if(TRITON_VECTOR_ADD_HSACO)
-  add_dependencies(lrrt_triton_vector_add triton_vector_add_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_vector_add
-    PRIVATE
-      LRRT_TRITON_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
+    triton_vector_add_bundle
+    LRRT_TRITON_VECTOR_ADD_MANIFEST
+    "${TRITON_VECTOR_ADD_MANIFEST}"
   )
 endif()
 
 if(TRITON_SAXPY_HSACO)
-  add_dependencies(lrrt_triton_saxpy triton_saxpy_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_saxpy
-    PRIVATE LRRT_TRITON_SAXPY_MANIFEST="${TRITON_SAXPY_MANIFEST}"
+    triton_saxpy_bundle
+    LRRT_TRITON_SAXPY_MANIFEST
+    "${TRITON_SAXPY_MANIFEST}"
   )
 endif()
 
 if(TRITON_SCALE_HSACO)
-  add_dependencies(lrrt_triton_scale triton_scale_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_scale
-    PRIVATE LRRT_TRITON_SCALE_MANIFEST="${TRITON_SCALE_MANIFEST}"
+    triton_scale_bundle
+    LRRT_TRITON_SCALE_MANIFEST
+    "${TRITON_SCALE_MANIFEST}"
   )
 endif()
 
 if(TRITON_RMSNORM_HSACO)
-  add_dependencies(lrrt_triton_rmsnorm triton_rmsnorm_bundle)
-  add_dependencies(lrrt_triton_rmsnorm_precision_tests triton_rmsnorm_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_rmsnorm
-    PRIVATE LRRT_TRITON_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
+    triton_rmsnorm_bundle
+    LRRT_TRITON_RMSNORM_MANIFEST
+    "${TRITON_RMSNORM_MANIFEST}"
   )
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_rmsnorm_precision_tests
-    PRIVATE LRRT_TRITON_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
+    triton_rmsnorm_bundle
+    LRRT_TRITON_RMSNORM_MANIFEST
+    "${TRITON_RMSNORM_MANIFEST}"
   )
 endif()
 
 if(TRITON_ROPE_HSACO)
-  add_dependencies(lrrt_triton_rope triton_rope_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_rope
-    PRIVATE LRRT_TRITON_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
+    triton_rope_bundle
+    LRRT_TRITON_ROPE_MANIFEST
+    "${TRITON_ROPE_MANIFEST}"
   )
 endif()
 
 if(TRITON_SILU_MUL_HSACO)
-  add_dependencies(lrrt_triton_silu_mul triton_silu_mul_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_silu_mul
-    PRIVATE LRRT_TRITON_SILU_MUL_MANIFEST="${TRITON_SILU_MUL_MANIFEST}"
+    triton_silu_mul_bundle
+    LRRT_TRITON_SILU_MUL_MANIFEST
+    "${TRITON_SILU_MUL_MANIFEST}"
   )
 endif()
 
 if(TRITON_SOFTMAX_HSACO)
-  add_dependencies(lrrt_triton_softmax triton_softmax_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_softmax
-    PRIVATE LRRT_TRITON_SOFTMAX_MANIFEST="${TRITON_SOFTMAX_MANIFEST}"
+    triton_softmax_bundle
+    LRRT_TRITON_SOFTMAX_MANIFEST
+    "${TRITON_SOFTMAX_MANIFEST}"
   )
 endif()
 
 if(TRITON_CAUSAL_SOFTMAX_HSACO)
-  add_dependencies(lrrt_triton_causal_softmax triton_causal_softmax_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_causal_softmax
-    PRIVATE
-      LRRT_TRITON_CAUSAL_SOFTMAX_MANIFEST="${TRITON_CAUSAL_SOFTMAX_MANIFEST}"
+    triton_causal_softmax_bundle
+    LRRT_TRITON_CAUSAL_SOFTMAX_MANIFEST
+    "${TRITON_CAUSAL_SOFTMAX_MANIFEST}"
   )
 endif()
 
 if(TRITON_MATVEC_HSACO)
-  add_dependencies(lrrt_triton_matvec triton_matvec_bundle)
-  add_dependencies(lrrt_triton_matvec_precision_tests triton_matvec_bundle)
-  add_dependencies(lrrt_triton_qkv_projection triton_matvec_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_matvec
-    PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+    triton_matvec_bundle
+    LRRT_TRITON_MATVEC_MANIFEST
+    "${TRITON_MATVEC_MANIFEST}"
   )
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_matvec_precision_tests
-    PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+    triton_matvec_bundle
+    LRRT_TRITON_MATVEC_MANIFEST
+    "${TRITON_MATVEC_MANIFEST}"
   )
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_qkv_projection
-    PRIVATE
-      LRRT_TRITON_QKV_PROJECTION_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+    triton_matvec_bundle
+    LRRT_TRITON_QKV_PROJECTION_MATVEC_MANIFEST
+    "${TRITON_MATVEC_MANIFEST}"
   )
 endif()
 
 if(TRITON_ATTENTION_SCORE_HSACO)
-  add_dependencies(lrrt_triton_attention_score triton_attention_score_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_attention_score
-    PRIVATE
-      LRRT_TRITON_ATTENTION_SCORE_MANIFEST="${TRITON_ATTENTION_SCORE_MANIFEST}"
+    triton_attention_score_bundle
+    LRRT_TRITON_ATTENTION_SCORE_MANIFEST
+    "${TRITON_ATTENTION_SCORE_MANIFEST}"
   )
 endif()
 
 if(TRITON_VALUE_AGGREGATION_HSACO)
-  add_dependencies(lrrt_triton_value_aggregation
-                   triton_value_aggregation_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_value_aggregation
-    PRIVATE
-      LRRT_TRITON_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
+    triton_value_aggregation_bundle
+    LRRT_TRITON_VALUE_AGGREGATION_MANIFEST
+    "${TRITON_VALUE_AGGREGATION_MANIFEST}"
   )
 endif()
 
 if(TRITON_KV_CACHE_HSACO)
-  add_dependencies(lrrt_triton_kv_cache triton_kv_cache_bundle)
-  target_compile_definitions(
+  lrrt_bind_triton_manifest(
     lrrt_triton_kv_cache
-    PRIVATE LRRT_TRITON_KV_CACHE_MANIFEST="${TRITON_KV_CACHE_MANIFEST}"
+    triton_kv_cache_bundle
+    LRRT_TRITON_KV_CACHE_MANIFEST
+    "${TRITON_KV_CACHE_MANIFEST}"
   )
 endif()
 
@@ -266,32 +271,6 @@ if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
       LRRT_TRITON_MINI_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
   )
 endif()
-
-add_test(NAME lrrt_triton_vector_add COMMAND lrrt_triton_vector_add)
-add_test(NAME lrrt_triton_saxpy COMMAND lrrt_triton_saxpy)
-add_test(NAME lrrt_triton_scale COMMAND lrrt_triton_scale)
-add_test(NAME lrrt_triton_rmsnorm COMMAND lrrt_triton_rmsnorm)
-add_test(
-  NAME lrrt_triton_rmsnorm_precision_tests
-  COMMAND lrrt_triton_rmsnorm_precision_tests
-)
-add_test(NAME lrrt_triton_rope COMMAND lrrt_triton_rope)
-add_test(NAME lrrt_triton_silu_mul COMMAND lrrt_triton_silu_mul)
-add_test(NAME lrrt_triton_softmax COMMAND lrrt_triton_softmax)
-add_test(NAME lrrt_triton_causal_softmax COMMAND lrrt_triton_causal_softmax)
-add_test(NAME lrrt_triton_matvec COMMAND lrrt_triton_matvec)
-add_test(
-  NAME lrrt_triton_matvec_precision_tests
-  COMMAND lrrt_triton_matvec_precision_tests
-)
-add_test(NAME lrrt_triton_qkv_projection COMMAND lrrt_triton_qkv_projection)
-add_test(NAME lrrt_triton_attention_score COMMAND lrrt_triton_attention_score)
-add_test(
-  NAME lrrt_triton_value_aggregation
-  COMMAND lrrt_triton_value_aggregation
-)
-add_test(NAME lrrt_triton_kv_cache COMMAND lrrt_triton_kv_cache)
-add_test(NAME lrrt_triton_mini_attention COMMAND lrrt_triton_mini_attention)
 
 if(PYTHON_EXECUTABLE AND LLVM_READELF)
   foreach(
