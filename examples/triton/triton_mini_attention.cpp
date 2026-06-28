@@ -33,6 +33,10 @@
 #define LRRT_TRITON_MINI_ROPE_MANIFEST "manifest.json"
 #endif
 
+#ifndef LRRT_TRITON_MINI_MATVEC_MANIFEST
+#define LRRT_TRITON_MINI_MATVEC_MANIFEST "manifest.json"
+#endif
+
 namespace tex = lrrt::executor::triton;
 
 static uint32_t select_head_block(uint32_t head_dim) {
@@ -55,11 +59,30 @@ static uint32_t select_keys_block(uint32_t keys) {
   return 4096;
 }
 
+static uint32_t select_matvec_block(uint32_t hidden) {
+  if (hidden <= 1024) {
+    return 1024;
+  }
+  if (hidden <= 2048) {
+    return 2048;
+  }
+  return 4096;
+}
+
 class MiniAttentionExecutor {
 public:
-  MiniAttentionExecutor(lrrt::Device &device, uint32_t keys, uint32_t head_dim)
+  MiniAttentionExecutor(lrrt::Device &device, uint32_t keys, uint32_t hidden,
+                        uint32_t head_dim)
       : queue_(device), bundles_(device), buffers_(device), keys_(keys),
-        head_dim_(head_dim), scale_(1.0f / sqrtf((float)head_dim)) {
+        hidden_(hidden), head_dim_(head_dim),
+        scale_(1.0f / sqrtf((float)head_dim)) {
+    const std::string matvec_kernel_name = make_matvec_kernel_name(hidden);
+    bundles_.add("q_projection", LRRT_TRITON_MINI_MATVEC_MANIFEST,
+                 matvec_kernel_name);
+    bundles_.add("k_projection", LRRT_TRITON_MINI_MATVEC_MANIFEST,
+                 matvec_kernel_name);
+    bundles_.add("v_projection", LRRT_TRITON_MINI_MATVEC_MANIFEST,
+                 matvec_kernel_name);
     bundles_.add("score", LRRT_TRITON_MINI_ATTENTION_SCORE_MANIFEST,
                  make_score_kernel_name(head_dim));
     bundles_.add("softmax", LRRT_TRITON_MINI_CAUSAL_SOFTMAX_MANIFEST,
@@ -73,6 +96,10 @@ public:
     bundles_.add("rope", LRRT_TRITON_MINI_ROPE_MANIFEST,
                  make_rope_kernel_name(head_dim));
 
+    buffers_.allocate<float>("hidden_states", keys * hidden);
+    buffers_.allocate<float>("q_weight", head_dim * hidden);
+    buffers_.allocate<float>("k_weight", head_dim * hidden);
+    buffers_.allocate<float>("v_weight", head_dim * hidden);
     buffers_.allocate<float>("q", head_dim);
     buffers_.allocate<float>("q_rope", head_dim);
     buffers_.allocate<float>("source_k", keys * head_dim);
@@ -89,33 +116,41 @@ public:
     buffers_.allocate<float>("out", head_dim);
   }
 
-  void copy_inputs(const std::vector<float> &q, const std::vector<float> &k,
-                   const std::vector<float> &v, const std::vector<float> &cos,
-                   const std::vector<float> &sin,
+  void copy_inputs(const std::vector<float> &hidden_states,
+                   const std::vector<float> &q_weight,
+                   const std::vector<float> &k_weight,
+                   const std::vector<float> &v_weight,
+                   const std::vector<float> &cos, const std::vector<float> &sin,
                    const std::vector<float> &residual) {
-    if (q.size() != head_dim_ || k.size() != keys_ * head_dim_ ||
-        v.size() != keys_ * head_dim_ ||
+    if (hidden_states.size() != keys_ * hidden_ ||
+        q_weight.size() != head_dim_ * hidden_ ||
+        k_weight.size() != head_dim_ * hidden_ ||
+        v_weight.size() != head_dim_ * hidden_ ||
         cos.size() != keys_ * (head_dim_ / 2) ||
         sin.size() != keys_ * (head_dim_ / 2) || residual.size() != head_dim_) {
       throw std::runtime_error("mini attention input shape mismatch");
     }
 
-    std::vector<float> cache(keys_ * head_dim_, 0.0f);
+    std::vector<float> vector_zero(head_dim_, 0.0f);
+    std::vector<float> cache_zero(keys_ * head_dim_, 0.0f);
     std::vector<float> scores(keys_, 0.0f);
     std::vector<float> probs(keys_, 0.0f);
-    std::vector<float> out(head_dim_, 0.0f);
-    buffers_.copy_to("q", q);
-    buffers_.copy_to("source_k", k);
-    buffers_.copy_to("source_v", v);
+    buffers_.copy_to("hidden_states", hidden_states);
+    buffers_.copy_to("q_weight", q_weight);
+    buffers_.copy_to("k_weight", k_weight);
+    buffers_.copy_to("v_weight", v_weight);
+    buffers_.copy_to("q", vector_zero);
+    buffers_.copy_to("source_k", cache_zero);
+    buffers_.copy_to("source_v", cache_zero);
     buffers_.copy_to("cos", cos);
     buffers_.copy_to("sin", sin);
-    buffers_.copy_to("k_cache", cache);
-    buffers_.copy_to("v_cache", cache);
+    buffers_.copy_to("k_cache", cache_zero);
+    buffers_.copy_to("v_cache", cache_zero);
     buffers_.copy_to("residual", residual);
     buffers_.copy_to("scores", scores);
     buffers_.copy_to("probs", probs);
-    buffers_.copy_to("attention_out", out);
-    buffers_.copy_to("out", out);
+    buffers_.copy_to("attention_out", vector_zero);
+    buffers_.copy_to("out", vector_zero);
   }
 
   void run(uint32_t valid_keys) {
@@ -125,6 +160,40 @@ public:
 
     const uint32_t half = head_dim_ / 2;
     const uint32_t query_position = valid_keys - 1;
+
+    tex::launch(
+        queue_, bundles_.get("q_projection"), head_dim_,
+        {
+            tex::arg("x", buffers_.ptr<float>("hidden_states",
+                                              query_position * hidden_)),
+            tex::arg("weight", buffers_.ptr<float>("q_weight")),
+            tex::arg("out", buffers_.ptr<float>("q")),
+            tex::arg("outputs", (int32_t)head_dim_),
+            tex::arg("hidden", (int32_t)hidden_),
+        });
+    for (uint32_t position = 0; position < valid_keys; ++position) {
+      tex::launch(queue_, bundles_.get("k_projection"), head_dim_,
+                  {
+                      tex::arg("x", buffers_.ptr<float>("hidden_states",
+                                                        position * hidden_)),
+                      tex::arg("weight", buffers_.ptr<float>("k_weight")),
+                      tex::arg("out", buffers_.ptr<float>(
+                                          "source_k", position * head_dim_)),
+                      tex::arg("outputs", (int32_t)head_dim_),
+                      tex::arg("hidden", (int32_t)hidden_),
+                  });
+      tex::launch(queue_, bundles_.get("v_projection"), head_dim_,
+                  {
+                      tex::arg("x", buffers_.ptr<float>("hidden_states",
+                                                        position * hidden_)),
+                      tex::arg("weight", buffers_.ptr<float>("v_weight")),
+                      tex::arg("out", buffers_.ptr<float>(
+                                          "source_v", position * head_dim_)),
+                      tex::arg("outputs", (int32_t)head_dim_),
+                      tex::arg("hidden", (int32_t)hidden_),
+                  });
+    }
+
     tex::launch(
         queue_, bundles_.get("rope"), 1,
         {
@@ -211,6 +280,10 @@ public:
   }
 
 private:
+  static std::string make_matvec_kernel_name(uint32_t hidden) {
+    return "matvec_fp32_" + std::to_string(select_matvec_block(hidden));
+  }
+
   static std::string make_score_kernel_name(uint32_t head_dim) {
     return "attention_score_fp32_" +
            std::to_string(select_head_block(head_dim));
@@ -237,15 +310,45 @@ private:
   tex::BundleSet bundles_;
   tex::BufferSet buffers_;
   uint32_t keys_;
+  uint32_t hidden_;
   uint32_t head_dim_;
   float scale_;
 };
 
-static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
-                     uint32_t valid_keys) {
+static void fill_projection_weight(std::vector<float> &weight, uint32_t hidden,
+                                   uint32_t seed) {
+  for (uint32_t row = 0; row < weight.size() / hidden; ++row) {
+    for (uint32_t col = 0; col < hidden; ++col) {
+      uint32_t index = row * hidden + col;
+      int32_t lane = (int32_t)((index + row * 7 + seed * 11) % 23) - 11;
+      weight[index] = 0.0078125f * (float)lane;
+    }
+  }
+}
+
+static void reference_projection(const std::vector<float> &hidden_states,
+                                 const std::vector<float> &weight,
+                                 uint32_t hidden, uint32_t row,
+                                 std::vector<float> &out) {
+  for (uint32_t projection = 0; projection < out.size(); ++projection) {
+    float sum = 0.0f;
+    for (uint32_t col = 0; col < hidden; ++col) {
+      sum +=
+          hidden_states[row * hidden + col] * weight[projection * hidden + col];
+    }
+    out[projection] = sum;
+  }
+}
+
+static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
+                     uint32_t head_dim, uint32_t valid_keys) {
+  std::vector<float> hidden_states(keys * hidden);
+  std::vector<float> q_weight(head_dim * hidden);
+  std::vector<float> k_weight(head_dim * hidden);
+  std::vector<float> v_weight(head_dim * hidden);
   std::vector<float> q(head_dim);
-  std::vector<float> k(keys * head_dim);
-  std::vector<float> v(keys * head_dim);
+  std::vector<float> k(keys * head_dim, 0.0f);
+  std::vector<float> v(keys * head_dim, 0.0f);
   std::vector<float> cos(keys * (head_dim / 2));
   std::vector<float> sin(keys * (head_dim / 2));
   std::vector<float> residual(head_dim);
@@ -253,18 +356,15 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
   const float scale = 1.0f / sqrtf((float)head_dim);
   const uint32_t half = head_dim / 2;
 
-  for (uint32_t col = 0; col < head_dim; ++col) {
-    q[col] = 0.03125f * (float)((int32_t)((col * 5) % 29) - 14);
-    residual[col] = 0.0625f * (float)((int32_t)((col * 7) % 23) - 11);
+  for (uint32_t i = 0; i < hidden_states.size(); ++i) {
+    hidden_states[i] =
+        0.03125f * (float)((int32_t)((i * 5 + i / hidden) % 31) - 15);
   }
-  for (uint32_t row = 0; row < keys; ++row) {
-    for (uint32_t col = 0; col < head_dim; ++col) {
-      uint32_t index = row * head_dim + col;
-      int32_t k_lane = (int32_t)((index + row * 11 + col * 3) % 31) - 15;
-      int32_t v_lane = (int32_t)((index + row * 13 + col * 5) % 37) - 18;
-      k[index] = 0.015625f * (float)k_lane;
-      v[index] = 0.015625f * (float)v_lane;
-    }
+  fill_projection_weight(q_weight, hidden, 1);
+  fill_projection_weight(k_weight, hidden, 2);
+  fill_projection_weight(v_weight, hidden, 3);
+  for (uint32_t col = 0; col < head_dim; ++col) {
+    residual[col] = 0.0625f * (float)((int32_t)((col * 7) % 23) - 11);
   }
   for (uint32_t token = 0; token < keys; ++token) {
     for (uint32_t frequency = 0; frequency < half; ++frequency) {
@@ -277,14 +377,27 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
     }
   }
 
-  MiniAttentionExecutor executor(device, keys, head_dim);
-  executor.copy_inputs(q, k, v, cos, sin, residual);
+  MiniAttentionExecutor executor(device, keys, hidden, head_dim);
+  executor.copy_inputs(hidden_states, q_weight, k_weight, v_weight, cos, sin,
+                       residual);
   executor.run(valid_keys);
   executor.synchronize();
   executor.copy_output(out);
 
+  const uint32_t query_position = valid_keys - 1;
+  reference_projection(hidden_states, q_weight, hidden, query_position, q);
+  for (uint32_t row = 0; row < valid_keys; ++row) {
+    std::vector<float> k_row(head_dim);
+    std::vector<float> v_row(head_dim);
+    reference_projection(hidden_states, k_weight, hidden, row, k_row);
+    reference_projection(hidden_states, v_weight, hidden, row, v_row);
+    for (uint32_t col = 0; col < head_dim; ++col) {
+      k[row * head_dim + col] = k_row[col];
+      v[row * head_dim + col] = v_row[col];
+    }
+  }
+
   std::vector<float> q_rope(head_dim);
-  uint32_t query_position = valid_keys - 1;
   for (uint32_t offset = 0; offset < head_dim; ++offset) {
     uint32_t frequency = offset % half;
     uint32_t partner = offset < half ? offset + half : offset - half;
@@ -343,10 +456,10 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t head_dim,
   }
   if (max_diff > 0.002f) {
     fprintf(stderr,
-            "triton_mini_attention keys=%u head_dim=%u valid_keys=%u "
+            "triton_mini_attention keys=%u hidden=%u head_dim=%u valid_keys=%u "
             "mismatch at %u: actual=%f expected=%f diff=%f\n",
-            keys, head_dim, valid_keys, max_index, max_actual, max_expected,
-            max_diff);
+            keys, hidden, head_dim, valid_keys, max_index, max_actual,
+            max_expected, max_diff);
     throw std::runtime_error("triton_mini_attention result mismatch");
   }
 }
@@ -362,9 +475,9 @@ int main(void) {
 
     lrrt::Device device = runtime.open_device(0);
     printf("opened device: %u\n", device.index());
-    run_case(device, 16, 64, 7);
-    run_case(device, 96, 128, 64);
-    run_case(device, 128, 192, 97);
+    run_case(device, 16, 768, 64, 7);
+    run_case(device, 96, 1024, 128, 64);
+    run_case(device, 128, 1536, 192, 97);
 
     printf("triton_mini_attention: ok\n");
     return 0;
