@@ -230,6 +230,10 @@ target_link_libraries(lrrt_cpp_wrapper_tests PRIVATE lrrt::lrrt)
 add_executable(lrrt_bundle_tests tests/bundle.cpp)
 target_link_libraries(lrrt_bundle_tests PRIVATE lrrt::bundle)
 
+add_executable(lrrt_triton_executor_tests tests/triton_executor.cpp)
+target_include_directories(lrrt_triton_executor_tests PRIVATE executor/triton)
+target_link_libraries(lrrt_triton_executor_tests PRIVATE lrrt::bundle)
+
 lrrt_add_hsaco_kernel(
   vector_add_kernel examples/vector_add/vector_add_kernel.cpp
   VECTOR_ADD_HSACO
@@ -538,6 +542,7 @@ add_test(NAME lrrt_copy_kernel_tests COMMAND lrrt_copy_kernel_tests)
 add_test(NAME lrrt_event_timing_tests COMMAND lrrt_event_timing_tests)
 add_test(NAME lrrt_cpp_wrapper_tests COMMAND lrrt_cpp_wrapper_tests)
 add_test(NAME lrrt_bundle_tests COMMAND lrrt_bundle_tests)
+add_test(NAME lrrt_triton_executor_tests COMMAND lrrt_triton_executor_tests)
 if(TARGET lrrt_triton_vector_add)
   add_test(NAME lrrt_triton_vector_add COMMAND lrrt_triton_vector_add)
 endif()
