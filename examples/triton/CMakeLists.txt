@@ -59,6 +59,14 @@ target_include_directories(
   lrrt_triton_mini_attention
   PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
 )
+lrrt_add_triton_executable(
+  lrrt_triton_mini_decoder_block
+  triton_mini_decoder_block.cpp
+)
+target_include_directories(
+  lrrt_triton_mini_decoder_block
+  PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+)
 
 lrrt_add_triton_bundle(
   triton_vector_add examples/triton/vector_add_kernel.py
@@ -271,6 +279,35 @@ if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
       LRRT_TRITON_MINI_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
       LRRT_TRITON_MINI_KV_CACHE_MANIFEST="${TRITON_KV_CACHE_MANIFEST}"
       LRRT_TRITON_MINI_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
+  )
+endif()
+
+if(TRITON_RMSNORM_HSACO AND TRITON_MATVEC_HSACO AND
+   TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
+   TRITON_VALUE_AGGREGATION_HSACO AND TRITON_VECTOR_ADD_HSACO AND
+   TRITON_KV_CACHE_HSACO AND TRITON_ROPE_HSACO)
+  add_dependencies(
+    lrrt_triton_mini_decoder_block
+    triton_rmsnorm_bundle
+    triton_matvec_bundle
+    triton_attention_score_bundle
+    triton_causal_softmax_bundle
+    triton_value_aggregation_bundle
+    triton_vector_add_bundle
+    triton_kv_cache_bundle
+    triton_rope_bundle
+  )
+  target_compile_definitions(
+    lrrt_triton_mini_decoder_block
+    PRIVATE
+      LRRT_TRITON_MINI_DECODER_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_ATTENTION_SCORE_MANIFEST="${TRITON_ATTENTION_SCORE_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_CAUSAL_SOFTMAX_MANIFEST="${TRITON_CAUSAL_SOFTMAX_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_KV_CACHE_MANIFEST="${TRITON_KV_CACHE_MANIFEST}"
+      LRRT_TRITON_MINI_DECODER_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
   )
 endif()
 
