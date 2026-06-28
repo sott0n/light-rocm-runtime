@@ -169,6 +169,11 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
   add_executable(lrrt_triton_matvec examples/triton/triton_matvec.cpp)
   target_link_libraries(lrrt_triton_matvec PRIVATE lrrt::bundle)
   add_executable(
+    lrrt_triton_matvec_precision_tests
+    tests/triton_matvec_precision.cpp
+  )
+  target_link_libraries(lrrt_triton_matvec_precision_tests PRIVATE lrrt::bundle)
+  add_executable(
     lrrt_triton_attention_score
     examples/triton/triton_attention_score.cpp
   )
@@ -300,6 +305,8 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
     triton_matvec examples/triton/matvec_kernel.py
     TRITON_MATVEC_HSACO TRITON_MATVEC_MANIFEST
     kernels_2048.hsaco kernels_4096.hsaco
+    kernels_fp16_1024.hsaco kernels_fp16_2048.hsaco kernels_fp16_4096.hsaco
+    kernels_bf16_1024.hsaco kernels_bf16_2048.hsaco kernels_bf16_4096.hsaco
   )
   lrrt_add_triton_bundle(
     triton_attention_score examples/triton/attention_score_kernel.py
@@ -475,8 +482,13 @@ if(TRITON_CAUSAL_SOFTMAX_HSACO)
 endif()
 if(TRITON_MATVEC_HSACO)
   add_dependencies(lrrt_triton_matvec triton_matvec_bundle)
+  add_dependencies(lrrt_triton_matvec_precision_tests triton_matvec_bundle)
   target_compile_definitions(
     lrrt_triton_matvec
+    PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+  )
+  target_compile_definitions(
+    lrrt_triton_matvec_precision_tests
     PRIVATE LRRT_TRITON_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
   )
 endif()
@@ -578,6 +590,12 @@ if(TARGET lrrt_triton_causal_softmax)
 endif()
 if(TARGET lrrt_triton_matvec)
   add_test(NAME lrrt_triton_matvec COMMAND lrrt_triton_matvec)
+endif()
+if(TARGET lrrt_triton_matvec_precision_tests)
+  add_test(
+    NAME lrrt_triton_matvec_precision_tests
+    COMMAND lrrt_triton_matvec_precision_tests
+  )
 endif()
 if(TARGET lrrt_triton_attention_score)
   add_test(
