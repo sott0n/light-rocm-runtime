@@ -1,6 +1,7 @@
 build/
 build-bench/
 build-triton/
+build-triton-bench/
 __pycache__/
 *.o
 *.a
