@@ -178,6 +178,8 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
     examples/triton/triton_value_aggregation.cpp
   )
   target_link_libraries(lrrt_triton_value_aggregation PRIVATE lrrt::bundle)
+  add_executable(lrrt_triton_kv_cache examples/triton/triton_kv_cache.cpp)
+  target_link_libraries(lrrt_triton_kv_cache PRIVATE lrrt::bundle)
   add_executable(lrrt_triton_mini_attention
                  examples/triton/triton_mini_attention.cpp)
   target_link_libraries(lrrt_triton_mini_attention PRIVATE lrrt::bundle)
@@ -299,6 +301,12 @@ if(LRRT_ENABLE_TRITON_EXAMPLES)
     triton_value_aggregation examples/triton/value_aggregation_kernel.py
     TRITON_VALUE_AGGREGATION_HSACO TRITON_VALUE_AGGREGATION_MANIFEST
     kernels_2048.hsaco kernels_4096.hsaco
+  )
+  lrrt_add_triton_bundle(
+    triton_kv_cache examples/triton/kv_cache_kernel.py
+    TRITON_KV_CACHE_HSACO TRITON_KV_CACHE_MANIFEST
+    kernels_read.hsaco kernels_128.hsaco kernels_read_128.hsaco
+    kernels_256.hsaco kernels_read_256.hsaco
   )
 endif()
 
@@ -480,6 +488,13 @@ if(TRITON_VALUE_AGGREGATION_HSACO)
       LRRT_TRITON_VALUE_AGGREGATION_MANIFEST="${TRITON_VALUE_AGGREGATION_MANIFEST}"
   )
 endif()
+if(TRITON_KV_CACHE_HSACO)
+  add_dependencies(lrrt_triton_kv_cache triton_kv_cache_bundle)
+  target_compile_definitions(
+    lrrt_triton_kv_cache
+    PRIVATE LRRT_TRITON_KV_CACHE_MANIFEST="${TRITON_KV_CACHE_MANIFEST}"
+  )
+endif()
 if(TRITON_ATTENTION_SCORE_HSACO AND TRITON_CAUSAL_SOFTMAX_HSACO AND
    TRITON_VALUE_AGGREGATION_HSACO AND TRITON_VECTOR_ADD_HSACO)
   add_dependencies(
@@ -560,6 +575,9 @@ if(TARGET lrrt_triton_value_aggregation)
     NAME lrrt_triton_value_aggregation
     COMMAND lrrt_triton_value_aggregation
   )
+endif()
+if(TARGET lrrt_triton_kv_cache)
+  add_test(NAME lrrt_triton_kv_cache COMMAND lrrt_triton_kv_cache)
 endif()
 if(TARGET lrrt_triton_mini_attention)
   add_test(NAME lrrt_triton_mini_attention COMMAND lrrt_triton_mini_attention)
@@ -652,6 +670,14 @@ if(LRRT_ENABLE_TRITON_EXAMPLES AND UV_EXECUTABLE)
         "${PYTHON_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
         "--manifest=${TRITON_VALUE_AGGREGATION_MANIFEST}"
+        "--llvm-readelf=${LLVM_READELF}"
+    )
+    add_test(
+      NAME lrrt_triton_kv_cache_bundle_consistency
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "--manifest=${TRITON_KV_CACHE_MANIFEST}"
         "--llvm-readelf=${LLVM_READELF}"
     )
   else()

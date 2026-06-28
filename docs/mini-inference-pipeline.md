@@ -42,7 +42,7 @@ decoder-style path, not by every example currently present in the repository.
 | Residual add | ✅ | `vector_add` is connected in the mini attention integration path | Needs reuse in a larger decoder-block path |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 | Not yet connected to MLP projection outputs |
 | Output projection | ✅/❌ | `matvec` can stand in for a small FP32 output projection | Needs larger/batched projection support and lower precision |
-| KV cache update/read | ❌ | None | Needs persistent K/V buffer layout and indexed read/write kernels |
+| KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads | Not yet connected to RoPE output or the mini attention executor |
 
 ## Decoder Block Shape
 
@@ -133,7 +133,9 @@ meaningful:
   fixed example rather than a reusable executor abstraction.
 - **Residual add**: the mini attention path now covers attention output plus
   residual stream, but this should be reused in a larger decoder-block example.
-- **KV cache**: decode mode needs persistent K/V buffers and indexed writes.
+- **KV cache integration**: the standalone KV cache bundle covers indexed
+  FP32 writes and reads, but decode mode still needs this connected between
+  RoPE output and the attention score/value aggregation path.
 - **FP16/BF16 matvec**: Qwen-style inference should use lower precision inputs
   with FP32 accumulation where appropriate.
 - **Shape metadata**: the current manifest describes launch ABI, not tensor
