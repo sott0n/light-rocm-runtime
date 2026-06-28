@@ -67,6 +67,11 @@ target_include_directories(
   lrrt_triton_mini_decoder_block
   PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
 )
+lrrt_add_triton_executable(lrrt_triton_mini_mlp triton_mini_mlp.cpp)
+target_include_directories(
+  lrrt_triton_mini_mlp
+  PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+)
 
 lrrt_add_triton_bundle(
   triton_vector_add examples/triton/vector_add_kernel.py
@@ -308,6 +313,25 @@ if(TRITON_RMSNORM_HSACO AND TRITON_MATVEC_HSACO AND
       LRRT_TRITON_MINI_DECODER_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
       LRRT_TRITON_MINI_DECODER_KV_CACHE_MANIFEST="${TRITON_KV_CACHE_MANIFEST}"
       LRRT_TRITON_MINI_DECODER_ROPE_MANIFEST="${TRITON_ROPE_MANIFEST}"
+  )
+endif()
+
+if(TRITON_RMSNORM_HSACO AND TRITON_MATVEC_HSACO AND TRITON_SILU_MUL_HSACO AND
+   TRITON_VECTOR_ADD_HSACO)
+  add_dependencies(
+    lrrt_triton_mini_mlp
+    triton_rmsnorm_bundle
+    triton_matvec_bundle
+    triton_silu_mul_bundle
+    triton_vector_add_bundle
+  )
+  target_compile_definitions(
+    lrrt_triton_mini_mlp
+    PRIVATE
+      LRRT_TRITON_MINI_MLP_RMSNORM_MANIFEST="${TRITON_RMSNORM_MANIFEST}"
+      LRRT_TRITON_MINI_MLP_MATVEC_MANIFEST="${TRITON_MATVEC_MANIFEST}"
+      LRRT_TRITON_MINI_MLP_SILU_MUL_MANIFEST="${TRITON_SILU_MUL_MANIFEST}"
+      LRRT_TRITON_MINI_MLP_VECTOR_ADD_MANIFEST="${TRITON_VECTOR_ADD_MANIFEST}"
   )
 endif()
 
