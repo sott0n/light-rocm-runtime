@@ -22,6 +22,7 @@ struct Colors {
 struct BenchmarkCase {
   uint32_t keys;
   uint32_t hidden;
+  uint32_t heads;
   uint32_t head_dim;
   uint32_t intermediate;
   uint32_t valid_keys;
@@ -77,21 +78,24 @@ double elapsed_ns(Clock::time_point begin, Clock::time_point end) {
           .count());
 }
 
-BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
-                        uint32_t intermediate, uint32_t valid_keys) {
+BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
+                        uint32_t head_dim, uint32_t intermediate,
+                        uint32_t valid_keys) {
+  const uint32_t qkv_dim = heads * head_dim;
   BenchmarkCase benchmark_case = {
       keys,
       hidden,
+      heads,
       head_dim,
       intermediate,
       valid_keys,
       std::vector<float>(keys * hidden),
       std::vector<float>(hidden),
       std::vector<float>(hidden),
-      std::vector<float>(head_dim * hidden),
-      std::vector<float>(head_dim * hidden),
-      std::vector<float>(head_dim * hidden),
-      std::vector<float>(hidden * head_dim),
+      std::vector<float>(qkv_dim * hidden),
+      std::vector<float>(qkv_dim * hidden),
+      std::vector<float>(qkv_dim * hidden),
+      std::vector<float>(hidden * qkv_dim),
       std::vector<float>(intermediate * hidden),
       std::vector<float>(intermediate * hidden),
       std::vector<float>(hidden * intermediate),
@@ -115,7 +119,7 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
   lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.v_weight,
                                                        hidden, 3);
   lrrt::executor::triton::mini::fill_projection_weight(
-      benchmark_case.out_weight, head_dim, 4);
+      benchmark_case.out_weight, qkv_dim, 4);
   lrrt::executor::triton::mini::fill_projection_weight(
       benchmark_case.gate_weight, hidden, 5);
   lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.up_weight,
@@ -137,6 +141,11 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
   return benchmark_case;
 }
 
+BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
+                        uint32_t intermediate, uint32_t valid_keys) {
+  return make_case(keys, hidden, 1, head_dim, intermediate, valid_keys);
+}
+
 void copy_inputs(lrrt::executor::triton::mini::DecoderLayer &executor,
                  const BenchmarkCase &benchmark_case) {
   executor.copy_inputs(benchmark_case.hidden_states,
@@ -152,7 +161,7 @@ Measurements measure_case(lrrt::Device &device,
                           const BenchmarkCase &benchmark_case,
                           uint32_t iterations, uint32_t warmup_iterations) {
   lrrt::executor::triton::mini::DecoderLayer executor(
-      device, benchmark_case.keys, benchmark_case.hidden,
+      device, benchmark_case.keys, benchmark_case.hidden, benchmark_case.heads,
       benchmark_case.head_dim, benchmark_case.intermediate);
   copy_inputs(executor, benchmark_case);
 
@@ -185,10 +194,10 @@ Measurements measure_case(lrrt::Device &device,
 
 void print_case(const BenchmarkCase &benchmark_case,
                 const Measurements &measurements, const Colors &colors) {
-  printf("%-26s %5u %7u %8u %12u %10u %s%11.3f us%s %s%11.3f us%s\n",
+  printf("%-26s %5u %7u %5u %8u %12u %10u %s%11.3f us%s %s%11.3f us%s\n",
          "decoder layer", benchmark_case.keys, benchmark_case.hidden,
-         benchmark_case.head_dim, benchmark_case.intermediate,
-         benchmark_case.valid_keys, colors.time,
+         benchmark_case.heads, benchmark_case.head_dim,
+         benchmark_case.intermediate, benchmark_case.valid_keys, colors.time,
          measurements.round_trip_ns / 1.0e3, colors.reset, colors.time,
          measurements.burst_interval_ns / 1.0e3, colors.reset);
 }
@@ -208,7 +217,8 @@ int main(int argc, char **argv) {
     lrrt::Device device = runtime.open_device(0);
     std::vector<BenchmarkCase> cases;
     cases.push_back(make_case(16, 768, 64, 2048, 7));
-    cases.push_back(make_case(64, 1024, 128, 3072, 33));
+    cases.push_back(make_case(32, 768, 2, 64, 2048, 19));
+    cases.push_back(make_case(64, 1024, 2, 128, 3072, 33));
 
     const Colors colors = output_colors();
     printf("\n%sLRRT Triton Mini Decoder Layer Benchmark%s\n", colors.title,
@@ -218,12 +228,13 @@ int main(int argc, char **argv) {
     printf("Device index:       %u\n", device.index());
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
-    printf("%s%-26s %5s %7s %8s %12s %10s %14s %14s%s\n", colors.label,
-           "Workload", "Keys", "Hidden", "HeadDim", "Intermediate", "ValidKeys",
-           "Round trip", "Burst interval", colors.reset);
-    printf("%-26s %5s %7s %8s %12s %10s %14s %14s\n",
-           "--------------------------", "-----", "-------", "--------",
-           "------------", "----------", "--------------", "--------------");
+    printf("%s%-26s %5s %7s %5s %8s %12s %10s %14s %14s%s\n", colors.label,
+           "Workload", "Keys", "Hidden", "Heads", "HeadDim", "Intermediate",
+           "ValidKeys", "Round trip", "Burst interval", colors.reset);
+    printf("%-26s %5s %7s %5s %8s %12s %10s %14s %14s\n",
+           "--------------------------", "-----", "-------", "-----",
+           "--------", "------------", "----------", "--------------",
+           "--------------");
 
     for (const BenchmarkCase &benchmark_case : cases) {
       Measurements measurements =
