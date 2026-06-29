@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -299,6 +300,36 @@ inline std::vector<TensorSpec> tensor_specs(const DecoderLayerShape &shape) {
   };
 }
 
+inline void append_tensor(std::ofstream &data, std::ofstream &manifest,
+                          const char *name, const std::vector<float> &values,
+                          uint64_t *offset, bool *first) {
+  if (!first || !offset) {
+    throw std::invalid_argument("mini decoder weight writer state is null");
+  }
+  if (!data || !manifest) {
+    throw std::runtime_error("mini decoder weight output stream is invalid");
+  }
+  if (!*first) {
+    manifest << ",\n";
+  }
+  *first = false;
+  manifest << "    {\"name\":\"" << name << "\",\"offset\":" << *offset
+           << ",\"count\":" << values.size() << "}";
+  size_t bytes = checked_multiply(values.size(), sizeof(float), name);
+  if (bytes > 0) {
+    data.write(reinterpret_cast<const char *>(values.data()),
+               static_cast<std::streamsize>(bytes));
+    if (!data) {
+      throw std::runtime_error("failed to write mini decoder weight tensor: " +
+                               std::string(name));
+    }
+  }
+  if (*offset > std::numeric_limits<uint64_t>::max() - bytes) {
+    throw std::overflow_error("mini decoder weight data offset overflows");
+  }
+  *offset += static_cast<uint64_t>(bytes);
+}
+
 inline void copy_tensor(const std::vector<unsigned char> &data, uint64_t offset,
                         size_t count, const std::string &name,
                         std::vector<float> *out) {
@@ -393,6 +424,85 @@ inline void copy_decoder_layer_inputs(DecoderLayer &executor,
       hidden_states, weights.attention_norm_weight, weights.mlp_norm_weight,
       weights.q_weight, weights.k_weight, weights.v_weight, weights.out_weight,
       weights.gate_weight, weights.up_weight, weights.down_weight, cos, sin);
+}
+
+inline void write_decoder_layer_weights(const char *manifest_path,
+                                        const char *data_file_name,
+                                        const DecoderLayerWeights &weights) {
+  if (!manifest_path || manifest_path[0] == '\0' || !data_file_name ||
+      data_file_name[0] == '\0') {
+    throw std::invalid_argument("mini decoder weight output path is empty");
+  }
+  detail::validate_shape(weights.shape);
+  if (weights.attention_norm_weight.size() != weights.shape.hidden ||
+      weights.mlp_norm_weight.size() != weights.shape.hidden ||
+      weights.q_weight.size() !=
+          static_cast<size_t>(weights.shape.qkv_dim()) * weights.shape.hidden ||
+      weights.k_weight.size() !=
+          static_cast<size_t>(weights.shape.qkv_dim()) * weights.shape.hidden ||
+      weights.v_weight.size() !=
+          static_cast<size_t>(weights.shape.qkv_dim()) * weights.shape.hidden ||
+      weights.out_weight.size() !=
+          static_cast<size_t>(weights.shape.hidden) * weights.shape.qkv_dim() ||
+      weights.gate_weight.size() !=
+          static_cast<size_t>(weights.shape.intermediate) *
+              weights.shape.hidden ||
+      weights.up_weight.size() !=
+          static_cast<size_t>(weights.shape.intermediate) *
+              weights.shape.hidden ||
+      weights.down_weight.size() != static_cast<size_t>(weights.shape.hidden) *
+                                        weights.shape.intermediate) {
+    throw std::runtime_error("mini decoder weights have invalid tensor sizes");
+  }
+
+  std::string data_path =
+      detail::relative_path(manifest_path, std::string(data_file_name));
+  std::ofstream data(data_path, std::ios::binary | std::ios::trunc);
+  if (!data) {
+    throw std::runtime_error(
+        "failed to create mini decoder weight data file: " + data_path);
+  }
+  std::ofstream manifest(manifest_path, std::ios::binary | std::ios::trunc);
+  if (!manifest) {
+    throw std::runtime_error("failed to create mini decoder weight manifest: " +
+                             std::string(manifest_path));
+  }
+
+  manifest << "{\n"
+           << "  \"format\": \"lrrt.mini_decoder_weights\",\n"
+           << "  \"version\": 1,\n"
+           << "  \"dtype\": \"f32\",\n"
+           << "  \"data\": \"" << data_file_name << "\",\n"
+           << "  \"keys\": " << weights.shape.keys << ",\n"
+           << "  \"hidden\": " << weights.shape.hidden << ",\n"
+           << "  \"heads\": " << weights.shape.heads << ",\n"
+           << "  \"head_dim\": " << weights.shape.head_dim << ",\n"
+           << "  \"intermediate\": " << weights.shape.intermediate << ",\n"
+           << "  \"tensors\": [\n";
+  uint64_t offset = 0;
+  bool first = true;
+  detail::append_tensor(data, manifest, "attention_norm_weight",
+                        weights.attention_norm_weight, &offset, &first);
+  detail::append_tensor(data, manifest, "mlp_norm_weight",
+                        weights.mlp_norm_weight, &offset, &first);
+  detail::append_tensor(data, manifest, "q_weight", weights.q_weight, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "k_weight", weights.k_weight, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "v_weight", weights.v_weight, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "out_weight", weights.out_weight,
+                        &offset, &first);
+  detail::append_tensor(data, manifest, "gate_weight", weights.gate_weight,
+                        &offset, &first);
+  detail::append_tensor(data, manifest, "up_weight", weights.up_weight, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "down_weight", weights.down_weight,
+                        &offset, &first);
+  manifest << "\n  ]\n}\n";
+  if (!manifest) {
+    throw std::runtime_error("failed to write mini decoder weight manifest");
+  }
 }
 
 } // namespace lrrt::executor::triton::mini

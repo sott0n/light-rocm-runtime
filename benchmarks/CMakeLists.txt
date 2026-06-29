@@ -4,6 +4,21 @@ target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
 
+if(LRRT_BUILD_TRITON_BENCHMARKS)
+  add_executable(
+    lrrt_triton_mini_decoder_weight_bundle
+    triton_mini_decoder_weight_bundle.cpp
+  )
+  target_link_libraries(
+    lrrt_triton_mini_decoder_weight_bundle
+    PRIVATE lrrt::bundle
+  )
+  target_include_directories(
+    lrrt_triton_mini_decoder_weight_bundle
+    PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+  )
+endif()
+
 if(LRRT_BUILD_TRITON_BENCHMARKS AND UV_EXECUTABLE)
   add_executable(
     lrrt_triton_mini_decoder_layer_benchmark

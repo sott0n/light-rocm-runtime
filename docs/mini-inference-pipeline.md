@@ -122,6 +122,23 @@ The actual manifest must include all mini decoder layer weight tensors:
 `attention_norm_weight`, `mlp_norm_weight`, `q_weight`, `k_weight`, `v_weight`,
 `out_weight`, `gate_weight`, `up_weight`, and `down_weight`.
 
+The Triton benchmark build also provides
+`lrrt_triton_mini_decoder_weight_bundle`, which emits the deterministic
+synthetic weight pattern in this format:
+
+```bash
+mkdir -p /tmp/lrrt-mini-weights
+./build-triton-bench/lrrt_triton_mini_decoder_weight_bundle \
+  /tmp/lrrt-mini-weights/weights.json 16 768 1 64 2048
+```
+
+The mini decoder layer benchmark can then consume that bundle:
+
+```bash
+./build-triton-bench/lrrt_triton_mini_decoder_layer_benchmark \
+  20 --weights /tmp/lrrt-mini-weights/weights.json --valid-keys 7
+```
+
 ## Current Integration Baseline
 
 The current multi-kernel baseline has moved beyond `triton_mini_attention` to

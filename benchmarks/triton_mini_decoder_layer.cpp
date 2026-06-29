@@ -1,4 +1,4 @@
-#include "mini_decoder_layer.hpp"
+#include "mini_decoder_weights.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -46,6 +46,13 @@ struct Measurements {
   double gpu_burst_interval_ns;
 };
 
+struct Options {
+  uint32_t iterations;
+  const char *weights_path;
+  uint32_t valid_keys;
+  bool has_valid_keys;
+};
+
 uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
   return benchmark_case.heads * benchmark_case.head_dim;
 }
@@ -65,21 +72,45 @@ Colors output_colors() {
   return {"\033[1;32m", "\033[1m", "\033[32m", "\033[1;32m", "\033[0m"};
 }
 
-uint32_t parse_iterations(int argc, char **argv) {
-  if (argc > 2) {
-    throw std::invalid_argument(
-        "usage: lrrt_triton_mini_decoder_layer_benchmark [count]");
-  }
-  if (argc == 1) {
-    return 20;
+uint32_t parse_u32(const char *text, const char *label) {
+  if (!text || text[0] == '\0') {
+    throw std::invalid_argument(std::string(label) + " is empty");
   }
   char *end = nullptr;
-  unsigned long value = strtoul(argv[1], &end, 10);
+  unsigned long value = strtoul(text, &end, 10);
   if (!end || *end != '\0' || value == 0 ||
       value > std::numeric_limits<uint32_t>::max()) {
-    throw std::invalid_argument("benchmark count must be a positive uint32");
+    throw std::invalid_argument(std::string(label) +
+                                " must be a positive uint32");
   }
   return static_cast<uint32_t>(value);
+}
+
+Options parse_options(int argc, char **argv) {
+  Options options{20, nullptr, 0, false};
+  bool saw_iterations = false;
+  for (int i = 1; i < argc; ++i) {
+    if (strcmp(argv[i], "--weights") == 0) {
+      if (++i >= argc) {
+        throw std::invalid_argument("--weights requires a manifest path");
+      }
+      options.weights_path = argv[i];
+    } else if (strcmp(argv[i], "--valid-keys") == 0) {
+      if (++i >= argc) {
+        throw std::invalid_argument("--valid-keys requires a count");
+      }
+      options.valid_keys = parse_u32(argv[i], "valid key count");
+      options.has_valid_keys = true;
+    } else if (!saw_iterations) {
+      options.iterations = parse_u32(argv[i], "benchmark count");
+      saw_iterations = true;
+    } else {
+      throw std::invalid_argument(
+          "usage: lrrt_triton_mini_decoder_layer_benchmark [count] "
+          "[--weights weights.json] [--valid-keys count]");
+    }
+  }
+  return options;
 }
 
 double elapsed_ns(Clock::time_point begin, Clock::time_point end) {
@@ -148,6 +179,24 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
       benchmark_case.sin[index] = sinf(angle);
     }
   }
+  return benchmark_case;
+}
+
+BenchmarkCase
+make_case(const lrrt::executor::triton::mini::DecoderLayerWeights &weights,
+          uint32_t valid_keys) {
+  BenchmarkCase benchmark_case =
+      make_case(weights.shape.keys, weights.shape.hidden, weights.shape.heads,
+                weights.shape.head_dim, weights.shape.intermediate, valid_keys);
+  benchmark_case.attention_norm_weight = weights.attention_norm_weight;
+  benchmark_case.mlp_norm_weight = weights.mlp_norm_weight;
+  benchmark_case.q_weight = weights.q_weight;
+  benchmark_case.k_weight = weights.k_weight;
+  benchmark_case.v_weight = weights.v_weight;
+  benchmark_case.out_weight = weights.out_weight;
+  benchmark_case.gate_weight = weights.gate_weight;
+  benchmark_case.up_weight = weights.up_weight;
+  benchmark_case.down_weight = weights.down_weight;
   return benchmark_case;
 }
 
@@ -232,7 +281,8 @@ void print_case(const BenchmarkCase &benchmark_case,
 
 int main(int argc, char **argv) {
   try {
-    const uint32_t iterations = parse_iterations(argc, argv);
+    const Options options = parse_options(argc, argv);
+    const uint32_t iterations = options.iterations;
     const uint32_t warmup_iterations = std::min(iterations, 5u);
 
     lrrt::Runtime runtime;
@@ -242,9 +292,22 @@ int main(int argc, char **argv) {
     }
     lrrt::Device device = runtime.open_device(0);
     std::vector<BenchmarkCase> cases;
-    cases.push_back(make_case(16, 768, 64, 2048, 7));
-    cases.push_back(make_case(32, 768, 2, 64, 2048, 19));
-    cases.push_back(make_case(64, 1024, 2, 128, 3072, 33));
+    if (options.weights_path) {
+      lrrt::executor::triton::mini::DecoderLayerWeights weights =
+          lrrt::executor::triton::mini::load_decoder_layer_weights(
+              options.weights_path);
+      uint32_t valid_keys =
+          options.has_valid_keys ? options.valid_keys : weights.shape.keys;
+      if (valid_keys > weights.shape.keys) {
+        throw std::invalid_argument(
+            "valid key count exceeds weight shape keys");
+      }
+      cases.push_back(make_case(weights, valid_keys));
+    } else {
+      cases.push_back(make_case(16, 768, 64, 2048, 7));
+      cases.push_back(make_case(32, 768, 2, 64, 2048, 19));
+      cases.push_back(make_case(64, 1024, 2, 128, 3072, 33));
+    }
 
     const Colors colors = output_colors();
     printf("\n%sLRRT Triton Mini Decoder Layer Benchmark%s\n", colors.title,
@@ -257,6 +320,8 @@ int main(int argc, char **argv) {
     printf("Cache layout:       [heads, keys, head_dim]\n");
     printf("Queueing:           ordered launches on one lrrt queue\n");
     printf("Timing source:      CPU steady_clock and HSA GPU event markers\n");
+    printf("Weight source:      %s\n",
+           options.weights_path ? options.weights_path : "synthetic");
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
     printf("%s%-26s %5s %7s %5s %8s %7s %12s %10s %10s %11s %11s %11s%s\n",
