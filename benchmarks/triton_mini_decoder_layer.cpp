@@ -1,5 +1,4 @@
-#define LRRT_TRITON_MINI_DECODER_LAYER_NO_MAIN
-#include "../examples/triton/triton_mini_decoder_layer.cpp"
+#include "mini_decoder_layer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -109,13 +108,20 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
     benchmark_case.mlp_norm_weight[i] = 1.0f - 0.001f * (float)(i % 17);
   }
 
-  fill_projection_weight(benchmark_case.q_weight, hidden, 1);
-  fill_projection_weight(benchmark_case.k_weight, hidden, 2);
-  fill_projection_weight(benchmark_case.v_weight, hidden, 3);
-  fill_projection_weight(benchmark_case.out_weight, head_dim, 4);
-  fill_projection_weight(benchmark_case.gate_weight, hidden, 5);
-  fill_projection_weight(benchmark_case.up_weight, hidden, 6);
-  fill_projection_weight(benchmark_case.down_weight, intermediate, 7);
+  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.q_weight,
+                                                       hidden, 1);
+  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.k_weight,
+                                                       hidden, 2);
+  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.v_weight,
+                                                       hidden, 3);
+  lrrt::executor::triton::mini::fill_projection_weight(
+      benchmark_case.out_weight, head_dim, 4);
+  lrrt::executor::triton::mini::fill_projection_weight(
+      benchmark_case.gate_weight, hidden, 5);
+  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.up_weight,
+                                                       hidden, 6);
+  lrrt::executor::triton::mini::fill_projection_weight(
+      benchmark_case.down_weight, intermediate, 7);
 
   const uint32_t half = head_dim / 2;
   for (uint32_t token = 0; token < keys; ++token) {
@@ -131,7 +137,7 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
   return benchmark_case;
 }
 
-void copy_inputs(MiniDecoderLayerExecutor &executor,
+void copy_inputs(lrrt::executor::triton::mini::DecoderLayer &executor,
                  const BenchmarkCase &benchmark_case) {
   executor.copy_inputs(benchmark_case.hidden_states,
                        benchmark_case.attention_norm_weight,
@@ -145,7 +151,7 @@ void copy_inputs(MiniDecoderLayerExecutor &executor,
 Measurements measure_case(lrrt::Device &device,
                           const BenchmarkCase &benchmark_case,
                           uint32_t iterations, uint32_t warmup_iterations) {
-  MiniDecoderLayerExecutor executor(
+  lrrt::executor::triton::mini::DecoderLayer executor(
       device, benchmark_case.keys, benchmark_case.hidden,
       benchmark_case.head_dim, benchmark_case.intermediate);
   copy_inputs(executor, benchmark_case);
