@@ -48,15 +48,15 @@ decoder-style path, not by every example currently present in the repository.
 | --- | --- | --- | --- |
 | RMSNorm | ✅ | `rmsnorm` with FP32/FP16/BF16 input variants and FP32 reference validation; used by `triton_mini_decoder_layer` before attention and MLP | Still fixed-shape/specialization driven |
 | Q/K/V projection | ✅/❌ | `matvec` covers one-vector FP32 projection and is wired into `triton_mini_decoder_layer` for Q/K/V | No batched projection or tiled GEMM; lower precision bundle variants exist for matvec tests but the decoder layer path is still FP32 |
-| RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits; applied to Q and K projection outputs in the decoder layer path | Still single-head in the decoder layer path |
-| Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling and is used in mini attention and mini decoder layer | Still single-head row-major cache layout |
+| RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits; applied to Q and K projection outputs in the decoder layer path | Multi-head currently reuses the single-head kernel once per head |
+| Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling and is used in mini attention and mini decoder layer | Multi-head currently dispatches score computation per head |
 | Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets and is used in mini attention and mini decoder layer | Needs broader shape coverage for model-like cache lengths |
-| Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors and is used in mini attention and mini decoder layer | Still single-head |
+| Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors and is used in mini attention and mini decoder layer | Multi-head currently dispatches aggregation per head |
 | Residual add | ✅ | `vector_add` is used for attention residual and MLP residual in `triton_mini_decoder_layer` | Only FP32 path is wired into the decoder layer |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 and is wired into `triton_mini_mlp` and `triton_mini_decoder_layer` | Needs lower precision and larger shape coverage later |
 | Output projection | ✅/❌ | `matvec` stands in for attention output projection and MLP down projection in the mini decoder layer | Needs larger/batched projection support and lower precision in the end-to-end path |
-| KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini decoder layer writes RoPE-applied K and raw V through cache buffers | Still single-head row-major layout |
-| Benchmark timing | ✅ | `lrrt_triton_mini_decoder_layer_benchmark` reports round-trip and burst-queued latency for the fixed-shape mini decoder layer | Needs methodology cleanup, per-stage timing, and model metadata reporting |
+| KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini decoder layer uses a `[heads, keys, head_dim]` cache layout by dispatching update/read-like operations per head | Needs a layout policy that can survive real model weight/cache integration |
+| Benchmark timing | ✅ | `lrrt_triton_mini_decoder_layer_benchmark` reports round-trip and burst-queued latency with dtype, cache layout, queueing mode, QKV dimension, and estimated dispatch count metadata | Needs per-stage timing and GPU event timing for deeper performance analysis |
 
 ## Decoder Layer Shape
 
@@ -128,7 +128,24 @@ path that exercises the same executor concerns:
 The benchmark target is `lrrt_triton_mini_decoder_layer_benchmark`, enabled by
 `LRRT_BUILD_BENCHMARKS=ON` and `LRRT_BUILD_TRITON_BENCHMARKS=ON`. It reuses the
 shared mini decoder layer executor helper and reports round-trip and
-burst-queued latency for deterministic synthetic inputs.
+burst-queued latency for deterministic synthetic inputs. The benchmark reports
+FP32 dtype, `[heads, keys, head_dim]` cache layout, ordered single-queue
+launching, `QKVDim`, and an estimated kernel dispatch count per layer. That
+dispatch count matters because multi-head attention currently loops over heads
+and reuses single-head kernels instead of using fused multi-head kernels.
+
+The benchmark timing modes are intentionally simple:
+
+- **Round trip**: measure one `executor.run()` followed by `synchronize()` for
+  each iteration. This includes CPU submission overhead, GPU execution, and the
+  final synchronization wait for that layer.
+- **Burst interval**: submit `executor.run()` repeatedly and call
+  `synchronize()` once at the end. This measures the average interval for a
+  burst of queued layer submissions, but it still preserves queue ordering and
+  dependencies.
+
+Both modes currently use CPU `steady_clock` around executor calls. Runtime GPU
+event timing can be added later for per-stage or GPU-only measurements.
 
 ## Executor Responsibilities
 
@@ -173,12 +190,14 @@ management, not high-level model execution.
 The current mini decoder layer and benchmark leave several gaps before a
 Qwen-like path can be meaningful:
 
-- **Multi-head attention**: the mini decoder layer is still effectively
-  single-head. Qwen-style execution needs a `num_heads x head_dim` layout for
-  Q/K/V, RoPE, cache, scores, probabilities, and value aggregation.
-- **KV cache layout**: mini attention now stores RoPE-applied K and raw V in
-  cache buffers, but the layout is still a single-head row-major
-  `[max_tokens, head_dim]` buffer.
+- **Multi-head performance**: the mini decoder layer now supports a
+  `num_heads x head_dim` layout, but it does so by dispatching existing
+  single-head kernels once per head. This is useful for correctness and layout
+  validation, not for final performance.
+- **KV cache layout policy**: the mini decoder layer uses a
+  `[heads, keys, head_dim]` cache layout. This is explicit enough for the
+  current benchmark, but real Qwen weight/cache integration may require a
+  different layout or a documented adapter.
 - **Weight loading**: the current examples and benchmark use deterministic
   synthetic weights. A Qwen-style benchmark needs an external weight-loading
   path, even if the first format is a simple raw binary plus metadata file.
@@ -189,10 +208,9 @@ Qwen-like path can be meaningful:
 - **Shape metadata**: the current manifest describes launch ABI, not tensor
   shape semantics. The executor must provide shape policy outside the runtime
   core.
-- **Benchmark methodology**: the benchmark reports end-to-end round-trip and
-  burst-queued latency, but the measurement boundaries and any future per-stage
-  timing need to be documented carefully before comparing performance across
-  implementations.
+- **Per-stage timing**: the benchmark reports end-to-end round-trip and
+  burst-queued latency with shape and queueing metadata, but it does not yet
+  report per-stage or GPU-event timings.
 
 ## Suggested Milestones
 
@@ -232,8 +250,7 @@ Qwen-like path can be meaningful:
 
 ### P4: Tiny Decoder Block
 
-- Status: complete for a fixed-shape, synthetic, single-head mini decoder
-  layer.
+- Status: complete for a fixed-shape, synthetic, multi-head mini decoder layer.
 - `triton_mini_decoder_layer` combines RMSNorm, projection, RoPE, causal
   softmax, value aggregation, MLP activation, and residual operations.
 - It is an executor-style example, not a general model runtime.
@@ -246,9 +263,10 @@ Qwen-like path can be meaningful:
   layer through lrrt using Triton-generated bundles.
 - It currently uses deterministic synthetic inputs and weights, not real Qwen
   weights.
-- It measures round-trip latency and burst-queued latency for the whole layer.
-- Next steps are multi-head support, external weight loading, lower precision
-  end-to-end execution, and clearer benchmark methodology.
+- It measures round-trip latency and burst-queued latency for the whole layer
+  and prints enough shape/queueing metadata to interpret those numbers.
+- Next steps are external weight loading, lower precision end-to-end execution,
+  fused or batched multi-head kernels, and per-stage timing.
 - Report enough benchmark metadata to make results reproducible: target arch,
   dtype, hidden size, head count, head dimension, cache length, layer count,
   warmup iterations, and measured iterations.

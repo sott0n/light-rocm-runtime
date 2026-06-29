@@ -45,6 +45,15 @@ struct Measurements {
   double burst_interval_ns;
 };
 
+uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
+  return benchmark_case.heads * benchmark_case.head_dim;
+}
+
+uint32_t estimated_dispatches(const BenchmarkCase &benchmark_case) {
+  return 10 + 2 * benchmark_case.valid_keys +
+         benchmark_case.heads * (4 + 2 * benchmark_case.valid_keys);
+}
+
 Colors output_colors() {
   const char *term = getenv("TERM");
   bool enabled = isatty(fileno(stdout)) && getenv("NO_COLOR") == nullptr &&
@@ -194,10 +203,12 @@ Measurements measure_case(lrrt::Device &device,
 
 void print_case(const BenchmarkCase &benchmark_case,
                 const Measurements &measurements, const Colors &colors) {
-  printf("%-26s %5u %7u %5u %8u %12u %10u %s%11.3f us%s %s%11.3f us%s\n",
+  printf("%-26s %5u %7u %5u %8u %7u %12u %10u %10u %s%11.3f us%s "
+         "%s%11.3f us%s\n",
          "decoder layer", benchmark_case.keys, benchmark_case.hidden,
-         benchmark_case.heads, benchmark_case.head_dim,
-         benchmark_case.intermediate, benchmark_case.valid_keys, colors.time,
+         benchmark_case.heads, benchmark_case.head_dim, qkv_dim(benchmark_case),
+         benchmark_case.intermediate, benchmark_case.valid_keys,
+         estimated_dispatches(benchmark_case), colors.time,
          measurements.round_trip_ns / 1.0e3, colors.reset, colors.time,
          measurements.burst_interval_ns / 1.0e3, colors.reset);
 }
@@ -226,15 +237,20 @@ int main(int argc, char **argv) {
     printf("%s========================================%s\n", colors.title,
            colors.reset);
     printf("Device index:       %u\n", device.index());
+    printf("Data type:          FP32 inputs / FP32 accumulation\n");
+    printf("Cache layout:       [heads, keys, head_dim]\n");
+    printf("Queueing:           ordered launches on one lrrt queue\n");
+    printf("Timing source:      CPU steady_clock around executor calls\n");
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
-    printf("%s%-26s %5s %7s %5s %8s %12s %10s %14s %14s%s\n", colors.label,
-           "Workload", "Keys", "Hidden", "Heads", "HeadDim", "Intermediate",
-           "ValidKeys", "Round trip", "Burst interval", colors.reset);
-    printf("%-26s %5s %7s %5s %8s %12s %10s %14s %14s\n",
+    printf("%s%-26s %5s %7s %5s %8s %7s %12s %10s %10s %14s %14s%s\n",
+           colors.label, "Workload", "Keys", "Hidden", "Heads", "HeadDim",
+           "QKVDim", "Intermediate", "ValidKeys", "Dispatches", "Round trip",
+           "Burst interval", colors.reset);
+    printf("%-26s %5s %7s %5s %8s %7s %12s %10s %10s %14s %14s\n",
            "--------------------------", "-----", "-------", "-----",
-           "--------", "------------", "----------", "--------------",
-           "--------------");
+           "--------", "-------", "------------", "----------", "----------",
+           "--------------", "--------------");
 
     for (const BenchmarkCase &benchmark_case : cases) {
       Measurements measurements =
@@ -242,11 +258,14 @@ int main(int argc, char **argv) {
       print_case(benchmark_case, measurements, colors);
     }
 
-    printf("\n%sRound trip%s runs one layer and synchronizes after each "
-           "iteration.\n",
+    printf("\n%sRound trip%s measures executor.run() plus synchronize() for "
+           "one layer per iteration.\n",
            colors.label, colors.reset);
-    printf("%sBurst interval%s queues all iterations first and synchronizes "
-           "once at the end.\n\n",
+    printf("%sBurst interval%s measures repeated executor.run() submissions "
+           "followed by one final synchronize().\n",
+           colors.label, colors.reset);
+    printf("%sDispatches%s is an estimate of kernel submissions per layer; "
+           "multi-head attention currently dispatches per head.\n\n",
            colors.label, colors.reset);
     return 0;
   } catch (const std::exception &error) {
