@@ -1,2 +1,1 @@
-safetensors
 numpy

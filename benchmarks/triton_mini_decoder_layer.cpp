@@ -23,6 +23,7 @@ struct BenchmarkCase {
   uint32_t keys;
   uint32_t hidden;
   uint32_t heads;
+  uint32_t kv_heads;
   uint32_t head_dim;
   uint32_t intermediate;
   uint32_t valid_keys;
@@ -57,9 +58,14 @@ uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
   return benchmark_case.heads * benchmark_case.head_dim;
 }
 
+uint32_t kv_dim(const BenchmarkCase &benchmark_case) {
+  return benchmark_case.kv_heads * benchmark_case.head_dim;
+}
+
 uint32_t estimated_dispatches(const BenchmarkCase &benchmark_case) {
   return 10 + 2 * benchmark_case.valid_keys +
-         benchmark_case.heads * (4 + 2 * benchmark_case.valid_keys);
+         2 * benchmark_case.kv_heads * benchmark_case.valid_keys +
+         4 * benchmark_case.heads;
 }
 
 Colors output_colors() {
@@ -120,13 +126,15 @@ double elapsed_ns(Clock::time_point begin, Clock::time_point end) {
 }
 
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
-                        uint32_t head_dim, uint32_t intermediate,
-                        uint32_t valid_keys) {
+                        uint32_t kv_heads, uint32_t head_dim,
+                        uint32_t intermediate, uint32_t valid_keys) {
   const uint32_t qkv_dim = heads * head_dim;
+  const uint32_t kv_dim = kv_heads * head_dim;
   BenchmarkCase benchmark_case = {
       keys,
       hidden,
       heads,
+      kv_heads,
       head_dim,
       intermediate,
       valid_keys,
@@ -134,8 +142,8 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
       std::vector<float>(hidden),
       std::vector<float>(hidden),
       std::vector<float>(qkv_dim * hidden),
-      std::vector<float>(qkv_dim * hidden),
-      std::vector<float>(qkv_dim * hidden),
+      std::vector<float>(kv_dim * hidden),
+      std::vector<float>(kv_dim * hidden),
       std::vector<float>(hidden * qkv_dim),
       std::vector<float>(intermediate * hidden),
       std::vector<float>(intermediate * hidden),
@@ -187,7 +195,8 @@ make_case(const lrrt::executor::triton::mini::DecoderLayerWeights &weights,
           uint32_t valid_keys) {
   BenchmarkCase benchmark_case =
       make_case(weights.shape.keys, weights.shape.hidden, weights.shape.heads,
-                weights.shape.head_dim, weights.shape.intermediate, valid_keys);
+                weights.shape.kv_heads, weights.shape.head_dim,
+                weights.shape.intermediate, valid_keys);
   benchmark_case.attention_norm_weight = weights.attention_norm_weight;
   benchmark_case.mlp_norm_weight = weights.mlp_norm_weight;
   benchmark_case.q_weight = weights.q_weight;
@@ -202,7 +211,7 @@ make_case(const lrrt::executor::triton::mini::DecoderLayerWeights &weights,
 
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
                         uint32_t intermediate, uint32_t valid_keys) {
-  return make_case(keys, hidden, 1, head_dim, intermediate, valid_keys);
+  return make_case(keys, hidden, 1, 1, head_dim, intermediate, valid_keys);
 }
 
 void copy_inputs(lrrt::executor::triton::mini::DecoderLayer &executor,
@@ -221,7 +230,8 @@ Measurements measure_case(lrrt::Device &device,
                           uint32_t iterations, uint32_t warmup_iterations) {
   lrrt::executor::triton::mini::DecoderLayer executor(
       device, benchmark_case.keys, benchmark_case.hidden, benchmark_case.heads,
-      benchmark_case.head_dim, benchmark_case.intermediate);
+      benchmark_case.kv_heads, benchmark_case.head_dim,
+      benchmark_case.intermediate);
   copy_inputs(executor, benchmark_case);
 
   for (uint32_t i = 0; i < warmup_iterations; ++i) {
@@ -266,10 +276,11 @@ Measurements measure_case(lrrt::Device &device,
 
 void print_case(const BenchmarkCase &benchmark_case,
                 const Measurements &measurements, const Colors &colors) {
-  printf("%-26s %5u %7u %5u %8u %7u %12u %10u %10u %s%11.3f%s "
+  printf("%-26s %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u %s%11.3f%s "
          "%s%11.3f%s %s%11.3f%s\n",
          "decoder layer", benchmark_case.keys, benchmark_case.hidden,
-         benchmark_case.heads, benchmark_case.head_dim, qkv_dim(benchmark_case),
+         benchmark_case.heads, benchmark_case.kv_heads, benchmark_case.head_dim,
+         qkv_dim(benchmark_case), kv_dim(benchmark_case),
          benchmark_case.intermediate, benchmark_case.valid_keys,
          estimated_dispatches(benchmark_case), colors.time,
          measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
@@ -305,8 +316,9 @@ int main(int argc, char **argv) {
       cases.push_back(make_case(weights, valid_keys));
     } else {
       cases.push_back(make_case(16, 768, 64, 2048, 7));
-      cases.push_back(make_case(32, 768, 2, 64, 2048, 19));
-      cases.push_back(make_case(64, 1024, 2, 128, 3072, 33));
+      cases.push_back(make_case(32, 768, 2, 2, 64, 2048, 19));
+      cases.push_back(make_case(64, 1024, 2, 2, 128, 3072, 33));
+      cases.push_back(make_case(16, 896, 14, 2, 64, 4864, 7));
     }
 
     const Colors colors = output_colors();
@@ -317,21 +329,22 @@ int main(int argc, char **argv) {
     printf("Device index:       %u\n", device.index());
     printf("Device name:        %s\n", device.name().c_str());
     printf("Data type:          FP32 inputs / FP32 accumulation\n");
-    printf("Cache layout:       [heads, keys, head_dim]\n");
+    printf("Cache layout:       [kv_heads, keys, head_dim]\n");
     printf("Queueing:           ordered launches on one lrrt queue\n");
     printf("Timing source:      CPU steady_clock and HSA GPU event markers\n");
     printf("Weight source:      %s\n",
            options.weights_path ? options.weights_path : "synthetic");
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
-    printf("%s%-26s %5s %7s %5s %8s %7s %12s %10s %10s %11s %11s %11s%s\n",
-           colors.label, "Workload", "Keys", "Hidden", "Heads", "HeadDim",
-           "QKVDim", "Intermediate", "ValidKeys", "Dispatches", "CPU round us",
-           "CPU burst us", "GPU burst us", colors.reset);
-    printf("%-26s %5s %7s %5s %8s %7s %12s %10s %10s %11s %11s %11s\n",
-           "--------------------------", "-----", "-------", "-----",
-           "--------", "-------", "------------", "----------", "----------",
-           "-----------", "-----------", "-----------");
+    printf(
+        "%s%-26s %5s %7s %5s %7s %8s %7s %5s %12s %10s %10s %11s %11s %11s%s\n",
+        colors.label, "Workload", "Keys", "Hidden", "Heads", "KVHeads",
+        "HeadDim", "QDim", "KVDim", "Intermediate", "ValidKeys", "Dispatches",
+        "CPU round us", "CPU burst us", "GPU burst us", colors.reset);
+    printf("%-26s %5s %7s %5s %7s %8s %7s %5s %12s %10s %10s %11s %11s %11s\n",
+           "--------------------------", "-----", "-------", "-----", "-------",
+           "--------", "-------", "-----", "------------", "----------",
+           "----------", "-----------", "-----------", "-----------");
 
     for (const BenchmarkCase &benchmark_case : cases) {
       Measurements measurements =

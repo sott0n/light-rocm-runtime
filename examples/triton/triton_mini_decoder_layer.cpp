@@ -57,17 +57,18 @@ static void reference_vector_projection(const std::vector<float> &x,
 }
 
 static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
-                     uint32_t heads, uint32_t head_dim, uint32_t intermediate,
-                     uint32_t valid_keys) {
-  const uint32_t qkv_dim = heads * head_dim;
+                     uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
+                     uint32_t intermediate, uint32_t valid_keys) {
+  const uint32_t q_dim = heads * head_dim;
+  const uint32_t kv_dim = kv_heads * head_dim;
   std::vector<float> hidden_states(keys * hidden);
   std::vector<float> attention_norm_weight(hidden);
   std::vector<float> mlp_norm_weight(hidden);
   std::vector<float> attention_norm_states(keys * hidden, 0.0f);
-  std::vector<float> q_weight(qkv_dim * hidden);
-  std::vector<float> k_weight(qkv_dim * hidden);
-  std::vector<float> v_weight(qkv_dim * hidden);
-  std::vector<float> out_weight(hidden * qkv_dim);
+  std::vector<float> q_weight(q_dim * hidden);
+  std::vector<float> k_weight(kv_dim * hidden);
+  std::vector<float> v_weight(kv_dim * hidden);
+  std::vector<float> out_weight(hidden * q_dim);
   std::vector<float> gate_weight(intermediate * hidden);
   std::vector<float> up_weight(intermediate * hidden);
   std::vector<float> down_weight(hidden * intermediate);
@@ -88,7 +89,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
   lrrt::executor::triton::mini::fill_projection_weight(q_weight, hidden, 1);
   lrrt::executor::triton::mini::fill_projection_weight(k_weight, hidden, 2);
   lrrt::executor::triton::mini::fill_projection_weight(v_weight, hidden, 3);
-  lrrt::executor::triton::mini::fill_projection_weight(out_weight, qkv_dim, 4);
+  lrrt::executor::triton::mini::fill_projection_weight(out_weight, q_dim, 4);
   lrrt::executor::triton::mini::fill_projection_weight(gate_weight, hidden, 5);
   lrrt::executor::triton::mini::fill_projection_weight(up_weight, hidden, 6);
   lrrt::executor::triton::mini::fill_projection_weight(down_weight,
@@ -105,7 +106,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
   }
 
   lrrt::executor::triton::mini::DecoderLayer executor(
-      device, keys, hidden, heads, head_dim, intermediate);
+      device, keys, hidden, heads, kv_heads, head_dim, intermediate);
   executor.copy_inputs(hidden_states, attention_norm_weight, mlp_norm_weight,
                        q_weight, k_weight, v_weight, out_weight, gate_weight,
                        up_weight, down_weight, cos, sin);
@@ -117,25 +118,27 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
                     attention_norm_states);
 
   const uint32_t query_position = valid_keys - 1;
-  std::vector<float> q(qkv_dim);
-  std::vector<float> k(keys * qkv_dim, 0.0f);
-  std::vector<float> v(keys * qkv_dim, 0.0f);
+  std::vector<float> q(q_dim);
+  std::vector<float> k(keys * kv_dim, 0.0f);
+  std::vector<float> v(keys * kv_dim, 0.0f);
   reference_projection(attention_norm_states, q_weight, hidden, query_position,
                        q);
   for (uint32_t row = 0; row < valid_keys; ++row) {
-    std::vector<float> k_row(qkv_dim);
-    std::vector<float> v_row(qkv_dim);
+    std::vector<float> k_row(kv_dim);
+    std::vector<float> v_row(kv_dim);
     reference_projection(attention_norm_states, k_weight, hidden, row, k_row);
     reference_projection(attention_norm_states, v_weight, hidden, row, v_row);
-    for (uint32_t col = 0; col < qkv_dim; ++col) {
-      k[row * qkv_dim + col] = k_row[col];
-      v[row * qkv_dim + col] = v_row[col];
+    for (uint32_t col = 0; col < kv_dim; ++col) {
+      k[row * kv_dim + col] = k_row[col];
+      v[row * kv_dim + col] = v_row[col];
     }
   }
 
-  std::vector<float> attention_out(qkv_dim, 0.0f);
+  std::vector<float> attention_out(q_dim, 0.0f);
   for (uint32_t head = 0; head < heads; ++head) {
     const uint32_t head_offset = head * head_dim;
+    const uint32_t kv_head = head * kv_heads / heads;
+    const uint32_t kv_head_offset = kv_head * head_dim;
     std::vector<float> q_rope(head_dim);
     for (uint32_t offset = 0; offset < head_dim; ++offset) {
       uint32_t frequency = offset % half;
@@ -152,7 +155,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
       for (uint32_t col = 0; col < head_dim; ++col) {
         uint32_t frequency = col % half;
         uint32_t partner = col < half ? col + half : col - half;
-        uint32_t base = row * qkv_dim + head_offset;
+        uint32_t base = row * kv_dim + kv_head_offset;
         float rotated = col < half ? -k[base + partner] : k[base + partner];
         float k_rope = k[base + col] * cos[row * half + frequency] +
                        rotated * sin[row * half + frequency];
@@ -179,13 +182,13 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
     for (uint32_t col = 0; col < head_dim; ++col) {
       for (uint32_t row = 0; row < valid_keys; ++row) {
         attention_out[head_offset + col] +=
-            reference_probs[row] * v[row * qkv_dim + head_offset + col];
+            reference_probs[row] * v[row * kv_dim + kv_head_offset + col];
       }
     }
   }
 
   std::vector<float> projected_attention(hidden, 0.0f);
-  reference_vector_projection(attention_out, out_weight, qkv_dim,
+  reference_vector_projection(attention_out, out_weight, q_dim,
                               projected_attention);
 
   std::vector<float> attention_residual(hidden, 0.0f);
@@ -246,9 +249,10 @@ int main(void) {
 
     lrrt::Device device = runtime.open_device(0);
     printf("opened device: %u\n", device.index());
-    run_case(device, 16, 768, 1, 64, 2048, 7);
-    run_case(device, 32, 768, 2, 64, 2048, 19);
-    run_case(device, 64, 1024, 2, 128, 3072, 33);
+    run_case(device, 16, 768, 1, 1, 64, 2048, 7);
+    run_case(device, 32, 768, 2, 2, 64, 2048, 19);
+    run_case(device, 64, 1024, 2, 2, 128, 3072, 33);
+    run_case(device, 16, 896, 14, 2, 64, 4864, 7);
 
     printf("triton_mini_decoder_layer: ok\n");
     return 0;

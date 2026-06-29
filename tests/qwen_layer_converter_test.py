@@ -23,20 +23,22 @@ def load_converter():
     return module
 
 
-def test_derive_shape_rejects_gqa() -> None:
+def test_derive_shape_accepts_gqa() -> None:
     converter = load_converter()
     config = {
-        "hidden_size": 8,
+        "hidden_size": 16,
         "num_attention_heads": 4,
         "num_key_value_heads": 2,
-        "intermediate_size": 16,
+        "intermediate_size": 24,
     }
-    try:
-        converter.derive_shape(config, keys=4)
-    except ValueError as error:
-        assert "grouped-query attention is not supported" in str(error)
-    else:
-        raise AssertionError("expected GQA rejection")
+    shape = converter.derive_shape(config, keys=4)
+    assert shape.heads == 4
+    assert shape.kv_heads == 2
+    assert shape.head_dim == 4
+    mappings = converter.tensor_mappings(layer=0, shape=shape)
+    assert mappings[2].shape == (16, 16)
+    assert mappings[3].shape == (8, 16)
+    assert mappings[4].shape == (8, 16)
 
 
 def test_tensor_mapping_and_bundle_writer() -> None:
@@ -68,6 +70,7 @@ def test_tensor_mapping_and_bundle_writer() -> None:
     assert manifest["dtype"] == "f32"
     assert manifest["hidden"] == 8
     assert manifest["heads"] == 2
+    assert manifest["kv_heads"] == 2
     assert manifest["head_dim"] == 4
     assert manifest["tensors"][0] == {
         "name": "attention_norm_weight",
@@ -78,9 +81,30 @@ def test_tensor_mapping_and_bundle_writer() -> None:
     assert struct.unpack_from("<f", data, 0)[0] == 0.0
 
 
+def test_read_safetensors_bf16() -> None:
+    converter = load_converter()
+    header = {
+        "tensor": {
+            "dtype": "BF16",
+            "shape": [2],
+            "data_offsets": [0, 4],
+        }
+    }
+    header_data = json.dumps(header).encode("utf-8")
+    values = struct.pack("<HH", 0x3F80, 0x4000)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "model.safetensors"
+        path.write_bytes(struct.pack("<Q", len(header_data)) + header_data + values)
+        tensors = converter.read_safetensors(path, {"tensor"})
+
+    assert list(tensors["tensor"]) == [1.0, 2.0]
+
+
 def main() -> int:
-    test_derive_shape_rejects_gqa()
+    test_derive_shape_accepts_gqa()
     test_tensor_mapping_and_bundle_writer()
+    test_read_safetensors_bf16()
     print("qwen_layer_converter_test: ok")
     return 0
 

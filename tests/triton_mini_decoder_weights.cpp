@@ -6,6 +6,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -20,7 +21,8 @@ struct TensorInput {
 };
 
 std::string test_path(const char *name) {
-  return std::string("/tmp/lrrt_mini_decoder_weights_") + name;
+  return std::string("/tmp/lrrt_mini_decoder_weights_") +
+         std::to_string((long long)getpid()) + "_" + name;
 }
 
 void write_file(const std::string &path, const std::string &data) {
@@ -41,14 +43,15 @@ void write_binary(const std::string &path, const std::vector<float> &values) {
 }
 
 std::vector<TensorInput> tensors(const DecoderLayerShape &shape) {
-  const size_t qkv_dim = shape.heads * shape.head_dim;
+  const size_t q_dim = shape.heads * shape.head_dim;
+  const size_t kv_dim = shape.kv_heads * shape.head_dim;
   return {
       {"attention_norm_weight", shape.hidden, 1.0f},
       {"mlp_norm_weight", shape.hidden, 2.0f},
-      {"q_weight", qkv_dim * shape.hidden, 3.0f},
-      {"k_weight", qkv_dim * shape.hidden, 4.0f},
-      {"v_weight", qkv_dim * shape.hidden, 5.0f},
-      {"out_weight", shape.hidden * qkv_dim, 6.0f},
+      {"q_weight", q_dim * shape.hidden, 3.0f},
+      {"k_weight", kv_dim * shape.hidden, 4.0f},
+      {"v_weight", kv_dim * shape.hidden, 5.0f},
+      {"out_weight", shape.hidden * q_dim, 6.0f},
       {"gate_weight", shape.intermediate * shape.hidden, 7.0f},
       {"up_weight", shape.intermediate * shape.hidden, 8.0f},
       {"down_weight", shape.hidden * shape.intermediate, 9.0f},
@@ -76,6 +79,9 @@ std::string manifest_for(const DecoderLayerShape &shape,
                          ",\n"
                          "  \"heads\": " +
                          std::to_string(shape.heads) +
+                         ",\n"
+                         "  \"kv_heads\": " +
+                         std::to_string(shape.kv_heads) +
                          ",\n"
                          "  \"head_dim\": " +
                          std::to_string(shape.head_dim) +
@@ -136,7 +142,7 @@ void expect_throw(Function function, const char *needle, const char *label) {
 }
 
 void test_load_weights(void) {
-  DecoderLayerShape shape{4, 8, 2, 4, 12};
+  DecoderLayerShape shape{4, 8, 2, 1, 4, 12};
   std::string data_path = test_path("weights.bin");
   std::string manifest_path = test_path("manifest.json");
   write_binary(data_path, data_for(shape));
@@ -149,6 +155,7 @@ void test_load_weights(void) {
   if (weights.shape.keys != shape.keys ||
       weights.shape.hidden != shape.hidden ||
       weights.shape.heads != shape.heads ||
+      weights.shape.kv_heads != shape.kv_heads ||
       weights.shape.head_dim != shape.head_dim ||
       weights.shape.intermediate != shape.intermediate) {
     throw std::runtime_error("loaded shape mismatch");
@@ -161,7 +168,7 @@ void test_load_weights(void) {
 }
 
 void test_validation_errors(void) {
-  DecoderLayerShape shape{4, 8, 2, 4, 12};
+  DecoderLayerShape shape{4, 8, 2, 1, 4, 12};
   std::string data_path = test_path("bad_weights.bin");
   std::string manifest_path = test_path("bad_manifest.json");
   write_binary(data_path, data_for(shape));

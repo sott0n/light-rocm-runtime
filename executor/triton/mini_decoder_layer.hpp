@@ -77,11 +77,19 @@ public:
 
   DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
                uint32_t heads, uint32_t head_dim, uint32_t intermediate)
+      : DecoderLayer(device, keys, hidden, heads, heads, head_dim,
+                     intermediate) {}
+
+  DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
+               uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
+               uint32_t intermediate)
       : queue_(device), bundles_(device), buffers_(device), keys_(keys),
-        hidden_(hidden), heads_(heads), head_dim_(head_dim),
-        qkv_dim_(heads * head_dim), intermediate_(intermediate),
+        hidden_(hidden), heads_(heads), kv_heads_(kv_heads),
+        head_dim_(head_dim), q_dim_(heads * head_dim),
+        kv_dim_(kv_heads * head_dim), intermediate_(intermediate),
         scale_(1.0f / sqrtf((float)head_dim)) {
-    if (heads == 0 || head_dim == 0 || head_dim % 2 != 0) {
+    if (heads == 0 || kv_heads == 0 || kv_heads > heads ||
+        heads % kv_heads != 0 || head_dim == 0 || head_dim % 2 != 0) {
       throw std::runtime_error("mini decoder layer invalid head shape");
     }
     bundles_.add("attention_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
@@ -95,7 +103,7 @@ public:
     bundles_.add("v_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
                  "matvec_fp32_" + std::to_string(select_block(hidden)));
     bundles_.add("out_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(qkv_dim_)));
+                 "matvec_fp32_" + std::to_string(select_block(q_dim_)));
     bundles_.add("gate_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
                  "matvec_fp32_" + std::to_string(select_block(hidden)));
     bundles_.add("up_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
@@ -125,25 +133,25 @@ public:
     buffers_.allocate<float>("mlp_norm_weight", hidden);
     buffers_.allocate<float>("attention_norm_states", keys * hidden);
     buffers_.allocate<float>("mlp_norm_hidden", hidden);
-    buffers_.allocate<float>("q_weight", qkv_dim_ * hidden);
-    buffers_.allocate<float>("k_weight", qkv_dim_ * hidden);
-    buffers_.allocate<float>("v_weight", qkv_dim_ * hidden);
-    buffers_.allocate<float>("out_weight", hidden * qkv_dim_);
+    buffers_.allocate<float>("q_weight", q_dim_ * hidden);
+    buffers_.allocate<float>("k_weight", kv_dim_ * hidden);
+    buffers_.allocate<float>("v_weight", kv_dim_ * hidden);
+    buffers_.allocate<float>("out_weight", hidden * q_dim_);
     buffers_.allocate<float>("gate_weight", intermediate * hidden);
     buffers_.allocate<float>("up_weight", intermediate * hidden);
     buffers_.allocate<float>("down_weight", hidden * intermediate);
-    buffers_.allocate<float>("q", qkv_dim_);
-    buffers_.allocate<float>("q_rope", qkv_dim_);
-    buffers_.allocate<float>("source_k", keys * qkv_dim_);
-    buffers_.allocate<float>("source_v", keys * qkv_dim_);
+    buffers_.allocate<float>("q", q_dim_);
+    buffers_.allocate<float>("q_rope", q_dim_);
+    buffers_.allocate<float>("source_k", keys * kv_dim_);
+    buffers_.allocate<float>("source_v", keys * kv_dim_);
     buffers_.allocate<float>("k_rope", head_dim);
-    buffers_.allocate<float>("k_cache", heads * keys * head_dim);
-    buffers_.allocate<float>("v_cache", heads * keys * head_dim);
+    buffers_.allocate<float>("k_cache", kv_heads * keys * head_dim);
+    buffers_.allocate<float>("v_cache", kv_heads * keys * head_dim);
     buffers_.allocate<float>("cos", keys * (head_dim / 2));
     buffers_.allocate<float>("sin", keys * (head_dim / 2));
     buffers_.allocate<float>("scores", heads * keys);
     buffers_.allocate<float>("probs", heads * keys);
-    buffers_.allocate<float>("attention_out", qkv_dim_);
+    buffers_.allocate<float>("attention_out", q_dim_);
     buffers_.allocate<float>("projected_attention", hidden);
     buffers_.allocate<float>("attention_residual", hidden);
     buffers_.allocate<float>("gate", intermediate);
@@ -168,10 +176,10 @@ public:
     if (hidden_states.size() != keys_ * hidden_ ||
         attention_norm_weight.size() != hidden_ ||
         mlp_norm_weight.size() != hidden_ ||
-        q_weight.size() != qkv_dim_ * hidden_ ||
-        k_weight.size() != qkv_dim_ * hidden_ ||
-        v_weight.size() != qkv_dim_ * hidden_ ||
-        out_weight.size() != hidden_ * qkv_dim_ ||
+        q_weight.size() != q_dim_ * hidden_ ||
+        k_weight.size() != kv_dim_ * hidden_ ||
+        v_weight.size() != kv_dim_ * hidden_ ||
+        out_weight.size() != hidden_ * q_dim_ ||
         gate_weight.size() != intermediate_ * hidden_ ||
         up_weight.size() != intermediate_ * hidden_ ||
         down_weight.size() != hidden_ * intermediate_ ||
@@ -182,10 +190,11 @@ public:
 
     std::vector<float> hidden_zero(hidden_, 0.0f);
     std::vector<float> hidden_cache_zero(keys_ * hidden_, 0.0f);
-    std::vector<float> qkv_zero(qkv_dim_, 0.0f);
+    std::vector<float> q_zero(q_dim_, 0.0f);
+    std::vector<float> kv_zero(kv_dim_, 0.0f);
     std::vector<float> head_zero(head_dim_, 0.0f);
-    std::vector<float> qkv_cache_zero(keys_ * qkv_dim_, 0.0f);
-    std::vector<float> head_cache_zero(heads_ * keys_ * head_dim_, 0.0f);
+    std::vector<float> kv_cache_zero(keys_ * kv_dim_, 0.0f);
+    std::vector<float> head_cache_zero(kv_heads_ * keys_ * head_dim_, 0.0f);
     std::vector<float> intermediate_zero(intermediate_, 0.0f);
     std::vector<float> scores_zero(keys_, 0.0f);
 
@@ -201,10 +210,10 @@ public:
     buffers_.copy_to("gate_weight", gate_weight);
     buffers_.copy_to("up_weight", up_weight);
     buffers_.copy_to("down_weight", down_weight);
-    buffers_.copy_to("q", qkv_zero);
-    buffers_.copy_to("q_rope", qkv_zero);
-    buffers_.copy_to("source_k", qkv_cache_zero);
-    buffers_.copy_to("source_v", qkv_cache_zero);
+    buffers_.copy_to("q", q_zero);
+    buffers_.copy_to("q_rope", q_zero);
+    buffers_.copy_to("source_k", kv_cache_zero);
+    buffers_.copy_to("source_v", kv_cache_zero);
     buffers_.copy_to("k_rope", head_zero);
     buffers_.copy_to("k_cache", head_cache_zero);
     buffers_.copy_to("v_cache", head_cache_zero);
@@ -212,7 +221,7 @@ public:
     buffers_.copy_to("sin", sin);
     buffers_.copy_to("scores", scores_zero);
     buffers_.copy_to("probs", scores_zero);
-    buffers_.copy_to("attention_out", qkv_zero);
+    buffers_.copy_to("attention_out", q_zero);
     buffers_.copy_to("projected_attention", hidden_zero);
     buffers_.copy_to("attention_residual", hidden_zero);
     buffers_.copy_to("gate", intermediate_zero);
@@ -239,41 +248,73 @@ public:
                arg("hidden", (int32_t)hidden_),
            });
 
-    launch(queue_, bundles_.get("q_projection"), qkv_dim_,
+    launch(queue_, bundles_.get("q_projection"), q_dim_,
            {
                arg("x", buffers_.ptr<float>("attention_norm_states",
                                             query_position * hidden_)),
                arg("weight", buffers_.ptr<float>("q_weight")),
                arg("out", buffers_.ptr<float>("q")),
-               arg("outputs", (int32_t)qkv_dim_),
+               arg("outputs", (int32_t)q_dim_),
                arg("hidden", (int32_t)hidden_),
            });
     for (uint32_t position = 0; position < valid_keys; ++position) {
       launch(
-          queue_, bundles_.get("k_projection"), qkv_dim_,
+          queue_, bundles_.get("k_projection"), kv_dim_,
           {
               arg("x", buffers_.ptr<float>("attention_norm_states",
                                            position * hidden_)),
               arg("weight", buffers_.ptr<float>("k_weight")),
-              arg("out", buffers_.ptr<float>("source_k", position * qkv_dim_)),
-              arg("outputs", (int32_t)qkv_dim_),
+              arg("out", buffers_.ptr<float>("source_k", position * kv_dim_)),
+              arg("outputs", (int32_t)kv_dim_),
               arg("hidden", (int32_t)hidden_),
           });
       launch(
-          queue_, bundles_.get("v_projection"), qkv_dim_,
+          queue_, bundles_.get("v_projection"), kv_dim_,
           {
               arg("x", buffers_.ptr<float>("attention_norm_states",
                                            position * hidden_)),
               arg("weight", buffers_.ptr<float>("v_weight")),
-              arg("out", buffers_.ptr<float>("source_v", position * qkv_dim_)),
-              arg("outputs", (int32_t)qkv_dim_),
+              arg("out", buffers_.ptr<float>("source_v", position * kv_dim_)),
+              arg("outputs", (int32_t)kv_dim_),
               arg("hidden", (int32_t)hidden_),
           });
     }
 
+    for (uint32_t kv_head = 0; kv_head < kv_heads_; ++kv_head) {
+      const uint32_t kv_head_offset = kv_head * head_dim_;
+      const uint32_t cache_offset = kv_head * keys_ * head_dim_;
+      for (uint32_t position = 0; position < valid_keys; ++position) {
+        launch(
+            queue_, bundles_.get("rope"), 1,
+            {
+                arg("x", buffers_.ptr<float>("source_k", position * kv_dim_ +
+                                                             kv_head_offset)),
+                arg("cos", buffers_.ptr<float>("cos", position * half)),
+                arg("sin", buffers_.ptr<float>("sin", position * half)),
+                arg("out", buffers_.ptr<float>("k_rope")),
+                arg("rows", (int32_t)1),
+                arg("heads", (int32_t)1),
+                arg("head_dim", (int32_t)head_dim_),
+            });
+        launch(
+            queue_, bundles_.get("kv_update"), 1,
+            {
+                arg("k", buffers_.ptr<float>("k_rope")),
+                arg("v", buffers_.ptr<float>("source_v", position * kv_dim_ +
+                                                             kv_head_offset)),
+                arg("k_cache", buffers_.ptr<float>("k_cache", cache_offset)),
+                arg("v_cache", buffers_.ptr<float>("v_cache", cache_offset)),
+                arg("position", (int32_t)position),
+                arg("max_tokens", (int32_t)keys_),
+                arg("head_dim", (int32_t)head_dim_),
+            });
+      }
+    }
+
     for (uint32_t head = 0; head < heads_; ++head) {
       const uint32_t head_offset = head * head_dim_;
-      const uint32_t cache_offset = head * keys_ * head_dim_;
+      const uint32_t kv_head = head * kv_heads_ / heads_;
+      const uint32_t cache_offset = kv_head * keys_ * head_dim_;
       const uint32_t scores_offset = head * keys_;
 
       launch(queue_, bundles_.get("rope"), 1,
@@ -286,31 +327,6 @@ public:
                  arg("heads", (int32_t)1),
                  arg("head_dim", (int32_t)head_dim_),
              });
-
-      for (uint32_t position = 0; position < valid_keys; ++position) {
-        launch(queue_, bundles_.get("rope"), 1,
-               {
-                   arg("x", buffers_.ptr<float>(
-                                "source_k", position * qkv_dim_ + head_offset)),
-                   arg("cos", buffers_.ptr<float>("cos", position * half)),
-                   arg("sin", buffers_.ptr<float>("sin", position * half)),
-                   arg("out", buffers_.ptr<float>("k_rope")),
-                   arg("rows", (int32_t)1),
-                   arg("heads", (int32_t)1),
-                   arg("head_dim", (int32_t)head_dim_),
-               });
-        launch(queue_, bundles_.get("kv_update"), 1,
-               {
-                   arg("k", buffers_.ptr<float>("k_rope")),
-                   arg("v", buffers_.ptr<float>(
-                                "source_v", position * qkv_dim_ + head_offset)),
-                   arg("k_cache", buffers_.ptr<float>("k_cache", cache_offset)),
-                   arg("v_cache", buffers_.ptr<float>("v_cache", cache_offset)),
-                   arg("position", (int32_t)position),
-                   arg("max_tokens", (int32_t)keys_),
-                   arg("head_dim", (int32_t)head_dim_),
-               });
-      }
 
       launch(queue_, bundles_.get("score"), keys_,
              {
@@ -344,7 +360,7 @@ public:
                arg("weight", buffers_.ptr<float>("out_weight")),
                arg("out", buffers_.ptr<float>("projected_attention")),
                arg("outputs", (int32_t)hidden_),
-               arg("hidden", (int32_t)qkv_dim_),
+               arg("hidden", (int32_t)q_dim_),
            });
     launch(queue_, bundles_.get("residual_add"), hidden_,
            {
@@ -422,8 +438,10 @@ private:
   uint32_t keys_;
   uint32_t hidden_;
   uint32_t heads_;
+  uint32_t kv_heads_;
   uint32_t head_dim_;
-  uint32_t qkv_dim_;
+  uint32_t q_dim_;
+  uint32_t kv_dim_;
   uint32_t intermediate_;
   float scale_;
 };

@@ -22,10 +22,13 @@ struct DecoderLayerShape {
   uint32_t keys;
   uint32_t hidden;
   uint32_t heads;
+  uint32_t kv_heads;
   uint32_t head_dim;
   uint32_t intermediate;
 
-  uint32_t qkv_dim() const { return heads * head_dim; }
+  uint32_t q_dim() const { return heads * head_dim; }
+  uint32_t kv_dim() const { return kv_heads * head_dim; }
+  uint32_t qkv_dim() const { return q_dim(); }
 };
 
 struct DecoderLayerWeights {
@@ -51,12 +54,19 @@ struct TensorSpec {
 
 inline void validate_shape(const DecoderLayerShape &shape) {
   if (shape.keys == 0 || shape.hidden == 0 || shape.heads == 0 ||
-      shape.head_dim == 0 || shape.head_dim % 2 != 0 ||
+      shape.kv_heads == 0 || shape.head_dim == 0 || shape.head_dim % 2 != 0 ||
       shape.intermediate == 0) {
     throw std::runtime_error("mini decoder weight manifest has invalid shape");
   }
+  if (shape.kv_heads > shape.heads || shape.heads % shape.kv_heads != 0) {
+    throw std::runtime_error(
+        "mini decoder weight manifest has invalid GQA shape");
+  }
   if (shape.heads > std::numeric_limits<uint32_t>::max() / shape.head_dim) {
-    throw std::overflow_error("mini decoder qkv dimension overflows uint32");
+    throw std::overflow_error("mini decoder q dimension overflows uint32");
+  }
+  if (shape.kv_heads > std::numeric_limits<uint32_t>::max() / shape.head_dim) {
+    throw std::overflow_error("mini decoder kv dimension overflows uint32");
   }
 }
 
@@ -277,19 +287,20 @@ inline std::pair<size_t, size_t> tensor_bounds(const std::string &text,
 
 inline std::vector<TensorSpec> tensor_specs(const DecoderLayerShape &shape) {
   size_t hidden = shape.hidden;
-  size_t qkv_dim = shape.qkv_dim();
+  size_t q_dim = shape.q_dim();
+  size_t kv_dim = shape.kv_dim();
   size_t intermediate = shape.intermediate;
   return {
       {"attention_norm_weight", hidden,
        &DecoderLayerWeights::attention_norm_weight},
       {"mlp_norm_weight", hidden, &DecoderLayerWeights::mlp_norm_weight},
-      {"q_weight", checked_multiply(qkv_dim, hidden, "q_weight"),
+      {"q_weight", checked_multiply(q_dim, hidden, "q_weight"),
        &DecoderLayerWeights::q_weight},
-      {"k_weight", checked_multiply(qkv_dim, hidden, "k_weight"),
+      {"k_weight", checked_multiply(kv_dim, hidden, "k_weight"),
        &DecoderLayerWeights::k_weight},
-      {"v_weight", checked_multiply(qkv_dim, hidden, "v_weight"),
+      {"v_weight", checked_multiply(kv_dim, hidden, "v_weight"),
        &DecoderLayerWeights::v_weight},
-      {"out_weight", checked_multiply(hidden, qkv_dim, "out_weight"),
+      {"out_weight", checked_multiply(hidden, q_dim, "out_weight"),
        &DecoderLayerWeights::out_weight},
       {"gate_weight", checked_multiply(intermediate, hidden, "gate_weight"),
        &DecoderLayerWeights::gate_weight},
@@ -373,9 +384,15 @@ load_decoder_layer_weights(const char *manifest_path) {
       detail::read_u32_field(manifest, "keys"),
       detail::read_u32_field(manifest, "hidden"),
       detail::read_u32_field(manifest, "heads"),
+      0,
       detail::read_u32_field(manifest, "head_dim"),
       detail::read_u32_field(manifest, "intermediate"),
   };
+  if (manifest.find("\"kv_heads\"") != std::string::npos) {
+    weights.shape.kv_heads = detail::read_u32_field(manifest, "kv_heads");
+  } else {
+    weights.shape.kv_heads = weights.shape.heads;
+  }
   detail::validate_shape(weights.shape);
 
   std::string data_file = detail::read_string_field(manifest, "data");
@@ -437,13 +454,13 @@ inline void write_decoder_layer_weights(const char *manifest_path,
   if (weights.attention_norm_weight.size() != weights.shape.hidden ||
       weights.mlp_norm_weight.size() != weights.shape.hidden ||
       weights.q_weight.size() !=
-          static_cast<size_t>(weights.shape.qkv_dim()) * weights.shape.hidden ||
+          static_cast<size_t>(weights.shape.q_dim()) * weights.shape.hidden ||
       weights.k_weight.size() !=
-          static_cast<size_t>(weights.shape.qkv_dim()) * weights.shape.hidden ||
+          static_cast<size_t>(weights.shape.kv_dim()) * weights.shape.hidden ||
       weights.v_weight.size() !=
-          static_cast<size_t>(weights.shape.qkv_dim()) * weights.shape.hidden ||
+          static_cast<size_t>(weights.shape.kv_dim()) * weights.shape.hidden ||
       weights.out_weight.size() !=
-          static_cast<size_t>(weights.shape.hidden) * weights.shape.qkv_dim() ||
+          static_cast<size_t>(weights.shape.hidden) * weights.shape.q_dim() ||
       weights.gate_weight.size() !=
           static_cast<size_t>(weights.shape.intermediate) *
               weights.shape.hidden ||
@@ -476,6 +493,7 @@ inline void write_decoder_layer_weights(const char *manifest_path,
            << "  \"keys\": " << weights.shape.keys << ",\n"
            << "  \"hidden\": " << weights.shape.hidden << ",\n"
            << "  \"heads\": " << weights.shape.heads << ",\n"
+           << "  \"kv_heads\": " << weights.shape.kv_heads << ",\n"
            << "  \"head_dim\": " << weights.shape.head_dim << ",\n"
            << "  \"intermediate\": " << weights.shape.intermediate << ",\n"
            << "  \"tensors\": [\n";

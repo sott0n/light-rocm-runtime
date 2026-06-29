@@ -20,12 +20,17 @@ class DecoderLayerShape:
     keys: int
     hidden: int
     heads: int
+    kv_heads: int
     head_dim: int
     intermediate: int
 
     @property
-    def qkv_dim(self) -> int:
+    def q_dim(self) -> int:
         return self.heads * self.head_dim
+
+    @property
+    def kv_dim(self) -> int:
+        return self.kv_heads * self.head_dim
 
 
 @dataclass(frozen=True)
@@ -52,10 +57,10 @@ def derive_shape(config: dict[str, Any], keys: int) -> DecoderLayerShape:
     kv_heads = config.get("num_key_value_heads", heads)
     if not isinstance(kv_heads, int) or kv_heads <= 0:
         raise ValueError("config field 'num_key_value_heads' must be positive")
-    if kv_heads != heads:
+    if kv_heads > heads or heads % kv_heads != 0:
         raise ValueError(
-            "grouped-query attention is not supported by the mini decoder "
-            f"converter yet: num_key_value_heads={kv_heads}, "
+            "the mini decoder converter expects num_attention_heads to be a "
+            f"multiple of num_key_value_heads, got num_key_value_heads={kv_heads}, "
             f"num_attention_heads={heads}"
         )
 
@@ -66,6 +71,8 @@ def derive_shape(config: dict[str, Any], keys: int) -> DecoderLayerShape:
         head_dim = hidden // heads
     if not isinstance(head_dim, int) or head_dim <= 0:
         raise ValueError("config field 'head_dim' must be a positive integer")
+    if head_dim % 2 != 0:
+        raise ValueError("head_dim must be even for the current RoPE kernels")
     if heads * head_dim != hidden:
         raise ValueError(
             "the current mini decoder expects heads * head_dim == hidden, "
@@ -76,6 +83,7 @@ def derive_shape(config: dict[str, Any], keys: int) -> DecoderLayerShape:
         keys=keys,
         hidden=hidden,
         heads=heads,
+        kv_heads=kv_heads,
         head_dim=head_dim,
         intermediate=intermediate,
     )
@@ -85,7 +93,8 @@ def tensor_mappings(layer: int, shape: DecoderLayerShape) -> list[TensorMapping]
     if layer < 0:
         raise ValueError("--layer must be non-negative")
     prefix = f"model.layers.{layer}"
-    qkv_dim = shape.qkv_dim
+    q_dim = shape.q_dim
+    kv_dim = shape.kv_dim
     return [
         TensorMapping(
             "attention_norm_weight",
@@ -100,22 +109,22 @@ def tensor_mappings(layer: int, shape: DecoderLayerShape) -> list[TensorMapping]
         TensorMapping(
             "q_weight",
             f"{prefix}.self_attn.q_proj.weight",
-            (qkv_dim, shape.hidden),
+            (q_dim, shape.hidden),
         ),
         TensorMapping(
             "k_weight",
             f"{prefix}.self_attn.k_proj.weight",
-            (qkv_dim, shape.hidden),
+            (kv_dim, shape.hidden),
         ),
         TensorMapping(
             "v_weight",
             f"{prefix}.self_attn.v_proj.weight",
-            (qkv_dim, shape.hidden),
+            (kv_dim, shape.hidden),
         ),
         TensorMapping(
             "out_weight",
             f"{prefix}.self_attn.o_proj.weight",
-            (shape.hidden, qkv_dim),
+            (shape.hidden, q_dim),
         ),
         TensorMapping(
             "gate_weight",
@@ -154,17 +163,6 @@ def _import_numpy() -> Any:
     return np
 
 
-def _import_safetensors_load_file() -> Any:
-    try:
-        from safetensors.numpy import load_file
-    except ImportError as error:
-        raise RuntimeError(
-            "safetensors is required for Qwen checkpoint conversion. Install "
-            "with `uv pip install -r tools/requirements.txt`."
-        ) from error
-    return load_file
-
-
 def checkpoint_weight_map(checkpoint_dir: Path) -> dict[str, str] | None:
     index_paths = sorted(checkpoint_dir.glob("*.safetensors.index.json"))
     if not index_paths:
@@ -188,8 +186,69 @@ def _safetensor_files(checkpoint_dir: Path) -> list[Path]:
     return files
 
 
+def _convert_safetensor_payload(
+    payload: memoryview, dtype: str, shape: tuple[int, ...], name: str
+) -> Any:
+    np = _import_numpy()
+    count = 1
+    for dim in shape:
+        count *= dim
+    if dtype == "F32":
+        array = np.frombuffer(payload, dtype="<f4", count=count)
+        return np.asarray(array, dtype=np.float32).reshape(shape)
+    if dtype == "F16":
+        array = np.frombuffer(payload, dtype="<f2", count=count)
+        return np.asarray(array, dtype=np.float32).reshape(shape)
+    if dtype == "BF16":
+        raw = np.frombuffer(payload, dtype="<u2", count=count).astype(np.uint32)
+        array = (raw << 16).view(np.float32)
+        return np.asarray(array, dtype=np.float32).reshape(shape)
+    raise ValueError(f"unsupported safetensors dtype for {name!r}: {dtype}")
+
+
+def read_safetensors(path: Path, wanted: set[str]) -> dict[str, Any]:
+    with path.open("rb") as file:
+        header_size_data = file.read(8)
+        if len(header_size_data) != 8:
+            raise ValueError(f"{path} is not a valid safetensors file")
+        header_size = struct.unpack("<Q", header_size_data)[0]
+        header_data = file.read(header_size)
+        if len(header_data) != header_size:
+            raise ValueError(f"{path} has a truncated safetensors header")
+        header = json.loads(header_data.decode("utf-8"))
+        if not isinstance(header, dict):
+            raise ValueError(f"{path} safetensors header must be an object")
+        data = memoryview(file.read())
+
+    tensors: dict[str, Any] = {}
+    for name in wanted:
+        entry = header.get(name)
+        if entry is None:
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path} tensor {name!r} metadata is invalid")
+        dtype = entry.get("dtype")
+        shape = entry.get("shape")
+        offsets = entry.get("data_offsets")
+        if (
+            not isinstance(dtype, str)
+            or not isinstance(shape, list)
+            or not isinstance(offsets, list)
+            or len(offsets) != 2
+        ):
+            raise ValueError(f"{path} tensor {name!r} metadata is incomplete")
+        tensor_shape = tuple(int(dim) for dim in shape)
+        begin = int(offsets[0])
+        end = int(offsets[1])
+        if begin < 0 or end < begin or end > len(data):
+            raise ValueError(f"{path} tensor {name!r} data offset is invalid")
+        tensors[name] = _convert_safetensor_payload(
+            data[begin:end], dtype, tensor_shape, name
+        )
+    return tensors
+
+
 def load_tensors(checkpoint_dir: Path, mappings: list[TensorMapping]) -> dict[str, Any]:
-    load_file = _import_safetensors_load_file()
     wanted = {mapping.checkpoint_name for mapping in mappings}
     weight_map = checkpoint_weight_map(checkpoint_dir)
 
@@ -200,12 +259,12 @@ def load_tensors(checkpoint_dir: Path, mappings: list[TensorMapping]) -> dict[st
             raise KeyError("checkpoint index is missing tensors: " + ", ".join(missing))
         shard_names = sorted({weight_map[name] for name in wanted})
         for shard_name in shard_names:
-            shard = load_file(str(checkpoint_dir / shard_name))
+            shard = read_safetensors(checkpoint_dir / shard_name, wanted)
             for name in wanted.intersection(shard):
                 tensors[name] = shard[name]
     else:
         for shard_path in _safetensor_files(checkpoint_dir):
-            shard = load_file(str(shard_path))
+            shard = read_safetensors(shard_path, wanted)
             for name in wanted.intersection(shard):
                 tensors[name] = shard[name]
             if len(tensors) == len(wanted):
@@ -305,6 +364,7 @@ def write_bundle(
         "keys": shape.keys,
         "hidden": shape.hidden,
         "heads": shape.heads,
+        "kv_heads": shape.kv_heads,
         "head_dim": shape.head_dim,
         "intermediate": shape.intermediate,
         "tensors": manifest_tensors,
@@ -342,7 +402,8 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     print(
         "shape: "
         f"keys={shape.keys} hidden={shape.hidden} heads={shape.heads} "
-        f"head_dim={shape.head_dim} intermediate={shape.intermediate}"
+        f"kv_heads={shape.kv_heads} head_dim={shape.head_dim} "
+        f"intermediate={shape.intermediate}"
     )
 
 

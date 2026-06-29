@@ -33,15 +33,16 @@ void fill_norm_weights(std::vector<float> &attention, std::vector<float> &mlp) {
 
 lrrt::executor::triton::mini::DecoderLayerWeights
 make_weights(const lrrt::executor::triton::mini::DecoderLayerShape &shape) {
-  const uint32_t qkv_dim = shape.qkv_dim();
+  const uint32_t q_dim = shape.q_dim();
+  const uint32_t kv_dim = shape.kv_dim();
   lrrt::executor::triton::mini::DecoderLayerWeights weights{};
   weights.shape = shape;
   weights.attention_norm_weight.resize(shape.hidden);
   weights.mlp_norm_weight.resize(shape.hidden);
-  weights.q_weight.resize(qkv_dim * shape.hidden);
-  weights.k_weight.resize(qkv_dim * shape.hidden);
-  weights.v_weight.resize(qkv_dim * shape.hidden);
-  weights.out_weight.resize(shape.hidden * qkv_dim);
+  weights.q_weight.resize(q_dim * shape.hidden);
+  weights.k_weight.resize(kv_dim * shape.hidden);
+  weights.v_weight.resize(kv_dim * shape.hidden);
+  weights.out_weight.resize(shape.hidden * q_dim);
   weights.gate_weight.resize(shape.intermediate * shape.hidden);
   weights.up_weight.resize(shape.intermediate * shape.hidden);
   weights.down_weight.resize(shape.hidden * shape.intermediate);
@@ -54,7 +55,7 @@ make_weights(const lrrt::executor::triton::mini::DecoderLayerShape &shape) {
   lrrt::executor::triton::mini::fill_projection_weight(weights.v_weight,
                                                        shape.hidden, 3);
   lrrt::executor::triton::mini::fill_projection_weight(weights.out_weight,
-                                                       qkv_dim, 4);
+                                                       q_dim, 4);
   lrrt::executor::triton::mini::fill_projection_weight(weights.gate_weight,
                                                        shape.hidden, 5);
   lrrt::executor::triton::mini::fill_projection_weight(weights.up_weight,
@@ -67,22 +68,26 @@ make_weights(const lrrt::executor::triton::mini::DecoderLayerShape &shape) {
 void print_usage(void) {
   fprintf(stderr,
           "usage: lrrt_triton_mini_decoder_weight_bundle <weights.json> "
-          "<keys> <hidden> <heads> <head_dim> <intermediate>\n");
+          "<keys> <hidden> <heads> [kv_heads] <head_dim> <intermediate>\n");
 }
 
 } // namespace
 
 int main(int argc, char **argv) {
   try {
-    if (argc != 7) {
+    if (argc != 7 && argc != 8) {
       print_usage();
       return 1;
     }
+    uint32_t keys = parse_u32(argv[2], "keys");
+    uint32_t hidden = parse_u32(argv[3], "hidden");
+    uint32_t heads = parse_u32(argv[4], "heads");
+    uint32_t kv_heads = argc == 8 ? parse_u32(argv[5], "kv_heads") : heads;
+    uint32_t head_dim = parse_u32(argc == 8 ? argv[6] : argv[5], "head_dim");
+    uint32_t intermediate =
+        parse_u32(argc == 8 ? argv[7] : argv[6], "intermediate");
     lrrt::executor::triton::mini::DecoderLayerShape shape{
-        parse_u32(argv[2], "keys"),         parse_u32(argv[3], "hidden"),
-        parse_u32(argv[4], "heads"),        parse_u32(argv[5], "head_dim"),
-        parse_u32(argv[6], "intermediate"),
-    };
+        keys, hidden, heads, kv_heads, head_dim, intermediate};
     lrrt::executor::triton::mini::DecoderLayerWeights weights =
         make_weights(shape);
     lrrt::executor::triton::mini::write_decoder_layer_weights(

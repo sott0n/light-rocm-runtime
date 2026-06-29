@@ -110,6 +110,7 @@ the shape and tensor offsets:
   "keys": 16,
   "hidden": 768,
   "heads": 1,
+  "kv_heads": 1,
   "head_dim": 64,
   "intermediate": 2048,
   "tensors": [
@@ -171,8 +172,8 @@ The intended per-layer mapping is:
 | `attention_norm_weight` | `model.layers.{layer}.input_layernorm.weight` | `[hidden]` | Direct copy |
 | `mlp_norm_weight` | `model.layers.{layer}.post_attention_layernorm.weight` | `[hidden]` | Direct copy |
 | `q_weight` | `model.layers.{layer}.self_attn.q_proj.weight` | `[heads * head_dim, hidden]` | Direct copy when `q_proj` is stored as PyTorch linear `[out, in]` |
-| `k_weight` | `model.layers.{layer}.self_attn.k_proj.weight` | `[heads * head_dim, hidden]` | Requires a GQA policy when Qwen uses fewer KV heads than attention heads |
-| `v_weight` | `model.layers.{layer}.self_attn.v_proj.weight` | `[heads * head_dim, hidden]` | Requires the same GQA policy as `k_weight` |
+| `k_weight` | `model.layers.{layer}.self_attn.k_proj.weight` | `[kv_heads * head_dim, hidden]` | Direct copy for grouped-query attention |
+| `v_weight` | `model.layers.{layer}.self_attn.v_proj.weight` | `[kv_heads * head_dim, hidden]` | Direct copy for grouped-query attention |
 | `out_weight` | `model.layers.{layer}.self_attn.o_proj.weight` | `[hidden, heads * head_dim]` | Direct copy for the current matvec layout |
 | `gate_weight` | `model.layers.{layer}.mlp.gate_proj.weight` | `[intermediate, hidden]` | Direct copy |
 | `up_weight` | `model.layers.{layer}.mlp.up_proj.weight` | `[intermediate, hidden]` | Direct copy |
@@ -196,27 +197,18 @@ shapes:
 | --- | --- |
 | `hidden` | `hidden_size` |
 | `heads` | `num_attention_heads` |
+| `kv_heads` | `num_key_value_heads`, defaulting to `heads` when absent |
 | `head_dim` | `hidden_size / num_attention_heads`, unless the config exposes an explicit head dimension |
 | `intermediate` | `intermediate_size` |
 | `keys` | Benchmark/cache length chosen by the converter or command-line option |
 
-Grouped-query attention is the main compatibility gap. Many Qwen checkpoints
-use `num_key_value_heads` that can be smaller than `num_attention_heads`, while
-the current mini decoder layer expects Q, K, and V to have the same
-`heads * head_dim` projection width. The first converter must choose one of
-these policies explicitly:
-
-1. reject checkpoints where `num_key_value_heads != num_attention_heads`
-2. repeat K/V projection rows to match attention heads for a prototype
-3. extend the mini decoder executor and kernels to carry separate Q-head and
-   KV-head counts
-
-Policy 1 is the safest first implementation. Policy 2 can unblock experiments
-but should be labeled as a prototype transformation. Policy 3 is the correct
-longer-term path for Qwen fidelity.
-
-The current converter implements policy 1: it rejects checkpoints where
-`num_key_value_heads != num_attention_heads`.
+Grouped-query attention is represented explicitly. The mini decoder executor
+keeps separate Q-head and KV-head counts, stores the KV cache as
+`[kv_heads, keys, head_dim]`, and maps each Q head to a KV head by contiguous
+groups. The converter therefore keeps Q projection rows at
+`heads * head_dim` while keeping K/V projection rows at
+`kv_heads * head_dim`. It rejects only unsupported shapes where
+`num_attention_heads` is not a multiple of `num_key_value_heads`.
 
 ## Current Integration Baseline
 
@@ -263,7 +255,7 @@ The benchmark target is `lrrt_triton_mini_decoder_layer_benchmark`, enabled by
 `LRRT_BUILD_BENCHMARKS=ON` and `LRRT_BUILD_TRITON_BENCHMARKS=ON`. It reuses the
 shared mini decoder layer executor helper and reports round-trip and
 burst-queued latency for deterministic synthetic inputs. The benchmark reports
-FP32 dtype, `[heads, keys, head_dim]` cache layout, ordered single-queue
+FP32 dtype, `[kv_heads, keys, head_dim]` cache layout, ordered single-queue
 launching, `QKVDim`, and an estimated kernel dispatch count per layer. That
 dispatch count matters because multi-head attention currently loops over heads
 and reuses single-head kernels instead of using fused multi-head kernels.
@@ -329,14 +321,15 @@ Qwen-like path can be meaningful:
   single-head kernels once per head. This is useful for correctness and layout
   validation, not for final performance.
 - **KV cache layout policy**: the mini decoder layer uses a
-  `[heads, keys, head_dim]` cache layout. This is explicit enough for the
+  `[kv_heads, keys, head_dim]` cache layout. This is explicit enough for the
   current benchmark, but real Qwen weight/cache integration may require a
   different layout or a documented adapter.
 - **Weight loading**: the executor now has a small FP32 raw-binary plus
   manifest loader for the mini decoder layer. The examples and benchmark still
   use deterministic synthetic weights by default. A prototype Qwen converter
   can now write one local Hugging Face Qwen layer into this format, but it is
-  FP32-only and rejects grouped-query attention for now.
+  FP32-only and supports grouped-query attention when the attention head count
+  is an integer multiple of the KV head count.
 - **FP16/BF16 end-to-end path**: Qwen-style inference should use lower
   precision inputs with FP32 accumulation where appropriate. Some operator
   bundles have lower precision coverage, but the mini decoder layer still runs
