@@ -406,6 +406,8 @@ public:
 
   void synchronize() const { queue_.synchronize(); }
 
+  const lrrt::Queue &queue() const { return queue_; }
+
   void copy_output(std::vector<float> &out) const {
     if (out.size() != hidden_) {
       throw std::runtime_error("mini decoder layer output shape mismatch");

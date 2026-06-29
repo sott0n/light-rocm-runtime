@@ -41,8 +41,9 @@ struct BenchmarkCase {
 };
 
 struct Measurements {
-  double round_trip_ns;
-  double burst_interval_ns;
+  double cpu_round_trip_ns;
+  double cpu_burst_interval_ns;
+  double gpu_burst_interval_ns;
 };
 
 uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
@@ -179,15 +180,15 @@ Measurements measure_case(lrrt::Device &device,
     executor.synchronize();
   }
 
-  double round_trip_ns = 0.0;
+  double cpu_round_trip_ns = 0.0;
   for (uint32_t i = 0; i < iterations; ++i) {
     auto begin = Clock::now();
     executor.run(benchmark_case.valid_keys);
     executor.synchronize();
     auto end = Clock::now();
-    round_trip_ns += elapsed_ns(begin, end);
+    cpu_round_trip_ns += elapsed_ns(begin, end);
   }
-  round_trip_ns /= static_cast<double>(iterations);
+  cpu_round_trip_ns /= static_cast<double>(iterations);
 
   auto begin = Clock::now();
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -195,22 +196,36 @@ Measurements measure_case(lrrt::Device &device,
   }
   executor.synchronize();
   auto end = Clock::now();
-  double burst_interval_ns =
+  double cpu_burst_interval_ns =
       elapsed_ns(begin, end) / static_cast<double>(iterations);
 
-  return {round_trip_ns, burst_interval_ns};
+  lrrt::Event gpu_start(device);
+  lrrt::Event gpu_end(device);
+  gpu_start.record(executor.queue());
+  for (uint32_t i = 0; i < iterations; ++i) {
+    executor.run(benchmark_case.valid_keys);
+  }
+  gpu_end.record(executor.queue());
+  gpu_end.synchronize();
+  gpu_start.synchronize();
+  double gpu_burst_interval_ns =
+      static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end)) /
+      static_cast<double>(iterations);
+
+  return {cpu_round_trip_ns, cpu_burst_interval_ns, gpu_burst_interval_ns};
 }
 
 void print_case(const BenchmarkCase &benchmark_case,
                 const Measurements &measurements, const Colors &colors) {
-  printf("%-26s %5u %7u %5u %8u %7u %12u %10u %10u %s%11.3f us%s "
-         "%s%11.3f us%s\n",
+  printf("%-26s %5u %7u %5u %8u %7u %12u %10u %10u %s%11.3f%s "
+         "%s%11.3f%s %s%11.3f%s\n",
          "decoder layer", benchmark_case.keys, benchmark_case.hidden,
          benchmark_case.heads, benchmark_case.head_dim, qkv_dim(benchmark_case),
          benchmark_case.intermediate, benchmark_case.valid_keys,
          estimated_dispatches(benchmark_case), colors.time,
-         measurements.round_trip_ns / 1.0e3, colors.reset, colors.time,
-         measurements.burst_interval_ns / 1.0e3, colors.reset);
+         measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
+         measurements.cpu_burst_interval_ns / 1.0e3, colors.reset, colors.time,
+         measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
 }
 
 } // namespace
@@ -241,17 +256,17 @@ int main(int argc, char **argv) {
     printf("Data type:          FP32 inputs / FP32 accumulation\n");
     printf("Cache layout:       [heads, keys, head_dim]\n");
     printf("Queueing:           ordered launches on one lrrt queue\n");
-    printf("Timing source:      CPU steady_clock around executor calls\n");
+    printf("Timing source:      CPU steady_clock and HSA GPU event markers\n");
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
-    printf("%s%-26s %5s %7s %5s %8s %7s %12s %10s %10s %14s %14s%s\n",
+    printf("%s%-26s %5s %7s %5s %8s %7s %12s %10s %10s %11s %11s %11s%s\n",
            colors.label, "Workload", "Keys", "Hidden", "Heads", "HeadDim",
-           "QKVDim", "Intermediate", "ValidKeys", "Dispatches", "Round trip",
-           "Burst interval", colors.reset);
-    printf("%-26s %5s %7s %5s %8s %7s %12s %10s %10s %14s %14s\n",
+           "QKVDim", "Intermediate", "ValidKeys", "Dispatches", "CPU round us",
+           "CPU burst us", "GPU burst us", colors.reset);
+    printf("%-26s %5s %7s %5s %8s %7s %12s %10s %10s %11s %11s %11s\n",
            "--------------------------", "-----", "-------", "-----",
            "--------", "-------", "------------", "----------", "----------",
-           "--------------", "--------------");
+           "-----------", "-----------", "-----------");
 
     for (const BenchmarkCase &benchmark_case : cases) {
       Measurements measurements =
@@ -259,11 +274,14 @@ int main(int argc, char **argv) {
       print_case(benchmark_case, measurements, colors);
     }
 
-    printf("\n%sRound trip%s measures executor.run() plus synchronize() for "
-           "one layer per iteration.\n",
+    printf("\n%sCPU round%s measures executor.run() plus synchronize() for "
+           "one layer per iteration with steady_clock.\n",
            colors.label, colors.reset);
-    printf("%sBurst interval%s measures repeated executor.run() submissions "
-           "followed by one final synchronize().\n",
+    printf("%sCPU burst%s measures repeated executor.run() submissions "
+           "followed by one final synchronize() with steady_clock.\n",
+           colors.label, colors.reset);
+    printf("%sGPU burst%s measures HSA event elapsed time around repeated "
+           "executor.run() submissions, divided by iteration count.\n",
            colors.label, colors.reset);
     printf("%sDispatches%s is an estimate of kernel submissions per layer; "
            "multi-head attention currently dispatches per head.\n\n",
