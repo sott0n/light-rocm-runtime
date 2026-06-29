@@ -99,6 +99,7 @@ std::atomic<bool> g_initialized{false};
 #if LRRT_ENABLE_HSA
 struct DeviceState {
   hsa_agent_t agent;
+  std::string name;
   hsa_region_t global_region;
   hsa_region_t kernarg_region;
   bool has_global_region;
@@ -142,7 +143,13 @@ hsa_status_t collect_gpu_agents(hsa_agent_t agent, void *data) {
   }
 
   if (device_type == HSA_DEVICE_TYPE_GPU) {
-    devices->push_back(DeviceState{agent, {}, {}, false, false, nullptr});
+    char name[64] = {};
+    status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NAME, name);
+    if (status != HSA_STATUS_SUCCESS) {
+      return status;
+    }
+    devices->push_back(
+        DeviceState{agent, std::string(name), {}, {}, false, false, nullptr});
   }
   return HSA_STATUS_SUCCESS;
 }
@@ -813,6 +820,34 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
 
   device->index = index;
   return LR_SUCCESS;
+}
+
+lr_status_t lr_device_name(lr_device_t device, char *name, size_t name_size) {
+  if (!name || name_size == 0) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const std::string &device_name = g_devices[device.index].name;
+  if (device_name.size() + 1 > name_size) {
+    name[0] = '\0';
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  std::strncpy(name, device_name.c_str(), name_size);
+  name[name_size - 1] = '\0';
+  return LR_SUCCESS;
+#else
+  (void)device;
+  name[0] = '\0';
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
 }
 
 lr_status_t lr_queue_create(lr_device_t device, lr_queue_t **queue) {

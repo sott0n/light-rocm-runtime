@@ -59,6 +59,8 @@ LRRT_API lr_status_t lr_shutdown(void);
 
 LRRT_API lr_status_t lr_device_count(uint32_t *count);
 LRRT_API lr_status_t lr_device_open(uint32_t index, lr_device_t *device);
+LRRT_API lr_status_t lr_device_name(lr_device_t device, char *name,
+                                    size_t name_size);
 
 LRRT_API lr_status_t lr_queue_create(lr_device_t device, lr_queue_t **queue);
 /* Waits for queue work before releasing the queue. */

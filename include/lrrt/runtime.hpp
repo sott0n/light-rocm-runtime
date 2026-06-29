@@ -4,6 +4,7 @@
 #include "lrrt/error.hpp"
 
 #include <stdint.h>
+#include <string>
 #include <vector>
 
 namespace lrrt {
@@ -14,6 +15,11 @@ public:
 
   lr_device_t get() const { return device_; }
   uint32_t index() const { return device_.index; }
+  std::string name() const {
+    char name[64] = {};
+    check(lr_device_name(device_, name, sizeof(name)), "lr_device_name");
+    return std::string(name);
+  }
   void synchronize() const { check(lr_synchronize(device_), "lr_synchronize"); }
 
 private:

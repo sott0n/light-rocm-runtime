@@ -52,7 +52,7 @@ Colors output_colors() {
   if (!enabled) {
     return {"", "", "", "", ""};
   }
-  return {"\033[1;36m", "\033[1m", "\033[36m", "\033[1;32m", "\033[0m"};
+  return {"\033[1;32m", "\033[1m", "\033[32m", "\033[1;32m", "\033[0m"};
 }
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -305,6 +305,7 @@ int main(int argc, char **argv) {
            colors.reset);
     printf("%s===============================%s\n", colors.title, colors.reset);
     printf("Device index:       %u\n", device.index());
+    printf("Device name:        %s\n", device.name().c_str());
     printf("Copy -> launch:     %.1f MiB D2D\n",
            static_cast<double>(copy_bytes) / (1024.0 * 1024.0));
     printf("Launch -> copy:     %zu B D2D\n", sizeof(float));

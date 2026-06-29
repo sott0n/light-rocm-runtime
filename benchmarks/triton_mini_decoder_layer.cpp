@@ -61,7 +61,7 @@ Colors output_colors() {
   if (!enabled) {
     return {"", "", "", "", ""};
   }
-  return {"\033[1;36m", "\033[1m", "\033[36m", "\033[1;32m", "\033[0m"};
+  return {"\033[1;32m", "\033[1m", "\033[32m", "\033[1;32m", "\033[0m"};
 }
 
 uint32_t parse_iterations(int argc, char **argv) {
@@ -237,6 +237,7 @@ int main(int argc, char **argv) {
     printf("%s========================================%s\n", colors.title,
            colors.reset);
     printf("Device index:       %u\n", device.index());
+    printf("Device name:        %s\n", device.name().c_str());
     printf("Data type:          FP32 inputs / FP32 accumulation\n");
     printf("Cache layout:       [heads, keys, head_dim]\n");
     printf("Queueing:           ordered launches on one lrrt queue\n");

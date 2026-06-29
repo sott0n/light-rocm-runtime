@@ -72,6 +72,9 @@ int main(void) {
     if (device.index() != 0) {
       throw std::runtime_error("Device reported the wrong index");
     }
+    if (device.name().empty()) {
+      throw std::runtime_error("Device reported an empty name");
+    }
 
     const int n = 64;
     const float alpha = 3.0f;
