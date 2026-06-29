@@ -139,6 +139,64 @@ The mini decoder layer benchmark can then consume that bundle:
   20 --weights /tmp/lrrt-mini-weights/weights.json --valid-keys 7
 ```
 
+## Qwen Tensor Mapping
+
+The first checkpoint converter should target one decoder layer from a
+Qwen2/Qwen2.5-style Hugging Face checkpoint. It should emit the current mini
+decoder weight bundle format for one selected layer, converting tensors to
+FP32 row-major bytes for the prototype path.
+
+The intended per-layer mapping is:
+
+| Mini decoder tensor | Qwen checkpoint tensor | Expected shape in mini bundle | Conversion note |
+| --- | --- | --- | --- |
+| `attention_norm_weight` | `model.layers.{layer}.input_layernorm.weight` | `[hidden]` | Direct copy |
+| `mlp_norm_weight` | `model.layers.{layer}.post_attention_layernorm.weight` | `[hidden]` | Direct copy |
+| `q_weight` | `model.layers.{layer}.self_attn.q_proj.weight` | `[heads * head_dim, hidden]` | Direct copy when `q_proj` is stored as PyTorch linear `[out, in]` |
+| `k_weight` | `model.layers.{layer}.self_attn.k_proj.weight` | `[heads * head_dim, hidden]` | Requires a GQA policy when Qwen uses fewer KV heads than attention heads |
+| `v_weight` | `model.layers.{layer}.self_attn.v_proj.weight` | `[heads * head_dim, hidden]` | Requires the same GQA policy as `k_weight` |
+| `out_weight` | `model.layers.{layer}.self_attn.o_proj.weight` | `[hidden, heads * head_dim]` | Direct copy for the current matvec layout |
+| `gate_weight` | `model.layers.{layer}.mlp.gate_proj.weight` | `[intermediate, hidden]` | Direct copy |
+| `up_weight` | `model.layers.{layer}.mlp.up_proj.weight` | `[intermediate, hidden]` | Direct copy |
+| `down_weight` | `model.layers.{layer}.mlp.down_proj.weight` | `[hidden, intermediate]` | Direct copy |
+
+The current mini decoder layer intentionally does not consume these
+checkpoint-level tensors yet:
+
+| Qwen tensor or config field | Current handling |
+| --- | --- |
+| `model.embed_tokens.weight` | Out of scope until token embedding is added |
+| `model.norm.weight` | Out of scope until a full model tail is added |
+| `lm_head.weight` | Out of scope until logits are produced |
+| RoPE parameters such as `rope_theta` | Used to generate `cos` and `sin`; not stored in the weight bundle yet |
+| Attention biases | Not supported; Qwen projection layers are expected to be bias-free for the initial path |
+
+The converter should derive bundle shape fields from model config and tensor
+shapes:
+
+| Bundle field | Source |
+| --- | --- |
+| `hidden` | `hidden_size` |
+| `heads` | `num_attention_heads` |
+| `head_dim` | `hidden_size / num_attention_heads`, unless the config exposes an explicit head dimension |
+| `intermediate` | `intermediate_size` |
+| `keys` | Benchmark/cache length chosen by the converter or command-line option |
+
+Grouped-query attention is the main compatibility gap. Many Qwen checkpoints
+use `num_key_value_heads` that can be smaller than `num_attention_heads`, while
+the current mini decoder layer expects Q, K, and V to have the same
+`heads * head_dim` projection width. The first converter must choose one of
+these policies explicitly:
+
+1. reject checkpoints where `num_key_value_heads != num_attention_heads`
+2. repeat K/V projection rows to match attention heads for a prototype
+3. extend the mini decoder executor and kernels to carry separate Q-head and
+   KV-head counts
+
+Policy 1 is the safest first implementation. Policy 2 can unblock experiments
+but should be labeled as a prototype transformation. Policy 3 is the correct
+longer-term path for Qwen fidelity.
+
 ## Current Integration Baseline
 
 The current multi-kernel baseline has moved beyond `triton_mini_attention` to
