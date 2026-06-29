@@ -56,7 +56,8 @@ decoder-style path, not by every example currently present in the repository.
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 and is wired into `triton_mini_mlp` and `triton_mini_decoder_layer` | Needs lower precision and larger shape coverage later |
 | Output projection | ✅/❌ | `matvec` stands in for attention output projection and MLP down projection in the mini decoder layer | Needs larger/batched projection support and lower precision in the end-to-end path |
 | KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini decoder layer uses a `[heads, keys, head_dim]` cache layout by dispatching update/read-like operations per head | Needs a layout policy that can survive real model weight/cache integration |
-| Benchmark timing | ✅ | `lrrt_triton_mini_decoder_layer_benchmark` reports round-trip and burst-queued latency with dtype, cache layout, queueing mode, QKV dimension, and estimated dispatch count metadata | Needs per-stage timing and GPU event timing for deeper performance analysis |
+| Benchmark timing | ✅ | `lrrt_triton_mini_decoder_layer_benchmark` reports CPU round-trip, CPU burst, and HSA GPU-event burst latency with dtype, cache layout, queueing mode, QKV dimension, and estimated dispatch count metadata | Needs per-stage timing for deeper performance analysis |
+| Weight bundle loading | ✅/❌ | `executor/triton/mini_decoder_weights.hpp` can load a mini decoder FP32 raw binary plus manifest into executor-owned weight vectors | This is a prototype format, not a Qwen checkpoint loader; lower precision and real checkpoint conversion are still missing |
 
 ## Decoder Layer Shape
 
@@ -83,6 +84,43 @@ bundles and the shared `lrrt::executor::triton::mini::DecoderLayer` helper.
 The example validates the final hidden state against a CPU reference. The
 available `matvec` bundle stands in for small projections, but it is not yet a
 complete GEMM or batched matmul implementation.
+
+## Mini Decoder Weight Bundle
+
+The first weight-loading prototype is intentionally narrow. It is a mini
+decoder-layer executor format, not a runtime-core ABI and not a Qwen checkpoint
+reader.
+
+The bundle is:
+
+```text
+weights.json
+weights.bin
+```
+
+`weights.bin` stores tightly packed FP32 tensor bytes. `weights.json` describes
+the shape and tensor offsets:
+
+```json
+{
+  "format": "lrrt.mini_decoder_weights",
+  "version": 1,
+  "dtype": "f32",
+  "data": "weights.bin",
+  "keys": 16,
+  "hidden": 768,
+  "heads": 1,
+  "head_dim": 64,
+  "intermediate": 2048,
+  "tensors": [
+    {"name": "attention_norm_weight", "offset": 0, "count": 768}
+  ]
+}
+```
+
+The actual manifest must include all mini decoder layer weight tensors:
+`attention_norm_weight`, `mlp_norm_weight`, `q_weight`, `k_weight`, `v_weight`,
+`out_weight`, `gate_weight`, `up_weight`, and `down_weight`.
 
 ## Current Integration Baseline
 
@@ -198,9 +236,10 @@ Qwen-like path can be meaningful:
   `[heads, keys, head_dim]` cache layout. This is explicit enough for the
   current benchmark, but real Qwen weight/cache integration may require a
   different layout or a documented adapter.
-- **Weight loading**: the current examples and benchmark use deterministic
-  synthetic weights. A Qwen-style benchmark needs an external weight-loading
-  path, even if the first format is a simple raw binary plus metadata file.
+- **Weight loading**: the executor now has a small FP32 raw-binary plus
+  manifest loader for the mini decoder layer. The examples and benchmark still
+  use deterministic synthetic weights by default, and a Qwen-style benchmark
+  still needs checkpoint conversion into this or a later weight-bundle format.
 - **FP16/BF16 end-to-end path**: Qwen-style inference should use lower
   precision inputs with FP32 accumulation where appropriate. Some operator
   bundles have lower precision coverage, but the mini decoder layer still runs
@@ -208,9 +247,8 @@ Qwen-like path can be meaningful:
 - **Shape metadata**: the current manifest describes launch ABI, not tensor
   shape semantics. The executor must provide shape policy outside the runtime
   core.
-- **Per-stage timing**: the benchmark reports end-to-end round-trip and
-  burst-queued latency with shape and queueing metadata, but it does not yet
-  report per-stage or GPU-event timings.
+- **Per-stage timing**: the benchmark reports CPU and GPU-event burst timing,
+  but it does not yet break timing down by pipeline stage.
 
 ## Suggested Milestones
 

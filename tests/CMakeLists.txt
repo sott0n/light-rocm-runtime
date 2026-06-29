@@ -47,6 +47,16 @@ target_include_directories(
   PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
 )
 
+lrrt_add_test_executable(
+  lrrt_triton_mini_decoder_weights_tests
+  triton_mini_decoder_weights.cpp
+  lrrt::bundle
+)
+target_include_directories(
+  lrrt_triton_mini_decoder_weights_tests
+  PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+)
+
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
 lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
 lrrt_add_hsaco_kernel(
