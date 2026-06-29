@@ -285,10 +285,11 @@ and reuses single-head kernels instead of using fused multi-head kernels.
 
 When passed `--weights-dir <dir> --layers <count>`, the benchmark loads
 `layer_0/weights.json` through `layer_<count - 1>/weights.json` and runs a
-small decoder stack loop. This path materializes each layer's output hidden
-state on the host and copies it into the next layer. It is useful for verifying
-multi-layer bundle conversion and executor sequencing, but it is not the final
-low-overhead device-to-device execution model.
+small decoder stack loop. This path copies each layer's output hidden state
+directly into the next layer's device input buffer through the runtime
+device-to-device copy API. It is useful for verifying multi-layer bundle
+conversion and executor sequencing, but it still synchronizes at each handoff
+and is not the final fully queued pipeline model.
 
 The benchmark timing modes are intentionally simple:
 
@@ -300,8 +301,9 @@ The benchmark timing modes are intentionally simple:
   burst of queued layer submissions, but it still preserves queue ordering and
   dependencies.
 - **Stack round trip**: for `--weights-dir`, run each layer in order and pass
-  hidden states between layers through host-visible memory. Only round-trip
-  timing is meaningful in this mode because each layer handoff synchronizes.
+  hidden states between layers through synchronous runtime device-to-device
+  copies. Only round-trip timing is meaningful in this mode because each layer
+  handoff synchronizes.
 
 Both modes currently use CPU `steady_clock` around executor calls. Runtime GPU
 event timing can be added later for per-stage or GPU-only measurements.
@@ -364,10 +366,11 @@ Qwen-like path can be meaningful:
   layers into this format, but it is FP32-only and supports grouped-query
   attention when the attention head count is an integer multiple of the KV head
   count.
-- **Layer handoff**: the multi-layer benchmark path currently copies each
-  layer output back to the host before feeding the next layer. This keeps the
-  prototype explicit and easy to validate, but it does not represent the final
-  executor pipeline design.
+- **Layer handoff**: the multi-layer benchmark path now keeps hidden-state
+  handoff on the device through the runtime copy API, but it still synchronizes
+  between per-token layer steps. This keeps the prototype explicit and easy to
+  validate, but it does not represent the final fully queued executor pipeline
+  design.
 - **FP16/BF16 end-to-end path**: Qwen-style inference should use lower
   precision inputs with FP32 accumulation where appropriate. Some operator
   bundles have lower precision coverage, but the mini decoder layer still runs
@@ -430,7 +433,7 @@ Qwen-like path can be meaningful:
 - It currently uses deterministic synthetic inputs and weights, not real Qwen
   weights.
 - It can also load a directory of per-layer Qwen weight bundles and run a
-  host-chained decoder stack loop for early multi-layer validation.
+  runtime-copy decoder stack loop for early multi-layer validation.
 - It measures round-trip latency and burst-queued latency for the whole layer
   and prints enough shape/queueing metadata to interpret those numbers.
 - Next steps are device-to-device layer handoff, lower precision end-to-end

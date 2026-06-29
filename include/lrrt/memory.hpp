@@ -167,6 +167,21 @@ inline void copy_device_to_device(DeviceBuffer &dst, const DeviceBuffer &src,
         "lr_memcpy device to device");
 }
 
+inline void copy_device_to_device(DeviceBuffer &dst, size_t dst_offset,
+                                  const DeviceBuffer &src, size_t src_offset,
+                                  size_t size) {
+  if (dst_offset > dst.size() || src_offset > src.size() ||
+      size > dst.size() - dst_offset || size > src.size() - src_offset) {
+    throw Error(LR_ERROR_INVALID_ARGUMENT,
+                "lr_memcpy device to device offset is out of range");
+  }
+  auto *dst_bytes = static_cast<unsigned char *>(dst.data());
+  const auto *src_bytes = static_cast<const unsigned char *>(src.data());
+  check(lr_memcpy(dst.device(), dst_bytes + dst_offset, src_bytes + src_offset,
+                  size, LR_MEMCPY_DEVICE_TO_DEVICE),
+        "lr_memcpy device to device");
+}
+
 inline void copy_device_to_device_async(DeviceBuffer &dst,
                                         const DeviceBuffer &src, size_t size,
                                         const Event &event) {

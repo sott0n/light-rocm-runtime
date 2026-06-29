@@ -439,6 +439,22 @@ public:
     buffers_.copy_from(out, "out");
   }
 
+  void copy_output_to_hidden_state(DecoderLayer &dst,
+                                   uint32_t dst_position) const {
+    if (hidden_ != dst.hidden_) {
+      throw std::runtime_error(
+          "mini decoder layer handoff hidden size mismatch");
+    }
+    if (dst_position >= dst.keys_) {
+      throw std::runtime_error(
+          "mini decoder layer handoff position is out of range");
+    }
+    lrrt::copy_device_to_device(
+        dst.buffers_.get("hidden_states"),
+        static_cast<size_t>(dst_position) * dst.hidden_ * sizeof(float),
+        buffers_.get("out"), 0, static_cast<size_t>(hidden_) * sizeof(float));
+  }
+
 private:
   lrrt::Queue queue_;
   BundleSet bundles_;

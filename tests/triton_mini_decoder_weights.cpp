@@ -25,6 +25,11 @@ std::string test_path(const char *name) {
          std::to_string((long long)getpid()) + "_" + name;
 }
 
+std::string test_file_name(const char *name) {
+  return std::string("lrrt_mini_decoder_weights_") +
+         std::to_string((long long)getpid()) + "_" + name;
+}
+
 void write_file(const std::string &path, const std::string &data) {
   std::ofstream file(path, std::ios::binary);
   if (!file) {
@@ -143,11 +148,11 @@ void expect_throw(Function function, const char *needle, const char *label) {
 
 void test_load_weights(void) {
   DecoderLayerShape shape{4, 8, 2, 1, 4, 12};
-  std::string data_path = test_path("weights.bin");
+  std::string data_file = test_file_name("weights.bin");
+  std::string data_path = std::string("/tmp/") + data_file;
   std::string manifest_path = test_path("manifest.json");
   write_binary(data_path, data_for(shape));
-  write_file(manifest_path, manifest_for(shape, "lrrt_mini_decoder_weights_"
-                                                "weights.bin"));
+  write_file(manifest_path, manifest_for(shape, data_file));
 
   DecoderLayerWeights weights =
       lrrt::executor::triton::mini::load_decoder_layer_weights(
@@ -169,13 +174,12 @@ void test_load_weights(void) {
 
 void test_validation_errors(void) {
   DecoderLayerShape shape{4, 8, 2, 1, 4, 12};
-  std::string data_path = test_path("bad_weights.bin");
+  std::string data_file = test_file_name("bad_weights.bin");
+  std::string data_path = std::string("/tmp/") + data_file;
   std::string manifest_path = test_path("bad_manifest.json");
   write_binary(data_path, data_for(shape));
 
-  write_file(manifest_path,
-             manifest_for(shape, "lrrt_mini_decoder_weights_bad_weights.bin",
-                          "down_weight"));
+  write_file(manifest_path, manifest_for(shape, data_file, "down_weight"));
   expect_throw(
       [&] {
         lrrt::executor::triton::mini::load_decoder_layer_weights(
@@ -192,9 +196,7 @@ void test_validation_errors(void) {
       },
       "invalid mini decoder weight data path", "data path validation");
 
-  write_file(manifest_path,
-             manifest_for(shape, "lrrt_mini_decoder_weights_bad_weights.bin",
-                          nullptr, "bf16"));
+  write_file(manifest_path, manifest_for(shape, data_file, nullptr, "bf16"));
   expect_throw(
       [&] {
         lrrt::executor::triton::mini::load_decoder_layer_weights(

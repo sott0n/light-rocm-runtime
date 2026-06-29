@@ -635,12 +635,25 @@ lr_status_t collect_event_dependencies_locked(
 }
 
 bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
-  auto allocation = g_allocations.find(ptr);
-  if (allocation == g_allocations.end()) {
+  if (!ptr || size == 0) {
     return false;
   }
-  const AllocationInfo &info = allocation->second;
-  return info.device_index == device.index && size <= info.size;
+  const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+  for (const auto &entry : g_allocations) {
+    const AllocationInfo &info = entry.second;
+    if (info.device_index != device.index) {
+      continue;
+    }
+    const uintptr_t base = reinterpret_cast<uintptr_t>(entry.first);
+    if (address < base) {
+      continue;
+    }
+    const uintptr_t offset = address - base;
+    if (offset <= info.size && size <= info.size - offset) {
+      return true;
+    }
+  }
+  return false;
 }
 #endif
 

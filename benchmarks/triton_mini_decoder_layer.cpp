@@ -345,24 +345,17 @@ Measurements measure_stack_case(lrrt::Device &device,
   }
 
   const uint32_t valid_keys = shape.valid_keys;
-  const uint32_t hidden = shape.hidden;
-  std::vector<float> current_hidden = shape.hidden_states;
-  std::vector<float> next_hidden = current_hidden;
-  std::vector<float> row(hidden);
 
   auto run_stack = [&]() {
-    current_hidden = shape.hidden_states;
     for (size_t layer = 0; layer < layers.size(); ++layer) {
-      next_hidden = current_hidden;
-      executors[layer]->copy_hidden_states(current_hidden);
       for (uint32_t key = 1; key <= valid_keys; ++key) {
         executors[layer]->run(key);
         executors[layer]->synchronize();
-        executors[layer]->copy_output(row);
-        std::copy(row.begin(), row.end(),
-                  next_hidden.begin() + static_cast<size_t>(key - 1) * hidden);
+        if (layer + 1 < layers.size()) {
+          executors[layer]->copy_output_to_hidden_state(*executors[layer + 1],
+                                                        key - 1);
+        }
       }
-      current_hidden.swap(next_hidden);
     }
   };
 
@@ -419,7 +412,7 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
          shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
          shape.valid_keys, dispatches_per_stack, colors.time,
          measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
-         "host-chain", colors.reset, colors.time, "n/a", colors.reset);
+         "runtime-copy", colors.reset, colors.time, "n/a", colors.reset);
 }
 
 } // namespace
@@ -485,7 +478,8 @@ int main(int argc, char **argv) {
                : (options.weights_dir ? options.weights_dir : "synthetic"));
     if (options.weights_dir) {
       printf("Layer count:        %u\n", options.layers);
-      printf("Stack handoff:      host copy between layers\n");
+      printf(
+          "Stack handoff:      runtime device-to-device copy between layers\n");
     }
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
@@ -521,9 +515,9 @@ int main(int argc, char **argv) {
            "executor.run() submissions, divided by iteration count.\n",
            colors.label, colors.reset);
     if (options.weights_dir) {
-      printf("%sdecoder stack%s currently uses host-visible handoff between "
-             "layers, so only CPU round-trip timing is meaningful for the "
-             "stack row.\n",
+      printf("%sdecoder stack%s currently uses synchronous runtime "
+             "device-to-device handoff between layers, so only CPU round-trip "
+             "timing is meaningful for the stack row.\n",
              colors.label, colors.reset);
     }
     printf("%sDispatches%s is an estimate of kernel submissions per layer; "
