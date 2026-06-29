@@ -81,6 +81,37 @@ def test_tensor_mapping_and_bundle_writer() -> None:
     assert struct.unpack_from("<f", data, 0)[0] == 0.0
 
 
+def test_multi_layer_output_paths() -> None:
+    converter = load_converter()
+    config = {
+        "hidden_size": 8,
+        "num_attention_heads": 2,
+        "intermediate_size": 12,
+    }
+    shape = converter.derive_shape(config, keys=4)
+    tensors = {}
+    for mapping in converter.tensor_mappings(layer=0, shape=shape):
+        count = 1
+        for dim in mapping.shape:
+            count *= dim
+        tensors[mapping.bundle_name] = [float(index) for index in range(count)]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output = Path(tmpdir) / "layers"
+        for layer in range(2):
+            converter.write_bundle(
+                output / f"layer_{layer}" / "weights.json",
+                "weights.bin",
+                shape,
+                tensors,
+            )
+
+        assert (output / "layer_0" / "weights.json").exists()
+        assert (output / "layer_0" / "weights.bin").exists()
+        assert (output / "layer_1" / "weights.json").exists()
+        assert (output / "layer_1" / "weights.bin").exists()
+
+
 def test_read_safetensors_bf16() -> None:
     converter = load_converter()
     header = {
@@ -104,6 +135,7 @@ def test_read_safetensors_bf16() -> None:
 def main() -> int:
     test_derive_shape_accepts_gqa()
     test_tensor_mapping_and_bundle_writer()
+    test_multi_layer_output_paths()
     test_read_safetensors_bf16()
     print("qwen_layer_converter_test: ok")
     return 0

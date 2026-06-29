@@ -231,6 +231,14 @@ public:
     buffers_.copy_to("out", hidden_zero);
   }
 
+  void copy_hidden_states(const std::vector<float> &hidden_states) {
+    if (hidden_states.size() != keys_ * hidden_) {
+      throw std::runtime_error(
+          "mini decoder layer hidden state shape mismatch");
+    }
+    buffers_.copy_to("hidden_states", hidden_states);
+  }
+
   void run(uint32_t valid_keys) {
     if (valid_keys == 0 || valid_keys > keys_) {
       throw std::runtime_error("mini decoder layer valid_keys is out of range");

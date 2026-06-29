@@ -149,7 +149,7 @@ FP32 row-major bytes for the prototype path.
 
 The prototype converter is `tools/convert_qwen_layer.py`. It reads a local
 Hugging Face checkpoint directory, loads the required safetensors shards, and
-writes one mini decoder layer bundle:
+writes one or more mini decoder layer bundles:
 
 ```bash
 uv pip install -r tools/requirements.txt
@@ -158,6 +158,29 @@ python3 tools/convert_qwen_layer.py \
   --layer 0 \
   --keys 16 \
   --output /tmp/lrrt-qwen-layer0/weights.json
+```
+
+For a consecutive layer range, pass `--layer-count` and treat `--output` as a
+directory:
+
+```bash
+python3 tools/convert_qwen_layer.py \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --layer 0 \
+  --layer-count 4 \
+  --keys 16 \
+  --output /tmp/lrrt-qwen-layers
+```
+
+That writes one independent bundle per layer:
+
+```text
+/tmp/lrrt-qwen-layers/
+  layer_0/weights.json
+  layer_0/weights.bin
+  layer_1/weights.json
+  layer_1/weights.bin
+  ...
 ```
 
 The converter does not download model weights. The caller must provide a local
@@ -256,9 +279,16 @@ The benchmark target is `lrrt_triton_mini_decoder_layer_benchmark`, enabled by
 shared mini decoder layer executor helper and reports round-trip and
 burst-queued latency for deterministic synthetic inputs. The benchmark reports
 FP32 dtype, `[kv_heads, keys, head_dim]` cache layout, ordered single-queue
-launching, `QKVDim`, and an estimated kernel dispatch count per layer. That
+launching, `QDim`/`KVDim`, and an estimated kernel dispatch count per layer. That
 dispatch count matters because multi-head attention currently loops over heads
 and reuses single-head kernels instead of using fused multi-head kernels.
+
+When passed `--weights-dir <dir> --layers <count>`, the benchmark loads
+`layer_0/weights.json` through `layer_<count - 1>/weights.json` and runs a
+small decoder stack loop. This path materializes each layer's output hidden
+state on the host and copies it into the next layer. It is useful for verifying
+multi-layer bundle conversion and executor sequencing, but it is not the final
+low-overhead device-to-device execution model.
 
 The benchmark timing modes are intentionally simple:
 
@@ -269,6 +299,9 @@ The benchmark timing modes are intentionally simple:
   `synchronize()` once at the end. This measures the average interval for a
   burst of queued layer submissions, but it still preserves queue ordering and
   dependencies.
+- **Stack round trip**: for `--weights-dir`, run each layer in order and pass
+  hidden states between layers through host-visible memory. Only round-trip
+  timing is meaningful in this mode because each layer handoff synchronizes.
 
 Both modes currently use CPU `steady_clock` around executor calls. Runtime GPU
 event timing can be added later for per-stage or GPU-only measurements.
@@ -327,9 +360,14 @@ Qwen-like path can be meaningful:
 - **Weight loading**: the executor now has a small FP32 raw-binary plus
   manifest loader for the mini decoder layer. The examples and benchmark still
   use deterministic synthetic weights by default. A prototype Qwen converter
-  can now write one local Hugging Face Qwen layer into this format, but it is
-  FP32-only and supports grouped-query attention when the attention head count
-  is an integer multiple of the KV head count.
+  can now write one local Hugging Face Qwen layer or a consecutive range of
+  layers into this format, but it is FP32-only and supports grouped-query
+  attention when the attention head count is an integer multiple of the KV head
+  count.
+- **Layer handoff**: the multi-layer benchmark path currently copies each
+  layer output back to the host before feeding the next layer. This keeps the
+  prototype explicit and easy to validate, but it does not represent the final
+  executor pipeline design.
 - **FP16/BF16 end-to-end path**: Qwen-style inference should use lower
   precision inputs with FP32 accumulation where appropriate. Some operator
   bundles have lower precision coverage, but the mini decoder layer still runs
@@ -391,10 +429,12 @@ Qwen-like path can be meaningful:
   layer through lrrt using Triton-generated bundles.
 - It currently uses deterministic synthetic inputs and weights, not real Qwen
   weights.
+- It can also load a directory of per-layer Qwen weight bundles and run a
+  host-chained decoder stack loop for early multi-layer validation.
 - It measures round-trip latency and burst-queued latency for the whole layer
   and prints enough shape/queueing metadata to interpret those numbers.
-- Next steps are external weight loading, lower precision end-to-end execution,
-  fused or batched multi-head kernels, and per-stage timing.
+- Next steps are device-to-device layer handoff, lower precision end-to-end
+  execution, fused or batched multi-head kernels, and per-stage timing.
 - Report enough benchmark metadata to make results reproducible: target arch,
   dtype, hidden size, head count, head dimension, cache length, layer count,
   warmup iterations, and measured iterations.

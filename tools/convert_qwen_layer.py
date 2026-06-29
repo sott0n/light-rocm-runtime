@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert one Qwen decoder layer into the lrrt mini decoder weight bundle."""
+"""Convert Qwen decoder layers into lrrt mini decoder weight bundles."""
 
 from __future__ import annotations
 
@@ -374,20 +374,16 @@ def write_bundle(
         manifest_file.write("\n")
 
 
-def convert_checkpoint(args: argparse.Namespace) -> None:
-    checkpoint_dir = args.checkpoint_dir.resolve()
-    config_path = (
-        args.config.resolve() if args.config else checkpoint_dir / "config.json"
-    )
-    config = read_json(config_path)
-    shape = derive_shape(config, args.keys)
-    mappings = tensor_mappings(args.layer, shape)
-    weight_map = checkpoint_weight_map(checkpoint_dir)
-    validate_no_attention_biases(
-        checkpoint_dir,
-        args.layer,
-        set(weight_map) if weight_map is not None else None,
-    )
+def _convert_layer(
+    checkpoint_dir: Path,
+    shape: DecoderLayerShape,
+    layer: int,
+    output: Path,
+    data_file: str,
+    available_names: set[str] | None,
+) -> None:
+    mappings = tensor_mappings(layer, shape)
+    validate_no_attention_biases(checkpoint_dir, layer, available_names)
     checkpoint_tensors = load_tensors(checkpoint_dir, mappings)
     converted = {
         mapping.bundle_name: convert_tensor(
@@ -397,8 +393,49 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
         )
         for mapping in mappings
     }
-    write_bundle(args.output, args.data_file, shape, converted)
-    print(f"wrote Qwen mini decoder weight bundle: {args.output}")
+    write_bundle(output, data_file, shape, converted)
+
+
+def convert_checkpoint(args: argparse.Namespace) -> None:
+    checkpoint_dir = args.checkpoint_dir.resolve()
+    config_path = (
+        args.config.resolve() if args.config else checkpoint_dir / "config.json"
+    )
+    config = read_json(config_path)
+    shape = derive_shape(config, args.keys)
+    weight_map = checkpoint_weight_map(checkpoint_dir)
+    available_names = set(weight_map) if weight_map is not None else None
+    layer_count = args.layer_count
+    if layer_count <= 0:
+        raise ValueError("--layer-count must be a positive integer")
+
+    if layer_count == 1:
+        _convert_layer(
+            checkpoint_dir,
+            shape,
+            args.layer,
+            args.output,
+            args.data_file,
+            available_names,
+        )
+        print(f"wrote Qwen mini decoder weight bundle: {args.output}")
+    else:
+        if args.output.suffix:
+            raise ValueError(
+                "--output must be a directory when --layer-count is greater than 1"
+            )
+        for layer in range(args.layer, args.layer + layer_count):
+            layer_manifest = args.output / f"layer_{layer}" / "weights.json"
+            _convert_layer(
+                checkpoint_dir,
+                shape,
+                layer,
+                layer_manifest,
+                args.data_file,
+                available_names,
+            )
+            print(f"wrote Qwen mini decoder layer {layer}: {layer_manifest}")
+
     print(
         "shape: "
         f"keys={shape.keys} hidden={shape.hidden} heads={shape.heads} "
@@ -410,13 +447,23 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Convert one local Hugging Face Qwen decoder layer into the lrrt "
-            "mini decoder weight bundle."
+            "Convert local Hugging Face Qwen decoder layers into lrrt mini "
+            "decoder weight bundles."
         )
     )
     parser.add_argument("--checkpoint-dir", required=True, type=Path)
     parser.add_argument("--config", type=Path, help="defaults to config.json")
     parser.add_argument("--layer", required=True, type=int)
+    parser.add_argument(
+        "--layer-count",
+        default=1,
+        type=int,
+        help=(
+            "number of consecutive decoder layers to convert. When greater "
+            "than 1, --output is treated as a directory and bundles are "
+            "written under layer_<index>/weights.json."
+        ),
+    )
     parser.add_argument("--keys", required=True, type=int)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--data-file", default="weights.bin")
