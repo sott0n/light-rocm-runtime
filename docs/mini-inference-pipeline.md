@@ -146,6 +146,24 @@ Qwen2/Qwen2.5-style Hugging Face checkpoint. It should emit the current mini
 decoder weight bundle format for one selected layer, converting tensors to
 FP32 row-major bytes for the prototype path.
 
+The prototype converter is `tools/convert_qwen_layer.py`. It reads a local
+Hugging Face checkpoint directory, loads the required safetensors shards, and
+writes one mini decoder layer bundle:
+
+```bash
+uv pip install -r tools/requirements.txt
+python3 tools/convert_qwen_layer.py \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --layer 0 \
+  --keys 16 \
+  --output /tmp/lrrt-qwen-layer0/weights.json
+```
+
+The converter does not download model weights. The caller must provide a local
+checkpoint directory containing `config.json` and `.safetensors` files. This is
+still a narrow bridge into the mini decoder benchmark format, not a general
+model loader.
+
 The intended per-layer mapping is:
 
 | Mini decoder tensor | Qwen checkpoint tensor | Expected shape in mini bundle | Conversion note |
@@ -196,6 +214,9 @@ these policies explicitly:
 Policy 1 is the safest first implementation. Policy 2 can unblock experiments
 but should be labeled as a prototype transformation. Policy 3 is the correct
 longer-term path for Qwen fidelity.
+
+The current converter implements policy 1: it rejects checkpoints where
+`num_key_value_heads != num_attention_heads`.
 
 ## Current Integration Baseline
 
@@ -313,8 +334,9 @@ Qwen-like path can be meaningful:
   different layout or a documented adapter.
 - **Weight loading**: the executor now has a small FP32 raw-binary plus
   manifest loader for the mini decoder layer. The examples and benchmark still
-  use deterministic synthetic weights by default, and a Qwen-style benchmark
-  still needs checkpoint conversion into this or a later weight-bundle format.
+  use deterministic synthetic weights by default. A prototype Qwen converter
+  can now write one local Hugging Face Qwen layer into this format, but it is
+  FP32-only and rejects grouped-query attention for now.
 - **FP16/BF16 end-to-end path**: Qwen-style inference should use lower
   precision inputs with FP32 accumulation where appropriate. Some operator
   bundles have lower precision coverage, but the mini decoder layer still runs

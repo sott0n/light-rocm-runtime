@@ -37,6 +37,15 @@ lrrt_add_test_executable(lrrt_event_timing_tests event_timing.cpp lrrt::lrrt)
 lrrt_add_test_executable(lrrt_cpp_wrapper_tests cpp_wrapper.cpp lrrt::lrrt)
 lrrt_add_test_executable(lrrt_bundle_tests bundle.cpp lrrt::bundle)
 
+if(PYTHON_EXECUTABLE)
+  add_test(
+    NAME lrrt_qwen_layer_converter_tests
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/qwen_layer_converter_test.py"
+  )
+endif()
+
 lrrt_add_test_executable(
   lrrt_triton_executor_tests
   triton_executor.cpp
