@@ -8,6 +8,7 @@
 #include <memory>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <unistd.h>
 #include <vector>
 
@@ -70,6 +71,7 @@ struct Options {
   uint32_t layers;
   uint32_t valid_keys;
   bool has_valid_keys;
+  bool layer_sweep;
 };
 
 uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
@@ -111,7 +113,7 @@ uint32_t parse_u32(const char *text, const char *label) {
 }
 
 Options parse_options(int argc, char **argv) {
-  Options options{20, nullptr, nullptr, 0, 0, false};
+  Options options{20, nullptr, nullptr, 0, 0, false, false};
   bool saw_iterations = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--weights") == 0) {
@@ -135,6 +137,8 @@ Options parse_options(int argc, char **argv) {
       }
       options.valid_keys = parse_u32(argv[i], "valid key count");
       options.has_valid_keys = true;
+    } else if (strcmp(argv[i], "--layer-sweep") == 0) {
+      options.layer_sweep = true;
     } else if (!saw_iterations) {
       options.iterations = parse_u32(argv[i], "benchmark count");
       saw_iterations = true;
@@ -142,7 +146,7 @@ Options parse_options(int argc, char **argv) {
       throw std::invalid_argument(
           "usage: lrrt_triton_mini_decoder_layer_benchmark [count] "
           "[--weights weights.json | --weights-dir dir --layers count] "
-          "[--valid-keys count]");
+          "[--valid-keys count] [--layer-sweep]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -154,6 +158,9 @@ Options parse_options(int argc, char **argv) {
   }
   if (!options.weights_dir && options.layers != 0) {
     throw std::invalid_argument("--layers requires --weights-dir");
+  }
+  if (options.layer_sweep && !options.weights_dir) {
+    throw std::invalid_argument("--layer-sweep requires --weights-dir");
   }
   return options;
 }
@@ -202,6 +209,32 @@ size_t count_non_finite(const std::vector<float> &values) {
     }
   }
   return count;
+}
+
+std::vector<uint32_t> layer_sweep_counts(uint32_t layers) {
+  std::vector<uint32_t> counts;
+  for (uint32_t count = 1; count < layers;) {
+    counts.push_back(count);
+    if (count > std::numeric_limits<uint32_t>::max() / 2) {
+      break;
+    }
+    count *= 2;
+  }
+  if (counts.empty() || counts.back() != layers) {
+    counts.push_back(layers);
+  }
+  return counts;
+}
+
+std::string join_layer_counts(const std::vector<uint32_t> &counts) {
+  std::string text;
+  for (size_t i = 0; i < counts.size(); ++i) {
+    if (i != 0) {
+      text += ", ";
+    }
+    text += std::to_string(counts[i]);
+  }
+  return text;
 }
 
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
@@ -401,14 +434,16 @@ Measurements measure_case(lrrt::Device &device,
 
 Measurements measure_stack_case(
     lrrt::Device &device, const std::vector<BenchmarkCase> &layers,
+    size_t layer_count,
     const lrrt::executor::triton::mini::ModelTailWeights *tail_weights,
     uint32_t iterations, uint32_t warmup_iterations) {
-  if (layers.empty()) {
+  if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
   }
 
   const BenchmarkCase &shape = layers.front();
-  for (const BenchmarkCase &layer : layers) {
+  for (size_t i = 0; i < layer_count; ++i) {
+    const BenchmarkCase &layer = layers[i];
     if (layer.keys != shape.keys || layer.hidden != shape.hidden ||
         layer.heads != shape.heads || layer.kv_heads != shape.kv_heads ||
         layer.head_dim != shape.head_dim ||
@@ -425,8 +460,9 @@ Measurements measure_stack_case(
 
   std::vector<std::unique_ptr<lrrt::executor::triton::mini::DecoderLayer>>
       executors;
-  executors.reserve(layers.size());
-  for (const BenchmarkCase &layer : layers) {
+  executors.reserve(layer_count);
+  for (size_t i = 0; i < layer_count; ++i) {
+    const BenchmarkCase &layer = layers[i];
     executors.push_back(
         std::make_unique<lrrt::executor::triton::mini::DecoderLayer>(
             device, layer.keys, layer.hidden, layer.heads, layer.kv_heads,
@@ -462,7 +498,7 @@ Measurements measure_stack_case(
     std::vector<std::unique_ptr<lrrt::Event>> source_complete;
     std::vector<std::unique_ptr<lrrt::Event>> handoff_complete;
     const size_t handoff_count =
-        layers.size() > 1 ? (layers.size() - 1) * valid_keys : 0;
+        layer_count > 1 ? (layer_count - 1) * valid_keys : 0;
     source_complete.reserve(handoff_count);
     handoff_complete.reserve(handoff_count);
     for (size_t i = 0; i < handoff_count; ++i) {
@@ -473,7 +509,7 @@ Measurements measure_stack_case(
       gpu_start->record(executors.front()->queue());
     }
 
-    for (size_t layer = 0; layer < layers.size(); ++layer) {
+    for (size_t layer = 0; layer < layer_count; ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
         std::vector<const lrrt::Event *> dependencies;
         if (gpu_start && layer == 0 && key == 1) {
@@ -484,7 +520,7 @@ Measurements measure_stack_case(
               handoff_complete[handoff_index(layer - 1, key)].get());
         }
         executors[layer]->run(key, dependencies);
-        if (layer + 1 < layers.size()) {
+        if (layer + 1 < layer_count) {
           const size_t index = handoff_index(layer, key);
           executors[layer]->copy_output_to_hidden_state_async(
               *executors[layer + 1], key - 1, *source_complete[index],
@@ -563,15 +599,16 @@ Measurements measure_stack_case(
 }
 
 uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
+                                    size_t layer_count,
                                     bool includes_model_tail) {
-  if (layers.empty()) {
+  if (layer_count == 0 || layer_count > layers.size()) {
     return 0;
   }
   BenchmarkCase layer = layers.front();
   uint32_t total = 0;
   for (uint32_t key = 1; key <= layers.front().valid_keys; ++key) {
     layer.valid_keys = key;
-    total += estimated_dispatches(layer) * static_cast<uint32_t>(layers.size());
+    total += estimated_dispatches(layer) * static_cast<uint32_t>(layer_count);
   }
   if (includes_model_tail) {
     total += 2;
@@ -581,9 +618,10 @@ uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
 
 void print_case(const BenchmarkCase &benchmark_case,
                 const Measurements &measurements, const Colors &colors) {
-  printf("%-26s %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u %s%11.3f%s "
+  printf("%-26s %6u %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u "
+         "%s%11.3f%s "
          "%s%11.3f%s %s%11.3f%s\n",
-         "decoder layer", benchmark_case.keys, benchmark_case.hidden,
+         "decoder layer", 1, benchmark_case.keys, benchmark_case.hidden,
          benchmark_case.heads, benchmark_case.kv_heads, benchmark_case.head_dim,
          qkv_dim(benchmark_case), kv_dim(benchmark_case),
          benchmark_case.intermediate, benchmark_case.valid_keys,
@@ -594,19 +632,22 @@ void print_case(const BenchmarkCase &benchmark_case,
 }
 
 void print_stack_case(const std::vector<BenchmarkCase> &layers,
-                      const Measurements &measurements, const Colors &colors) {
+                      size_t layer_count, const Measurements &measurements,
+                      const Colors &colors) {
   const BenchmarkCase &shape = layers.front();
-  const uint32_t dispatches_per_stack =
-      estimated_stack_dispatches(layers, measurements.produced_logits);
-  printf(
-      "%-26s %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u %s%11.3f%s "
-      "%s%11s%s %s%11.3f%s\n",
-      measurements.produced_logits ? "decoder stack+logits" : "decoder stack",
-      shape.keys, shape.hidden, shape.heads, shape.kv_heads, shape.head_dim,
-      qkv_dim(shape), kv_dim(shape), shape.intermediate, shape.valid_keys,
-      dispatches_per_stack, colors.time, measurements.cpu_round_trip_ns / 1.0e3,
-      colors.reset, colors.time, "runtime-copy", colors.reset, colors.time,
-      measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
+  const uint32_t dispatches_per_stack = estimated_stack_dispatches(
+      layers, layer_count, measurements.produced_logits);
+  printf("%-26s %6zu %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u "
+         "%s%11.3f%s "
+         "%s%11s%s %s%11.3f%s\n",
+         measurements.produced_logits ? "decoder stack+logits"
+                                      : "decoder stack",
+         layer_count, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
+         shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
+         shape.valid_keys, dispatches_per_stack, colors.time,
+         measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
+         "runtime-copy", colors.reset, colors.time,
+         measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
   if (measurements.produced_logits && measurements.top_logits.empty()) {
     printf("%sTop logits%s unavailable; non-finite hidden=%zu norm_hidden=%zu "
            "logits=%zu/%u\n",
@@ -728,6 +769,10 @@ int main(int argc, char **argv) {
                : (options.weights_dir ? options.weights_dir : "synthetic"));
     if (options.weights_dir) {
       printf("Layer count:        %u\n", options.layers);
+      if (options.layer_sweep) {
+        std::vector<uint32_t> counts = layer_sweep_counts(options.layers);
+        printf("Layer sweep:        %s\n", join_layer_counts(counts).c_str());
+      }
       printf("Stack handoff:      queued async device-to-device copy between "
              "layers\n");
       printf("Model tail:         %s\n",
@@ -736,20 +781,32 @@ int main(int argc, char **argv) {
     }
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
+    printf("%s%-26s %6s %5s %7s %5s %7s %8s %7s %5s %12s %10s %10s %11s %11s "
+           "%11s%s\n",
+           colors.label, "Workload", "Layers", "Keys", "Hidden", "Heads",
+           "KVHeads", "HeadDim", "QDim", "KVDim", "Intermediate", "ValidKeys",
+           "Dispatches", "CPU round us", "CPU burst us", "GPU burst us",
+           colors.reset);
     printf(
-        "%s%-26s %5s %7s %5s %7s %8s %7s %5s %12s %10s %10s %11s %11s %11s%s\n",
-        colors.label, "Workload", "Keys", "Hidden", "Heads", "KVHeads",
-        "HeadDim", "QDim", "KVDim", "Intermediate", "ValidKeys", "Dispatches",
-        "CPU round us", "CPU burst us", "GPU burst us", colors.reset);
-    printf("%-26s %5s %7s %5s %7s %8s %7s %5s %12s %10s %10s %11s %11s %11s\n",
-           "--------------------------", "-----", "-------", "-----", "-------",
-           "--------", "-------", "-----", "------------", "----------",
-           "----------", "-----------", "-----------", "-----------");
+        "%-26s %6s %5s %7s %5s %7s %8s %7s %5s %12s %10s %10s %11s %11s %11s\n",
+        "--------------------------", "------", "-----", "-------", "-----",
+        "-------", "--------", "-------", "-----", "------------", "----------",
+        "----------", "-----------", "-----------", "-----------");
 
     if (options.weights_dir) {
-      Measurements measurements = measure_stack_case(
-          device, cases, tail_weights.get(), iterations, warmup_iterations);
-      print_stack_case(cases, measurements, colors);
+      if (options.layer_sweep) {
+        for (uint32_t count : layer_sweep_counts(options.layers)) {
+          Measurements measurements =
+              measure_stack_case(device, cases, count, tail_weights.get(),
+                                 iterations, warmup_iterations);
+          print_stack_case(cases, count, measurements, colors);
+        }
+      } else {
+        Measurements measurements =
+            measure_stack_case(device, cases, cases.size(), tail_weights.get(),
+                               iterations, warmup_iterations);
+        print_stack_case(cases, cases.size(), measurements, colors);
+      }
     } else {
       for (const BenchmarkCase &benchmark_case : cases) {
         Measurements measurements =
