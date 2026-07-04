@@ -66,7 +66,10 @@ inline uint32_t select_block(uint32_t size) {
   if (size <= 2048) {
     return 2048;
   }
-  return 4096;
+  if (size <= 4096) {
+    return 4096;
+  }
+  return 8192;
 }
 
 class DecoderLayer {
@@ -196,7 +199,7 @@ public:
     std::vector<float> kv_cache_zero(keys_ * kv_dim_, 0.0f);
     std::vector<float> head_cache_zero(kv_heads_ * keys_ * head_dim_, 0.0f);
     std::vector<float> intermediate_zero(intermediate_, 0.0f);
-    std::vector<float> scores_zero(keys_, 0.0f);
+    std::vector<float> scores_zero(static_cast<size_t>(heads_) * keys_, 0.0f);
 
     buffers_.copy_to("hidden_states", hidden_states);
     buffers_.copy_to("attention_norm_weight", attention_norm_weight);
@@ -572,6 +575,13 @@ public:
       throw std::runtime_error("mini model tail logits shape mismatch");
     }
     buffers_.copy_from(out, "logits");
+  }
+
+  void copy_norm_hidden(std::vector<float> &out) const {
+    if (out.size() != hidden_) {
+      throw std::runtime_error("mini model tail norm hidden shape mismatch");
+    }
+    buffers_.copy_from(out, "norm_hidden");
   }
 
 private:

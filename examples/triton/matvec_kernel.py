@@ -45,6 +45,7 @@ def main():
         (1024, 4),
         (2048, 8),
         (4096, 8),
+        (8192, 8),
     ]
     kernels = []
     for dtype, pointer_type in data_types:

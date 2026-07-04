@@ -17,13 +17,15 @@ def causal_softmax_kernel(x, out, rows, hidden, query_start, BLOCK_SIZE: tl.cons
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_SIZE)
     causal_limit = query_start + row
-    mask = (row < rows) & (offsets < hidden) & (offsets <= causal_limit)
+    valid_mask = (row < rows) & (offsets < hidden)
+    mask = valid_mask & (offsets <= causal_limit)
     base = row * hidden + offsets
     values = tl.load(x + base, mask=mask, other=-float("inf")).to(tl.float32)
     values = values - tl.max(values, axis=0)
     numerators = tl.exp(values)
     denominator = tl.sum(numerators, axis=0)
-    tl.store(out + base, numerators / denominator, mask=mask)
+    result = tl.where(mask, numerators / denominator, 0.0)
+    tl.store(out + base, result, mask=valid_mask)
 
 
 def main():

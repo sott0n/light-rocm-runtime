@@ -59,6 +59,8 @@ struct Measurements {
   uint32_t vocab;
   std::vector<LogitEntry> top_logits;
   size_t non_finite_logits;
+  size_t non_finite_hidden;
+  size_t non_finite_norm_hidden;
 };
 
 struct Options {
@@ -190,6 +192,16 @@ std::vector<LogitEntry> top_logits(const std::vector<float> &logits,
     }
   }
   return top;
+}
+
+size_t count_non_finite(const std::vector<float> &values) {
+  size_t count = 0;
+  for (float value : values) {
+    if (!std::isfinite(value)) {
+      ++count;
+    }
+  }
+  return count;
 }
 
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
@@ -382,6 +394,8 @@ Measurements measure_case(lrrt::Device &device,
           false,
           0,
           {},
+          0,
+          0,
           0};
 }
 
@@ -523,7 +537,15 @@ Measurements measure_stack_case(
 
   std::vector<LogitEntry> summary;
   size_t non_finite_logits = 0;
+  size_t non_finite_hidden = 0;
+  size_t non_finite_norm_hidden = 0;
   if (tail && tail_weights) {
+    std::vector<float> hidden(tail_weights->hidden);
+    executors.back()->copy_output(hidden);
+    non_finite_hidden = count_non_finite(hidden);
+    std::vector<float> norm_hidden(tail_weights->hidden);
+    tail->copy_norm_hidden(norm_hidden);
+    non_finite_norm_hidden = count_non_finite(norm_hidden);
     std::vector<float> logits(tail_weights->vocab);
     tail->copy_logits(logits);
     summary = top_logits(logits, 5, &non_finite_logits);
@@ -535,7 +557,9 @@ Measurements measure_stack_case(
           tail != nullptr,
           tail_weights ? tail_weights->vocab : 0,
           summary,
-          non_finite_logits};
+          non_finite_logits,
+          non_finite_hidden,
+          non_finite_norm_hidden};
 }
 
 uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
@@ -584,8 +608,10 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
       colors.reset, colors.time, "runtime-copy", colors.reset, colors.time,
       measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
   if (measurements.produced_logits && measurements.top_logits.empty()) {
-    printf("%sTop logits%s unavailable; non-finite logits=%zu/%u\n",
-           colors.label, colors.reset, measurements.non_finite_logits,
+    printf("%sTop logits%s unavailable; non-finite hidden=%zu norm_hidden=%zu "
+           "logits=%zu/%u\n",
+           colors.label, colors.reset, measurements.non_finite_hidden,
+           measurements.non_finite_norm_hidden, measurements.non_finite_logits,
            measurements.vocab);
   } else if (!measurements.top_logits.empty()) {
     printf("%sTop logits%s", colors.label, colors.reset);
@@ -597,6 +623,12 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
     if (measurements.non_finite_logits != 0) {
       printf("  non-finite=%zu/%u", measurements.non_finite_logits,
              measurements.vocab);
+    }
+    if (measurements.non_finite_hidden != 0 ||
+        measurements.non_finite_norm_hidden != 0) {
+      printf("  hidden-non-finite=%zu norm-hidden-non-finite=%zu",
+             measurements.non_finite_hidden,
+             measurements.non_finite_norm_hidden);
     }
     printf("\n");
   }
