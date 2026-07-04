@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <limits>
 #include <memory>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -44,12 +46,19 @@ struct BenchmarkCase {
   std::vector<float> sin;
 };
 
+struct LogitEntry {
+  uint32_t token_id;
+  float value;
+};
+
 struct Measurements {
   double cpu_round_trip_ns;
   double cpu_burst_interval_ns;
   double gpu_burst_interval_ns;
   bool produced_logits;
   uint32_t vocab;
+  std::vector<LogitEntry> top_logits;
+  size_t non_finite_logits;
 };
 
 struct Options {
@@ -151,6 +160,36 @@ double elapsed_ns(Clock::time_point begin, Clock::time_point end) {
   return static_cast<double>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
           .count());
+}
+
+std::vector<LogitEntry> top_logits(const std::vector<float> &logits,
+                                   size_t count, size_t *non_finite_logits) {
+  if (count == 0) {
+    return {};
+  }
+  *non_finite_logits = 0;
+  std::vector<LogitEntry> top;
+  top.reserve(std::min(count, logits.size()));
+  for (size_t token = 0; token < logits.size(); ++token) {
+    if (!std::isfinite(logits[token])) {
+      ++*non_finite_logits;
+      continue;
+    }
+    const LogitEntry candidate{static_cast<uint32_t>(token), logits[token]};
+    if (top.size() == count && candidate.value <= top.back().value) {
+      continue;
+    }
+    if (top.size() < count) {
+      top.push_back(candidate);
+    } else {
+      top.back() = candidate;
+    }
+    for (size_t i = top.size() - 1; i > 0 && top[i].value > top[i - 1].value;
+         --i) {
+      std::swap(top[i], top[i - 1]);
+    }
+  }
+  return top;
 }
 
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
@@ -337,8 +376,13 @@ Measurements measure_case(lrrt::Device &device,
       static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end)) /
       static_cast<double>(iterations);
 
-  return {cpu_round_trip_ns, cpu_burst_interval_ns, gpu_burst_interval_ns,
-          false, 0};
+  return {cpu_round_trip_ns,
+          cpu_burst_interval_ns,
+          gpu_burst_interval_ns,
+          false,
+          0,
+          {},
+          0};
 }
 
 Measurements measure_stack_case(
@@ -477,8 +521,21 @@ Measurements measure_stack_case(
       static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end));
   synchronize_stack();
 
-  return {cpu_round_trip_ns, cpu_round_trip_ns, gpu_burst_interval_ns,
-          tail != nullptr, tail_weights ? tail_weights->vocab : 0};
+  std::vector<LogitEntry> summary;
+  size_t non_finite_logits = 0;
+  if (tail && tail_weights) {
+    std::vector<float> logits(tail_weights->vocab);
+    tail->copy_logits(logits);
+    summary = top_logits(logits, 5, &non_finite_logits);
+  }
+
+  return {cpu_round_trip_ns,
+          cpu_round_trip_ns,
+          gpu_burst_interval_ns,
+          tail != nullptr,
+          tail_weights ? tail_weights->vocab : 0,
+          summary,
+          non_finite_logits};
 }
 
 uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
@@ -526,6 +583,23 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
       dispatches_per_stack, colors.time, measurements.cpu_round_trip_ns / 1.0e3,
       colors.reset, colors.time, "runtime-copy", colors.reset, colors.time,
       measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
+  if (measurements.produced_logits && measurements.top_logits.empty()) {
+    printf("%sTop logits%s unavailable; non-finite logits=%zu/%u\n",
+           colors.label, colors.reset, measurements.non_finite_logits,
+           measurements.vocab);
+  } else if (!measurements.top_logits.empty()) {
+    printf("%sTop logits%s", colors.label, colors.reset);
+    for (size_t i = 0; i < measurements.top_logits.size(); ++i) {
+      const LogitEntry &entry = measurements.top_logits[i];
+      printf("  #%zu token=%u logit=%s%.6f%s", i + 1, entry.token_id,
+             colors.throughput, entry.value, colors.reset);
+    }
+    if (measurements.non_finite_logits != 0) {
+      printf("  non-finite=%zu/%u", measurements.non_finite_logits,
+             measurements.vocab);
+    }
+    printf("\n");
+  }
 }
 
 } // namespace
