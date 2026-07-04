@@ -128,6 +128,20 @@ int main(void) {
       }
     }
 
+    lrrt::copy_to_device(device_copy, partial);
+    lrrt::Event async_offset_copy_event(device);
+    lrrt::copy_device_to_device_async(device_copy, sizeof(float), device_in,
+                                      2 * sizeof(float), 2 * sizeof(float),
+                                      async_offset_copy_event, {});
+    async_offset_copy_event.synchronize();
+    lrrt::copy_to_host(partial, device_copy);
+    if (fabsf(partial[0] + 1.0f) > 0.001f ||
+        fabsf(partial[1] - in[2]) > 0.001f ||
+        fabsf(partial[2] - in[3]) > 0.001f ||
+        fabsf(partial[3] + 1.0f) > 0.001f) {
+      throw std::runtime_error("async offset device copy result mismatch");
+    }
+
     std::vector<float> vector_in(in, in + n);
     std::vector<float> vector_out(n, 0.0f);
     lrrt::copy_to_device(device_in, vector_in);

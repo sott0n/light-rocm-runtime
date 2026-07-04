@@ -345,17 +345,40 @@ Measurements measure_stack_case(lrrt::Device &device,
   }
 
   const uint32_t valid_keys = shape.valid_keys;
+  const auto handoff_index = [valid_keys](size_t layer, uint32_t key) {
+    return layer * valid_keys + (key - 1);
+  };
 
   auto run_stack = [&]() {
+    std::vector<std::unique_ptr<lrrt::Event>> source_complete;
+    std::vector<std::unique_ptr<lrrt::Event>> handoff_complete;
+    const size_t handoff_count =
+        layers.size() > 1 ? (layers.size() - 1) * valid_keys : 0;
+    source_complete.reserve(handoff_count);
+    handoff_complete.reserve(handoff_count);
+    for (size_t i = 0; i < handoff_count; ++i) {
+      source_complete.push_back(std::make_unique<lrrt::Event>(device));
+      handoff_complete.push_back(std::make_unique<lrrt::Event>(device));
+    }
+
     for (size_t layer = 0; layer < layers.size(); ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
-        executors[layer]->run(key);
-        executors[layer]->synchronize();
+        std::vector<const lrrt::Event *> dependencies;
+        if (layer > 0) {
+          dependencies.push_back(
+              handoff_complete[handoff_index(layer - 1, key)].get());
+        }
+        executors[layer]->run(key, dependencies);
         if (layer + 1 < layers.size()) {
-          executors[layer]->copy_output_to_hidden_state(*executors[layer + 1],
-                                                        key - 1);
+          const size_t index = handoff_index(layer, key);
+          executors[layer]->copy_output_to_hidden_state_async(
+              *executors[layer + 1], key - 1, *source_complete[index],
+              *handoff_complete[index]);
         }
       }
+    }
+    for (const auto &executor : executors) {
+      executor->synchronize();
     }
   };
 
@@ -478,8 +501,8 @@ int main(int argc, char **argv) {
                : (options.weights_dir ? options.weights_dir : "synthetic"));
     if (options.weights_dir) {
       printf("Layer count:        %u\n", options.layers);
-      printf(
-          "Stack handoff:      runtime device-to-device copy between layers\n");
+      printf("Stack handoff:      queued async device-to-device copy between "
+             "layers\n");
     }
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
@@ -515,9 +538,9 @@ int main(int argc, char **argv) {
            "executor.run() submissions, divided by iteration count.\n",
            colors.label, colors.reset);
     if (options.weights_dir) {
-      printf("%sdecoder stack%s currently uses synchronous runtime "
-             "device-to-device handoff between layers, so only CPU round-trip "
-             "timing is meaningful for the stack row.\n",
+      printf("%sdecoder stack%s records source-layer completion events, "
+             "queues async device-to-device handoff copies, and launches the "
+             "next layer after copy events without per-layer host sync.\n",
              colors.label, colors.reset);
     }
     printf("%sDispatches%s is an estimate of kernel submissions per layer; "

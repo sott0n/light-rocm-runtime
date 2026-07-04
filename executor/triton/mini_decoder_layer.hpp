@@ -239,7 +239,8 @@ public:
     buffers_.copy_to("hidden_states", hidden_states);
   }
 
-  void run(uint32_t valid_keys) {
+  void run(uint32_t valid_keys,
+           const std::vector<const lrrt::Event *> &dependencies = {}) {
     if (valid_keys == 0 || valid_keys > keys_) {
       throw std::runtime_error("mini decoder layer valid_keys is out of range");
     }
@@ -254,7 +255,8 @@ public:
                arg("eps", 1.0e-5f),
                arg("rows", (int32_t)keys_),
                arg("hidden", (int32_t)hidden_),
-           });
+           },
+           dependencies);
 
     launch(queue_, bundles_.get("q_projection"), q_dim_,
            {
@@ -453,6 +455,26 @@ public:
         dst.buffers_.get("hidden_states"),
         static_cast<size_t>(dst_position) * dst.hidden_ * sizeof(float),
         buffers_.get("out"), 0, static_cast<size_t>(hidden_) * sizeof(float));
+  }
+
+  void
+  copy_output_to_hidden_state_async(DecoderLayer &dst, uint32_t dst_position,
+                                    const lrrt::Event &source_complete,
+                                    const lrrt::Event &copy_complete) const {
+    if (hidden_ != dst.hidden_) {
+      throw std::runtime_error(
+          "mini decoder layer handoff hidden size mismatch");
+    }
+    if (dst_position >= dst.keys_) {
+      throw std::runtime_error(
+          "mini decoder layer handoff position is out of range");
+    }
+    source_complete.record(queue_);
+    lrrt::copy_device_to_device_async(
+        dst.buffers_.get("hidden_states"),
+        static_cast<size_t>(dst_position) * dst.hidden_ * sizeof(float),
+        buffers_.get("out"), 0, static_cast<size_t>(hidden_) * sizeof(float),
+        copy_complete, {&source_complete});
   }
 
 private:

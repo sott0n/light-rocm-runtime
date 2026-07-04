@@ -171,7 +171,8 @@ template <typename T> LaunchArg arg(const char *name, const T &value) {
 }
 
 inline void launch(const lrrt::Queue &queue, lrrt::Bundle &bundle, uint32_t n,
-                   std::initializer_list<LaunchArg> args) {
+                   std::initializer_list<LaunchArg> args,
+                   const std::vector<const lrrt::Event *> &dependencies = {}) {
   lrrt::KernargBuffer kernargs = bundle.make_args();
   std::unordered_set<std::string> bound_names;
   for (const LaunchArg &arg : args) {
@@ -191,7 +192,7 @@ inline void launch(const lrrt::Queue &queue, lrrt::Bundle &bundle, uint32_t n,
   }
   try {
     kernargs.bind_optional_nulls();
-    bundle.launch(queue, n, kernargs);
+    bundle.launch(queue, n, kernargs, dependencies);
   } catch (const std::exception &error) {
     throw std::runtime_error("failed to launch Triton executor kernel " +
                              detail::kernel_label(bundle.manifest()) + ": " +

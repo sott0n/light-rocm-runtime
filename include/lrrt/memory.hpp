@@ -190,6 +190,23 @@ inline void copy_device_to_device_async(DeviceBuffer &dst,
         "lr_memcpy_async device to device");
 }
 
+inline void copy_device_to_device_async(DeviceBuffer &dst, size_t dst_offset,
+                                        const DeviceBuffer &src,
+                                        size_t src_offset, size_t size,
+                                        const Event &event) {
+  if (dst_offset > dst.size() || src_offset > src.size() ||
+      size > dst.size() - dst_offset || size > src.size() - src_offset) {
+    throw Error(LR_ERROR_INVALID_ARGUMENT,
+                "lr_memcpy_async device to device offset is out of range");
+  }
+  auto *dst_bytes = static_cast<unsigned char *>(dst.data());
+  const auto *src_bytes = static_cast<const unsigned char *>(src.data());
+  check(lr_memcpy_async(dst.device(), dst_bytes + dst_offset,
+                        src_bytes + src_offset, size,
+                        LR_MEMCPY_DEVICE_TO_DEVICE, event.get()),
+        "lr_memcpy_async device to device");
+}
+
 inline void
 copy_device_to_device_async(DeviceBuffer &dst, const DeviceBuffer &src,
                             size_t size, const Event &event,
@@ -199,6 +216,27 @@ copy_device_to_device_async(DeviceBuffer &dst, const DeviceBuffer &src,
                                           size, LR_MEMCPY_DEVICE_TO_DEVICE,
                                           event.get(), handles.data(),
                                           handles.size()),
+        "lr_memcpy_async_with_dependencies device to device");
+}
+
+inline void
+copy_device_to_device_async(DeviceBuffer &dst, size_t dst_offset,
+                            const DeviceBuffer &src, size_t src_offset,
+                            size_t size, const Event &event,
+                            const std::vector<const Event *> &dependencies) {
+  if (dst_offset > dst.size() || src_offset > src.size() ||
+      size > dst.size() - dst_offset || size > src.size() - src_offset) {
+    throw Error(LR_ERROR_INVALID_ARGUMENT,
+                "lr_memcpy_async_with_dependencies device to device offset is "
+                "out of range");
+  }
+  auto *dst_bytes = static_cast<unsigned char *>(dst.data());
+  const auto *src_bytes = static_cast<const unsigned char *>(src.data());
+  std::vector<lr_event_t *> handles = event_handles(dependencies);
+  check(lr_memcpy_async_with_dependencies(
+            dst.device(), dst_bytes + dst_offset, src_bytes + src_offset, size,
+            LR_MEMCPY_DEVICE_TO_DEVICE, event.get(), handles.data(),
+            handles.size()),
         "lr_memcpy_async_with_dependencies device to device");
 }
 
