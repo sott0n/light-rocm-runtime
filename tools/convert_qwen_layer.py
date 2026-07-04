@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 FORMAT = "lrrt.mini_decoder_weights"
+TAIL_FORMAT = "lrrt.mini_model_tail_weights"
 VERSION = 1
 
 
@@ -142,6 +143,10 @@ def tensor_mappings(layer: int, shape: DecoderLayerShape) -> list[TensorMapping]
             (shape.hidden, shape.intermediate),
         ),
     ]
+
+
+def tail_tensor_names() -> tuple[str, str, str]:
+    return ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight")
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -374,6 +379,121 @@ def write_bundle(
         manifest_file.write("\n")
 
 
+def _write_tail_bundle(
+    output_manifest: Path,
+    data_file_name: str,
+    hidden: int,
+    token_id: int,
+    token_embedding: Any,
+    final_norm_weight: Any,
+    lm_head_weight: Any,
+) -> None:
+    _validate_data_file_name(data_file_name)
+    np = _import_numpy()
+    token_embedding = np.ascontiguousarray(token_embedding, dtype=np.float32)
+    final_norm_weight = np.ascontiguousarray(final_norm_weight, dtype=np.float32)
+    lm_head_weight = np.ascontiguousarray(lm_head_weight, dtype=np.float32)
+    if token_embedding.shape != (hidden,):
+        raise ValueError(
+            f"token embedding has shape {token_embedding.shape}, expected {(hidden,)}"
+        )
+    if final_norm_weight.shape != (hidden,):
+        raise ValueError(
+            "model.norm.weight has shape "
+            f"{final_norm_weight.shape}, expected {(hidden,)}"
+        )
+    if len(lm_head_weight.shape) != 2 or lm_head_weight.shape[1] != hidden:
+        raise ValueError(
+            "lm_head.weight must have shape [vocab, hidden], got "
+            f"{lm_head_weight.shape}"
+        )
+    vocab = int(lm_head_weight.shape[0])
+    if token_id < 0 or token_id >= vocab:
+        raise ValueError(f"--token-id must be in [0, {vocab}), got {token_id}")
+
+    output_manifest.parent.mkdir(parents=True, exist_ok=True)
+    data_path = output_manifest.parent / data_file_name
+    manifest_tensors: list[dict[str, int | str]] = []
+    offset = 0
+    tensors = [
+        ("token_embedding", token_embedding),
+        ("final_norm_weight", final_norm_weight),
+        ("lm_head_weight", lm_head_weight),
+    ]
+    with data_path.open("wb") as data_file:
+        for name, tensor in tensors:
+            payload = tensor.tobytes(order="C")
+            manifest_tensors.append(
+                {"name": name, "offset": offset, "count": len(payload) // 4}
+            )
+            data_file.write(payload)
+            offset += len(payload)
+
+    manifest = {
+        "format": TAIL_FORMAT,
+        "version": VERSION,
+        "dtype": "f32",
+        "data": data_file_name,
+        "hidden": hidden,
+        "vocab": vocab,
+        "token_id": token_id,
+        "tensors": manifest_tensors,
+    }
+    with output_manifest.open("w", encoding="utf-8") as manifest_file:
+        json.dump(manifest, manifest_file, indent=2)
+        manifest_file.write("\n")
+
+
+def _convert_tail(
+    checkpoint_dir: Path,
+    output: Path,
+    data_file: str,
+    hidden: int,
+    token_id: int,
+) -> None:
+    embed_name, norm_name, lm_head_name = tail_tensor_names()
+    try:
+        checkpoint_tensors = load_tensors(
+            checkpoint_dir,
+            [
+                TensorMapping("embed_tokens", embed_name, (1,)),
+                TensorMapping("final_norm_weight", norm_name, (hidden,)),
+                TensorMapping("lm_head_weight", lm_head_name, (1, hidden)),
+            ],
+        )
+    except KeyError:
+        checkpoint_tensors = load_tensors(
+            checkpoint_dir,
+            [
+                TensorMapping("embed_tokens", embed_name, (1,)),
+                TensorMapping("final_norm_weight", norm_name, (hidden,)),
+            ],
+        )
+        checkpoint_tensors[lm_head_name] = checkpoint_tensors[embed_name]
+
+    embed_tokens = checkpoint_tensors[embed_name]
+    final_norm_weight = checkpoint_tensors[norm_name]
+    lm_head_weight = checkpoint_tensors[lm_head_name]
+    if len(embed_tokens.shape) != 2 or embed_tokens.shape[1] != hidden:
+        raise ValueError(
+            "model.embed_tokens.weight must have shape [vocab, hidden], got "
+            f"{embed_tokens.shape}"
+        )
+    if token_id < 0 or token_id >= embed_tokens.shape[0]:
+        raise ValueError(
+            f"--token-id must be in [0, {embed_tokens.shape[0]}), got {token_id}"
+        )
+    _write_tail_bundle(
+        output,
+        data_file,
+        hidden,
+        token_id,
+        embed_tokens[token_id],
+        final_norm_weight,
+        lm_head_weight,
+    )
+
+
 def _convert_layer(
     checkpoint_dir: Path,
     shape: DecoderLayerShape,
@@ -435,6 +555,15 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
                 available_names,
             )
             print(f"wrote Qwen mini decoder layer {layer}: {layer_manifest}")
+        tail_manifest = args.output / "model_tail" / "weights.json"
+        _convert_tail(
+            checkpoint_dir,
+            tail_manifest,
+            args.data_file,
+            shape.hidden,
+            args.token_id,
+        )
+        print(f"wrote Qwen mini model tail: {tail_manifest}")
 
     print(
         "shape: "
@@ -465,6 +594,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         ),
     )
     parser.add_argument("--keys", required=True, type=int)
+    parser.add_argument(
+        "--token-id",
+        default=0,
+        type=int,
+        help=(
+            "token id whose embedding row is stored in the model tail bundle "
+            "when --layer-count is greater than 1."
+        ),
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--data-file", default="weights.bin")
     return parser.parse_args(argv)

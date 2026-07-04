@@ -112,6 +112,37 @@ def test_multi_layer_output_paths() -> None:
         assert (output / "layer_1" / "weights.bin").exists()
 
 
+def test_tail_bundle_writer() -> None:
+    converter = load_converter()
+    np = converter._import_numpy()
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        manifest_path = Path(tmpdir) / "model_tail" / "weights.json"
+        converter._write_tail_bundle(
+            manifest_path,
+            "weights.bin",
+            hidden=4,
+            token_id=2,
+            token_embedding=np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+            final_norm_weight=np.asarray([5.0, 6.0, 7.0, 8.0], dtype=np.float32),
+            lm_head_weight=np.arange(12, dtype=np.float32).reshape(3, 4),
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        data = (manifest_path.parent / "weights.bin").read_bytes()
+
+    assert manifest["format"] == "lrrt.mini_model_tail_weights"
+    assert manifest["hidden"] == 4
+    assert manifest["vocab"] == 3
+    assert manifest["token_id"] == 2
+    assert manifest["tensors"][0] == {
+        "name": "token_embedding",
+        "offset": 0,
+        "count": 4,
+    }
+    assert len(data) == (4 + 4 + 12) * 4
+    assert struct.unpack_from("<f", data, 0)[0] == 1.0
+
+
 def test_read_safetensors_bf16() -> None:
     converter = load_converter()
     header = {

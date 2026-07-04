@@ -44,12 +44,27 @@ struct DecoderLayerWeights {
   std::vector<float> down_weight;
 };
 
+struct ModelTailWeights {
+  uint32_t hidden;
+  uint32_t vocab;
+  uint32_t token_id;
+  std::vector<float> token_embedding;
+  std::vector<float> final_norm_weight;
+  std::vector<float> lm_head_weight;
+};
+
 namespace detail {
 
 struct TensorSpec {
   const char *name;
   size_t count;
   std::vector<float> DecoderLayerWeights::*field;
+};
+
+struct TailTensorSpec {
+  const char *name;
+  size_t count;
+  std::vector<float> ModelTailWeights::*field;
 };
 
 inline void validate_shape(const DecoderLayerShape &shape) {
@@ -311,6 +326,16 @@ inline std::vector<TensorSpec> tensor_specs(const DecoderLayerShape &shape) {
   };
 }
 
+inline std::vector<TailTensorSpec> tail_tensor_specs(uint32_t hidden,
+                                                     uint32_t vocab) {
+  return {
+      {"token_embedding", hidden, &ModelTailWeights::token_embedding},
+      {"final_norm_weight", hidden, &ModelTailWeights::final_norm_weight},
+      {"lm_head_weight", checked_multiply(vocab, hidden, "lm_head_weight"),
+       &ModelTailWeights::lm_head_weight},
+  };
+}
+
 inline void append_tensor(std::ofstream &data, std::ofstream &manifest,
                           const char *name, const std::vector<float> &values,
                           uint64_t *offset, bool *first) {
@@ -432,6 +457,68 @@ load_decoder_layer_weights(const char *manifest_path) {
   return weights;
 }
 
+inline ModelTailWeights load_model_tail_weights(const char *manifest_path) {
+  if (!manifest_path || manifest_path[0] == '\0') {
+    throw std::invalid_argument("mini model tail manifest path is empty");
+  }
+
+  std::string manifest = detail::read_text_file(manifest_path);
+  if (detail::read_u32_field(manifest, "version") != 1) {
+    throw std::runtime_error("unsupported mini model tail manifest version");
+  }
+  std::string format = detail::read_string_field(manifest, "format");
+  if (format != "lrrt.mini_model_tail_weights") {
+    throw std::runtime_error("unsupported mini model tail manifest format: " +
+                             format);
+  }
+  std::string dtype = detail::read_string_field(manifest, "dtype");
+  if (dtype != "f32") {
+    throw std::runtime_error("unsupported mini model tail dtype: " + dtype);
+  }
+
+  ModelTailWeights weights{};
+  weights.hidden = detail::read_u32_field(manifest, "hidden");
+  weights.vocab = detail::read_u32_field(manifest, "vocab");
+  weights.token_id = detail::read_u32_field(manifest, "token_id");
+  if (weights.hidden == 0 || weights.vocab == 0 ||
+      weights.token_id >= weights.vocab) {
+    throw std::runtime_error("mini model tail manifest has invalid shape");
+  }
+
+  std::string data_file = detail::read_string_field(manifest, "data");
+  std::vector<unsigned char> data =
+      detail::read_file(detail::relative_path(manifest_path, data_file));
+
+  uint64_t expected_size = 0;
+  for (const detail::TailTensorSpec &spec :
+       detail::tail_tensor_specs(weights.hidden, weights.vocab)) {
+    auto [begin, end] = detail::tensor_bounds(manifest, spec.name);
+    uint64_t offset =
+        detail::read_u64_field(manifest, begin, end, "offset", spec.name);
+    uint64_t count =
+        detail::read_u64_field(manifest, begin, end, "count", spec.name);
+    if (count != spec.count) {
+      throw std::runtime_error("mini model tail tensor '" +
+                               std::string(spec.name) +
+                               "' has unexpected count");
+    }
+    uint64_t bytes = static_cast<uint64_t>(
+        detail::checked_multiply(spec.count, sizeof(float), spec.name));
+    if (offset > std::numeric_limits<uint64_t>::max() - bytes) {
+      throw std::runtime_error("mini model tail tensor '" +
+                               std::string(spec.name) + "' overflows offset");
+    }
+    expected_size = std::max(expected_size, offset + bytes);
+    detail::copy_tensor(data, offset, spec.count, spec.name,
+                        &(weights.*(spec.field)));
+  }
+  if (expected_size != data.size()) {
+    throw std::runtime_error("mini model tail data size mismatch");
+  }
+
+  return weights;
+}
+
 inline void copy_decoder_layer_inputs(DecoderLayer &executor,
                                       const std::vector<float> &hidden_states,
                                       const DecoderLayerWeights &weights,
@@ -520,6 +607,58 @@ inline void write_decoder_layer_weights(const char *manifest_path,
   manifest << "\n  ]\n}\n";
   if (!manifest) {
     throw std::runtime_error("failed to write mini decoder weight manifest");
+  }
+}
+
+inline void write_model_tail_weights(const char *manifest_path,
+                                     const char *data_file_name,
+                                     const ModelTailWeights &weights) {
+  if (!manifest_path || manifest_path[0] == '\0' || !data_file_name ||
+      data_file_name[0] == '\0') {
+    throw std::invalid_argument("mini model tail output path is empty");
+  }
+  if (weights.hidden == 0 || weights.vocab == 0 ||
+      weights.token_id >= weights.vocab ||
+      weights.token_embedding.size() != weights.hidden ||
+      weights.final_norm_weight.size() != weights.hidden ||
+      weights.lm_head_weight.size() !=
+          static_cast<size_t>(weights.vocab) * weights.hidden) {
+    throw std::runtime_error("mini model tail weights have invalid sizes");
+  }
+
+  std::string data_path =
+      detail::relative_path(manifest_path, std::string(data_file_name));
+  std::ofstream data(data_path, std::ios::binary | std::ios::trunc);
+  if (!data) {
+    throw std::runtime_error("failed to create mini model tail data file: " +
+                             data_path);
+  }
+  std::ofstream manifest(manifest_path, std::ios::binary | std::ios::trunc);
+  if (!manifest) {
+    throw std::runtime_error("failed to create mini model tail manifest: " +
+                             std::string(manifest_path));
+  }
+
+  manifest << "{\n"
+           << "  \"format\": \"lrrt.mini_model_tail_weights\",\n"
+           << "  \"version\": 1,\n"
+           << "  \"dtype\": \"f32\",\n"
+           << "  \"data\": \"" << data_file_name << "\",\n"
+           << "  \"hidden\": " << weights.hidden << ",\n"
+           << "  \"vocab\": " << weights.vocab << ",\n"
+           << "  \"token_id\": " << weights.token_id << ",\n"
+           << "  \"tensors\": [\n";
+  uint64_t offset = 0;
+  bool first = true;
+  detail::append_tensor(data, manifest, "token_embedding",
+                        weights.token_embedding, &offset, &first);
+  detail::append_tensor(data, manifest, "final_norm_weight",
+                        weights.final_norm_weight, &offset, &first);
+  detail::append_tensor(data, manifest, "lm_head_weight",
+                        weights.lm_head_weight, &offset, &first);
+  manifest << "\n  ]\n}\n";
+  if (!manifest) {
+    throw std::runtime_error("failed to write mini model tail manifest");
   }
 }
 

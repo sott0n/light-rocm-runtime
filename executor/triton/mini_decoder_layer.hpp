@@ -477,6 +477,19 @@ public:
         copy_complete, {&source_complete});
   }
 
+  void copy_output_to_buffer_async(lrrt::DeviceBuffer &dst,
+                                   const lrrt::Event &source_complete,
+                                   const lrrt::Event &copy_complete) const {
+    if (dst.size() < static_cast<size_t>(hidden_) * sizeof(float)) {
+      throw std::runtime_error("mini decoder layer output buffer is too small");
+    }
+    source_complete.record(queue_);
+    lrrt::copy_device_to_device_async(dst, 0, buffers_.get("out"), 0,
+                                      static_cast<size_t>(hidden_) *
+                                          sizeof(float),
+                                      copy_complete, {&source_complete});
+  }
+
 private:
   lrrt::Queue queue_;
   BundleSet bundles_;
@@ -490,6 +503,81 @@ private:
   uint32_t kv_dim_;
   uint32_t intermediate_;
   float scale_;
+};
+
+class ModelTail {
+public:
+  ModelTail(lrrt::Device &device, uint32_t hidden, uint32_t vocab)
+      : queue_(device), bundles_(device), buffers_(device), hidden_(hidden),
+        vocab_(vocab) {
+    if (hidden == 0 || vocab == 0) {
+      throw std::runtime_error("mini model tail invalid shape");
+    }
+    bundles_.add("final_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
+                 "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
+    bundles_.add("lm_head", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+                 "matvec_fp32_" + std::to_string(select_block(hidden)));
+    buffers_.allocate<float>("hidden", hidden);
+    buffers_.allocate<float>("final_norm_weight", hidden);
+    buffers_.allocate<float>("norm_hidden", hidden);
+    buffers_.allocate<float>("lm_head_weight",
+                             static_cast<size_t>(vocab) * hidden);
+    buffers_.allocate<float>("logits", vocab);
+  }
+
+  void copy_weights(const std::vector<float> &token_embedding,
+                    const std::vector<float> &final_norm_weight,
+                    const std::vector<float> &lm_head_weight) {
+    if (token_embedding.size() != hidden_ ||
+        final_norm_weight.size() != hidden_ ||
+        lm_head_weight.size() != static_cast<size_t>(vocab_) * hidden_) {
+      throw std::runtime_error("mini model tail weight shape mismatch");
+    }
+    buffers_.copy_to("hidden", token_embedding);
+    buffers_.copy_to("final_norm_weight", final_norm_weight);
+    buffers_.copy_to("lm_head_weight", lm_head_weight);
+    std::vector<float> zero(vocab_, 0.0f);
+    buffers_.copy_to("logits", zero);
+  }
+
+  void run(const std::vector<const lrrt::Event *> &dependencies = {}) {
+    launch(queue_, bundles_.get("final_norm"), 1,
+           {
+               arg("x", buffers_.ptr<float>("hidden")),
+               arg("weight", buffers_.ptr<float>("final_norm_weight")),
+               arg("out", buffers_.ptr<float>("norm_hidden")),
+               arg("eps", 1.0e-5f),
+               arg("rows", (int32_t)1),
+               arg("hidden", (int32_t)hidden_),
+           },
+           dependencies);
+    launch(queue_, bundles_.get("lm_head"), vocab_,
+           {
+               arg("x", buffers_.ptr<float>("norm_hidden")),
+               arg("weight", buffers_.ptr<float>("lm_head_weight")),
+               arg("out", buffers_.ptr<float>("logits")),
+               arg("outputs", (int32_t)vocab_),
+               arg("hidden", (int32_t)hidden_),
+           });
+  }
+
+  void synchronize() const { queue_.synchronize(); }
+
+  lrrt::DeviceBuffer &hidden_buffer() const { return buffers_.get("hidden"); }
+
+  void copy_logits(std::vector<float> &out) const {
+    if (out.size() != vocab_) {
+      throw std::runtime_error("mini model tail logits shape mismatch");
+    }
+    buffers_.copy_from(out, "logits");
+  }
+
+private:
+  lrrt::Queue queue_;
+  BundleSet bundles_;
+  BufferSet buffers_;
+  uint32_t hidden_;
+  uint32_t vocab_;
 };
 
 inline void fill_projection_weight(std::vector<float> &weight, uint32_t input,

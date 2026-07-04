@@ -47,6 +47,8 @@ struct Measurements {
   double cpu_round_trip_ns;
   double cpu_burst_interval_ns;
   double gpu_burst_interval_ns;
+  bool produced_logits;
+  uint32_t vocab;
 };
 
 struct Options {
@@ -264,6 +266,20 @@ load_layer_weights(const char *weights_dir, uint32_t layers) {
   return weights;
 }
 
+bool has_tail_weights(const char *weights_dir) {
+  const std::filesystem::path manifest =
+      std::filesystem::path(weights_dir) / "model_tail" / "weights.json";
+  return std::filesystem::exists(manifest);
+}
+
+lrrt::executor::triton::mini::ModelTailWeights
+load_tail_weights(const char *weights_dir) {
+  const std::filesystem::path manifest =
+      std::filesystem::path(weights_dir) / "model_tail" / "weights.json";
+  return lrrt::executor::triton::mini::load_model_tail_weights(
+      manifest.string().c_str());
+}
+
 Measurements measure_case(lrrt::Device &device,
                           const BenchmarkCase &benchmark_case,
                           uint32_t iterations, uint32_t warmup_iterations) {
@@ -310,13 +326,14 @@ Measurements measure_case(lrrt::Device &device,
       static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end)) /
       static_cast<double>(iterations);
 
-  return {cpu_round_trip_ns, cpu_burst_interval_ns, gpu_burst_interval_ns};
+  return {cpu_round_trip_ns, cpu_burst_interval_ns, gpu_burst_interval_ns,
+          false, 0};
 }
 
-Measurements measure_stack_case(lrrt::Device &device,
-                                const std::vector<BenchmarkCase> &layers,
-                                uint32_t iterations,
-                                uint32_t warmup_iterations) {
+Measurements measure_stack_case(
+    lrrt::Device &device, const std::vector<BenchmarkCase> &layers,
+    const lrrt::executor::triton::mini::ModelTailWeights *tail_weights,
+    uint32_t iterations, uint32_t warmup_iterations) {
   if (layers.empty()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
   }
@@ -332,6 +349,10 @@ Measurements measure_stack_case(lrrt::Device &device,
           "decoder stack benchmark requires matching layer shapes");
     }
   }
+  if (tail_weights && tail_weights->hidden != shape.hidden) {
+    throw std::runtime_error(
+        "decoder stack model tail shape does not match layer hidden size");
+  }
 
   std::vector<std::unique_ptr<lrrt::executor::triton::mini::DecoderLayer>>
       executors;
@@ -342,6 +363,14 @@ Measurements measure_stack_case(lrrt::Device &device,
             device, layer.keys, layer.hidden, layer.heads, layer.kv_heads,
             layer.head_dim, layer.intermediate));
     copy_inputs(*executors.back(), layer);
+  }
+  std::unique_ptr<lrrt::executor::triton::mini::ModelTail> tail;
+  if (tail_weights) {
+    tail = std::make_unique<lrrt::executor::triton::mini::ModelTail>(
+        device, tail_weights->hidden, tail_weights->vocab);
+    tail->copy_weights(tail_weights->token_embedding,
+                       tail_weights->final_norm_weight,
+                       tail_weights->lm_head_weight);
   }
 
   const uint32_t valid_keys = shape.valid_keys;
@@ -377,8 +406,18 @@ Measurements measure_stack_case(lrrt::Device &device,
         }
       }
     }
+    if (tail) {
+      lrrt::Event source_complete(device);
+      lrrt::Event handoff_complete(device);
+      executors.back()->copy_output_to_buffer_async(
+          tail->hidden_buffer(), source_complete, handoff_complete);
+      tail->run({&handoff_complete});
+    }
     for (const auto &executor : executors) {
       executor->synchronize();
+    }
+    if (tail) {
+      tail->synchronize();
     }
   };
 
@@ -395,10 +434,12 @@ Measurements measure_stack_case(lrrt::Device &device,
   }
   cpu_round_trip_ns /= static_cast<double>(iterations);
 
-  return {cpu_round_trip_ns, cpu_round_trip_ns, 0.0};
+  return {cpu_round_trip_ns, cpu_round_trip_ns, 0.0, tail != nullptr,
+          tail_weights ? tail_weights->vocab : 0};
 }
 
-uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers) {
+uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
+                                    bool includes_model_tail) {
   if (layers.empty()) {
     return 0;
   }
@@ -407,6 +448,9 @@ uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers) {
   for (uint32_t key = 1; key <= layers.front().valid_keys; ++key) {
     layer.valid_keys = key;
     total += estimated_dispatches(layer) * static_cast<uint32_t>(layers.size());
+  }
+  if (includes_model_tail) {
+    total += 2;
   }
   return total;
 }
@@ -428,12 +472,15 @@ void print_case(const BenchmarkCase &benchmark_case,
 void print_stack_case(const std::vector<BenchmarkCase> &layers,
                       const Measurements &measurements, const Colors &colors) {
   const BenchmarkCase &shape = layers.front();
-  const uint32_t dispatches_per_stack = estimated_stack_dispatches(layers);
+  const uint32_t dispatches_per_stack =
+      estimated_stack_dispatches(layers, measurements.produced_logits);
   printf("%-26s %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u %s%11.3f%s "
          "%s%11s%s %s%11s%s\n",
-         "decoder stack", shape.keys, shape.hidden, shape.heads, shape.kv_heads,
-         shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
-         shape.valid_keys, dispatches_per_stack, colors.time,
+         measurements.produced_logits ? "decoder stack+logits"
+                                      : "decoder stack",
+         shape.keys, shape.hidden, shape.heads, shape.kv_heads, shape.head_dim,
+         qkv_dim(shape), kv_dim(shape), shape.intermediate, shape.valid_keys,
+         dispatches_per_stack, colors.time,
          measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
          "runtime-copy", colors.reset, colors.time, "n/a", colors.reset);
 }
@@ -453,6 +500,8 @@ int main(int argc, char **argv) {
     }
     lrrt::Device device = runtime.open_device(0);
     std::vector<BenchmarkCase> cases;
+    std::unique_ptr<lrrt::executor::triton::mini::ModelTailWeights>
+        tail_weights;
     if (options.weights_path) {
       lrrt::executor::triton::mini::DecoderLayerWeights weights =
           lrrt::executor::triton::mini::load_decoder_layer_weights(
@@ -466,6 +515,11 @@ int main(int argc, char **argv) {
       cases.push_back(make_case(weights, valid_keys));
     } else if (options.weights_dir) {
       auto weights = load_layer_weights(options.weights_dir, options.layers);
+      if (has_tail_weights(options.weights_dir)) {
+        tail_weights =
+            std::make_unique<lrrt::executor::triton::mini::ModelTailWeights>(
+                load_tail_weights(options.weights_dir));
+      }
       for (const auto &layer_weights : weights) {
         uint32_t valid_keys = options.has_valid_keys ? options.valid_keys
                                                      : layer_weights.shape.keys;
@@ -474,6 +528,19 @@ int main(int argc, char **argv) {
               "valid key count exceeds weight shape keys");
         }
         cases.push_back(make_case(layer_weights, valid_keys));
+      }
+      if (tail_weights && !cases.empty()) {
+        if (tail_weights->hidden != cases.front().hidden) {
+          throw std::runtime_error(
+              "model tail hidden size does not match decoder stack");
+        }
+        BenchmarkCase &first_layer = cases.front();
+        for (uint32_t key = 0; key < first_layer.keys; ++key) {
+          std::copy(tail_weights->token_embedding.begin(),
+                    tail_weights->token_embedding.end(),
+                    first_layer.hidden_states.begin() +
+                        static_cast<size_t>(key) * first_layer.hidden);
+        }
       }
     } else {
       cases.push_back(make_case(16, 768, 64, 2048, 7));
@@ -503,6 +570,9 @@ int main(int argc, char **argv) {
       printf("Layer count:        %u\n", options.layers);
       printf("Stack handoff:      queued async device-to-device copy between "
              "layers\n");
+      printf("Model tail:         %s\n",
+             tail_weights ? "token embedding + final norm + lm_head"
+                          : "not found");
     }
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
@@ -517,8 +587,8 @@ int main(int argc, char **argv) {
            "----------", "-----------", "-----------", "-----------");
 
     if (options.weights_dir) {
-      Measurements measurements =
-          measure_stack_case(device, cases, iterations, warmup_iterations);
+      Measurements measurements = measure_stack_case(
+          device, cases, tail_weights.get(), iterations, warmup_iterations);
       print_stack_case(cases, measurements, colors);
     } else {
       for (const BenchmarkCase &benchmark_case : cases) {
@@ -542,6 +612,13 @@ int main(int argc, char **argv) {
              "queues async device-to-device handoff copies, and launches the "
              "next layer after copy events without per-layer host sync.\n",
              colors.label, colors.reset);
+      if (tail_weights) {
+        printf("%smodel tail%s initializes the first layer input from token id "
+               "%u and runs final RMSNorm plus lm_head matvec to produce %u "
+               "logits.\n",
+               colors.label, colors.reset, tail_weights->token_id,
+               tail_weights->vocab);
+      }
     }
     printf("%sDispatches%s is an estimate of kernel submissions per layer; "
            "multi-head attention currently dispatches per head.\n\n",

@@ -13,6 +13,7 @@ namespace {
 
 using lrrt::executor::triton::mini::DecoderLayerShape;
 using lrrt::executor::triton::mini::DecoderLayerWeights;
+using lrrt::executor::triton::mini::ModelTailWeights;
 
 struct TensorInput {
   const char *name;
@@ -172,6 +173,32 @@ void test_load_weights(void) {
   expect_close(weights.down_weight.back(), 9.095f, "down_weight");
 }
 
+void test_load_model_tail_weights(void) {
+  std::string data_file = test_file_name("tail_weights.bin");
+  std::string manifest_path = test_path("tail_manifest.json");
+  ModelTailWeights weights{};
+  weights.hidden = 4;
+  weights.vocab = 3;
+  weights.token_id = 2;
+  weights.token_embedding = {1.0f, 2.0f, 3.0f, 4.0f};
+  weights.final_norm_weight = {5.0f, 6.0f, 7.0f, 8.0f};
+  weights.lm_head_weight = {0.0f, 0.1f, 0.2f, 0.3f, 1.0f, 1.1f,
+                            1.2f, 1.3f, 2.0f, 2.1f, 2.2f, 2.3f};
+  lrrt::executor::triton::mini::write_model_tail_weights(
+      manifest_path.c_str(), data_file.c_str(), weights);
+
+  ModelTailWeights loaded =
+      lrrt::executor::triton::mini::load_model_tail_weights(
+          manifest_path.c_str());
+  if (loaded.hidden != weights.hidden || loaded.vocab != weights.vocab ||
+      loaded.token_id != weights.token_id) {
+    throw std::runtime_error("loaded model tail shape mismatch");
+  }
+  expect_close(loaded.token_embedding.back(), 4.0f, "token_embedding");
+  expect_close(loaded.final_norm_weight.front(), 5.0f, "final_norm_weight");
+  expect_close(loaded.lm_head_weight.back(), 2.3f, "lm_head_weight");
+}
+
 void test_validation_errors(void) {
   DecoderLayerShape shape{4, 8, 2, 1, 4, 12};
   std::string data_file = test_file_name("bad_weights.bin");
@@ -210,6 +237,7 @@ void test_validation_errors(void) {
 int main(void) {
   try {
     test_load_weights();
+    test_load_model_tail_weights();
     test_validation_errors();
     printf("triton_mini_decoder_weights: ok\n");
     return 0;
