@@ -48,7 +48,7 @@ decoder-style path, not by every example currently present in the repository.
 | --- | --- | --- | --- |
 | RMSNorm | ✅ | `rmsnorm` with FP32/FP16/BF16 input variants and FP32 reference validation; used by `triton_mini_decoder_layer` before attention and MLP | Still fixed-shape/specialization driven |
 | Q/K/V projection | ✅/❌ | `matvec` covers one-vector FP32 projection and is wired into `triton_mini_decoder_layer` for Q/K/V | No batched projection or tiled GEMM; lower precision bundle variants exist for matvec tests but the decoder layer path is still FP32 |
-| RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits; applied to Q and K projection outputs in the decoder layer path | Multi-head currently reuses the single-head kernel once per head |
+| RoPE | ✅ | `rope` for FP32 vectors up to the current specialization limits; applied to Q and K projection outputs in the decoder layer path using `rope_theta` from converted Qwen config | Multi-head currently reuses the single-head kernel once per head |
 | Attention score computation | ✅ | `attention_score` computes FP32 Q x K dot products with scaling and is used in mini attention and mini decoder layer | Multi-head currently dispatches score computation per head |
 | Causal softmax | ✅ | `causal_softmax` covers FP32 future-token masking with query offsets and is used in mini attention and mini decoder layer | Needs broader shape coverage for model-like cache lengths |
 | Value aggregation | ✅ | `value_aggregation` computes FP32 weighted sums over V vectors and is used in mini attention and mini decoder layer | Multi-head currently dispatches aggregation per head |
@@ -116,6 +116,7 @@ the shape and tensor offsets:
   "kv_heads": 1,
   "head_dim": 64,
   "intermediate": 2048,
+  "rope_theta": 10000.0,
   "tensors": [
     {"name": "attention_norm_weight", "offset": 0, "count": 768}
   ]
@@ -213,7 +214,7 @@ checkpoint-level tensors yet:
 | `model.embed_tokens.weight` | The converter stores one selected token row in `model_tail/weights.json` for the benchmark input |
 | `model.norm.weight` | The converter stores it in `model_tail/weights.json` and the benchmark runs final RMSNorm |
 | `lm_head.weight` | The converter stores it in `model_tail/weights.json` and the benchmark runs an FP32 matvec to produce logits |
-| RoPE parameters such as `rope_theta` | Used to generate `cos` and `sin`; not stored in the weight bundle yet |
+| RoPE parameters such as `rope_theta` | The converter stores `rope_theta` in each layer bundle and the benchmark uses it to generate `cos` and `sin` tables |
 | Attention biases | Not supported; Qwen projection layers are expected to be bias-free for the initial path |
 
 The converter should derive bundle shape fields from model config and tensor

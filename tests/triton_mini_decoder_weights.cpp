@@ -67,7 +67,8 @@ std::vector<TensorInput> tensors(const DecoderLayerShape &shape) {
 std::string manifest_for(const DecoderLayerShape &shape,
                          const std::string &data_file,
                          const char *skip_tensor = nullptr,
-                         const char *dtype = "f32") {
+                         const char *dtype = "f32",
+                         const char *rope_theta = "1000000.0") {
   std::string manifest = "{\n"
                          "  \"format\": \"lrrt.mini_decoder_weights\",\n"
                          "  \"version\": 1,\n"
@@ -94,6 +95,9 @@ std::string manifest_for(const DecoderLayerShape &shape,
                          ",\n"
                          "  \"intermediate\": " +
                          std::to_string(shape.intermediate) +
+                         ",\n"
+                         "  \"rope_theta\": " +
+                         rope_theta +
                          ",\n"
                          "  \"tensors\": [\n";
 
@@ -168,6 +172,7 @@ void test_load_weights(void) {
   }
   expect_close(weights.attention_norm_weight.front(), 1.0f,
                "attention_norm_weight");
+  expect_close(weights.rope_theta, 1000000.0f, "rope_theta");
   expect_close(weights.mlp_norm_weight.back(), 2.007f, "mlp_norm_weight");
   expect_close(weights.q_weight.front(), 3.0f, "q_weight");
   expect_close(weights.down_weight.back(), 9.095f, "down_weight");

@@ -32,6 +32,7 @@ def test_derive_shape_accepts_gqa() -> None:
         "intermediate_size": 24,
     }
     shape = converter.derive_shape(config, keys=4)
+    assert converter.derive_rope_theta({"rope_theta": 1000000.0}) == 1000000.0
     assert shape.heads == 4
     assert shape.kv_heads == 2
     assert shape.head_dim == 4
@@ -62,7 +63,9 @@ def test_tensor_mapping_and_bundle_writer() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         manifest_path = Path(tmpdir) / "weights.json"
-        converter.write_bundle(manifest_path, "weights.bin", shape, tensors)
+        converter.write_bundle(
+            manifest_path, "weights.bin", shape, tensors, rope_theta=1000000.0
+        )
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         data = (Path(tmpdir) / "weights.bin").read_bytes()
 
@@ -72,6 +75,7 @@ def test_tensor_mapping_and_bundle_writer() -> None:
     assert manifest["heads"] == 2
     assert manifest["kv_heads"] == 2
     assert manifest["head_dim"] == 4
+    assert manifest["rope_theta"] == 1000000.0
     assert manifest["tensors"][0] == {
         "name": "attention_norm_weight",
         "offset": 0,

@@ -90,6 +90,13 @@ def derive_shape(config: dict[str, Any], keys: int) -> DecoderLayerShape:
     )
 
 
+def derive_rope_theta(config: dict[str, Any]) -> float:
+    value = config.get("rope_theta", 10000.0)
+    if not isinstance(value, int | float) or value <= 0:
+        raise ValueError("config field 'rope_theta' must be a positive number")
+    return float(value)
+
+
 def tensor_mappings(layer: int, shape: DecoderLayerShape) -> list[TensorMapping]:
     if layer < 0:
         raise ValueError("--layer must be non-negative")
@@ -334,6 +341,7 @@ def write_bundle(
     data_file_name: str,
     shape: DecoderLayerShape,
     tensors: dict[str, Any],
+    rope_theta: float = 10000.0,
 ) -> None:
     _validate_data_file_name(data_file_name)
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -372,6 +380,7 @@ def write_bundle(
         "kv_heads": shape.kv_heads,
         "head_dim": shape.head_dim,
         "intermediate": shape.intermediate,
+        "rope_theta": rope_theta,
         "tensors": manifest_tensors,
     }
     with output_manifest.open("w", encoding="utf-8") as manifest_file:
@@ -497,6 +506,7 @@ def _convert_tail(
 def _convert_layer(
     checkpoint_dir: Path,
     shape: DecoderLayerShape,
+    rope_theta: float,
     layer: int,
     output: Path,
     data_file: str,
@@ -513,7 +523,7 @@ def _convert_layer(
         )
         for mapping in mappings
     }
-    write_bundle(output, data_file, shape, converted)
+    write_bundle(output, data_file, shape, converted, rope_theta)
 
 
 def convert_checkpoint(args: argparse.Namespace) -> None:
@@ -523,6 +533,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     )
     config = read_json(config_path)
     shape = derive_shape(config, args.keys)
+    rope_theta = derive_rope_theta(config)
     weight_map = checkpoint_weight_map(checkpoint_dir)
     available_names = set(weight_map) if weight_map is not None else None
     layer_count = args.layer_count
@@ -533,6 +544,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
         _convert_layer(
             checkpoint_dir,
             shape,
+            rope_theta,
             args.layer,
             args.output,
             args.data_file,
@@ -549,6 +561,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
             _convert_layer(
                 checkpoint_dir,
                 shape,
+                rope_theta,
                 layer,
                 layer_manifest,
                 args.data_file,
@@ -569,7 +582,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
         "shape: "
         f"keys={shape.keys} hidden={shape.hidden} heads={shape.heads} "
         f"kv_heads={shape.kv_heads} head_dim={shape.head_dim} "
-        f"intermediate={shape.intermediate}"
+        f"intermediate={shape.intermediate} rope_theta={rope_theta:g}"
     )
 
 

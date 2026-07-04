@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <ios>
@@ -33,6 +35,7 @@ struct DecoderLayerShape {
 
 struct DecoderLayerWeights {
   DecoderLayerShape shape;
+  float rope_theta = 10000.0f;
   std::vector<float> attention_norm_weight;
   std::vector<float> mlp_norm_weight;
   std::vector<float> q_weight;
@@ -211,6 +214,20 @@ inline uint32_t read_u32_field(const std::string &text, const char *field) {
                              std::string(field));
   }
   return static_cast<uint32_t>(value);
+}
+
+inline float read_f32_field(const std::string &text, const char *field) {
+  size_t position = field_position(text, field);
+  const char *begin = text.c_str() + position;
+  char *end = nullptr;
+  errno = 0;
+  float value = std::strtof(begin, &end);
+  if (begin == end || errno == ERANGE || value <= 0.0f) {
+    throw std::runtime_error("mini decoder weight manifest field is not a "
+                             "positive float: " +
+                             std::string(field));
+  }
+  return value;
 }
 
 inline uint64_t read_u64_field(const std::string &text, size_t begin,
@@ -418,6 +435,9 @@ load_decoder_layer_weights(const char *manifest_path) {
   } else {
     weights.shape.kv_heads = weights.shape.heads;
   }
+  if (manifest.find("\"rope_theta\"") != std::string::npos) {
+    weights.rope_theta = detail::read_f32_field(manifest, "rope_theta");
+  }
   detail::validate_shape(weights.shape);
 
   std::string data_file = detail::read_string_field(manifest, "data");
@@ -538,7 +558,8 @@ inline void write_decoder_layer_weights(const char *manifest_path,
     throw std::invalid_argument("mini decoder weight output path is empty");
   }
   detail::validate_shape(weights.shape);
-  if (weights.attention_norm_weight.size() != weights.shape.hidden ||
+  if (weights.rope_theta <= 0.0f ||
+      weights.attention_norm_weight.size() != weights.shape.hidden ||
       weights.mlp_norm_weight.size() != weights.shape.hidden ||
       weights.q_weight.size() !=
           static_cast<size_t>(weights.shape.q_dim()) * weights.shape.hidden ||
@@ -583,6 +604,7 @@ inline void write_decoder_layer_weights(const char *manifest_path,
            << "  \"kv_heads\": " << weights.shape.kv_heads << ",\n"
            << "  \"head_dim\": " << weights.shape.head_dim << ",\n"
            << "  \"intermediate\": " << weights.shape.intermediate << ",\n"
+           << "  \"rope_theta\": " << weights.rope_theta << ",\n"
            << "  \"tensors\": [\n";
   uint64_t offset = 0;
   bool first = true;

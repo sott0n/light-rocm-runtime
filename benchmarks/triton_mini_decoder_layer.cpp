@@ -29,6 +29,7 @@ struct BenchmarkCase {
   uint32_t head_dim;
   uint32_t intermediate;
   uint32_t valid_keys;
+  float rope_theta;
   std::vector<float> hidden_states;
   std::vector<float> attention_norm_weight;
   std::vector<float> mlp_norm_weight;
@@ -154,7 +155,8 @@ double elapsed_ns(Clock::time_point begin, Clock::time_point end) {
 
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
                         uint32_t kv_heads, uint32_t head_dim,
-                        uint32_t intermediate, uint32_t valid_keys) {
+                        uint32_t intermediate, uint32_t valid_keys,
+                        float rope_theta, uint32_t rope_position_offset) {
   const uint32_t qkv_dim = heads * head_dim;
   const uint32_t kv_dim = kv_heads * head_dim;
   BenchmarkCase benchmark_case = {
@@ -165,6 +167,7 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
       head_dim,
       intermediate,
       valid_keys,
+      rope_theta,
       std::vector<float>(keys * hidden),
       std::vector<float>(hidden),
       std::vector<float>(hidden),
@@ -207,8 +210,8 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
   for (uint32_t token = 0; token < keys; ++token) {
     for (uint32_t frequency = 0; frequency < half; ++frequency) {
       float exponent = -2.0f * (float)frequency / (float)head_dim;
-      float inverse_frequency = powf(10000.0f, exponent);
-      float angle = (float)(token + 7) * inverse_frequency;
+      float inverse_frequency = powf(rope_theta, exponent);
+      float angle = (float)(token + rope_position_offset) * inverse_frequency;
       uint32_t index = token * half + frequency;
       benchmark_case.cos[index] = cosf(angle);
       benchmark_case.sin[index] = sinf(angle);
@@ -223,7 +226,7 @@ make_case(const lrrt::executor::triton::mini::DecoderLayerWeights &weights,
   BenchmarkCase benchmark_case =
       make_case(weights.shape.keys, weights.shape.hidden, weights.shape.heads,
                 weights.shape.kv_heads, weights.shape.head_dim,
-                weights.shape.intermediate, valid_keys);
+                weights.shape.intermediate, valid_keys, weights.rope_theta, 0);
   benchmark_case.attention_norm_weight = weights.attention_norm_weight;
   benchmark_case.mlp_norm_weight = weights.mlp_norm_weight;
   benchmark_case.q_weight = weights.q_weight;
@@ -236,9 +239,17 @@ make_case(const lrrt::executor::triton::mini::DecoderLayerWeights &weights,
   return benchmark_case;
 }
 
+BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
+                        uint32_t kv_heads, uint32_t head_dim,
+                        uint32_t intermediate, uint32_t valid_keys) {
+  return make_case(keys, hidden, heads, kv_heads, head_dim, intermediate,
+                   valid_keys, 10000.0f, 7);
+}
+
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
                         uint32_t intermediate, uint32_t valid_keys) {
-  return make_case(keys, hidden, 1, 1, head_dim, intermediate, valid_keys);
+  return make_case(keys, hidden, 1, 1, head_dim, intermediate, valid_keys,
+                   10000.0f, 7);
 }
 
 void copy_inputs(lrrt::executor::triton::mini::DecoderLayer &executor,
