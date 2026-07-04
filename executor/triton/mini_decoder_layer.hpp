@@ -563,6 +563,8 @@ public:
 
   void synchronize() const { queue_.synchronize(); }
 
+  const lrrt::Queue &queue() const { return queue_; }
+
   lrrt::DeviceBuffer &hidden_buffer() const { return buffers_.get("hidden"); }
 
   void copy_logits(std::vector<float> &out) const {

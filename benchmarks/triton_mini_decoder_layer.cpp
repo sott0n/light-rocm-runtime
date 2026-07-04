@@ -389,7 +389,16 @@ Measurements measure_stack_case(
     return layer * valid_keys + (key - 1);
   };
 
-  auto run_stack = [&]() {
+  auto synchronize_stack = [&]() {
+    for (const auto &executor : executors) {
+      executor->synchronize();
+    }
+    if (tail) {
+      tail->synchronize();
+    }
+  };
+
+  auto submit_stack = [&](lrrt::Event *gpu_start, lrrt::Event *gpu_end) {
     std::vector<std::unique_ptr<lrrt::Event>> source_complete;
     std::vector<std::unique_ptr<lrrt::Event>> handoff_complete;
     const size_t handoff_count =
@@ -400,10 +409,16 @@ Measurements measure_stack_case(
       source_complete.push_back(std::make_unique<lrrt::Event>(device));
       handoff_complete.push_back(std::make_unique<lrrt::Event>(device));
     }
+    if (gpu_start) {
+      gpu_start->record(executors.front()->queue());
+    }
 
     for (size_t layer = 0; layer < layers.size(); ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
         std::vector<const lrrt::Event *> dependencies;
+        if (gpu_start && layer == 0 && key == 1) {
+          dependencies.push_back(gpu_start);
+        }
         if (layer > 0) {
           dependencies.push_back(
               handoff_complete[handoff_index(layer - 1, key)].get());
@@ -424,12 +439,18 @@ Measurements measure_stack_case(
           tail->hidden_buffer(), source_complete, handoff_complete);
       tail->run({&handoff_complete});
     }
-    for (const auto &executor : executors) {
-      executor->synchronize();
+    if (gpu_end) {
+      if (tail) {
+        gpu_end->record(tail->queue());
+      } else {
+        gpu_end->record(executors.back()->queue());
+      }
     }
-    if (tail) {
-      tail->synchronize();
-    }
+  };
+
+  auto run_stack = [&]() {
+    submit_stack(nullptr, nullptr);
+    synchronize_stack();
   };
 
   for (uint32_t i = 0; i < warmup_iterations; ++i) {
@@ -445,8 +466,17 @@ Measurements measure_stack_case(
   }
   cpu_round_trip_ns /= static_cast<double>(iterations);
 
-  return {cpu_round_trip_ns, cpu_round_trip_ns, 0.0, tail != nullptr,
-          tail_weights ? tail_weights->vocab : 0};
+  lrrt::Event gpu_start(device);
+  lrrt::Event gpu_end(device);
+  submit_stack(&gpu_start, &gpu_end);
+  gpu_end.synchronize();
+  gpu_start.synchronize();
+  double gpu_burst_interval_ns =
+      static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end));
+  synchronize_stack();
+
+  return {cpu_round_trip_ns, cpu_round_trip_ns, gpu_burst_interval_ns,
+          tail != nullptr, tail_weights ? tail_weights->vocab : 0};
 }
 
 uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
@@ -485,15 +515,15 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
   const BenchmarkCase &shape = layers.front();
   const uint32_t dispatches_per_stack =
       estimated_stack_dispatches(layers, measurements.produced_logits);
-  printf("%-26s %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u %s%11.3f%s "
-         "%s%11s%s %s%11s%s\n",
-         measurements.produced_logits ? "decoder stack+logits"
-                                      : "decoder stack",
-         shape.keys, shape.hidden, shape.heads, shape.kv_heads, shape.head_dim,
-         qkv_dim(shape), kv_dim(shape), shape.intermediate, shape.valid_keys,
-         dispatches_per_stack, colors.time,
-         measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
-         "runtime-copy", colors.reset, colors.time, "n/a", colors.reset);
+  printf(
+      "%-26s %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u %s%11.3f%s "
+      "%s%11s%s %s%11.3f%s\n",
+      measurements.produced_logits ? "decoder stack+logits" : "decoder stack",
+      shape.keys, shape.hidden, shape.heads, shape.kv_heads, shape.head_dim,
+      qkv_dim(shape), kv_dim(shape), shape.intermediate, shape.valid_keys,
+      dispatches_per_stack, colors.time, measurements.cpu_round_trip_ns / 1.0e3,
+      colors.reset, colors.time, "runtime-copy", colors.reset, colors.time,
+      measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
 }
 
 } // namespace
@@ -615,9 +645,16 @@ int main(int argc, char **argv) {
     printf("%sCPU burst%s measures repeated executor.run() submissions "
            "followed by one final synchronize() with steady_clock.\n",
            colors.label, colors.reset);
-    printf("%sGPU burst%s measures HSA event elapsed time around repeated "
-           "executor.run() submissions, divided by iteration count.\n",
-           colors.label, colors.reset);
+    if (options.weights_dir) {
+      printf("%sGPU burst%s measures HSA event elapsed time around one queued "
+             "decoder stack chain, from the first layer queue marker to the "
+             "last layer or model-tail queue marker.\n",
+             colors.label, colors.reset);
+    } else {
+      printf("%sGPU burst%s measures HSA event elapsed time around repeated "
+             "executor.run() submissions, divided by iteration count.\n",
+             colors.label, colors.reset);
+    }
     if (options.weights_dir) {
       printf("%sdecoder stack%s records source-layer completion events, "
              "queues async device-to-device handoff copies, and launches the "

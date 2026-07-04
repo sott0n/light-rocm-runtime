@@ -310,9 +310,12 @@ The benchmark timing modes are intentionally simple:
   hidden states between layers through queued async runtime device-to-device
   copies. The stack path synchronizes only after the queued layer/copy chain is
   submitted, so the measured time covers submission plus final completion wait.
+- **Stack GPU burst**: for `--weights-dir`, place HSA event markers around one
+  queued stack chain. The start marker is recorded on the first layer queue and
+  the end marker is recorded on the final layer or model-tail queue, so this
+  reports GPU-side elapsed time across the queued handoff path.
 
-Both modes currently use CPU `steady_clock` around executor calls. Runtime GPU
-event timing can be added later for per-stage or GPU-only measurements.
+The benchmark still does not break timing down by individual stage or operator.
 
 ## Executor Responsibilities
 
