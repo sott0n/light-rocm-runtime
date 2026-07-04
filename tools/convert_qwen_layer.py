@@ -156,6 +156,24 @@ def tail_tensor_names() -> tuple[str, str, str]:
     return ("model.embed_tokens.weight", "model.norm.weight", "lm_head.weight")
 
 
+def parse_token_ids(text: str) -> list[int]:
+    if not text:
+        raise ValueError("--token-ids must not be empty")
+    token_ids: list[int] = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            raise ValueError("--token-ids contains an empty entry")
+        try:
+            token_id = int(item, 10)
+        except ValueError as error:
+            raise ValueError(f"--token-ids contains a non-integer: {item!r}") from error
+        if token_id < 0:
+            raise ValueError("--token-ids must contain non-negative integers")
+        token_ids.append(token_id)
+    return token_ids
+
+
 def read_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as file:
         data = json.load(file)
@@ -392,19 +410,22 @@ def _write_tail_bundle(
     output_manifest: Path,
     data_file_name: str,
     hidden: int,
-    token_id: int,
-    token_embedding: Any,
+    token_ids: list[int],
+    token_embeddings: Any,
     final_norm_weight: Any,
     lm_head_weight: Any,
 ) -> None:
     _validate_data_file_name(data_file_name)
+    if not token_ids:
+        raise ValueError("at least one token id is required")
     np = _import_numpy()
-    token_embedding = np.ascontiguousarray(token_embedding, dtype=np.float32)
+    token_embeddings = np.ascontiguousarray(token_embeddings, dtype=np.float32)
     final_norm_weight = np.ascontiguousarray(final_norm_weight, dtype=np.float32)
     lm_head_weight = np.ascontiguousarray(lm_head_weight, dtype=np.float32)
-    if token_embedding.shape != (hidden,):
+    if token_embeddings.shape != (len(token_ids), hidden):
         raise ValueError(
-            f"token embedding has shape {token_embedding.shape}, expected {(hidden,)}"
+            "token embeddings have shape "
+            f"{token_embeddings.shape}, expected {(len(token_ids), hidden)}"
         )
     if final_norm_weight.shape != (hidden,):
         raise ValueError(
@@ -417,15 +438,16 @@ def _write_tail_bundle(
             f"{lm_head_weight.shape}"
         )
     vocab = int(lm_head_weight.shape[0])
-    if token_id < 0 or token_id >= vocab:
-        raise ValueError(f"--token-id must be in [0, {vocab}), got {token_id}")
+    for token_id in token_ids:
+        if token_id < 0 or token_id >= vocab:
+            raise ValueError(f"token id must be in [0, {vocab}), got {token_id}")
 
     output_manifest.parent.mkdir(parents=True, exist_ok=True)
     data_path = output_manifest.parent / data_file_name
     manifest_tensors: list[dict[str, int | str]] = []
     offset = 0
     tensors = [
-        ("token_embedding", token_embedding),
+        ("token_embeddings", token_embeddings),
         ("final_norm_weight", final_norm_weight),
         ("lm_head_weight", lm_head_weight),
     ]
@@ -445,7 +467,7 @@ def _write_tail_bundle(
         "data": data_file_name,
         "hidden": hidden,
         "vocab": vocab,
-        "token_id": token_id,
+        "token_ids": token_ids,
         "tensors": manifest_tensors,
     }
     with output_manifest.open("w", encoding="utf-8") as manifest_file:
@@ -458,7 +480,7 @@ def _convert_tail(
     output: Path,
     data_file: str,
     hidden: int,
-    token_id: int,
+    token_ids: list[int],
 ) -> None:
     embed_name, norm_name, lm_head_name = tail_tensor_names()
     try:
@@ -488,16 +510,17 @@ def _convert_tail(
             "model.embed_tokens.weight must have shape [vocab, hidden], got "
             f"{embed_tokens.shape}"
         )
-    if token_id < 0 or token_id >= embed_tokens.shape[0]:
-        raise ValueError(
-            f"--token-id must be in [0, {embed_tokens.shape[0]}), got {token_id}"
-        )
+    for token_id in token_ids:
+        if token_id < 0 or token_id >= embed_tokens.shape[0]:
+            raise ValueError(
+                f"token id must be in [0, {embed_tokens.shape[0]}), got {token_id}"
+            )
     _write_tail_bundle(
         output,
         data_file,
         hidden,
-        token_id,
-        embed_tokens[token_id],
+        token_ids,
+        embed_tokens[token_ids],
         final_norm_weight,
         lm_head_weight,
     )
@@ -539,6 +562,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     layer_count = args.layer_count
     if layer_count <= 0:
         raise ValueError("--layer-count must be a positive integer")
+    token_ids = parse_token_ids(args.token_ids)
 
     if layer_count == 1:
         _convert_layer(
@@ -574,7 +598,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
             tail_manifest,
             args.data_file,
             shape.hidden,
-            args.token_id,
+            token_ids,
         )
         print(f"wrote Qwen mini model tail: {tail_manifest}")
 
@@ -608,12 +632,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--keys", required=True, type=int)
     parser.add_argument(
-        "--token-id",
-        default=0,
-        type=int,
+        "--token-ids",
+        default="0",
         help=(
-            "token id whose embedding row is stored in the model tail bundle "
-            "when --layer-count is greater than 1."
+            "comma-separated token ids whose embedding rows initialize the "
+            "mini decoder hidden states."
         ),
     )
     parser.add_argument("--output", required=True, type=Path)

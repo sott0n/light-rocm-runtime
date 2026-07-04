@@ -55,7 +55,7 @@ decoder-style path, not by every example currently present in the repository.
 | Residual add | ✅ | `vector_add` is used for attention residual and MLP residual in `triton_mini_decoder_layer` | Only FP32 path is wired into the decoder layer |
 | Gated MLP activation | ✅ | `silu_mul` covers `SiLU(gate) * up` in FP32 and is wired into `triton_mini_mlp` and `triton_mini_decoder_layer` | Needs lower precision and larger shape coverage later |
 | Output projection | ✅/❌ | `matvec` stands in for attention output projection and MLP down projection in the mini decoder layer | Needs larger/batched projection support and lower precision in the end-to-end path |
-| Token embedding | ✅/❌ | The Qwen converter can store one selected `model.embed_tokens.weight` row as the initial hidden state for the mini stack benchmark | This is a single-token benchmark path, not a general device-side embedding lookup |
+| Token embedding | ✅/❌ | The Qwen converter can store selected `model.embed_tokens.weight` rows as initial hidden states for the mini stack benchmark | This is a converter-side prompt setup path, not a general device-side embedding lookup |
 | Final norm | ✅ | `rmsnorm` is reused for `model.norm.weight` in the model tail path | Still FP32 and specialization driven |
 | LM head logits | ✅/❌ | `matvec` can run `lm_head.weight` against the final normalized hidden state and produce vocabulary logits | This is a prototype one-vector logits path, not a tiled production GEMV |
 | KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini decoder layer uses a `[heads, keys, head_dim]` cache layout by dispatching update/read-like operations per head | Needs a layout policy that can survive real model weight/cache integration |
@@ -211,7 +211,7 @@ checkpoint-level tensors yet:
 
 | Qwen tensor or config field | Current handling |
 | --- | --- |
-| `model.embed_tokens.weight` | The converter stores one selected token row in `model_tail/weights.json` for the benchmark input |
+| `model.embed_tokens.weight` | The converter stores selected token rows in `model_tail/weights.json` for the benchmark input |
 | `model.norm.weight` | The converter stores it in `model_tail/weights.json` and the benchmark runs final RMSNorm |
 | `lm_head.weight` | The converter stores it in `model_tail/weights.json` and the benchmark runs an FP32 matvec to produce logits |
 | RoPE parameters such as `rope_theta` | The converter stores `rope_theta` in each layer bundle and the benchmark uses it to generate `cos` and `sin` tables |
@@ -442,9 +442,9 @@ Qwen-like path can be meaningful:
   checkpoint converted into layer bundles plus a `model_tail` bundle.
 - It can also load a directory of per-layer Qwen weight bundles and run a
   queued runtime-copy decoder stack loop for early multi-layer validation. When
-  `model_tail/weights.json` is present, it initializes the first layer from a
-  selected token embedding and runs final RMSNorm plus lm_head to produce
-  logits.
+  `model_tail/weights.json` is present, it initializes the first layer from one
+  or more selected token embeddings and runs final RMSNorm plus lm_head to
+  produce logits.
 - It measures round-trip latency and burst-queued latency for the whole layer
   and prints enough shape/queueing metadata to interpret those numbers.
 - Next steps are lower precision end-to-end execution, fused or batched

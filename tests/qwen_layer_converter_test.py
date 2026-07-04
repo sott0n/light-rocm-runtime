@@ -33,6 +33,7 @@ def test_derive_shape_accepts_gqa() -> None:
     }
     shape = converter.derive_shape(config, keys=4)
     assert converter.derive_rope_theta({"rope_theta": 1000000.0}) == 1000000.0
+    assert converter.parse_token_ids("1, 2,3") == [1, 2, 3]
     assert shape.heads == 4
     assert shape.kv_heads == 2
     assert shape.head_dim == 4
@@ -126,8 +127,11 @@ def test_tail_bundle_writer() -> None:
             manifest_path,
             "weights.bin",
             hidden=4,
-            token_id=2,
-            token_embedding=np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32),
+            token_ids=[2, 1],
+            token_embeddings=np.asarray(
+                [[1.0, 2.0, 3.0, 4.0], [0.5, 0.6, 0.7, 0.8]],
+                dtype=np.float32,
+            ),
             final_norm_weight=np.asarray([5.0, 6.0, 7.0, 8.0], dtype=np.float32),
             lm_head_weight=np.arange(12, dtype=np.float32).reshape(3, 4),
         )
@@ -137,13 +141,13 @@ def test_tail_bundle_writer() -> None:
     assert manifest["format"] == "lrrt.mini_model_tail_weights"
     assert manifest["hidden"] == 4
     assert manifest["vocab"] == 3
-    assert manifest["token_id"] == 2
+    assert manifest["token_ids"] == [2, 1]
     assert manifest["tensors"][0] == {
-        "name": "token_embedding",
+        "name": "token_embeddings",
         "offset": 0,
-        "count": 4,
+        "count": 8,
     }
-    assert len(data) == (4 + 4 + 12) * 4
+    assert len(data) == (8 + 4 + 12) * 4
     assert struct.unpack_from("<f", data, 0)[0] == 1.0
 
 

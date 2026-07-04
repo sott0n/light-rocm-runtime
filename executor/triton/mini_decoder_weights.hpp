@@ -50,8 +50,8 @@ struct DecoderLayerWeights {
 struct ModelTailWeights {
   uint32_t hidden;
   uint32_t vocab;
-  uint32_t token_id;
-  std::vector<float> token_embedding;
+  std::vector<uint32_t> token_ids;
+  std::vector<float> token_embeddings;
   std::vector<float> final_norm_weight;
   std::vector<float> lm_head_weight;
 };
@@ -216,6 +216,58 @@ inline uint32_t read_u32_field(const std::string &text, const char *field) {
   return static_cast<uint32_t>(value);
 }
 
+inline std::vector<uint32_t> read_u32_array_field(const std::string &text,
+                                                  const char *field) {
+  size_t position = field_position(text, field);
+  if (position >= text.size() || text[position] != '[') {
+    throw std::runtime_error("mini decoder weight manifest field is not an "
+                             "array: " +
+                             std::string(field));
+  }
+  ++position;
+  std::vector<uint32_t> values;
+  while (true) {
+    position = skip_ws(text, position);
+    if (position >= text.size()) {
+      throw std::runtime_error("unterminated mini decoder weight manifest "
+                               "array: " +
+                               std::string(field));
+    }
+    if (text[position] == ']') {
+      return values;
+    }
+    uint64_t value = 0;
+    bool saw_digit = false;
+    while (position < text.size() &&
+           std::isdigit(static_cast<unsigned char>(text[position])) != 0) {
+      saw_digit = true;
+      value = value * 10 + static_cast<uint64_t>(text[position] - '0');
+      if (value > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("mini decoder weight manifest integer is too "
+                                 "large: " +
+                                 std::string(field));
+      }
+      ++position;
+    }
+    if (!saw_digit) {
+      throw std::runtime_error("mini decoder weight manifest array contains a "
+                               "non-integer: " +
+                               std::string(field));
+    }
+    values.push_back(static_cast<uint32_t>(value));
+    position = skip_ws(text, position);
+    if (position < text.size() && text[position] == ',') {
+      ++position;
+      continue;
+    }
+    if (position < text.size() && text[position] == ']') {
+      return values;
+    }
+    throw std::runtime_error("mini decoder weight manifest array is invalid: " +
+                             std::string(field));
+  }
+}
+
 inline float read_f32_field(const std::string &text, const char *field) {
   size_t position = field_position(text, field);
   const char *begin = text.c_str() + position;
@@ -343,10 +395,11 @@ inline std::vector<TensorSpec> tensor_specs(const DecoderLayerShape &shape) {
   };
 }
 
-inline std::vector<TailTensorSpec> tail_tensor_specs(uint32_t hidden,
-                                                     uint32_t vocab) {
+inline std::vector<TailTensorSpec>
+tail_tensor_specs(uint32_t hidden, uint32_t vocab, uint32_t tokens) {
   return {
-      {"token_embedding", hidden, &ModelTailWeights::token_embedding},
+      {"token_embeddings", checked_multiply(tokens, hidden, "token_embeddings"),
+       &ModelTailWeights::token_embeddings},
       {"final_norm_weight", hidden, &ModelTailWeights::final_norm_weight},
       {"lm_head_weight", checked_multiply(vocab, hidden, "lm_head_weight"),
        &ModelTailWeights::lm_head_weight},
@@ -499,19 +552,24 @@ inline ModelTailWeights load_model_tail_weights(const char *manifest_path) {
   ModelTailWeights weights{};
   weights.hidden = detail::read_u32_field(manifest, "hidden");
   weights.vocab = detail::read_u32_field(manifest, "vocab");
-  weights.token_id = detail::read_u32_field(manifest, "token_id");
-  if (weights.hidden == 0 || weights.vocab == 0 ||
-      weights.token_id >= weights.vocab) {
+  weights.token_ids = detail::read_u32_array_field(manifest, "token_ids");
+  if (weights.hidden == 0 || weights.vocab == 0 || weights.token_ids.empty()) {
     throw std::runtime_error("mini model tail manifest has invalid shape");
   }
-
+  for (uint32_t token_id : weights.token_ids) {
+    if (token_id >= weights.vocab) {
+      throw std::runtime_error("mini model tail manifest has invalid token id");
+    }
+  }
   std::string data_file = detail::read_string_field(manifest, "data");
   std::vector<unsigned char> data =
       detail::read_file(detail::relative_path(manifest_path, data_file));
 
   uint64_t expected_size = 0;
-  for (const detail::TailTensorSpec &spec :
-       detail::tail_tensor_specs(weights.hidden, weights.vocab)) {
+  std::vector<detail::TailTensorSpec> specs = detail::tail_tensor_specs(
+      weights.hidden, weights.vocab,
+      static_cast<uint32_t>(weights.token_ids.size()));
+  for (const detail::TailTensorSpec &spec : specs) {
     auto [begin, end] = detail::tensor_bounds(manifest, spec.name);
     uint64_t offset =
         detail::read_u64_field(manifest, begin, end, "offset", spec.name);
@@ -639,13 +697,18 @@ inline void write_model_tail_weights(const char *manifest_path,
       data_file_name[0] == '\0') {
     throw std::invalid_argument("mini model tail output path is empty");
   }
-  if (weights.hidden == 0 || weights.vocab == 0 ||
-      weights.token_id >= weights.vocab ||
-      weights.token_embedding.size() != weights.hidden ||
+  if (weights.hidden == 0 || weights.vocab == 0 || weights.token_ids.empty() ||
+      weights.token_embeddings.size() !=
+          static_cast<size_t>(weights.token_ids.size()) * weights.hidden ||
       weights.final_norm_weight.size() != weights.hidden ||
       weights.lm_head_weight.size() !=
           static_cast<size_t>(weights.vocab) * weights.hidden) {
     throw std::runtime_error("mini model tail weights have invalid sizes");
+  }
+  for (uint32_t token_id : weights.token_ids) {
+    if (token_id >= weights.vocab) {
+      throw std::runtime_error("mini model tail weights have invalid token id");
+    }
   }
 
   std::string data_path =
@@ -668,12 +731,19 @@ inline void write_model_tail_weights(const char *manifest_path,
            << "  \"data\": \"" << data_file_name << "\",\n"
            << "  \"hidden\": " << weights.hidden << ",\n"
            << "  \"vocab\": " << weights.vocab << ",\n"
-           << "  \"token_id\": " << weights.token_id << ",\n"
+           << "  \"token_ids\": [";
+  for (size_t i = 0; i < weights.token_ids.size(); ++i) {
+    if (i != 0) {
+      manifest << ", ";
+    }
+    manifest << weights.token_ids[i];
+  }
+  manifest << "],\n"
            << "  \"tensors\": [\n";
   uint64_t offset = 0;
   bool first = true;
-  detail::append_tensor(data, manifest, "token_embedding",
-                        weights.token_embedding, &offset, &first);
+  detail::append_tensor(data, manifest, "token_embeddings",
+                        weights.token_embeddings, &offset, &first);
   detail::append_tensor(data, manifest, "final_norm_weight",
                         weights.final_norm_weight, &offset, &first);
   detail::append_tensor(data, manifest, "lm_head_weight",

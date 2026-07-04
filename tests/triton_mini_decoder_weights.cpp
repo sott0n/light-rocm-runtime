@@ -184,8 +184,8 @@ void test_load_model_tail_weights(void) {
   ModelTailWeights weights{};
   weights.hidden = 4;
   weights.vocab = 3;
-  weights.token_id = 2;
-  weights.token_embedding = {1.0f, 2.0f, 3.0f, 4.0f};
+  weights.token_ids = {2, 1};
+  weights.token_embeddings = {1.0f, 2.0f, 3.0f, 4.0f, 0.5f, 0.6f, 0.7f, 0.8f};
   weights.final_norm_weight = {5.0f, 6.0f, 7.0f, 8.0f};
   weights.lm_head_weight = {0.0f, 0.1f, 0.2f, 0.3f, 1.0f, 1.1f,
                             1.2f, 1.3f, 2.0f, 2.1f, 2.2f, 2.3f};
@@ -196,10 +196,12 @@ void test_load_model_tail_weights(void) {
       lrrt::executor::triton::mini::load_model_tail_weights(
           manifest_path.c_str());
   if (loaded.hidden != weights.hidden || loaded.vocab != weights.vocab ||
-      loaded.token_id != weights.token_id) {
+      loaded.token_ids.size() != weights.token_ids.size()) {
     throw std::runtime_error("loaded model tail shape mismatch");
   }
-  expect_close(loaded.token_embedding.back(), 4.0f, "token_embedding");
+  expect_close((float)loaded.token_ids.back(), 1.0f, "token_ids");
+  expect_close(loaded.token_embeddings.front(), 1.0f, "token_embeddings");
+  expect_close(loaded.token_embeddings.back(), 0.8f, "token_embeddings");
   expect_close(loaded.final_norm_weight.front(), 5.0f, "final_norm_weight");
   expect_close(loaded.lm_head_weight.back(), 2.3f, "lm_head_weight");
 }

@@ -379,8 +379,10 @@ Measurements measure_stack_case(
   if (tail_weights) {
     tail = std::make_unique<lrrt::executor::triton::mini::ModelTail>(
         device, tail_weights->hidden, tail_weights->vocab);
-    tail->copy_weights(tail_weights->token_embedding,
-                       tail_weights->final_norm_weight,
+    std::vector<float> first_token_embedding(
+        tail_weights->token_embeddings.begin(),
+        tail_weights->token_embeddings.begin() + tail_weights->hidden);
+    tail->copy_weights(first_token_embedding, tail_weights->final_norm_weight,
                        tail_weights->lm_head_weight);
   }
 
@@ -562,8 +564,12 @@ int main(int argc, char **argv) {
                 load_tail_weights(options.weights_dir));
       }
       for (const auto &layer_weights : weights) {
-        uint32_t valid_keys = options.has_valid_keys ? options.valid_keys
-                                                     : layer_weights.shape.keys;
+        uint32_t valid_keys =
+            options.has_valid_keys
+                ? options.valid_keys
+                : (tail_weights
+                       ? static_cast<uint32_t>(tail_weights->token_ids.size())
+                       : layer_weights.shape.keys);
         if (valid_keys > layer_weights.shape.keys) {
           throw std::invalid_argument(
               "valid key count exceeds weight shape keys");
@@ -575,10 +581,17 @@ int main(int argc, char **argv) {
           throw std::runtime_error(
               "model tail hidden size does not match decoder stack");
         }
+        if (tail_weights->token_ids.size() > cases.front().keys) {
+          throw std::runtime_error(
+              "model tail token count exceeds decoder stack key capacity");
+        }
         BenchmarkCase &first_layer = cases.front();
         for (uint32_t key = 0; key < first_layer.keys; ++key) {
-          std::copy(tail_weights->token_embedding.begin(),
-                    tail_weights->token_embedding.end(),
+          const size_t token_index =
+              std::min<size_t>(key, tail_weights->token_ids.size() - 1);
+          const auto begin = tail_weights->token_embeddings.begin() +
+                             token_index * first_layer.hidden;
+          std::copy(begin, begin + first_layer.hidden,
                     first_layer.hidden_states.begin() +
                         static_cast<size_t>(key) * first_layer.hidden);
         }
@@ -661,11 +674,12 @@ int main(int argc, char **argv) {
              "next layer after copy events without per-layer host sync.\n",
              colors.label, colors.reset);
       if (tail_weights) {
-        printf("%smodel tail%s initializes the first layer input from token id "
-               "%u and runs final RMSNorm plus lm_head matvec to produce %u "
-               "logits.\n",
-               colors.label, colors.reset, tail_weights->token_id,
-               tail_weights->vocab);
+        printf(
+            "%smodel tail%s initializes the first layer input from %zu token "
+            "embedding row(s) and runs final RMSNorm plus lm_head matvec "
+            "to produce %u logits.\n",
+            colors.label, colors.reset, tail_weights->token_ids.size(),
+            tail_weights->vocab);
       }
     }
     printf("%sDispatches%s is an estimate of kernel submissions per layer; "
