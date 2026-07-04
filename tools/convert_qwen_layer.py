@@ -97,6 +97,35 @@ def derive_rope_theta(config: dict[str, Any]) -> float:
     return float(value)
 
 
+def derive_model_layer_count(config: dict[str, Any]) -> int:
+    return _positive_int(config, "num_hidden_layers")
+
+
+def resolve_layer_count(config: dict[str, Any], args: argparse.Namespace) -> int:
+    if args.layer < 0:
+        raise ValueError("--layer must be non-negative")
+
+    if args.all_layers:
+        if args.layer_count != 1:
+            raise ValueError("--all-layers cannot be combined with --layer-count")
+        total_layers = derive_model_layer_count(config)
+        if args.layer >= total_layers:
+            raise ValueError(
+                "--layer must be smaller than config field 'num_hidden_layers'"
+            )
+        return total_layers - args.layer
+
+    if args.layer_count <= 0:
+        raise ValueError("--layer-count must be a positive integer")
+    if "num_hidden_layers" in config:
+        total_layers = derive_model_layer_count(config)
+        if args.layer + args.layer_count > total_layers:
+            raise ValueError(
+                "--layer + --layer-count exceeds config field 'num_hidden_layers'"
+            )
+    return args.layer_count
+
+
 def tensor_mappings(layer: int, shape: DecoderLayerShape) -> list[TensorMapping]:
     if layer < 0:
         raise ValueError("--layer must be non-negative")
@@ -559,12 +588,11 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     rope_theta = derive_rope_theta(config)
     weight_map = checkpoint_weight_map(checkpoint_dir)
     available_names = set(weight_map) if weight_map is not None else None
-    layer_count = args.layer_count
-    if layer_count <= 0:
-        raise ValueError("--layer-count must be a positive integer")
+    layer_count = resolve_layer_count(config, args)
     token_ids = parse_token_ids(args.token_ids)
+    writes_layer_directory = args.all_layers or layer_count > 1
 
-    if layer_count == 1:
+    if not writes_layer_directory:
         _convert_layer(
             checkpoint_dir,
             shape,
@@ -578,7 +606,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     else:
         if args.output.suffix:
             raise ValueError(
-                "--output must be a directory when --layer-count is greater than 1"
+                "--output must be a directory when writing multiple decoder layers"
             )
         for layer in range(args.layer, args.layer + layer_count):
             layer_manifest = args.output / f"layer_{layer}" / "weights.json"
@@ -619,7 +647,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-dir", required=True, type=Path)
     parser.add_argument("--config", type=Path, help="defaults to config.json")
-    parser.add_argument("--layer", required=True, type=int)
+    parser.add_argument("--layer", default=0, type=int)
     parser.add_argument(
         "--layer-count",
         default=1,
@@ -628,6 +656,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "number of consecutive decoder layers to convert. When greater "
             "than 1, --output is treated as a directory and bundles are "
             "written under layer_<index>/weights.json."
+        ),
+    )
+    parser.add_argument(
+        "--all-layers",
+        action="store_true",
+        help=(
+            "convert every decoder layer from --layer through "
+            "config['num_hidden_layers'] - 1. The output is treated as a "
+            "directory."
         ),
     )
     parser.add_argument("--keys", required=True, type=int)

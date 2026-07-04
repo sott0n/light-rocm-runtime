@@ -8,6 +8,7 @@ import struct
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 CONVERTER = ROOT / "tools" / "convert_qwen_layer.py"
@@ -41,6 +42,63 @@ def test_derive_shape_accepts_gqa() -> None:
     assert mappings[2].shape == (16, 16)
     assert mappings[3].shape == (8, 16)
     assert mappings[4].shape == (8, 16)
+
+
+def test_resolve_layer_count_accepts_all_layers() -> None:
+    converter = load_converter()
+    config = {
+        "num_hidden_layers": 24,
+    }
+    count = converter.resolve_layer_count(
+        config, SimpleNamespace(layer=0, layer_count=1, all_layers=True)
+    )
+    assert count == 24
+
+    count = converter.resolve_layer_count(
+        config, SimpleNamespace(layer=4, layer_count=1, all_layers=True)
+    )
+    assert count == 20
+
+    try:
+        converter.resolve_layer_count(
+            config, SimpleNamespace(layer=24, layer_count=1, all_layers=True)
+        )
+    except ValueError as error:
+        assert "num_hidden_layers" in str(error)
+    else:
+        raise AssertionError("expected --all-layers to reject an out-of-range layer")
+
+
+def test_resolve_layer_count_rejects_too_many_layers() -> None:
+    converter = load_converter()
+    config = {
+        "num_hidden_layers": 3,
+    }
+
+    try:
+        converter.resolve_layer_count(
+            config, SimpleNamespace(layer=2, layer_count=2, all_layers=False)
+        )
+    except ValueError as error:
+        assert "--layer + --layer-count" in str(error)
+    else:
+        raise AssertionError("expected layer range overflow to fail")
+
+
+def test_resolve_layer_count_rejects_all_layers_with_layer_count() -> None:
+    converter = load_converter()
+    config = {
+        "num_hidden_layers": 3,
+    }
+
+    try:
+        converter.resolve_layer_count(
+            config, SimpleNamespace(layer=0, layer_count=2, all_layers=True)
+        )
+    except ValueError as error:
+        assert "--all-layers" in str(error)
+    else:
+        raise AssertionError("expected --all-layers with --layer-count to fail")
 
 
 def test_tensor_mapping_and_bundle_writer() -> None:
@@ -173,8 +231,12 @@ def test_read_safetensors_bf16() -> None:
 
 def main() -> int:
     test_derive_shape_accepts_gqa()
+    test_resolve_layer_count_accepts_all_layers()
+    test_resolve_layer_count_rejects_too_many_layers()
+    test_resolve_layer_count_rejects_all_layers_with_layer_count()
     test_tensor_mapping_and_bundle_writer()
     test_multi_layer_output_paths()
+    test_tail_bundle_writer()
     test_read_safetensors_bf16()
     print("qwen_layer_converter_test: ok")
     return 0
