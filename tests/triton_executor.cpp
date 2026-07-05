@@ -1,10 +1,13 @@
 #include "triton_executor.hpp"
 
+#include <algorithm>
 #include <limits>
 #include <stdio.h>
 #include <string.h>
 
 #include <exception>
+#include <stdexcept>
+#include <vector>
 
 namespace {
 
@@ -106,6 +109,70 @@ void test_buffer_offset_errors() {
                         "out-of-range offset must include buffer size");
 }
 
+void test_arena_contract() {
+  namespace tex = lrrt::executor::triton;
+
+  lrrt::Runtime runtime;
+  if (runtime.device_count() == 0) {
+    printf("triton_executor: skipped GPU arena check, no GPU devices\n");
+    return;
+  }
+
+  lrrt::Device device = runtime.open_device(0);
+  device.reset_memory_stats();
+
+  tex::BufferSet buffers(device, true);
+  expect(buffers.uses_arena(), "arena buffer set must report arena mode");
+  expect_throw_contains([&] { buffers.get("a"); },
+                        "Triton executor buffer set is not finalized",
+                        "arena buffers must reject lookup before finalize");
+  expect_throw_contains(
+      [&] { buffers.byte_offset("a"); },
+      "Triton executor buffer set does not have arena offsets",
+      "arena offsets must reject lookup before finalize");
+
+  buffers.allocate<float>("a", 3);
+  buffers.allocate<uint32_t>("b", 5);
+  buffers.finalize();
+
+  const size_t offset_a = buffers.byte_offset("a");
+  const size_t offset_b = buffers.byte_offset("b");
+  expect(offset_a == 0, "first arena buffer must start at offset zero");
+  expect(offset_b == 256, "second arena buffer must be 256-byte aligned");
+  expect(buffers.arena_size() == offset_b + 5 * sizeof(uint32_t),
+         "arena size must include aligned buffers");
+
+  lrrt::MemoryStats stats = device.memory_stats();
+  expect(stats.live_bytes == buffers.arena_size(),
+         "arena must be the only live allocation");
+  expect(stats.total_allocated_bytes == buffers.arena_size(),
+         "arena allocation size must be counted");
+  expect(stats.allocation_count == 1,
+         "arena buffer set must allocate one device buffer");
+
+  std::vector<float> values_a = {1.0f, 2.0f, 3.0f};
+  std::vector<uint32_t> values_b = {4, 5, 6, 7, 8};
+  buffers.copy_to("a", values_a);
+  buffers.copy_to("b", values_b);
+
+  std::vector<float> out_a(3, 0.0f);
+  std::vector<uint32_t> out_b(5, 0);
+  buffers.copy_from(out_a, "a");
+  buffers.copy_from(out_b, "b");
+  expect(std::equal(out_a.begin(), out_a.end(), values_a.begin()),
+         "arena view copy for float buffer must round trip");
+  expect(std::equal(out_b.begin(), out_b.end(), values_b.begin()),
+         "arena view copy for uint32 buffer must round trip");
+
+  expect_throw_contains(
+      [&] { buffers.allocate<float>("late", 1); },
+      "Triton executor arena buffer set is finalized",
+      "arena buffer set must reject allocation after finalize");
+  expect_throw_contains([&] { buffers.byte_offset("missing"); },
+                        "unknown Triton executor buffer 'missing'",
+                        "missing arena offset must include buffer name");
+}
+
 } // namespace
 
 int main() {
@@ -113,6 +180,7 @@ int main() {
   test_allocation_overflow();
   test_empty_launch_arg_name();
   test_buffer_offset_errors();
+  test_arena_contract();
 
   if (g_failures != 0) {
     return 1;
