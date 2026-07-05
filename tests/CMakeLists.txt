@@ -44,6 +44,12 @@ if(PYTHON_EXECUTABLE)
       "${PYTHON_EXECUTABLE}"
       "${PROJECT_SOURCE_DIR}/tests/qwen_layer_converter_test.py"
   )
+  add_test(
+    NAME lrrt_qwen_benchmark_runner_tests
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/qwen_benchmark_runner_test.py"
+  )
 endif()
 
 lrrt_add_test_executable(

@@ -192,6 +192,31 @@ checkpoint directory containing `config.json` and `.safetensors` files. This is
 still a narrow bridge into the mini decoder benchmark format, not a general
 model loader.
 
+`tools/run_qwen_benchmark.py` wraps this prototype E2E flow. It reuses an
+existing bundle directory when all requested layer manifests and the model tail
+manifest are present; otherwise it invokes the converter before running
+`lrrt_triton_mini_decoder_layer_benchmark`:
+
+```bash
+python3 tools/run_qwen_benchmark.py \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --bundle-dir /tmp/lrrt-qwen-full \
+  --all-layers \
+  --keys 4 \
+  --token-ids 0,1,2 \
+  --iterations 1 \
+  --no-warmup
+```
+
+Use `--no-convert` to require an already-converted bundle directory, or
+`--force-convert` to rewrite the bundle before running the benchmark. The
+wrapper uses `uv run --with-requirements tools/requirements.txt` for conversion
+when `uv` is available, and falls back to the current Python interpreter when
+`uv` is not installed.
+
+The current wrapper starts at layer 0 because the benchmark consumes
+`layer_0..layer_N` directories.
+
 The intended per-layer mapping is:
 
 | Mini decoder tensor | Qwen checkpoint tensor | Expected shape in mini bundle | Conversion note |
