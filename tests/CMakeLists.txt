@@ -7,6 +7,11 @@ endfunction()
 lrrt_add_test_executable(lrrt_memory_bounds_tests memory_bounds.cpp lrrt::lrrt)
 lrrt_add_test_executable(lrrt_runtime_api_tests runtime_api.cpp lrrt::lrrt)
 lrrt_add_test_executable(lrrt_memory_stats_tests memory_stats.cpp lrrt::lrrt)
+lrrt_add_test_executable(
+  lrrt_device_buffer_ownership_tests
+  device_buffer_ownership.cpp
+  lrrt::lrrt
+)
 lrrt_add_test_executable(lrrt_async_copy_tests async_copy.cpp lrrt::lrrt)
 lrrt_add_test_executable(
   lrrt_async_copy_launch_tests
