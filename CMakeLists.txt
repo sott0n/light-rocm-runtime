@@ -9,8 +9,14 @@ set(
   CACHE STRING "Python version or interpreter for Triton examples"
 )
 option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
+option(LRRT_ENABLE_IREE_ADAPTER "Build the experimental IREE HAL adapter" OFF)
 option(LRRT_BUILD_BENCHMARKS "Build runtime benchmarks" OFF)
 option(LRRT_BUILD_TRITON_BENCHMARKS "Build Triton runtime benchmarks" OFF)
+set(
+  LRRT_IREE_ROOT
+  ""
+  CACHE PATH "Path to an IREE install or source tree for the IREE HAL adapter"
+)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -44,6 +50,7 @@ find_program(
 
 include(cmake/Hsaco.cmake)
 include(cmake/TritonBundle.cmake)
+include(cmake/IreeAdapter.cmake)
 
 add_library(lrrt src/runtime.cpp)
 add_library(lrrt::lrrt ALIAS lrrt)
@@ -74,6 +81,11 @@ enable_testing()
 
 add_subdirectory(examples)
 add_subdirectory(tests)
+
+if(LRRT_ENABLE_IREE_ADAPTER)
+  lrrt_find_iree()
+  add_subdirectory(executor/iree)
+endif()
 
 if(LRRT_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)

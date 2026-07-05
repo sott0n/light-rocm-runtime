@@ -52,9 +52,8 @@ kernel and has an existing ROCm/HIP path.
 The first IREE integration target is exploratory:
 
 - study IREE's ROCm/HIP output artifacts
-- identify the dispatch metadata needed by an external executor
-- evaluate whether the mapping should be a lightweight lrrt executor or a
-  HAL-style adapter
+- identify the dispatch metadata needed by a HAL-style adapter
+- prototype a narrow lrrt-backed IREE HAL adapter
 - keep IREE's graph, scheduling, and framework integration responsibilities out
   of the lrrt core
 
