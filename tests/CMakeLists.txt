@@ -5,6 +5,11 @@ function(lrrt_add_test_executable target source library)
 endfunction()
 
 lrrt_add_test_executable(lrrt_memory_bounds_tests memory_bounds.cpp lrrt::lrrt)
+lrrt_add_test_executable(
+  lrrt_allocation_registry_tests
+  allocation_registry.cpp
+  lrrt::lrrt
+)
 lrrt_add_test_executable(lrrt_runtime_api_tests runtime_api.cpp lrrt::lrrt)
 lrrt_add_test_executable(lrrt_memory_stats_tests memory_stats.cpp lrrt::lrrt)
 lrrt_add_test_executable(
