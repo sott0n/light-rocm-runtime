@@ -124,6 +124,9 @@ The first investigation should answer these questions:
 - Run the compiled VMFB with `iree-run-module --device=hip` to establish a
   baseline outside lrrt.
 
+The local tool build strategy is tracked in
+[IREE Tool Build Strategy](iree-tool-build.md).
+
 ### I1: HAL contract mapping
 
 - Identify the minimal IREE HAL interfaces needed to load an executable,
