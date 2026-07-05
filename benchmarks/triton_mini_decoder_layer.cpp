@@ -53,6 +53,21 @@ struct LogitEntry {
   float value;
 };
 
+struct StageBreakdown {
+  double attention_norm_ns = 0.0;
+  double qkv_projection_ns = 0.0;
+  double kv_cache_ns = 0.0;
+  double attention_ns = 0.0;
+  double attention_output_ns = 0.0;
+  double mlp_ns = 0.0;
+  double handoff_copy_ns = 0.0;
+  double tail_final_norm_ns = 0.0;
+  double tail_lm_head_ns = 0.0;
+  uint64_t decoder_runs = 0;
+  uint64_t handoff_copies = 0;
+  uint64_t tail_runs = 0;
+};
+
 struct Measurements {
   double cpu_round_trip_ns;
   double cpu_burst_interval_ns;
@@ -62,6 +77,7 @@ struct Measurements {
   double setup_construct_ns;
   double setup_model_copy_ns;
   double setup_tail_model_copy_ns;
+  StageBreakdown stage_breakdown;
   lrrt::MemoryStats memory_stats;
   bool produced_logits;
   uint32_t vocab;
@@ -97,6 +113,26 @@ struct SetupBreakdown {
   double model_copy_ns = 0.0;
   double tail_model_copy_ns = 0.0;
 };
+
+void accumulate_stage_breakdown(
+    StageBreakdown &dst,
+    const lrrt::executor::triton::mini::DecoderLayerStageTiming &src) {
+  dst.attention_norm_ns += src.attention_norm_ns;
+  dst.qkv_projection_ns += src.qkv_projection_ns;
+  dst.kv_cache_ns += src.kv_cache_ns;
+  dst.attention_ns += src.attention_ns;
+  dst.attention_output_ns += src.attention_output_ns;
+  dst.mlp_ns += src.mlp_ns;
+  ++dst.decoder_runs;
+}
+
+void accumulate_stage_breakdown(
+    StageBreakdown &dst,
+    const lrrt::executor::triton::mini::ModelTailStageTiming &src) {
+  dst.tail_final_norm_ns += src.final_norm_ns;
+  dst.tail_lm_head_ns += src.lm_head_ns;
+  ++dst.tail_runs;
+}
 
 uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
   return benchmark_case.heads * benchmark_case.head_dim;
@@ -433,12 +469,15 @@ Measurements measure_case(lrrt::Device &device,
   auto warmup_end = Clock::now();
 
   double cpu_round_trip_ns = 0.0;
+  StageBreakdown stage_breakdown;
   for (uint32_t i = 0; i < iterations; ++i) {
     auto begin = Clock::now();
-    executor.run(benchmark_case.valid_keys);
+    lrrt::executor::triton::mini::DecoderLayerStageTiming timing;
+    executor.run(benchmark_case.valid_keys, {}, &timing);
     executor.synchronize();
     auto end = Clock::now();
     cpu_round_trip_ns += elapsed_ns(begin, end);
+    accumulate_stage_breakdown(stage_breakdown, timing);
   }
   cpu_round_trip_ns /= static_cast<double>(iterations);
 
@@ -472,6 +511,7 @@ Measurements measure_case(lrrt::Device &device,
           0.0,
           0.0,
           0.0,
+          stage_breakdown,
           device.memory_stats(),
           false,
           0,
@@ -600,8 +640,8 @@ Measurements measure_stack_case(
     }
   };
 
-  auto submit_stack = [&](lrrt::Event *gpu_start,
-                          lrrt::Event *gpu_end) -> StackSubmission {
+  auto submit_stack = [&](lrrt::Event *gpu_start, lrrt::Event *gpu_end,
+                          StageBreakdown *stage_breakdown) -> StackSubmission {
     StackSubmission submission;
     const size_t handoff_count =
         layer_count > 1 ? (layer_count - 1) * valid_keys : 0;
@@ -624,13 +664,25 @@ Measurements measure_stack_case(
           dependencies.push_back(
               submission.handoff_complete[handoff_index(layer - 1, key)].get());
         }
-        executors[layer]->run(key, dependencies);
+        lrrt::executor::triton::mini::DecoderLayerStageTiming timing;
+        executors[layer]->run(key, dependencies,
+                              stage_breakdown ? &timing : nullptr);
+        if (stage_breakdown) {
+          accumulate_stage_breakdown(*stage_breakdown, timing);
+        }
         if (layer + 1 < layer_count) {
           const size_t index = handoff_index(layer, key);
+          auto copy_begin = Clock::now();
           executors[layer]->copy_output_to_hidden_state_async(
               *executors[layer + 1], key - 1,
               *submission.source_complete[index],
               *submission.handoff_complete[index]);
+          if (stage_breakdown) {
+            auto copy_end = Clock::now();
+            stage_breakdown->handoff_copy_ns +=
+                elapsed_ns(copy_begin, copy_end);
+            ++stage_breakdown->handoff_copies;
+          }
         }
       }
     }
@@ -640,7 +692,12 @@ Measurements measure_stack_case(
       executors.back()->copy_output_to_buffer_async(
           tail->hidden_buffer(), *submission.tail_source_complete,
           *submission.tail_handoff_complete);
-      tail->run({submission.tail_handoff_complete.get()});
+      lrrt::executor::triton::mini::ModelTailStageTiming timing;
+      tail->run({submission.tail_handoff_complete.get()},
+                stage_breakdown ? &timing : nullptr);
+      if (stage_breakdown) {
+        accumulate_stage_breakdown(*stage_breakdown, timing);
+      }
     }
     if (gpu_end) {
       if (tail) {
@@ -653,7 +710,7 @@ Measurements measure_stack_case(
   };
 
   auto run_stack = [&]() {
-    StackSubmission submission = submit_stack(nullptr, nullptr);
+    StackSubmission submission = submit_stack(nullptr, nullptr, nullptr);
     synchronize_stack();
   };
 
@@ -672,13 +729,16 @@ Measurements measure_stack_case(
   auto warmup_end = Clock::now();
 
   double cpu_round_trip_ns = 0.0;
+  StageBreakdown stage_breakdown;
   for (uint32_t i = 0; i < iterations; ++i) {
     if (trace_run) {
       fprintf(stderr, "  cpu round %u/%u begin\n", i + 1, iterations);
       fflush(stderr);
     }
     auto begin = Clock::now();
-    run_stack();
+    StackSubmission submission =
+        submit_stack(nullptr, nullptr, &stage_breakdown);
+    synchronize_stack();
     auto end = Clock::now();
     if (trace_run) {
       fprintf(stderr, "  cpu round %u/%u end\n", i + 1, iterations);
@@ -712,6 +772,7 @@ Measurements measure_stack_case(
           setup_breakdown.construct_ns,
           setup_breakdown.model_copy_ns,
           setup_breakdown.tail_model_copy_ns,
+          stage_breakdown,
           device.memory_stats(),
           tail != nullptr,
           tail_weights ? tail_weights->vocab : 0,
@@ -767,6 +828,49 @@ void print_memory_stats(const Measurements &measurements,
       "%sMemcpy%s h2d=%.3f MiB d2h=%.3f MiB d2d=%.3f MiB calls=%" PRIu64 "\n",
       colors.label, colors.reset, mib(stats.h2d_copy_bytes),
       mib(stats.d2h_copy_bytes), mib(stats.d2d_copy_bytes), stats.memcpy_count);
+}
+
+double average_us(double ns, uint64_t count) {
+  if (count == 0) {
+    return 0.0;
+  }
+  return ns / static_cast<double>(count) / 1.0e3;
+}
+
+void print_stage_breakdown(const Measurements &measurements,
+                           const Colors &colors) {
+  const StageBreakdown &stages = measurements.stage_breakdown;
+  if (stages.decoder_runs == 0) {
+    return;
+  }
+  printf("%sStage submit avg%s attention-norm=%s%.3f%s us "
+         "qkv=%s%.3f%s us kv-cache=%s%.3f%s us attention=%s%.3f%s us "
+         "attn-out=%s%.3f%s us mlp=%s%.3f%s us per decoder-run\n",
+         colors.label, colors.reset, colors.time,
+         average_us(stages.attention_norm_ns, stages.decoder_runs),
+         colors.reset, colors.time,
+         average_us(stages.qkv_projection_ns, stages.decoder_runs),
+         colors.reset, colors.time,
+         average_us(stages.kv_cache_ns, stages.decoder_runs), colors.reset,
+         colors.time, average_us(stages.attention_ns, stages.decoder_runs),
+         colors.reset, colors.time,
+         average_us(stages.attention_output_ns, stages.decoder_runs),
+         colors.reset, colors.time,
+         average_us(stages.mlp_ns, stages.decoder_runs), colors.reset);
+  if (stages.handoff_copies != 0) {
+    printf("%sHandoff submit avg%s copy=%s%.3f%s us per async copy\n",
+           colors.label, colors.reset, colors.time,
+           average_us(stages.handoff_copy_ns, stages.handoff_copies),
+           colors.reset);
+  }
+  if (stages.tail_runs != 0) {
+    printf("%sTail submit avg%s final-norm=%s%.3f%s us lm-head=%s%.3f%s us "
+           "per tail-run\n",
+           colors.label, colors.reset, colors.time,
+           average_us(stages.tail_final_norm_ns, stages.tail_runs),
+           colors.reset, colors.time,
+           average_us(stages.tail_lm_head_ns, stages.tail_runs), colors.reset);
+  }
 }
 
 void print_stack_case(const std::vector<BenchmarkCase> &layers,
@@ -825,6 +929,7 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
          colors.label, colors.reset, measurements.setup_construct_ns / 1.0e6,
          measurements.setup_model_copy_ns / 1.0e6,
          measurements.setup_tail_model_copy_ns / 1.0e6);
+  print_stage_breakdown(measurements, colors);
   print_memory_stats(measurements, colors);
   fflush(stdout);
 }
@@ -981,6 +1086,7 @@ int main(int argc, char **argv) {
         Measurements measurements =
             measure_case(device, benchmark_case, iterations, warmup_iterations);
         print_case(benchmark_case, measurements, colors);
+        print_stage_breakdown(measurements, colors);
         print_memory_stats(measurements, colors);
       }
     }
@@ -1004,6 +1110,9 @@ int main(int argc, char **argv) {
       printf("%sdecoder stack%s records source-layer completion events, "
              "queues async device-to-device handoff copies, and launches the "
              "next layer after copy events without per-layer host sync.\n",
+             colors.label, colors.reset);
+      printf("%sstage submit avg%s measures CPU time spent enqueueing each "
+             "executor stage, not GPU kernel execution time.\n",
              colors.label, colors.reset);
       if (tail_weights) {
         printf(

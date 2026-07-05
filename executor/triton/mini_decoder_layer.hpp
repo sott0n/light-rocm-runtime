@@ -4,6 +4,7 @@
 
 #include "lrrt/lrrt.hpp"
 
+#include <chrono>
 #include <math.h>
 #include <memory>
 #include <stdexcept>
@@ -49,6 +50,27 @@
 #endif
 
 namespace lrrt::executor::triton::mini {
+
+struct DecoderLayerStageTiming {
+  double attention_norm_ns = 0.0;
+  double qkv_projection_ns = 0.0;
+  double kv_cache_ns = 0.0;
+  double attention_ns = 0.0;
+  double attention_output_ns = 0.0;
+  double mlp_ns = 0.0;
+};
+
+struct ModelTailStageTiming {
+  double final_norm_ns = 0.0;
+  double lm_head_ns = 0.0;
+};
+
+inline double elapsed_stage_ns(std::chrono::steady_clock::time_point begin,
+                               std::chrono::steady_clock::time_point end) {
+  return static_cast<double>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
+          .count());
+}
 
 inline uint32_t select_head_block(uint32_t head_dim) {
   if (head_dim <= 64) {
@@ -232,13 +254,15 @@ public:
   }
 
   void run(uint32_t valid_keys,
-           const std::vector<const lrrt::Event *> &dependencies = {}) {
+           const std::vector<const lrrt::Event *> &dependencies = {},
+           DecoderLayerStageTiming *timing = nullptr) {
     if (valid_keys == 0 || valid_keys > keys_) {
       throw std::runtime_error("mini decoder layer valid_keys is out of range");
     }
 
     const uint32_t half = head_dim_ / 2;
     const uint32_t query_position = valid_keys - 1;
+    auto stage_begin = std::chrono::steady_clock::now();
     launch(queue_, bundles_->get("attention_norm"), keys_,
            {
                arg("x", buffers_.ptr<float>("hidden_states")),
@@ -249,6 +273,11 @@ public:
                arg("hidden", (int32_t)hidden_),
            },
            dependencies);
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->attention_norm_ns += elapsed_stage_ns(stage_begin, stage_end);
+      stage_begin = stage_end;
+    }
 
     launch(queue_, bundles_->get("q_projection"), q_dim_,
            {
@@ -281,6 +310,11 @@ public:
               arg("hidden", (int32_t)hidden_),
           });
     }
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->qkv_projection_ns += elapsed_stage_ns(stage_begin, stage_end);
+      stage_begin = stage_end;
+    }
 
     for (uint32_t kv_head = 0; kv_head < kv_heads_; ++kv_head) {
       const uint32_t kv_head_offset = kv_head * head_dim_;
@@ -311,6 +345,11 @@ public:
                 arg("head_dim", (int32_t)head_dim_),
             });
       }
+    }
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->kv_cache_ns += elapsed_stage_ns(stage_begin, stage_end);
+      stage_begin = stage_end;
     }
 
     for (uint32_t head = 0; head < heads_; ++head) {
@@ -356,6 +395,11 @@ public:
                  arg("head_dim", (int32_t)head_dim_),
              });
     }
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->attention_ns += elapsed_stage_ns(stage_begin, stage_end);
+      stage_begin = stage_end;
+    }
     launch(queue_, bundles_->get("out_projection"), hidden_,
            {
                arg("x", buffers_.ptr<float>("attention_out")),
@@ -372,6 +416,11 @@ public:
                arg("out", buffers_.ptr<float>("attention_residual")),
                arg("n", (int32_t)hidden_),
            });
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->attention_output_ns += elapsed_stage_ns(stage_begin, stage_end);
+      stage_begin = stage_end;
+    }
 
     launch(queue_, bundles_->get("mlp_norm"), 1,
            {
@@ -420,6 +469,10 @@ public:
                arg("out", buffers_.ptr<float>("out")),
                arg("n", (int32_t)hidden_),
            });
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->mlp_ns += elapsed_stage_ns(stage_begin, stage_end);
+    }
   }
 
   void synchronize() const { queue_.synchronize(); }
@@ -592,7 +645,9 @@ public:
     buffers_.copy_arena_to_device(packed);
   }
 
-  void run(const std::vector<const lrrt::Event *> &dependencies = {}) {
+  void run(const std::vector<const lrrt::Event *> &dependencies = {},
+           ModelTailStageTiming *timing = nullptr) {
+    auto stage_begin = std::chrono::steady_clock::now();
     launch(queue_, bundles_->get("final_norm"), 1,
            {
                arg("x", buffers_.ptr<float>("hidden")),
@@ -603,6 +658,11 @@ public:
                arg("hidden", (int32_t)hidden_),
            },
            dependencies);
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->final_norm_ns += elapsed_stage_ns(stage_begin, stage_end);
+      stage_begin = stage_end;
+    }
     launch(queue_, bundles_->get("lm_head"), vocab_,
            {
                arg("x", buffers_.ptr<float>("norm_hidden")),
@@ -611,6 +671,10 @@ public:
                arg("outputs", (int32_t)vocab_),
                arg("hidden", (int32_t)hidden_),
            });
+    if (timing) {
+      auto stage_end = std::chrono::steady_clock::now();
+      timing->lm_head_ns += elapsed_stage_ns(stage_begin, stage_end);
+    }
   }
 
   void synchronize() const { queue_.synchronize(); }
