@@ -311,6 +311,17 @@ std::string join_layer_counts(const std::vector<uint32_t> &counts) {
   return text;
 }
 
+std::string join_u32_values(const std::vector<uint32_t> &values) {
+  std::string text;
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (i != 0) {
+      text += ", ";
+    }
+    text += std::to_string(values[i]);
+  }
+  return text;
+}
+
 BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
                         uint32_t kv_heads, uint32_t head_dim,
                         uint32_t intermediate, uint32_t valid_keys,
@@ -1030,6 +1041,15 @@ int main(int argc, char **argv) {
            options.weights_path
                ? options.weights_path
                : (options.weights_dir ? options.weights_dir : "synthetic"));
+    if (!cases.empty()) {
+      const BenchmarkCase &shape = cases.front();
+      printf("Shape summary:      keys=%u valid_keys=%u hidden=%u heads=%u "
+             "kv_heads=%u head_dim=%u q_dim=%u kv_dim=%u intermediate=%u\n",
+             shape.keys, shape.valid_keys, shape.hidden, shape.heads,
+             shape.kv_heads, shape.head_dim, qkv_dim(shape), kv_dim(shape),
+             shape.intermediate);
+      printf("RoPE theta:         %.6g\n", shape.rope_theta);
+    }
     if (options.weights_dir) {
       printf("Layer count:        %u\n", options.layers);
       if (options.layer_sweep) {
@@ -1043,6 +1063,19 @@ int main(int argc, char **argv) {
                  ? "disabled"
                  : (tail_weights ? "token embedding + final norm + lm_head"
                                  : "not found"));
+      printf("Valid key source:   %s\n",
+             options.has_valid_keys ? "--valid-keys"
+                                    : (tail_weights ? "model_tail token count"
+                                                    : "layer key capacity"));
+      printf("Weight format:      lrrt.mini_decoder_weights v1, dtype=f32\n");
+      if (tail_weights) {
+        printf("Model tail format:  lrrt.mini_model_tail_weights v1, "
+               "dtype=f32\n");
+        printf("Prompt token ids:   [%s]\n",
+               join_u32_values(tail_weights->token_ids).c_str());
+        printf("Prompt tokens:      %zu\n", tail_weights->token_ids.size());
+        printf("Vocab size:         %u\n", tail_weights->vocab);
+      }
     }
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
