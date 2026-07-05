@@ -17,6 +17,11 @@ lrrt_add_test_executable(
   device_buffer_ownership.cpp
   lrrt::lrrt
 )
+lrrt_add_test_executable(
+  lrrt_queue_event_lifetime_tests
+  queue_event_lifetime.cpp
+  lrrt::lrrt
+)
 lrrt_add_test_executable(lrrt_async_copy_tests async_copy.cpp lrrt::lrrt)
 lrrt_add_test_executable(
   lrrt_async_copy_launch_tests
@@ -124,6 +129,8 @@ if(ASYNC_COPY_LAUNCH_HSACO)
   add_dependencies(lrrt_explicit_dependencies_tests
                    async_copy_launch_kernel_hsaco)
   add_dependencies(lrrt_multiple_queues_tests async_copy_launch_kernel_hsaco)
+  add_dependencies(lrrt_queue_event_lifetime_tests
+                   async_copy_launch_kernel_hsaco)
   target_compile_definitions(
     lrrt_async_copy_launch_tests
     PRIVATE LRRT_ASYNC_COPY_LAUNCH_HSACO="${ASYNC_COPY_LAUNCH_HSACO}"
@@ -138,6 +145,10 @@ if(ASYNC_COPY_LAUNCH_HSACO)
   )
   target_compile_definitions(
     lrrt_multiple_queues_tests
+    PRIVATE LRRT_ASYNC_COPY_LAUNCH_HSACO="${ASYNC_COPY_LAUNCH_HSACO}"
+  )
+  target_compile_definitions(
+    lrrt_queue_event_lifetime_tests
     PRIVATE LRRT_ASYNC_COPY_LAUNCH_HSACO="${ASYNC_COPY_LAUNCH_HSACO}"
   )
 endif()
