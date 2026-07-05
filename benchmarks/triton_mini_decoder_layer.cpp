@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <inttypes.h>
 #include <limits>
 #include <memory>
 #include <stdlib.h>
@@ -56,6 +57,12 @@ struct Measurements {
   double cpu_round_trip_ns;
   double cpu_burst_interval_ns;
   double gpu_burst_interval_ns;
+  double setup_ns;
+  double warmup_ns;
+  double setup_construct_ns;
+  double setup_model_copy_ns;
+  double setup_tail_model_copy_ns;
+  lrrt::MemoryStats memory_stats;
   bool produced_logits;
   uint32_t vocab;
   std::vector<LogitEntry> top_logits;
@@ -72,6 +79,23 @@ struct Options {
   uint32_t valid_keys;
   bool has_valid_keys;
   bool layer_sweep;
+  bool no_warmup;
+  bool no_model_tail;
+  bool trace_setup;
+  bool trace_run;
+};
+
+struct StackSubmission {
+  std::vector<std::unique_ptr<lrrt::Event>> source_complete;
+  std::vector<std::unique_ptr<lrrt::Event>> handoff_complete;
+  std::unique_ptr<lrrt::Event> tail_source_complete;
+  std::unique_ptr<lrrt::Event> tail_handoff_complete;
+};
+
+struct SetupBreakdown {
+  double construct_ns = 0.0;
+  double model_copy_ns = 0.0;
+  double tail_model_copy_ns = 0.0;
 };
 
 uint32_t qkv_dim(const BenchmarkCase &benchmark_case) {
@@ -113,7 +137,8 @@ uint32_t parse_u32(const char *text, const char *label) {
 }
 
 Options parse_options(int argc, char **argv) {
-  Options options{20, nullptr, nullptr, 0, 0, false, false};
+  Options options{20,    nullptr, nullptr, 0,     0,    false,
+                  false, false,   false,   false, false};
   bool saw_iterations = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--weights") == 0) {
@@ -139,6 +164,14 @@ Options parse_options(int argc, char **argv) {
       options.has_valid_keys = true;
     } else if (strcmp(argv[i], "--layer-sweep") == 0) {
       options.layer_sweep = true;
+    } else if (strcmp(argv[i], "--no-warmup") == 0) {
+      options.no_warmup = true;
+    } else if (strcmp(argv[i], "--no-model-tail") == 0) {
+      options.no_model_tail = true;
+    } else if (strcmp(argv[i], "--trace-setup") == 0) {
+      options.trace_setup = true;
+    } else if (strcmp(argv[i], "--trace-run") == 0) {
+      options.trace_run = true;
     } else if (!saw_iterations) {
       options.iterations = parse_u32(argv[i], "benchmark count");
       saw_iterations = true;
@@ -146,7 +179,8 @@ Options parse_options(int argc, char **argv) {
       throw std::invalid_argument(
           "usage: lrrt_triton_mini_decoder_layer_benchmark [count] "
           "[--weights weights.json | --weights-dir dir --layers count] "
-          "[--valid-keys count] [--layer-sweep]");
+          "[--valid-keys count] [--layer-sweep] [--no-warmup] "
+          "[--no-model-tail] [--trace-setup] [--trace-run]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -169,6 +203,10 @@ double elapsed_ns(Clock::time_point begin, Clock::time_point end) {
   return static_cast<double>(
       std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
           .count());
+}
+
+double mib(uint64_t bytes) {
+  return static_cast<double>(bytes) / (1024.0 * 1024.0);
 }
 
 std::vector<LogitEntry> top_logits(const std::vector<float> &logits,
@@ -378,16 +416,21 @@ load_tail_weights(const char *weights_dir) {
 Measurements measure_case(lrrt::Device &device,
                           const BenchmarkCase &benchmark_case,
                           uint32_t iterations, uint32_t warmup_iterations) {
+  device.reset_memory_stats();
+  auto setup_begin = Clock::now();
   lrrt::executor::triton::mini::DecoderLayer executor(
       device, benchmark_case.keys, benchmark_case.hidden, benchmark_case.heads,
       benchmark_case.kv_heads, benchmark_case.head_dim,
       benchmark_case.intermediate);
   copy_inputs(executor, benchmark_case);
+  auto setup_end = Clock::now();
 
+  auto warmup_begin = Clock::now();
   for (uint32_t i = 0; i < warmup_iterations; ++i) {
     executor.run(benchmark_case.valid_keys);
     executor.synchronize();
   }
+  auto warmup_end = Clock::now();
 
   double cpu_round_trip_ns = 0.0;
   for (uint32_t i = 0; i < iterations; ++i) {
@@ -424,6 +467,12 @@ Measurements measure_case(lrrt::Device &device,
   return {cpu_round_trip_ns,
           cpu_burst_interval_ns,
           gpu_burst_interval_ns,
+          elapsed_ns(setup_begin, setup_end),
+          elapsed_ns(warmup_begin, warmup_end),
+          0.0,
+          0.0,
+          0.0,
+          device.memory_stats(),
           false,
           0,
           {},
@@ -436,7 +485,9 @@ Measurements measure_stack_case(
     lrrt::Device &device, const std::vector<BenchmarkCase> &layers,
     size_t layer_count,
     const lrrt::executor::triton::mini::ModelTailWeights *tail_weights,
-    uint32_t iterations, uint32_t warmup_iterations) {
+    uint32_t iterations, uint32_t warmup_iterations, bool trace_setup,
+    bool trace_run) {
+  device.reset_memory_stats();
   if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
   }
@@ -458,27 +509,82 @@ Measurements measure_stack_case(
         "decoder stack model tail shape does not match layer hidden size");
   }
 
+  auto setup_begin = Clock::now();
+  SetupBreakdown setup_breakdown;
+  auto layer_bundles = lrrt::executor::triton::mini::make_decoder_layer_bundles(
+      device, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
+      shape.head_dim, shape.intermediate);
   std::vector<std::unique_ptr<lrrt::executor::triton::mini::DecoderLayer>>
       executors;
   executors.reserve(layer_count);
   for (size_t i = 0; i < layer_count; ++i) {
+    if (trace_setup) {
+      fprintf(stderr, "  setup layer %zu/%zu begin\n", i + 1, layer_count);
+      fflush(stderr);
+    }
     const BenchmarkCase &layer = layers[i];
+    auto construct_begin = Clock::now();
+    if (trace_setup) {
+      fprintf(stderr, "    construct begin\n");
+      fflush(stderr);
+    }
     executors.push_back(
         std::make_unique<lrrt::executor::triton::mini::DecoderLayer>(
             device, layer.keys, layer.hidden, layer.heads, layer.kv_heads,
-            layer.head_dim, layer.intermediate));
+            layer.head_dim, layer.intermediate, layer_bundles));
+    auto construct_end = Clock::now();
+    setup_breakdown.construct_ns += elapsed_ns(construct_begin, construct_end);
+    if (trace_setup) {
+      fprintf(stderr, "    construct end %.3f ms\n",
+              elapsed_ns(construct_begin, construct_end) / 1.0e6);
+      fflush(stderr);
+    }
+
+    auto model_copy_begin = Clock::now();
+    if (trace_setup) {
+      fprintf(stderr, "    model copy begin\n");
+      fflush(stderr);
+    }
     copy_inputs(*executors.back(), layer);
+    auto model_copy_end = Clock::now();
+    setup_breakdown.model_copy_ns +=
+        elapsed_ns(model_copy_begin, model_copy_end);
+    if (trace_setup) {
+      fprintf(stderr, "    model copy end %.3f ms\n",
+              elapsed_ns(model_copy_begin, model_copy_end) / 1.0e6);
+      fflush(stderr);
+    }
+
+    if (trace_setup) {
+      fprintf(stderr, "  setup layer %zu/%zu end\n", i + 1, layer_count);
+      fflush(stderr);
+    }
   }
   std::unique_ptr<lrrt::executor::triton::mini::ModelTail> tail;
   if (tail_weights) {
+    if (trace_setup) {
+      fprintf(stderr, "  setup model tail begin\n");
+      fflush(stderr);
+    }
+    auto tail_bundles = lrrt::executor::triton::mini::make_model_tail_bundles(
+        device, tail_weights->hidden);
     tail = std::make_unique<lrrt::executor::triton::mini::ModelTail>(
-        device, tail_weights->hidden, tail_weights->vocab);
+        device, tail_weights->hidden, tail_weights->vocab, tail_bundles);
     std::vector<float> first_token_embedding(
         tail_weights->token_embeddings.begin(),
         tail_weights->token_embeddings.begin() + tail_weights->hidden);
+    auto tail_model_copy_begin = Clock::now();
     tail->copy_weights(first_token_embedding, tail_weights->final_norm_weight,
                        tail_weights->lm_head_weight);
+    auto tail_model_copy_end = Clock::now();
+    setup_breakdown.tail_model_copy_ns =
+        elapsed_ns(tail_model_copy_begin, tail_model_copy_end);
+    if (trace_setup) {
+      fprintf(stderr, "  setup model tail end\n");
+      fflush(stderr);
+    }
   }
+  auto setup_end = Clock::now();
 
   const uint32_t valid_keys = shape.valid_keys;
   const auto handoff_index = [valid_keys](size_t layer, uint32_t key) {
@@ -494,16 +600,18 @@ Measurements measure_stack_case(
     }
   };
 
-  auto submit_stack = [&](lrrt::Event *gpu_start, lrrt::Event *gpu_end) {
-    std::vector<std::unique_ptr<lrrt::Event>> source_complete;
-    std::vector<std::unique_ptr<lrrt::Event>> handoff_complete;
+  auto submit_stack = [&](lrrt::Event *gpu_start,
+                          lrrt::Event *gpu_end) -> StackSubmission {
+    StackSubmission submission;
     const size_t handoff_count =
         layer_count > 1 ? (layer_count - 1) * valid_keys : 0;
-    source_complete.reserve(handoff_count);
-    handoff_complete.reserve(handoff_count);
+    submission.source_complete.reserve(handoff_count);
+    submission.handoff_complete.reserve(handoff_count);
     for (size_t i = 0; i < handoff_count; ++i) {
-      source_complete.push_back(std::make_unique<lrrt::Event>(device));
-      handoff_complete.push_back(std::make_unique<lrrt::Event>(device));
+      submission.source_complete.push_back(
+          std::make_unique<lrrt::Event>(device));
+      submission.handoff_complete.push_back(
+          std::make_unique<lrrt::Event>(device));
     }
     if (gpu_start) {
       gpu_start->record(executors.front()->queue());
@@ -512,28 +620,27 @@ Measurements measure_stack_case(
     for (size_t layer = 0; layer < layer_count; ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
         std::vector<const lrrt::Event *> dependencies;
-        if (gpu_start && layer == 0 && key == 1) {
-          dependencies.push_back(gpu_start);
-        }
         if (layer > 0) {
           dependencies.push_back(
-              handoff_complete[handoff_index(layer - 1, key)].get());
+              submission.handoff_complete[handoff_index(layer - 1, key)].get());
         }
         executors[layer]->run(key, dependencies);
         if (layer + 1 < layer_count) {
           const size_t index = handoff_index(layer, key);
           executors[layer]->copy_output_to_hidden_state_async(
-              *executors[layer + 1], key - 1, *source_complete[index],
-              *handoff_complete[index]);
+              *executors[layer + 1], key - 1,
+              *submission.source_complete[index],
+              *submission.handoff_complete[index]);
         }
       }
     }
     if (tail) {
-      lrrt::Event source_complete(device);
-      lrrt::Event handoff_complete(device);
+      submission.tail_source_complete = std::make_unique<lrrt::Event>(device);
+      submission.tail_handoff_complete = std::make_unique<lrrt::Event>(device);
       executors.back()->copy_output_to_buffer_async(
-          tail->hidden_buffer(), source_complete, handoff_complete);
-      tail->run({&handoff_complete});
+          tail->hidden_buffer(), *submission.tail_source_complete,
+          *submission.tail_handoff_complete);
+      tail->run({submission.tail_handoff_complete.get()});
     }
     if (gpu_end) {
       if (tail) {
@@ -542,34 +649,44 @@ Measurements measure_stack_case(
         gpu_end->record(executors.back()->queue());
       }
     }
+    return submission;
   };
 
   auto run_stack = [&]() {
-    submit_stack(nullptr, nullptr);
+    StackSubmission submission = submit_stack(nullptr, nullptr);
     synchronize_stack();
   };
 
+  auto warmup_begin = Clock::now();
   for (uint32_t i = 0; i < warmup_iterations; ++i) {
+    if (trace_run) {
+      fprintf(stderr, "  warmup %u/%u begin\n", i + 1, warmup_iterations);
+      fflush(stderr);
+    }
     run_stack();
+    if (trace_run) {
+      fprintf(stderr, "  warmup %u/%u end\n", i + 1, warmup_iterations);
+      fflush(stderr);
+    }
   }
+  auto warmup_end = Clock::now();
 
   double cpu_round_trip_ns = 0.0;
   for (uint32_t i = 0; i < iterations; ++i) {
+    if (trace_run) {
+      fprintf(stderr, "  cpu round %u/%u begin\n", i + 1, iterations);
+      fflush(stderr);
+    }
     auto begin = Clock::now();
     run_stack();
     auto end = Clock::now();
+    if (trace_run) {
+      fprintf(stderr, "  cpu round %u/%u end\n", i + 1, iterations);
+      fflush(stderr);
+    }
     cpu_round_trip_ns += elapsed_ns(begin, end);
   }
   cpu_round_trip_ns /= static_cast<double>(iterations);
-
-  lrrt::Event gpu_start(device);
-  lrrt::Event gpu_end(device);
-  submit_stack(&gpu_start, &gpu_end);
-  gpu_end.synchronize();
-  gpu_start.synchronize();
-  double gpu_burst_interval_ns =
-      static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end));
-  synchronize_stack();
 
   std::vector<LogitEntry> summary;
   size_t non_finite_logits = 0;
@@ -589,7 +706,13 @@ Measurements measure_stack_case(
 
   return {cpu_round_trip_ns,
           cpu_round_trip_ns,
-          gpu_burst_interval_ns,
+          -1.0,
+          elapsed_ns(setup_begin, setup_end),
+          elapsed_ns(warmup_begin, warmup_end),
+          setup_breakdown.construct_ns,
+          setup_breakdown.model_copy_ns,
+          setup_breakdown.tail_model_copy_ns,
+          device.memory_stats(),
           tail != nullptr,
           tail_weights ? tail_weights->vocab : 0,
           summary,
@@ -631,23 +754,44 @@ void print_case(const BenchmarkCase &benchmark_case,
          measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
 }
 
+void print_memory_stats(const Measurements &measurements,
+                        const Colors &colors) {
+  const lrrt::MemoryStats &stats = measurements.memory_stats;
+  printf("%sMemory%s live=%.3f MiB peak=%.3f MiB allocated=%.3f MiB "
+         "freed=%.3f MiB allocs=%" PRIu64 " frees=%" PRIu64 "\n",
+         colors.label, colors.reset, mib(stats.live_bytes),
+         mib(stats.peak_live_bytes), mib(stats.total_allocated_bytes),
+         mib(stats.total_freed_bytes), stats.allocation_count,
+         stats.free_count);
+  printf(
+      "%sMemcpy%s h2d=%.3f MiB d2h=%.3f MiB d2d=%.3f MiB calls=%" PRIu64 "\n",
+      colors.label, colors.reset, mib(stats.h2d_copy_bytes),
+      mib(stats.d2h_copy_bytes), mib(stats.d2d_copy_bytes), stats.memcpy_count);
+}
+
 void print_stack_case(const std::vector<BenchmarkCase> &layers,
                       size_t layer_count, const Measurements &measurements,
                       const Colors &colors) {
   const BenchmarkCase &shape = layers.front();
   const uint32_t dispatches_per_stack = estimated_stack_dispatches(
       layers, layer_count, measurements.produced_logits);
-  printf("%-26s %6zu %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u "
-         "%s%11.3f%s "
-         "%s%11s%s %s%11.3f%s\n",
-         measurements.produced_logits ? "decoder stack+logits"
-                                      : "decoder stack",
-         layer_count, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
-         shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
-         shape.valid_keys, dispatches_per_stack, colors.time,
-         measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
-         "runtime-copy", colors.reset, colors.time,
-         measurements.gpu_burst_interval_ns / 1.0e3, colors.reset);
+  char gpu_burst_text[32] = {};
+  if (measurements.gpu_burst_interval_ns >= 0.0) {
+    snprintf(gpu_burst_text, sizeof(gpu_burst_text), "%11.3f",
+             measurements.gpu_burst_interval_ns / 1.0e3);
+  } else {
+    snprintf(gpu_burst_text, sizeof(gpu_burst_text), "%11s", "n/a");
+  }
+  printf(
+      "%-26s %6zu %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u "
+      "%s%11.3f%s "
+      "%s%11s%s %s%s%s\n",
+      measurements.produced_logits ? "decoder stack+logits" : "decoder stack",
+      layer_count, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
+      shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
+      shape.valid_keys, dispatches_per_stack, colors.time,
+      measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
+      "runtime-copy", colors.reset, colors.time, gpu_burst_text, colors.reset);
   if (measurements.produced_logits && measurements.top_logits.empty()) {
     printf("%sTop logits%s unavailable; non-finite hidden=%zu norm_hidden=%zu "
            "logits=%zu/%u\n",
@@ -673,6 +817,16 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
     }
     printf("\n");
   }
+  printf("%sSetup/Warmup%s setup=%.3f ms warmup=%.3f ms\n", colors.label,
+         colors.reset, measurements.setup_ns / 1.0e6,
+         measurements.warmup_ns / 1.0e6);
+  printf("%sSetup detail%s construct=%.3f ms model-copy=%.3f ms "
+         "tail-model-copy=%.3f ms\n",
+         colors.label, colors.reset, measurements.setup_construct_ns / 1.0e6,
+         measurements.setup_model_copy_ns / 1.0e6,
+         measurements.setup_tail_model_copy_ns / 1.0e6);
+  print_memory_stats(measurements, colors);
+  fflush(stdout);
 }
 
 } // namespace
@@ -681,7 +835,8 @@ int main(int argc, char **argv) {
   try {
     const Options options = parse_options(argc, argv);
     const uint32_t iterations = options.iterations;
-    const uint32_t warmup_iterations = std::min(iterations, 5u);
+    const uint32_t warmup_iterations =
+        options.no_warmup ? 0 : std::min(iterations, 5u);
 
     lrrt::Runtime runtime;
     if (runtime.device_count() == 0) {
@@ -705,7 +860,7 @@ int main(int argc, char **argv) {
       cases.push_back(make_case(weights, valid_keys));
     } else if (options.weights_dir) {
       auto weights = load_layer_weights(options.weights_dir, options.layers);
-      if (has_tail_weights(options.weights_dir)) {
+      if (!options.no_model_tail && has_tail_weights(options.weights_dir)) {
         tail_weights =
             std::make_unique<lrrt::executor::triton::mini::ModelTailWeights>(
                 load_tail_weights(options.weights_dir));
@@ -762,7 +917,10 @@ int main(int argc, char **argv) {
     printf("Queueing:           %s\n",
            options.weights_dir ? "ordered launches on one lrrt queue per layer"
                                : "ordered launches on one lrrt queue");
-    printf("Timing source:      CPU steady_clock and HSA GPU event markers\n");
+    printf("Timing source:      %s\n",
+           options.weights_dir
+               ? "CPU steady_clock; stack GPU event timing disabled"
+               : "CPU steady_clock and HSA GPU event markers");
     printf("Weight source:      %s\n",
            options.weights_path
                ? options.weights_path
@@ -776,8 +934,10 @@ int main(int argc, char **argv) {
       printf("Stack handoff:      queued async device-to-device copy between "
              "layers\n");
       printf("Model tail:         %s\n",
-             tail_weights ? "token embedding + final norm + lm_head"
-                          : "not found");
+             options.no_model_tail
+                 ? "disabled"
+                 : (tail_weights ? "token embedding + final norm + lm_head"
+                                 : "not found"));
     }
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per shape\n\n", warmup_iterations);
@@ -792,19 +952,28 @@ int main(int argc, char **argv) {
         "--------------------------", "------", "-----", "-------", "-----",
         "-------", "--------", "-------", "-----", "------------", "----------",
         "----------", "-----------", "-----------", "-----------");
+    fflush(stdout);
 
     if (options.weights_dir) {
       if (options.layer_sweep) {
         for (uint32_t count : layer_sweep_counts(options.layers)) {
-          Measurements measurements =
-              measure_stack_case(device, cases, count, tail_weights.get(),
-                                 iterations, warmup_iterations);
+          fprintf(stderr, "running decoder stack benchmark: layers=%u\n",
+                  count);
+          fflush(stderr);
+          Measurements measurements = measure_stack_case(
+              device, cases, count, tail_weights.get(), iterations,
+              warmup_iterations, options.trace_setup,
+              options.trace_setup || options.trace_run);
           print_stack_case(cases, count, measurements, colors);
         }
       } else {
-        Measurements measurements =
-            measure_stack_case(device, cases, cases.size(), tail_weights.get(),
-                               iterations, warmup_iterations);
+        fprintf(stderr, "running decoder stack benchmark: layers=%zu\n",
+                cases.size());
+        fflush(stderr);
+        Measurements measurements = measure_stack_case(
+            device, cases, cases.size(), tail_weights.get(), iterations,
+            warmup_iterations, options.trace_setup,
+            options.trace_setup || options.trace_run);
         print_stack_case(cases, cases.size(), measurements, colors);
       }
     } else {
@@ -812,6 +981,7 @@ int main(int argc, char **argv) {
         Measurements measurements =
             measure_case(device, benchmark_case, iterations, warmup_iterations);
         print_case(benchmark_case, measurements, colors);
+        print_memory_stats(measurements, colors);
       }
     }
 
@@ -822,9 +992,8 @@ int main(int argc, char **argv) {
            "followed by one final synchronize() with steady_clock.\n",
            colors.label, colors.reset);
     if (options.weights_dir) {
-      printf("%sGPU burst%s measures HSA event elapsed time around one queued "
-             "decoder stack chain, from the first layer queue marker to the "
-             "last layer or model-tail queue marker.\n",
+      printf("%sGPU burst%s is n/a for decoder stacks because cross-queue HSA "
+             "event timing can hang on the current multi-queue pipeline.\n",
              colors.label, colors.reset);
     } else {
       printf("%sGPU burst%s measures HSA event elapsed time around repeated "

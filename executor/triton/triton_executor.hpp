@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <cstring>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -88,9 +89,17 @@ private:
 
 class BufferSet {
 public:
-  explicit BufferSet(lrrt::Device device) : device_(device) {}
+  explicit BufferSet(lrrt::Device device, bool arena = false)
+      : device_(device), arena_enabled_(arena), finalized_(!arena) {}
 
   void allocate_bytes(const std::string &name, size_t bytes) {
+    if (finalized_ && arena_enabled_) {
+      throw std::runtime_error("Triton executor arena buffer set is finalized");
+    }
+    if (arena_enabled_) {
+      pending_buffers_.push_back(PendingBuffer{name, bytes});
+      return;
+    }
     try {
       buffers_[name] = std::make_unique<lrrt::DeviceBuffer>(device_, bytes);
     } catch (const std::exception &error) {
@@ -109,7 +118,38 @@ public:
     allocate_bytes(name, count * sizeof(T));
   }
 
+  void finalize() {
+    if (finalized_) {
+      return;
+    }
+    size_t total = 0;
+    for (const PendingBuffer &buffer : pending_buffers_) {
+      total = align_up(total, kArenaAlignment);
+      if (buffer.bytes > std::numeric_limits<size_t>::max() - total) {
+        throw std::overflow_error(
+            "Triton executor arena allocation overflows size_t");
+      }
+      total += buffer.bytes;
+    }
+    arena_ = std::make_unique<lrrt::DeviceBuffer>(device_, total);
+    auto *base = static_cast<unsigned char *>(arena_->data());
+    size_t offset = 0;
+    for (const PendingBuffer &buffer : pending_buffers_) {
+      offset = align_up(offset, kArenaAlignment);
+      offsets_[buffer.name] = offset;
+      buffers_[buffer.name] = std::make_unique<lrrt::DeviceBuffer>(
+          lrrt::DeviceBuffer::view(device_.get(), base + offset, buffer.bytes));
+      offset += buffer.bytes;
+    }
+    arena_size_ = total;
+    pending_buffers_.clear();
+    finalized_ = true;
+  }
+
   lrrt::DeviceBuffer &get(const std::string &name) const {
+    if (!finalized_) {
+      throw std::runtime_error("Triton executor buffer set is not finalized");
+    }
     auto buffer = buffers_.find(name);
     if (buffer == buffers_.end()) {
       throw std::runtime_error("unknown Triton executor buffer '" + name +
@@ -150,8 +190,77 @@ public:
     lrrt::copy_to_host(dst, get(name));
   }
 
+  bool uses_arena() const { return arena_enabled_; }
+  size_t arena_size() const { return arena_size_; }
+
+  size_t byte_offset(const std::string &name) const {
+    if (!finalized_ || !arena_enabled_) {
+      throw std::runtime_error(
+          "Triton executor buffer set does not have arena offsets");
+    }
+    auto offset = offsets_.find(name);
+    if (offset == offsets_.end()) {
+      throw std::runtime_error("unknown Triton executor buffer '" + name +
+                               "'; available buffers: " +
+                               detail::join_names(detail::keys(offsets_)));
+    }
+    return offset->second;
+  }
+
+  template <typename T>
+  void pack(std::vector<unsigned char> &dst, const std::string &name,
+            const std::vector<T> &src) const {
+    const lrrt::DeviceBuffer &buffer = get(name);
+    const size_t bytes = src.size() * sizeof(T);
+    if (bytes > buffer.size()) {
+      throw std::runtime_error(
+          "Triton executor packed copy overflows buffer '" + name + "'");
+    }
+    const size_t offset = byte_offset(name);
+    if (offset > dst.size() || bytes > dst.size() - offset) {
+      throw std::runtime_error(
+          "Triton executor packed copy is out of range for '" + name + "'");
+    }
+    if (bytes != 0) {
+      std::memcpy(dst.data() + offset, src.data(), bytes);
+    }
+  }
+
+  void copy_arena_to_device(const std::vector<unsigned char> &src) const {
+    if (!arena_ || src.size() != arena_size_) {
+      throw std::runtime_error("Triton executor arena copy size mismatch");
+    }
+    lrrt::copy_to_device(*arena_, src);
+  }
+
 private:
+  static constexpr size_t kArenaAlignment = 256;
+
+  struct PendingBuffer {
+    std::string name;
+    size_t bytes;
+  };
+
+  static size_t align_up(size_t value, size_t alignment) {
+    const size_t remainder = value % alignment;
+    if (remainder == 0) {
+      return value;
+    }
+    const size_t padding = alignment - remainder;
+    if (value > std::numeric_limits<size_t>::max() - padding) {
+      throw std::overflow_error(
+          "Triton executor arena alignment overflows size_t");
+    }
+    return value + padding;
+  }
+
   lrrt::Device device_;
+  bool arena_enabled_;
+  bool finalized_;
+  size_t arena_size_ = 0;
+  std::vector<PendingBuffer> pending_buffers_;
+  std::unique_ptr<lrrt::DeviceBuffer> arena_;
+  std::unordered_map<std::string, size_t> offsets_;
   std::unordered_map<std::string, std::unique_ptr<lrrt::DeviceBuffer>> buffers_;
 };
 

@@ -9,6 +9,8 @@
 
 namespace lrrt {
 
+using MemoryStats = lr_memory_stats_t;
+
 class Device {
 public:
   explicit Device(lr_device_t device) : device_(device) {}
@@ -21,6 +23,14 @@ public:
     return std::string(name);
   }
   void synchronize() const { check(lr_synchronize(device_), "lr_synchronize"); }
+  MemoryStats memory_stats() const {
+    MemoryStats stats{};
+    check(lr_get_memory_stats(device_, &stats), "lr_get_memory_stats");
+    return stats;
+  }
+  void reset_memory_stats() const {
+    check(lr_reset_memory_stats(device_), "lr_reset_memory_stats");
+  }
 
 private:
   lr_device_t device_;

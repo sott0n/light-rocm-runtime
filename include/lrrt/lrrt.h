@@ -50,6 +50,19 @@ typedef struct lr_launch_config_t {
   uint32_t shared_memory_bytes;
 } lr_launch_config_t;
 
+typedef struct lr_memory_stats_t {
+  uint64_t live_bytes;
+  uint64_t peak_live_bytes;
+  uint64_t total_allocated_bytes;
+  uint64_t total_freed_bytes;
+  uint64_t allocation_count;
+  uint64_t free_count;
+  uint64_t h2d_copy_bytes;
+  uint64_t d2h_copy_bytes;
+  uint64_t d2d_copy_bytes;
+  uint64_t memcpy_count;
+} lr_memory_stats_t;
+
 LRRT_API const char *lr_status_string(lr_status_t status);
 
 LRRT_API lr_status_t lr_init(void);
@@ -61,6 +74,9 @@ LRRT_API lr_status_t lr_device_count(uint32_t *count);
 LRRT_API lr_status_t lr_device_open(uint32_t index, lr_device_t *device);
 LRRT_API lr_status_t lr_device_name(lr_device_t device, char *name,
                                     size_t name_size);
+LRRT_API lr_status_t lr_get_memory_stats(lr_device_t device,
+                                         lr_memory_stats_t *stats);
+LRRT_API lr_status_t lr_reset_memory_stats(lr_device_t device);
 
 LRRT_API lr_status_t lr_queue_create(lr_device_t device, lr_queue_t **queue);
 /* Waits for queue work before releasing the queue. */

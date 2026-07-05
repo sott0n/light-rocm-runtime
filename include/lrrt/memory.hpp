@@ -10,18 +10,29 @@ namespace lrrt {
 class DeviceBuffer {
 public:
   DeviceBuffer(lr_device_t device, size_t size)
-      : device_(device), ptr_(nullptr), size_(size) {
+      : device_(device), ptr_(nullptr), size_(size), owner_(true) {
     check(lr_malloc(device_, size_, &ptr_), "lr_malloc");
   }
 
   DeviceBuffer(Device device, size_t size) : DeviceBuffer(device.get(), size) {}
 
+  static DeviceBuffer view(lr_device_t device, void *ptr, size_t size) {
+    DeviceBuffer buffer;
+    buffer.device_ = device;
+    buffer.ptr_ = ptr;
+    buffer.size_ = size;
+    buffer.owner_ = false;
+    return buffer;
+  }
+
   ~DeviceBuffer() { reset(); }
 
   DeviceBuffer(DeviceBuffer &&other) noexcept
-      : device_(other.device_), ptr_(other.ptr_), size_(other.size_) {
+      : device_(other.device_), ptr_(other.ptr_), size_(other.size_),
+        owner_(other.owner_) {
     other.ptr_ = nullptr;
     other.size_ = 0;
+    other.owner_ = true;
   }
 
   DeviceBuffer(const DeviceBuffer &) = delete;
@@ -33,8 +44,10 @@ public:
       device_ = other.device_;
       ptr_ = other.ptr_;
       size_ = other.size_;
+      owner_ = other.owner_;
       other.ptr_ = nullptr;
       other.size_ = 0;
+      other.owner_ = true;
     }
     return *this;
   }
@@ -44,17 +57,21 @@ public:
   lr_device_t device() const { return device_; }
 
 private:
+  DeviceBuffer() : device_{}, ptr_(nullptr), size_(0), owner_(true) {}
+
   void reset() noexcept {
-    if (ptr_) {
+    if (ptr_ && owner_) {
       lr_free(device_, ptr_);
-      ptr_ = nullptr;
-      size_ = 0;
     }
+    ptr_ = nullptr;
+    size_ = 0;
+    owner_ = true;
   }
 
   lr_device_t device_;
   void *ptr_;
   size_t size_;
+  bool owner_;
 };
 
 inline void copy_to_device(DeviceBuffer &dst, const void *src, size_t size) {

@@ -76,6 +76,14 @@ int main(void) {
       throw std::runtime_error("Device reported an empty name");
     }
 
+    device.reset_memory_stats();
+    lrrt::MemoryStats initial_stats = device.memory_stats();
+    if (initial_stats.live_bytes != 0 || initial_stats.peak_live_bytes != 0 ||
+        initial_stats.allocation_count != 0 ||
+        initial_stats.memcpy_count != 0) {
+      throw std::runtime_error("memory stats did not reset");
+    }
+
     const int n = 64;
     const float alpha = 3.0f;
     float in[n];
@@ -103,6 +111,17 @@ int main(void) {
       if (fabsf(copied[i] - in[i]) > 0.001f) {
         throw std::runtime_error("device copy result mismatch");
       }
+    }
+
+    lrrt::MemoryStats copy_stats = device.memory_stats();
+    if (copy_stats.live_bytes < sizeof(in) * 3 ||
+        copy_stats.peak_live_bytes < copy_stats.live_bytes ||
+        copy_stats.total_allocated_bytes < sizeof(in) * 3 ||
+        copy_stats.allocation_count < 4 ||
+        copy_stats.h2d_copy_bytes < sizeof(in) ||
+        copy_stats.d2h_copy_bytes < sizeof(in) ||
+        copy_stats.d2d_copy_bytes < sizeof(in) || copy_stats.memcpy_count < 3) {
+      throw std::runtime_error("memory stats did not track allocations/copies");
     }
 
     float partial[4] = {-1.0f, -1.0f, -1.0f, -1.0f};

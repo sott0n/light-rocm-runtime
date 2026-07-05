@@ -107,6 +107,7 @@ struct DeviceState {
   lr_queue_t *default_queue;
   std::vector<lr_queue_t *> queues;
   std::vector<lr_event_t *> pending_events;
+  lr_memory_stats_t memory_stats;
 };
 
 struct SymbolSearch {
@@ -148,8 +149,8 @@ hsa_status_t collect_gpu_agents(hsa_agent_t agent, void *data) {
     if (status != HSA_STATUS_SUCCESS) {
       return status;
     }
-    devices->push_back(
-        DeviceState{agent, std::string(name), {}, {}, false, false, nullptr});
+    devices->push_back(DeviceState{
+        agent, std::string(name), {}, {}, false, false, nullptr, {}, {}, {}});
   }
   return HSA_STATUS_SUCCESS;
 }
@@ -655,6 +656,35 @@ bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
   }
   return false;
 }
+
+void record_allocation(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.live_bytes += size;
+  stats.total_allocated_bytes += size;
+  ++stats.allocation_count;
+  if (stats.live_bytes > stats.peak_live_bytes) {
+    stats.peak_live_bytes = stats.live_bytes;
+  }
+}
+
+void record_free(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.live_bytes = size > stats.live_bytes ? 0 : stats.live_bytes - size;
+  stats.total_freed_bytes += size;
+  ++stats.free_count;
+}
+
+void record_memcpy(DeviceState *device, lr_memcpy_kind_t kind, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    stats.h2d_copy_bytes += size;
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    stats.d2h_copy_bytes += size;
+  } else if (kind == LR_MEMCPY_DEVICE_TO_DEVICE) {
+    stats.d2d_copy_bytes += size;
+  }
+  ++stats.memcpy_count;
+}
 #endif
 
 bool valid_device(lr_device_t device) {
@@ -859,6 +889,49 @@ lr_status_t lr_device_name(lr_device_t device, char *name, size_t name_size) {
 #else
   (void)device;
   name[0] = '\0';
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_get_memory_stats(lr_device_t device, lr_memory_stats_t *stats) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!valid_device(device) || !stats) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  *stats = g_devices[device.index].memory_stats;
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_reset_memory_stats(lr_device_t device) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!valid_device(device)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  lr_memory_stats_t reset{};
+  reset.live_bytes = g_devices[device.index].memory_stats.live_bytes;
+  reset.peak_live_bytes = reset.live_bytes;
+  g_devices[device.index].memory_stats = reset;
+  return LR_SUCCESS;
+#else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
 }
@@ -1195,6 +1268,7 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
   }
 
   g_allocations[*ptr] = AllocationInfo{device.index, size};
+  record_allocation(&state, size);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -1222,10 +1296,12 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
     return drain_status;
   }
 
+  const size_t size = allocation->second.size;
   hsa_status_t status = hsa_memory_free(ptr);
   if (status != HSA_STATUS_SUCCESS) {
     return to_lr_status(status);
   }
+  record_free(&g_devices[device.index], size);
   g_allocations.erase(allocation);
   return LR_SUCCESS;
 #else
@@ -1272,7 +1348,11 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     return drain_status;
   }
 
-  return to_lr_status(hsa_memory_copy(dst, src, size));
+  hsa_status_t status = hsa_memory_copy(dst, src, size);
+  if (status == HSA_STATUS_SUCCESS) {
+    record_memcpy(&g_devices[device.index], kind, size);
+  }
+  return to_lr_status(status);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -1386,6 +1466,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     return to_lr_status(status);
   }
 
+  record_memcpy(&state, kind, size);
   event->dependencies = std::move(event_dependencies);
   for (lr_event_t *dependency : event->dependencies) {
     ++dependency->dependency_count;

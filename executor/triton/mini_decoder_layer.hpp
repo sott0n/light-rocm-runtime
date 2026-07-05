@@ -5,6 +5,7 @@
 #include "lrrt/lrrt.hpp"
 
 #include <math.h>
+#include <memory>
 #include <stdexcept>
 #include <stdint.h>
 #include <stdio.h>
@@ -72,6 +73,68 @@ inline uint32_t select_block(uint32_t size) {
   return 8192;
 }
 
+inline void validate_decoder_layer_shape(uint32_t heads, uint32_t kv_heads,
+                                         uint32_t head_dim) {
+  if (heads == 0 || kv_heads == 0 || kv_heads > heads ||
+      heads % kv_heads != 0 || head_dim == 0 || head_dim % 2 != 0) {
+    throw std::runtime_error("mini decoder layer invalid head shape");
+  }
+}
+
+inline std::shared_ptr<BundleSet>
+make_decoder_layer_bundles(lrrt::Device &device, uint32_t keys, uint32_t hidden,
+                           uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
+                           uint32_t intermediate) {
+  validate_decoder_layer_shape(heads, kv_heads, head_dim);
+  const uint32_t q_dim = heads * head_dim;
+  auto bundles = std::make_shared<BundleSet>(device);
+  bundles->add("attention_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
+               "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("mlp_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
+               "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("q_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("k_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("v_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("out_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(q_dim)));
+  bundles->add("gate_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("up_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("down_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(intermediate)));
+  bundles->add("score", LRRT_TRITON_MINI_LAYER_ATTENTION_SCORE_MANIFEST,
+               "attention_score_fp32_" +
+                   std::to_string(select_head_block(head_dim)));
+  bundles->add("softmax", LRRT_TRITON_MINI_LAYER_CAUSAL_SOFTMAX_MANIFEST,
+               "causal_softmax_fp32_" + std::to_string(select_block(keys)));
+  bundles->add("aggregation", LRRT_TRITON_MINI_LAYER_VALUE_AGGREGATION_MANIFEST,
+               "value_aggregation_fp32_" + std::to_string(select_block(keys)));
+  bundles->add("kv_update", LRRT_TRITON_MINI_LAYER_KV_CACHE_MANIFEST,
+               "kv_cache_update_fp32_" +
+                   std::to_string(select_head_block(head_dim)));
+  bundles->add("rope", LRRT_TRITON_MINI_LAYER_ROPE_MANIFEST,
+               "rope_" + std::to_string(select_head_block(head_dim)));
+  bundles->add("silu_mul", LRRT_TRITON_MINI_LAYER_SILU_MUL_MANIFEST,
+               "silu_mul");
+  bundles->add("residual_add", LRRT_TRITON_MINI_LAYER_VECTOR_ADD_MANIFEST,
+               "vector_add");
+  return bundles;
+}
+
+inline std::shared_ptr<BundleSet> make_model_tail_bundles(lrrt::Device &device,
+                                                          uint32_t hidden) {
+  auto bundles = std::make_shared<BundleSet>(device);
+  bundles->add("final_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
+               "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
+  bundles->add("lm_head", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
+               "matvec_fp32_" + std::to_string(select_block(hidden)));
+  return bundles;
+}
+
 class DecoderLayer {
 public:
   DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
@@ -86,50 +149,23 @@ public:
   DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
                uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
                uint32_t intermediate)
-      : queue_(device), bundles_(device), buffers_(device), keys_(keys),
-        hidden_(hidden), heads_(heads), kv_heads_(kv_heads),
+      : DecoderLayer(
+            device, keys, hidden, heads, kv_heads, head_dim, intermediate,
+            make_decoder_layer_bundles(device, keys, hidden, heads, kv_heads,
+                                       head_dim, intermediate)) {}
+
+  DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
+               uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
+               uint32_t intermediate, std::shared_ptr<BundleSet> bundles)
+      : queue_(device), bundles_(std::move(bundles)), buffers_(device, true),
+        keys_(keys), hidden_(hidden), heads_(heads), kv_heads_(kv_heads),
         head_dim_(head_dim), q_dim_(heads * head_dim),
         kv_dim_(kv_heads * head_dim), intermediate_(intermediate),
         scale_(1.0f / sqrtf((float)head_dim)) {
-    if (heads == 0 || kv_heads == 0 || kv_heads > heads ||
-        heads % kv_heads != 0 || head_dim == 0 || head_dim % 2 != 0) {
-      throw std::runtime_error("mini decoder layer invalid head shape");
+    validate_decoder_layer_shape(heads, kv_heads, head_dim);
+    if (!bundles_) {
+      throw std::runtime_error("mini decoder layer bundles are null");
     }
-    bundles_.add("attention_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
-                 "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("mlp_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
-                 "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("q_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("k_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("v_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("out_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(q_dim_)));
-    bundles_.add("gate_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("up_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("down_projection", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(intermediate)));
-    bundles_.add("score", LRRT_TRITON_MINI_LAYER_ATTENTION_SCORE_MANIFEST,
-                 "attention_score_fp32_" +
-                     std::to_string(select_head_block(head_dim)));
-    bundles_.add("softmax", LRRT_TRITON_MINI_LAYER_CAUSAL_SOFTMAX_MANIFEST,
-                 "causal_softmax_fp32_" + std::to_string(select_block(keys)));
-    bundles_.add(
-        "aggregation", LRRT_TRITON_MINI_LAYER_VALUE_AGGREGATION_MANIFEST,
-        "value_aggregation_fp32_" + std::to_string(select_block(keys)));
-    bundles_.add("kv_update", LRRT_TRITON_MINI_LAYER_KV_CACHE_MANIFEST,
-                 "kv_cache_update_fp32_" +
-                     std::to_string(select_head_block(head_dim)));
-    bundles_.add("rope", LRRT_TRITON_MINI_LAYER_ROPE_MANIFEST,
-                 "rope_" + std::to_string(select_head_block(head_dim)));
-    bundles_.add("silu_mul", LRRT_TRITON_MINI_LAYER_SILU_MUL_MANIFEST,
-                 "silu_mul");
-    bundles_.add("residual_add", LRRT_TRITON_MINI_LAYER_VECTOR_ADD_MANIFEST,
-                 "vector_add");
 
     buffers_.allocate<float>("hidden_states", keys * hidden);
     buffers_.allocate<float>("attention_norm_weight", hidden);
@@ -162,6 +198,7 @@ public:
     buffers_.allocate<float>("activated", intermediate);
     buffers_.allocate<float>("projected_mlp", hidden);
     buffers_.allocate<float>("out", hidden);
+    buffers_.finalize();
   }
 
   void copy_inputs(const std::vector<float> &hidden_states,
@@ -176,62 +213,14 @@ public:
                    const std::vector<float> &down_weight,
                    const std::vector<float> &cos,
                    const std::vector<float> &sin) {
-    if (hidden_states.size() != keys_ * hidden_ ||
-        attention_norm_weight.size() != hidden_ ||
-        mlp_norm_weight.size() != hidden_ ||
-        q_weight.size() != q_dim_ * hidden_ ||
-        k_weight.size() != kv_dim_ * hidden_ ||
-        v_weight.size() != kv_dim_ * hidden_ ||
-        out_weight.size() != hidden_ * q_dim_ ||
-        gate_weight.size() != intermediate_ * hidden_ ||
-        up_weight.size() != intermediate_ * hidden_ ||
-        down_weight.size() != hidden_ * intermediate_ ||
-        cos.size() != keys_ * (head_dim_ / 2) ||
-        sin.size() != keys_ * (head_dim_ / 2)) {
-      throw std::runtime_error("mini decoder layer input shape mismatch");
-    }
-
-    std::vector<float> hidden_zero(hidden_, 0.0f);
-    std::vector<float> hidden_cache_zero(keys_ * hidden_, 0.0f);
-    std::vector<float> q_zero(q_dim_, 0.0f);
-    std::vector<float> kv_zero(kv_dim_, 0.0f);
-    std::vector<float> head_zero(head_dim_, 0.0f);
-    std::vector<float> kv_cache_zero(keys_ * kv_dim_, 0.0f);
-    std::vector<float> head_cache_zero(kv_heads_ * keys_ * head_dim_, 0.0f);
-    std::vector<float> intermediate_zero(intermediate_, 0.0f);
-    std::vector<float> scores_zero(static_cast<size_t>(heads_) * keys_, 0.0f);
-
-    buffers_.copy_to("hidden_states", hidden_states);
-    buffers_.copy_to("attention_norm_weight", attention_norm_weight);
-    buffers_.copy_to("mlp_norm_weight", mlp_norm_weight);
-    buffers_.copy_to("attention_norm_states", hidden_cache_zero);
-    buffers_.copy_to("mlp_norm_hidden", hidden_zero);
-    buffers_.copy_to("q_weight", q_weight);
-    buffers_.copy_to("k_weight", k_weight);
-    buffers_.copy_to("v_weight", v_weight);
-    buffers_.copy_to("out_weight", out_weight);
-    buffers_.copy_to("gate_weight", gate_weight);
-    buffers_.copy_to("up_weight", up_weight);
-    buffers_.copy_to("down_weight", down_weight);
-    buffers_.copy_to("q", q_zero);
-    buffers_.copy_to("q_rope", q_zero);
-    buffers_.copy_to("source_k", kv_cache_zero);
-    buffers_.copy_to("source_v", kv_cache_zero);
-    buffers_.copy_to("k_rope", head_zero);
-    buffers_.copy_to("k_cache", head_cache_zero);
-    buffers_.copy_to("v_cache", head_cache_zero);
-    buffers_.copy_to("cos", cos);
-    buffers_.copy_to("sin", sin);
-    buffers_.copy_to("scores", scores_zero);
-    buffers_.copy_to("probs", scores_zero);
-    buffers_.copy_to("attention_out", q_zero);
-    buffers_.copy_to("projected_attention", hidden_zero);
-    buffers_.copy_to("attention_residual", hidden_zero);
-    buffers_.copy_to("gate", intermediate_zero);
-    buffers_.copy_to("up", intermediate_zero);
-    buffers_.copy_to("activated", intermediate_zero);
-    buffers_.copy_to("projected_mlp", hidden_zero);
-    buffers_.copy_to("out", hidden_zero);
+    validate_inputs(hidden_states, attention_norm_weight, mlp_norm_weight,
+                    q_weight, k_weight, v_weight, out_weight, gate_weight,
+                    up_weight, down_weight, cos, sin);
+    std::vector<unsigned char> packed(buffers_.arena_size(), 0);
+    pack_model_inputs(packed, hidden_states, attention_norm_weight,
+                      mlp_norm_weight, q_weight, k_weight, v_weight, out_weight,
+                      gate_weight, up_weight, down_weight, cos, sin);
+    buffers_.copy_arena_to_device(packed);
   }
 
   void copy_hidden_states(const std::vector<float> &hidden_states) {
@@ -250,7 +239,7 @@ public:
 
     const uint32_t half = head_dim_ / 2;
     const uint32_t query_position = valid_keys - 1;
-    launch(queue_, bundles_.get("attention_norm"), keys_,
+    launch(queue_, bundles_->get("attention_norm"), keys_,
            {
                arg("x", buffers_.ptr<float>("hidden_states")),
                arg("weight", buffers_.ptr<float>("attention_norm_weight")),
@@ -261,7 +250,7 @@ public:
            },
            dependencies);
 
-    launch(queue_, bundles_.get("q_projection"), q_dim_,
+    launch(queue_, bundles_->get("q_projection"), q_dim_,
            {
                arg("x", buffers_.ptr<float>("attention_norm_states",
                                             query_position * hidden_)),
@@ -272,7 +261,7 @@ public:
            });
     for (uint32_t position = 0; position < valid_keys; ++position) {
       launch(
-          queue_, bundles_.get("k_projection"), kv_dim_,
+          queue_, bundles_->get("k_projection"), kv_dim_,
           {
               arg("x", buffers_.ptr<float>("attention_norm_states",
                                            position * hidden_)),
@@ -282,7 +271,7 @@ public:
               arg("hidden", (int32_t)hidden_),
           });
       launch(
-          queue_, bundles_.get("v_projection"), kv_dim_,
+          queue_, bundles_->get("v_projection"), kv_dim_,
           {
               arg("x", buffers_.ptr<float>("attention_norm_states",
                                            position * hidden_)),
@@ -298,7 +287,7 @@ public:
       const uint32_t cache_offset = kv_head * keys_ * head_dim_;
       for (uint32_t position = 0; position < valid_keys; ++position) {
         launch(
-            queue_, bundles_.get("rope"), 1,
+            queue_, bundles_->get("rope"), 1,
             {
                 arg("x", buffers_.ptr<float>("source_k", position * kv_dim_ +
                                                              kv_head_offset)),
@@ -310,7 +299,7 @@ public:
                 arg("head_dim", (int32_t)head_dim_),
             });
         launch(
-            queue_, bundles_.get("kv_update"), 1,
+            queue_, bundles_->get("kv_update"), 1,
             {
                 arg("k", buffers_.ptr<float>("k_rope")),
                 arg("v", buffers_.ptr<float>("source_v", position * kv_dim_ +
@@ -330,7 +319,7 @@ public:
       const uint32_t cache_offset = kv_head * keys_ * head_dim_;
       const uint32_t scores_offset = head * keys_;
 
-      launch(queue_, bundles_.get("rope"), 1,
+      launch(queue_, bundles_->get("rope"), 1,
              {
                  arg("x", buffers_.ptr<float>("q", head_offset)),
                  arg("cos", buffers_.ptr<float>("cos", query_position * half)),
@@ -341,7 +330,7 @@ public:
                  arg("head_dim", (int32_t)head_dim_),
              });
 
-      launch(queue_, bundles_.get("score"), keys_,
+      launch(queue_, bundles_->get("score"), keys_,
              {
                  arg("q", buffers_.ptr<float>("q_rope", head_offset)),
                  arg("k", buffers_.ptr<float>("k_cache", cache_offset)),
@@ -350,7 +339,7 @@ public:
                  arg("head_dim", (int32_t)head_dim_),
                  arg("scale", scale_),
              });
-      launch(queue_, bundles_.get("softmax"), 1,
+      launch(queue_, bundles_->get("softmax"), 1,
              {
                  arg("x", buffers_.ptr<float>("scores", scores_offset)),
                  arg("out", buffers_.ptr<float>("probs", scores_offset)),
@@ -358,7 +347,7 @@ public:
                  arg("hidden", (int32_t)keys_),
                  arg("query_start", (int32_t)(valid_keys - 1)),
              });
-      launch(queue_, bundles_.get("aggregation"), head_dim_,
+      launch(queue_, bundles_->get("aggregation"), head_dim_,
              {
                  arg("probs", buffers_.ptr<float>("probs", scores_offset)),
                  arg("v", buffers_.ptr<float>("v_cache", cache_offset)),
@@ -367,7 +356,7 @@ public:
                  arg("head_dim", (int32_t)head_dim_),
              });
     }
-    launch(queue_, bundles_.get("out_projection"), hidden_,
+    launch(queue_, bundles_->get("out_projection"), hidden_,
            {
                arg("x", buffers_.ptr<float>("attention_out")),
                arg("weight", buffers_.ptr<float>("out_weight")),
@@ -375,7 +364,7 @@ public:
                arg("outputs", (int32_t)hidden_),
                arg("hidden", (int32_t)q_dim_),
            });
-    launch(queue_, bundles_.get("residual_add"), hidden_,
+    launch(queue_, bundles_->get("residual_add"), hidden_,
            {
                arg("x", buffers_.ptr<float>("hidden_states",
                                             query_position * hidden_)),
@@ -384,7 +373,7 @@ public:
                arg("n", (int32_t)hidden_),
            });
 
-    launch(queue_, bundles_.get("mlp_norm"), 1,
+    launch(queue_, bundles_->get("mlp_norm"), 1,
            {
                arg("x", buffers_.ptr<float>("attention_residual")),
                arg("weight", buffers_.ptr<float>("mlp_norm_weight")),
@@ -393,7 +382,7 @@ public:
                arg("rows", (int32_t)1),
                arg("hidden", (int32_t)hidden_),
            });
-    launch(queue_, bundles_.get("gate_projection"), intermediate_,
+    launch(queue_, bundles_->get("gate_projection"), intermediate_,
            {
                arg("x", buffers_.ptr<float>("mlp_norm_hidden")),
                arg("weight", buffers_.ptr<float>("gate_weight")),
@@ -401,7 +390,7 @@ public:
                arg("outputs", (int32_t)intermediate_),
                arg("hidden", (int32_t)hidden_),
            });
-    launch(queue_, bundles_.get("up_projection"), intermediate_,
+    launch(queue_, bundles_->get("up_projection"), intermediate_,
            {
                arg("x", buffers_.ptr<float>("mlp_norm_hidden")),
                arg("weight", buffers_.ptr<float>("up_weight")),
@@ -409,14 +398,14 @@ public:
                arg("outputs", (int32_t)intermediate_),
                arg("hidden", (int32_t)hidden_),
            });
-    launch(queue_, bundles_.get("silu_mul"), intermediate_,
+    launch(queue_, bundles_->get("silu_mul"), intermediate_,
            {
                arg("gate", buffers_.ptr<float>("gate")),
                arg("up", buffers_.ptr<float>("up")),
                arg("out", buffers_.ptr<float>("activated")),
                arg("n", (int32_t)intermediate_),
            });
-    launch(queue_, bundles_.get("down_projection"), hidden_,
+    launch(queue_, bundles_->get("down_projection"), hidden_,
            {
                arg("x", buffers_.ptr<float>("activated")),
                arg("weight", buffers_.ptr<float>("down_weight")),
@@ -424,7 +413,7 @@ public:
                arg("outputs", (int32_t)hidden_),
                arg("hidden", (int32_t)intermediate_),
            });
-    launch(queue_, bundles_.get("residual_add"), hidden_,
+    launch(queue_, bundles_->get("residual_add"), hidden_,
            {
                arg("x", buffers_.ptr<float>("attention_residual")),
                arg("y", buffers_.ptr<float>("projected_mlp")),
@@ -494,8 +483,63 @@ public:
   }
 
 private:
+  void pack_model_inputs(std::vector<unsigned char> &packed,
+                         const std::vector<float> &hidden_states,
+                         const std::vector<float> &attention_norm_weight,
+                         const std::vector<float> &mlp_norm_weight,
+                         const std::vector<float> &q_weight,
+                         const std::vector<float> &k_weight,
+                         const std::vector<float> &v_weight,
+                         const std::vector<float> &out_weight,
+                         const std::vector<float> &gate_weight,
+                         const std::vector<float> &up_weight,
+                         const std::vector<float> &down_weight,
+                         const std::vector<float> &cos,
+                         const std::vector<float> &sin) const {
+    buffers_.pack(packed, "hidden_states", hidden_states);
+    buffers_.pack(packed, "attention_norm_weight", attention_norm_weight);
+    buffers_.pack(packed, "mlp_norm_weight", mlp_norm_weight);
+    buffers_.pack(packed, "q_weight", q_weight);
+    buffers_.pack(packed, "k_weight", k_weight);
+    buffers_.pack(packed, "v_weight", v_weight);
+    buffers_.pack(packed, "out_weight", out_weight);
+    buffers_.pack(packed, "gate_weight", gate_weight);
+    buffers_.pack(packed, "up_weight", up_weight);
+    buffers_.pack(packed, "down_weight", down_weight);
+    buffers_.pack(packed, "cos", cos);
+    buffers_.pack(packed, "sin", sin);
+  }
+
+  void validate_inputs(const std::vector<float> &hidden_states,
+                       const std::vector<float> &attention_norm_weight,
+                       const std::vector<float> &mlp_norm_weight,
+                       const std::vector<float> &q_weight,
+                       const std::vector<float> &k_weight,
+                       const std::vector<float> &v_weight,
+                       const std::vector<float> &out_weight,
+                       const std::vector<float> &gate_weight,
+                       const std::vector<float> &up_weight,
+                       const std::vector<float> &down_weight,
+                       const std::vector<float> &cos,
+                       const std::vector<float> &sin) const {
+    if (hidden_states.size() != keys_ * hidden_ ||
+        attention_norm_weight.size() != hidden_ ||
+        mlp_norm_weight.size() != hidden_ ||
+        q_weight.size() != q_dim_ * hidden_ ||
+        k_weight.size() != kv_dim_ * hidden_ ||
+        v_weight.size() != kv_dim_ * hidden_ ||
+        out_weight.size() != hidden_ * q_dim_ ||
+        gate_weight.size() != intermediate_ * hidden_ ||
+        up_weight.size() != intermediate_ * hidden_ ||
+        down_weight.size() != hidden_ * intermediate_ ||
+        cos.size() != keys_ * (head_dim_ / 2) ||
+        sin.size() != keys_ * (head_dim_ / 2)) {
+      throw std::runtime_error("mini decoder layer input shape mismatch");
+    }
+  }
+
   lrrt::Queue queue_;
-  BundleSet bundles_;
+  std::shared_ptr<BundleSet> bundles_;
   BufferSet buffers_;
   uint32_t keys_;
   uint32_t hidden_;
@@ -511,21 +555,26 @@ private:
 class ModelTail {
 public:
   ModelTail(lrrt::Device &device, uint32_t hidden, uint32_t vocab)
-      : queue_(device), bundles_(device), buffers_(device), hidden_(hidden),
-        vocab_(vocab) {
+      : ModelTail(device, hidden, vocab,
+                  make_model_tail_bundles(device, hidden)) {}
+
+  ModelTail(lrrt::Device &device, uint32_t hidden, uint32_t vocab,
+            std::shared_ptr<BundleSet> bundles)
+      : queue_(device), bundles_(std::move(bundles)), buffers_(device, true),
+        hidden_(hidden), vocab_(vocab) {
     if (hidden == 0 || vocab == 0) {
       throw std::runtime_error("mini model tail invalid shape");
     }
-    bundles_.add("final_norm", LRRT_TRITON_MINI_LAYER_RMSNORM_MANIFEST,
-                 "rmsnorm_fp32_" + std::to_string(select_block(hidden)));
-    bundles_.add("lm_head", LRRT_TRITON_MINI_LAYER_MATVEC_MANIFEST,
-                 "matvec_fp32_" + std::to_string(select_block(hidden)));
+    if (!bundles_) {
+      throw std::runtime_error("mini model tail bundles are null");
+    }
     buffers_.allocate<float>("hidden", hidden);
     buffers_.allocate<float>("final_norm_weight", hidden);
     buffers_.allocate<float>("norm_hidden", hidden);
     buffers_.allocate<float>("lm_head_weight",
                              static_cast<size_t>(vocab) * hidden);
     buffers_.allocate<float>("logits", vocab);
+    buffers_.finalize();
   }
 
   void copy_weights(const std::vector<float> &token_embedding,
@@ -536,15 +585,15 @@ public:
         lm_head_weight.size() != static_cast<size_t>(vocab_) * hidden_) {
       throw std::runtime_error("mini model tail weight shape mismatch");
     }
-    buffers_.copy_to("hidden", token_embedding);
-    buffers_.copy_to("final_norm_weight", final_norm_weight);
-    buffers_.copy_to("lm_head_weight", lm_head_weight);
-    std::vector<float> zero(vocab_, 0.0f);
-    buffers_.copy_to("logits", zero);
+    std::vector<unsigned char> packed(buffers_.arena_size(), 0);
+    buffers_.pack(packed, "hidden", token_embedding);
+    buffers_.pack(packed, "final_norm_weight", final_norm_weight);
+    buffers_.pack(packed, "lm_head_weight", lm_head_weight);
+    buffers_.copy_arena_to_device(packed);
   }
 
   void run(const std::vector<const lrrt::Event *> &dependencies = {}) {
-    launch(queue_, bundles_.get("final_norm"), 1,
+    launch(queue_, bundles_->get("final_norm"), 1,
            {
                arg("x", buffers_.ptr<float>("hidden")),
                arg("weight", buffers_.ptr<float>("final_norm_weight")),
@@ -554,7 +603,7 @@ public:
                arg("hidden", (int32_t)hidden_),
            },
            dependencies);
-    launch(queue_, bundles_.get("lm_head"), vocab_,
+    launch(queue_, bundles_->get("lm_head"), vocab_,
            {
                arg("x", buffers_.ptr<float>("norm_hidden")),
                arg("weight", buffers_.ptr<float>("lm_head_weight")),
@@ -586,7 +635,7 @@ public:
 
 private:
   lrrt::Queue queue_;
-  BundleSet bundles_;
+  std::shared_ptr<BundleSet> bundles_;
   BufferSet buffers_;
   uint32_t hidden_;
   uint32_t vocab_;
