@@ -150,6 +150,36 @@ async-copy signals. Neither direction waits for completion on the host.
 Destroying or re-recording an event that is still referenced by a queued
 dependency drains the device before reusing its signal.
 
+## Memory Statistics
+
+The runtime exposes lightweight per-device memory counters through
+`lr_get_memory_stats` and `lr_reset_memory_stats`. The C++ wrapper provides the
+same data as `lrrt::Device::memory_stats()` and resets it with
+`lrrt::Device::reset_memory_stats()`.
+
+`lr_memory_stats_t` tracks work that flows through lrrt:
+
+- currently live bytes and peak live bytes for runtime-managed allocations
+- total allocated and freed bytes
+- allocation and free counts
+- host-to-device, device-to-host, and device-to-device copy bytes
+- total copy call count
+
+These counters are intended for runtime debugging and benchmark regression
+checks. For example, they can show whether an executor accidentally added many
+small allocations, copied a full model more than once, or stopped using a
+device-to-device handoff path.
+
+The counters are not a ROCm global memory query. They do not report total GPU
+VRAM, system-wide free VRAM, allocations made outside lrrt, kernel-side scratch
+usage, or memory owned by HIP, PyTorch, Triton, or another runtime in the same
+process. They only cover allocations and copies submitted through this runtime.
+
+`lr_reset_memory_stats` preserves the current live byte count, sets the peak to
+that current live value, and clears the accumulated allocation, free, and copy
+totals. This makes it useful for measuring one benchmark phase after setup
+buffers have already been allocated.
+
 ## C++ Usage
 
 The C++ wrapper in `lrrt/lrrt.hpp` keeps the C ABI underneath, but provides
