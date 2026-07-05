@@ -132,6 +132,9 @@ The first investigation should answer these questions:
 - Record missing lrrt runtime capabilities as adapter requirements, not core
   changes, unless they are generally useful for dispatch/resource management.
 
+The current adapter skeleton mapping is tracked in
+[IREE HAL Adapter Mapping](iree-hal-mapping.md).
+
 ### I2: Artifact inspection
 
 - Inspect the VMFB or compiler intermediates.
