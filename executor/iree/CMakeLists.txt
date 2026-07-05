@@ -9,3 +9,7 @@ target_include_directories(
 )
 
 target_link_libraries(lrrt_iree_adapter INTERFACE lrrt::lrrt)
+
+add_executable(lrrt_iree_adapter_smoke smoke.cpp)
+target_link_libraries(lrrt_iree_adapter_smoke PRIVATE lrrt::iree_adapter)
+add_test(NAME lrrt_iree_adapter_smoke COMMAND lrrt_iree_adapter_smoke)
