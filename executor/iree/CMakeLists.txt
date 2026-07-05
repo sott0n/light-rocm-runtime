@@ -13,3 +13,13 @@ target_link_libraries(lrrt_iree_adapter INTERFACE lrrt::lrrt)
 add_executable(lrrt_iree_adapter_smoke smoke.cpp)
 target_link_libraries(lrrt_iree_adapter_smoke PRIVATE lrrt::iree_adapter)
 add_test(NAME lrrt_iree_adapter_smoke COMMAND lrrt_iree_adapter_smoke)
+
+add_executable(lrrt_iree_adapter_contract_tests adapter_contract_test.cpp)
+target_link_libraries(
+  lrrt_iree_adapter_contract_tests
+  PRIVATE lrrt::iree_adapter
+)
+add_test(
+  NAME lrrt_iree_adapter_contract_tests
+  COMMAND lrrt_iree_adapter_contract_tests
+)
