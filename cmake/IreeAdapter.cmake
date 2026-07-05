@@ -1,5 +1,5 @@
 function(lrrt_find_iree)
-  set(_iree_hints)
+  set(_iree_hints "${PROJECT_SOURCE_DIR}/third_party/iree")
   if(LRRT_IREE_ROOT)
     list(
       APPEND
@@ -53,24 +53,26 @@ function(lrrt_find_iree)
 
   if(NOT LRRT_IREE_COMPILE_EXECUTABLE)
     message(
-      FATAL_ERROR
-        "LRRT_ENABLE_IREE_ADAPTER=ON requires iree-compile for the first "
-        "adapter validation path. Set LRRT_IREE_ROOT to an IREE install or "
-        "build tree that provides iree-compile."
+      STATUS
+        "IREE compiler not found; IREE adapter validation tests that require "
+        "iree-compile will be unavailable"
     )
   endif()
 
   if(NOT LRRT_IREE_RUN_MODULE_EXECUTABLE)
     message(
-      FATAL_ERROR
-        "LRRT_ENABLE_IREE_ADAPTER=ON requires iree-run-module for the first "
-        "adapter validation path. Set LRRT_IREE_ROOT to an IREE install or "
-        "build tree that provides iree-run-module."
+      STATUS
+        "IREE runner not found; IREE adapter validation tests that require "
+        "iree-run-module will be unavailable"
     )
   endif()
 
   message(STATUS "IREE adapter enabled")
   message(STATUS "IREE headers: ${LRRT_IREE_INCLUDE_DIR}")
-  message(STATUS "IREE compiler: ${LRRT_IREE_COMPILE_EXECUTABLE}")
-  message(STATUS "IREE runner: ${LRRT_IREE_RUN_MODULE_EXECUTABLE}")
+  if(LRRT_IREE_COMPILE_EXECUTABLE)
+    message(STATUS "IREE compiler: ${LRRT_IREE_COMPILE_EXECUTABLE}")
+  endif()
+  if(LRRT_IREE_RUN_MODULE_EXECUTABLE)
+    message(STATUS "IREE runner: ${LRRT_IREE_RUN_MODULE_EXECUTABLE}")
+  endif()
 endfunction()

@@ -56,17 +56,20 @@ Use `-DLRRT_TRITON_PYTHON=/path/to/python3.13` or another `uv --python` value
 to override the Python used for Triton bundle generation.
 
 The experimental IREE HAL adapter is also opt-in and is not part of the
-default build. Enabling it requires an IREE development install or source tree
-that provides IREE runtime headers and tools:
+default build. The adapter uses the pinned IREE submodule for IREE runtime
+headers:
 
 ```sh
+git submodule update --init third_party/iree
 cmake -S . -B build-iree \
-  -DLRRT_ENABLE_IREE_ADAPTER=ON \
-  -DLRRT_IREE_ROOT=/path/to/iree
+  -DLRRT_ENABLE_IREE_ADAPTER=ON
 ```
 
 The first adapter milestone only probes the IREE dependency surface. It does
-not add IREE to the default build and does not download IREE.
+not add IREE to the default build and does not download IREE during CMake
+configure. Use `-DLRRT_IREE_ROOT=/path/to/iree` to point at a different IREE
+source or install tree. `iree-compile` and `iree-run-module` are optional for
+the current skeleton build and will be required only by later validation tests.
 
 ## Launch Overhead Benchmark
 
