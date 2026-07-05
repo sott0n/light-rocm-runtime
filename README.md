@@ -180,6 +180,10 @@ that current live value, and clears the accumulated allocation, free, and copy
 totals. This makes it useful for measuring one benchmark phase after setup
 buffers have already been allocated.
 
+See [Resource Ownership Policy](docs/resource-ownership.md) for the boundary
+between runtime-owned allocations, C++ RAII helpers, and executor-owned arena
+policy.
+
 ## C++ Usage
 
 The C++ wrapper in `lrrt/lrrt.hpp` keeps the C ABI underneath, but provides
