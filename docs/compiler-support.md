@@ -141,9 +141,12 @@ rules there so the roadmap can stay focused on compiler integration direction.
 
 - Compile a small model or operator graph through IREE's ROCm/HIP path.
 - Inspect generated code objects and dispatch metadata.
-- Prototype either an lrrt executor mapping or a HAL-style adapter.
+- Prototype a narrow lrrt-backed HAL-style adapter.
 - Decide whether IREE integration belongs in this repository or a companion
   compiler/executor project.
+
+The detailed investigation plan is tracked in
+[IREE Integration Investigation](iree-integration.md).
 
 ## Non-goals
 
