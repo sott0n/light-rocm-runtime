@@ -1,5 +1,9 @@
 function(lrrt_find_iree)
-  set(_iree_hints "${PROJECT_SOURCE_DIR}/third_party/iree")
+  set(
+    _iree_hints
+    "${PROJECT_SOURCE_DIR}/third_party/iree"
+    "${PROJECT_SOURCE_DIR}/build-iree-tools"
+  )
   if(LRRT_IREE_ROOT)
     list(
       APPEND

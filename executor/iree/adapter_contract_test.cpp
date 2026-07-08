@@ -1,5 +1,6 @@
 #include "iree_adapter.hpp"
 
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -126,6 +127,43 @@ int test_metadata_contract() {
   return 0;
 }
 
+int test_metadata_export_lookup() {
+  const ExecutableMetadata metadata = minimal_mul_metadata();
+  const char *symbol = "simple_mul_dispatch_0_elementwise_4_f32";
+
+  const ExportMetadata *by_symbol = metadata.find_export_by_symbol(symbol);
+  const ExportMetadata *by_ordinal = metadata.find_export_by_ordinal(0);
+  if (!by_symbol || !by_ordinal || by_symbol != by_ordinal) {
+    return 1;
+  }
+
+  const ExportMetadata &required_by_symbol =
+      metadata.require_export_by_symbol(symbol);
+  const ExportMetadata &required_by_ordinal =
+      metadata.require_export_by_ordinal(0);
+  if (&required_by_symbol != by_symbol || &required_by_ordinal != by_ordinal) {
+    return 1;
+  }
+
+  if (metadata.find_export_by_symbol("missing") != nullptr ||
+      metadata.find_export_by_ordinal(7) != nullptr) {
+    return 1;
+  }
+
+  try {
+    metadata.require_export_by_symbol("missing");
+  } catch (const std::runtime_error &error) {
+    const std::string message = error.what();
+    if (message.find("missing IREE executable export symbol") ==
+        std::string::npos) {
+      return 1;
+    }
+    return 0;
+  }
+
+  return 1;
+}
+
 } // namespace
 
 int main() {
@@ -136,6 +174,9 @@ int main() {
     return 1;
   }
   if (test_metadata_contract() != 0) {
+    return 1;
+  }
+  if (test_metadata_export_lookup() != 0) {
     return 1;
   }
   return 0;

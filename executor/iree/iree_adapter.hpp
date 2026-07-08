@@ -72,6 +72,43 @@ struct ExecutableMetadata {
   std::string executable;
   std::string variant;
   std::vector<ExportMetadata> exports;
+
+  const ExportMetadata *find_export_by_symbol(const std::string &symbol) const {
+    const auto it =
+        std::find_if(exports.begin(), exports.end(),
+                     [&symbol](const ExportMetadata &export_metadata) {
+                       return export_metadata.symbol == symbol;
+                     });
+    return it == exports.end() ? nullptr : &*it;
+  }
+
+  const ExportMetadata *find_export_by_ordinal(uint32_t ordinal) const {
+    const auto it =
+        std::find_if(exports.begin(), exports.end(),
+                     [ordinal](const ExportMetadata &export_metadata) {
+                       return export_metadata.ordinal == ordinal;
+                     });
+    return it == exports.end() ? nullptr : &*it;
+  }
+
+  const ExportMetadata &
+  require_export_by_symbol(const std::string &symbol) const {
+    const ExportMetadata *export_metadata = find_export_by_symbol(symbol);
+    if (!export_metadata) {
+      throw std::runtime_error("missing IREE executable export symbol: " +
+                               symbol);
+    }
+    return *export_metadata;
+  }
+
+  const ExportMetadata &require_export_by_ordinal(uint32_t ordinal) const {
+    const ExportMetadata *export_metadata = find_export_by_ordinal(ordinal);
+    if (!export_metadata) {
+      throw std::runtime_error("missing IREE executable export ordinal: " +
+                               std::to_string(ordinal));
+    }
+    return *export_metadata;
+  }
 };
 
 class Fence {

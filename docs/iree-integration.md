@@ -146,7 +146,8 @@ The JSON summary intentionally stays at the HAL/executable level. It records
 the target architecture, executable and variant names, exported kernel symbol,
 binding layout, workgroup size, subgroup size, kernel attributes, and dispatch
 path. It does not attempt to parse VM bytecode or implement IREE runtime
-semantics.
+semantics. The JSON contract is documented in
+[IREE Metadata Summary Schema](iree-metadata-schema.md).
 
 On the current development machine, full VMFB serialization requires a recent
 LLD. The system `ld.lld` is version 14 and fails with

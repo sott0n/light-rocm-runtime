@@ -146,10 +146,20 @@ The baseline run writes stdout/stderr to
 failure makes the probe exit non-zero so it can be used as a local validation
 step before comparing an lrrt-backed adapter path.
 
+When lrrt is configured with `LRRT_ENABLE_IREE_ADAPTER=ON` and both
+`iree-compile` and `iree-run-module` are found, the same baseline is also
+available as an opt-in CTest:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R lrrt_iree_baseline_probe
+```
+
 The probe also writes `minimal_mul_<target>_metadata.json` by running
 `tools/iree_metadata_summary.py` on the generated `executable-targets` MLIR.
 This gives later adapter work a stable, reviewable view of the exported
-dispatch metadata without parsing VMFB files in the lrrt runtime core.
+dispatch metadata without parsing VMFB files in the lrrt runtime core. The
+summary schema is documented in
+[IREE Metadata Summary Schema](iree-metadata-schema.md).
 
 ## Assumptions
 
