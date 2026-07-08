@@ -61,6 +61,12 @@ if(PYTHON_EXECUTABLE)
       "${PYTHON_EXECUTABLE}"
       "${PROJECT_SOURCE_DIR}/tests/qwen_benchmark_runner_test.py"
   )
+  add_test(
+    NAME lrrt_iree_metadata_summary_tests
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/iree_metadata_summary_test.py"
+  )
 endif()
 
 while(LRRT_TRITON_EXECUTOR_TESTS)

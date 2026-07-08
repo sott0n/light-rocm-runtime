@@ -129,8 +129,9 @@ The local tool build strategy is tracked in
 
 The first local compile probe is tracked by `tools/iree_compile_probe.sh`. It
 uses `tools/iree_minimal_mul.mlir` and emits `executable-configurations` and
-`executable-targets` MLIR into `build-iree-probe/`. These intermediate forms
-are useful before a full VMFB baseline exists because they expose the first
+`executable-targets` MLIR into `build-iree-probe/`. It also writes a JSON
+metadata summary through `tools/iree_metadata_summary.py`. These intermediate
+forms are useful before a full adapter exists because they expose the first
 adapter-relevant anchors:
 
 - `hal.executable` and `hal.executable.variant`
@@ -140,6 +141,12 @@ adapter-relevant anchors:
 - workgroup size and subgroup size
 - lowered `llvm.func` kernel symbol
 - `stream.cmd.dispatch`
+
+The JSON summary intentionally stays at the HAL/executable level. It records
+the target architecture, executable and variant names, exported kernel symbol,
+binding layout, workgroup size, subgroup size, kernel attributes, and dispatch
+path. It does not attempt to parse VM bytecode or implement IREE runtime
+semantics.
 
 On the current development machine, full VMFB serialization requires a recent
 LLD. The system `ld.lld` is version 14 and fails with

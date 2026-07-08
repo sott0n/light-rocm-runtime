@@ -127,6 +127,11 @@ executable metadata anchors that matter to the lrrt adapter investigation. Use
 full VMFB. The probe automatically prefers `/opt/rocm/llvm/bin/lld` when it is
 available; pass `--lld-dir` to use a different LLD directory.
 
+The probe also writes `minimal_mul_<target>_metadata.json` by running
+`tools/iree_metadata_summary.py` on the generated `executable-targets` MLIR.
+This gives later adapter work a stable, reviewable view of the exported
+dispatch metadata without parsing VMFB files in the lrrt runtime core.
+
 ## Assumptions
 
 - The pinned submodule remains the source of truth for IREE headers.

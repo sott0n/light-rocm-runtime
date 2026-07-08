@@ -14,6 +14,7 @@ Options:
   --input PATH         MLIR input (default: tools/iree_minimal_mul.mlir)
   --lld-dir DIR        Directory containing lld for ROCm HSACO linking
                        (default: /opt/rocm/llvm/bin when present)
+  --summary PATH       Write executable-target metadata JSON summary
   --out-dir DIR        Output directory (default: build-iree-probe)
   --target CHIP        ROCm target chip (default: gfx1101)
   --try-vmfb           Also attempt full VMFB serialization. This may fail when
@@ -27,6 +28,7 @@ iree_compile="${repo_root}/build-iree-tools/tools/iree-compile"
 input="${repo_root}/tools/iree_minimal_mul.mlir"
 lld_dir=""
 out_dir="${repo_root}/build-iree-probe"
+summary_path=""
 target="gfx1101"
 try_vmfb=0
 
@@ -42,6 +44,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --lld-dir)
     lld_dir="$2"
+    shift 2
+    ;;
+  --summary)
+    summary_path="$2"
     shift 2
     ;;
   --out-dir)
@@ -101,8 +107,13 @@ mkdir -p "${out_dir}"
 base="${out_dir}/minimal_mul_${target}"
 config_ir="${base}_executable_configurations.mlir"
 target_ir="${base}_executable_targets.mlir"
+default_summary="${base}_metadata.json"
 vmfb="${base}.vmfb"
 vmfb_log="${base}_vmfb.log"
+
+if [[ -z "${summary_path}" ]]; then
+  summary_path="${default_summary}"
+fi
 
 compile_common=(
   "${iree_compile}"
@@ -127,6 +138,10 @@ run "${compile_common[@]}" \
   "${input}" \
   -o "${target_ir}"
 
+run "${repo_root}/tools/iree_metadata_summary.py" \
+  "${target_ir}" \
+  -o "${summary_path}"
+
 vmfb_status="skipped"
 if [[ "${try_vmfb}" -eq 1 ]]; then
   if "${compile_common[@]}" "${input}" -o "${vmfb}" >"${vmfb_log}" 2>&1; then
@@ -143,6 +158,7 @@ echo "  target: ${target}"
 echo "  lld: $(command -v lld || true)"
 echo "  executable-configurations: ${config_ir}"
 echo "  executable-targets: ${target_ir}"
+echo "  metadata-summary: ${summary_path}"
 echo "  vmfb: ${vmfb_status}"
 if [[ "${vmfb_status}" == "failed" ]]; then
   echo "  vmfb-log: ${vmfb_log}"
