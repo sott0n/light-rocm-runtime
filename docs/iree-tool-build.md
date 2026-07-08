@@ -161,6 +161,18 @@ dispatch metadata without parsing VMFB files in the lrrt runtime core. The
 summary schema is documented in
 [IREE Metadata Summary Schema](iree-metadata-schema.md).
 
+Use `--emit-hsaco` when the lrrt adapter investigation needs the matching raw
+AMDGPU code object:
+
+```sh
+tools/iree_compile_probe.sh --emit-hsaco
+```
+
+This writes `minimal_mul_<target>.hsaco` under `build-iree-probe/` by compiling
+the generated `executable-targets` MLIR in `hal-executable` mode with
+`--iree-rocm-container-type=hsaco`. The artifact split is documented in
+[IREE Artifact Extraction Notes](iree-artifact-extraction.md).
+
 ## Assumptions
 
 - The pinned submodule remains the source of truth for IREE headers.

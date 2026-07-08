@@ -20,6 +20,10 @@ Options:
   --summary PATH       Write executable-target metadata JSON summary
   --out-dir DIR        Output directory (default: build-iree-probe)
   --target CHIP        ROCm target chip (default: gfx1101)
+  --emit-hsaco         Emit a raw HSACO image from executable-targets MLIR for
+                       lrrt module loading experiments.
+  --hsaco PATH         Raw HSACO output path for --emit-hsaco
+                       (default: <out-dir>/minimal_mul_<target>.hsaco)
   --try-vmfb           Also attempt full VMFB serialization. This may fail when
                        the available ld.lld is incompatible with IREE's LLVM.
   --run-baseline       Run the serialized VMFB with iree-run-module --device=hip
@@ -45,6 +49,7 @@ lld_dir=""
 out_dir="${repo_root}/build-iree-probe"
 summary_path=""
 target="gfx1101"
+emit_hsaco=0
 try_vmfb=0
 run_baseline=0
 baseline_function="simple_mul"
@@ -79,6 +84,14 @@ while [[ $# -gt 0 ]]; do
     ;;
   --target)
     target="$2"
+    shift 2
+    ;;
+  --emit-hsaco)
+    emit_hsaco=1
+    shift
+    ;;
+  --hsaco)
+    hsaco_path="$2"
     shift 2
     ;;
   --try-vmfb)
@@ -162,9 +175,13 @@ default_summary="${base}_metadata.json"
 vmfb="${base}.vmfb"
 vmfb_log="${base}_vmfb.log"
 baseline_log="${base}_baseline.log"
+default_hsaco="${base}.hsaco"
 
 if [[ -z "${summary_path}" ]]; then
   summary_path="${default_summary}"
+fi
+if [[ -z "${hsaco_path:-}" ]]; then
+  hsaco_path="${default_hsaco}"
 fi
 
 compile_common=(
@@ -193,6 +210,17 @@ run "${compile_common[@]}" \
 run "${repo_root}/tools/iree_metadata_summary.py" \
   "${target_ir}" \
   -o "${summary_path}"
+
+hsaco_status="skipped"
+if [[ "${emit_hsaco}" -eq 1 ]]; then
+  run "${iree_compile}" \
+    --compile-mode=hal-executable \
+    "--iree-rocm-target=${target}" \
+    --iree-rocm-container-type=hsaco \
+    "${target_ir}" \
+    -o "${hsaco_path}"
+  hsaco_status="ok"
+fi
 
 vmfb_status="skipped"
 if [[ "${try_vmfb}" -eq 1 ]]; then
@@ -250,6 +278,10 @@ echo "  lld: $(command -v lld || true)"
 echo "  executable-configurations: ${config_ir}"
 echo "  executable-targets: ${target_ir}"
 echo "  metadata-summary: ${summary_path}"
+echo "  hsaco: ${hsaco_status}"
+if [[ "${emit_hsaco}" -eq 1 ]]; then
+  echo "  hsaco-output: ${hsaco_path}"
+fi
 echo "  vmfb: ${vmfb_status}"
 if [[ "${vmfb_status}" == "failed" ]]; then
   echo "  vmfb-log: ${vmfb_log}"

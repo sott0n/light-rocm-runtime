@@ -161,6 +161,11 @@ It serializes the VMFB, runs the default `simple_mul` entry point with
 the IREE-owned reference path reproducible before an lrrt-backed HAL adapter
 attempts to execute the same dispatch.
 
+Use `tools/iree_compile_probe.sh --emit-hsaco` to emit the matching raw HSACO
+artifact for lrrt module loading experiments. The extraction path and the
+reason for keeping it separate from the IREE baseline VMFB are documented in
+[IREE Artifact Extraction Notes](iree-artifact-extraction.md).
+
 ### I1: HAL contract mapping
 
 - Identify the minimal IREE HAL interfaces needed to load an executable,
