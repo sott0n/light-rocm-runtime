@@ -141,12 +141,11 @@ adapter-relevant anchors:
 - lowered `llvm.func` kernel symbol
 - `stream.cmd.dispatch`
 
-On the current development machine, full VMFB serialization fails with
-`lld: error: unknown abi version` while the intermediate compile phases pass.
-The system `ld.lld` is version 14 while the built IREE compiler reports LLVM
-23. This makes full HIP runtime baseline execution a separate toolchain fix,
-not a blocker for inspecting the HAL/executable metadata needed by the next
-adapter mapping step.
+On the current development machine, full VMFB serialization requires a recent
+LLD. The system `ld.lld` is version 14 and fails with
+`lld: error: unknown abi version`. The probe therefore prefers
+`/opt/rocm/llvm/bin/lld` when present, which allows `--try-vmfb` to serialize a
+VMFB and run it through IREE's HIP runtime baseline.
 
 ### I1: HAL contract mapping
 

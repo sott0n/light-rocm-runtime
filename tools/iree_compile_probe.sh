@@ -12,6 +12,8 @@ Options:
   --iree-compile PATH  iree-compile executable
                        (default: build-iree-tools/tools/iree-compile)
   --input PATH         MLIR input (default: tools/iree_minimal_mul.mlir)
+  --lld-dir DIR        Directory containing lld for ROCm HSACO linking
+                       (default: /opt/rocm/llvm/bin when present)
   --out-dir DIR        Output directory (default: build-iree-probe)
   --target CHIP        ROCm target chip (default: gfx1101)
   --try-vmfb           Also attempt full VMFB serialization. This may fail when
@@ -23,6 +25,7 @@ EOF
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 iree_compile="${repo_root}/build-iree-tools/tools/iree-compile"
 input="${repo_root}/tools/iree_minimal_mul.mlir"
+lld_dir=""
 out_dir="${repo_root}/build-iree-probe"
 target="gfx1101"
 try_vmfb=0
@@ -35,6 +38,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --input)
     input="$2"
+    shift 2
+    ;;
+  --lld-dir)
+    lld_dir="$2"
     shift 2
     ;;
   --out-dir)
@@ -75,6 +82,18 @@ fi
 if [[ ! -f "${input}" ]]; then
   echo "input MLIR file not found: ${input}" >&2
   exit 1
+fi
+
+if [[ -z "${lld_dir}" && -x /opt/rocm/llvm/bin/lld ]]; then
+  lld_dir="/opt/rocm/llvm/bin"
+fi
+
+if [[ -n "${lld_dir}" ]]; then
+  if [[ ! -x "${lld_dir}/lld" ]]; then
+    echo "lld was not found or is not executable: ${lld_dir}/lld" >&2
+    exit 1
+  fi
+  export PATH="${lld_dir}:${PATH}"
 fi
 
 mkdir -p "${out_dir}"
@@ -121,6 +140,7 @@ echo
 echo "IREE ROCm compile probe"
 echo "  input: ${input}"
 echo "  target: ${target}"
+echo "  lld: $(command -v lld || true)"
 echo "  executable-configurations: ${config_ir}"
 echo "  executable-targets: ${target_ir}"
 echo "  vmfb: ${vmfb_status}"

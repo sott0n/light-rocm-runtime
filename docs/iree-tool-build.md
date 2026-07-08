@@ -124,7 +124,8 @@ tools/iree_compile_probe.sh
 It writes ignored artifacts under `build-iree-probe/` and prints the HAL
 executable metadata anchors that matter to the lrrt adapter investigation. Use
 `--try-vmfb` when checking whether the local IREE/LLD toolchain can serialize a
-full VMFB.
+full VMFB. The probe automatically prefers `/opt/rocm/llvm/bin/lld` when it is
+available; pass `--lld-dir` to use a different LLD directory.
 
 ## Assumptions
 
