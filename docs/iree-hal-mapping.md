@@ -27,6 +27,55 @@ before binding directly to real IREE HAL types. It is compiled only when
 | fence / wait handle | `Fence` | Owns `lrrt::Event`; records on a queue and waits with `lr_event_synchronize` |
 | unsupported HAL feature | `UnsupportedFeature` | Explicit adapter-level error, not a runtime fallback |
 
+## Metadata Contract
+
+The first probe does not ask lrrt to parse VMFB files. Instead,
+`tools/iree_metadata_summary.py` extracts the adapter-relevant HAL/executable
+anchors from IREE's `executable-targets` MLIR into a JSON summary. The
+`executor/iree` layer now has matching metadata structs that describe the
+contract an eventual HAL adapter should receive before it calls the lrrt
+dispatcher.
+
+The current `tools/iree_compile_probe.sh --try-vmfb` output for
+`tools/iree_minimal_mul.mlir` has this shape:
+
+| Summary field | Current value | Adapter metadata | lrrt use |
+| --- | --- | --- | --- |
+| `target` | `gfx1101` | `ExecutableMetadata::target` | Validate that the code object matches the selected AMD GPU. |
+| `executable` | `simple_mul_dispatch_0` | `ExecutableMetadata::executable` | Names the HAL executable that owns the dispatch. |
+| `variant` | `rocm_hsaco_fb` | `ExecutableMetadata::variant` | Identifies the ROCm HSACO variant that should provide the loaded image. |
+| `exports[0].symbol` | `simple_mul_dispatch_0_elementwise_4_f32` | `ExportMetadata::symbol` | Entry point name passed to `lr_kernel_get`. |
+| `exports[0].ordinal` | `0` | `ExportMetadata::ordinal` | Stable export index for adapter-side lookup. |
+| `exports[0].workgroup_size` | `[32, 1, 1]` | `ExportMetadata::workgroup_size` | Converted to `lr_launch_config_t::block`. |
+| `exports[0].subgroup_size` | `32` | `ExportMetadata::subgroup_size` | Validation/diagnostic metadata; lrrt does not schedule waves directly. |
+| `exports[0].bindings` | three `storage_buffer` bindings | `BindingMetadata` | Defines the buffer argument order that the adapter must pack into kernargs. |
+| `exports[0].kernel.symbol` | same as export symbol | `KernelMetadata::symbol` | Cross-checks the lowered LLVM kernel symbol. |
+| `exports[0].kernel.attributes` | `rocdl.kernel`, workgroup attributes | `KernelMetadata::attributes` | Confirms this is a ROCm kernel and records compiler launch constraints. |
+| `exports[0].dispatch` | executable, variant, symbol | `DispatchMetadata` | Connects the Stream dispatch site back to the executable export. |
+
+The metadata structs are intentionally plain data. They do not load HSACO,
+parse JSON, calculate tensor shapes, or own IREE runtime semantics. Their job
+is to make the adapter boundary explicit:
+
+```text
+IREE executable metadata
+  -> ExecutableMetadata / ExportMetadata / BindingMetadata
+  -> lrrt::Module, lrrt::Kernel, lr_launch_config_t, packed kernargs
+  -> CommandQueue::dispatch
+```
+
+For the current minimal multiply probe, the binding layout is:
+
+| Binding index | Type | Flags | Expected role |
+| --- | --- | --- | --- |
+| `0` | `storage_buffer` | `ReadOnly`, `Indirect` | input buffer A |
+| `1` | `storage_buffer` | `ReadOnly`, `Indirect` | input buffer B |
+| `2` | `storage_buffer` | `Indirect` | output buffer |
+
+The adapter still needs a real IREE HAL binding step to turn IREE buffer views
+and dispatch records into these metadata and kernarg values. That logic belongs
+in `executor/iree`, not in the C runtime core.
+
 ## Dispatch Contract
 
 The skeleton dispatch path is deliberately narrow:

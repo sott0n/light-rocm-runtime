@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -18,6 +20,58 @@ public:
   explicit UnsupportedFeature(const std::string &feature)
       : std::runtime_error("unsupported IREE HAL adapter feature: " + feature) {
   }
+};
+
+struct BindingMetadata {
+  uint32_t index = 0;
+  std::string type;
+  std::vector<std::string> flags;
+
+  bool has_flag(const std::string &flag) const {
+    return std::find(flags.begin(), flags.end(), flag) != flags.end();
+  }
+};
+
+struct KernelMetadata {
+  std::string symbol;
+  std::vector<std::string> attributes;
+
+  bool has_attribute(const std::string &attribute) const {
+    return std::find(attributes.begin(), attributes.end(), attribute) !=
+           attributes.end();
+  }
+};
+
+struct DispatchMetadata {
+  std::string executable;
+  std::string variant;
+  std::string symbol;
+};
+
+struct ExportMetadata {
+  std::string symbol;
+  uint32_t ordinal = 0;
+  std::array<uint32_t, 3> workgroup_size = {1, 1, 1};
+  uint32_t subgroup_size = 0;
+  std::vector<BindingMetadata> bindings;
+  KernelMetadata kernel;
+  DispatchMetadata dispatch;
+
+  lr_launch_config_t launch_config(lr_dim3_t grid,
+                                   uint32_t shared_memory_bytes = 0) const {
+    return lr_launch_config_t{
+        grid,
+        lr_dim3_t{workgroup_size[0], workgroup_size[1], workgroup_size[2]},
+        shared_memory_bytes,
+    };
+  }
+};
+
+struct ExecutableMetadata {
+  std::string target;
+  std::string executable;
+  std::string variant;
+  std::vector<ExportMetadata> exports;
 };
 
 class Fence {
