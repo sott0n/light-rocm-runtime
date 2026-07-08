@@ -127,6 +127,25 @@ executable metadata anchors that matter to the lrrt adapter investigation. Use
 full VMFB. The probe automatically prefers `/opt/rocm/llvm/bin/lld` when it is
 available; pass `--lld-dir` to use a different LLD directory.
 
+Use `--run-baseline` when the local GPU should also run the serialized VMFB
+through IREE's HIP HAL runtime:
+
+```sh
+tools/iree_compile_probe.sh --run-baseline
+```
+
+This option implies `--try-vmfb`, calls `iree-run-module --device=hip`, and
+checks the default `tools/iree_minimal_mul.mlir` output:
+
+```text
+4xf32=10 40 90 160
+```
+
+The baseline run writes stdout/stderr to
+`build-iree-probe/minimal_mul_<target>_baseline.log`. A mismatch or runner
+failure makes the probe exit non-zero so it can be used as a local validation
+step before comparing an lrrt-backed adapter path.
+
 The probe also writes `minimal_mul_<target>_metadata.json` by running
 `tools/iree_metadata_summary.py` on the generated `executable-targets` MLIR.
 This gives later adapter work a stable, reviewable view of the exported

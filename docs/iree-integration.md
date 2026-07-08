@@ -154,6 +154,12 @@ LLD. The system `ld.lld` is version 14 and fails with
 `/opt/rocm/llvm/bin/lld` when present, which allows `--try-vmfb` to serialize a
 VMFB and run it through IREE's HIP runtime baseline.
 
+Use `tools/iree_compile_probe.sh --run-baseline` to make that baseline explicit.
+It serializes the VMFB, runs the default `simple_mul` entry point with
+`iree-run-module --device=hip`, and checks for `4xf32=10 40 90 160`. This keeps
+the IREE-owned reference path reproducible before an lrrt-backed HAL adapter
+attempts to execute the same dispatch.
+
 ### I1: HAL contract mapping
 
 - Identify the minimal IREE HAL interfaces needed to load an executable,
