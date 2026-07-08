@@ -127,6 +127,27 @@ The first investigation should answer these questions:
 The local tool build strategy is tracked in
 [IREE Tool Build Strategy](iree-tool-build.md).
 
+The first local compile probe is tracked by `tools/iree_compile_probe.sh`. It
+uses `tools/iree_minimal_mul.mlir` and emits `executable-configurations` and
+`executable-targets` MLIR into `build-iree-probe/`. These intermediate forms
+are useful before a full VMFB baseline exists because they expose the first
+adapter-relevant anchors:
+
+- `hal.executable` and `hal.executable.variant`
+- `hal.executable.export`
+- target architecture and ROCm backend attributes
+- pipeline binding layout
+- workgroup size and subgroup size
+- lowered `llvm.func` kernel symbol
+- `stream.cmd.dispatch`
+
+On the current development machine, full VMFB serialization fails with
+`lld: error: unknown abi version` while the intermediate compile phases pass.
+The system `ld.lld` is version 14 while the built IREE compiler reports LLVM
+23. This makes full HIP runtime baseline execution a separate toolchain fix,
+not a blocker for inspecting the HAL/executable metadata needed by the next
+adapter mapping step.
+
 ### I1: HAL contract mapping
 
 - Identify the minimal IREE HAL interfaces needed to load an executable,

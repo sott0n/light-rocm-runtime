@@ -4,6 +4,7 @@ build-triton/
 build-triton-bench/
 build-iree/
 build-iree-tools/
+build-iree-probe/
 __pycache__/
 *.o
 *.a

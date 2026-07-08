@@ -66,8 +66,12 @@ cmake -S third_party/iree -B build-iree-tools \
 Build only the tools needed by the first adapter validation path:
 
 ```sh
-cmake --build build-iree-tools --target iree-compile iree-run-module -j2
+cmake --build build-iree-tools --target iree-compile iree-run-module -j16
 ```
+
+On the development machine, `-j32` reached the same build graph but crashed the
+host clang 17 frontend while compiling bundled LLVM. `-j16` completed the tool
+build with the Ninja generator and is the recommended local setting.
 
 Then configure lrrt with the adapter enabled:
 
@@ -110,6 +114,17 @@ The first real validation should use the built tools as external executables:
 
 Until the HAL binding exists, lrrt should only check that the adapter can find
 IREE headers and optionally report available tools.
+
+The current compile probe is:
+
+```sh
+tools/iree_compile_probe.sh
+```
+
+It writes ignored artifacts under `build-iree-probe/` and prints the HAL
+executable metadata anchors that matter to the lrrt adapter investigation. Use
+`--try-vmfb` when checking whether the local IREE/LLD toolchain can serialize a
+full VMFB.
 
 ## Assumptions
 
