@@ -33,6 +33,9 @@ set(LRRT_IREE_BASE_LIB
 set(LRRT_IREE_HAL_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/hal/libiree_hal_hal.a"
 )
+set(LRRT_IREE_ASYNC_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/async/libiree_async_async.a"
+)
 set(LRRT_IREE_BASE_PATH_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/internal/libiree_base_internal_path.a"
 )
@@ -42,7 +45,13 @@ set(LRRT_IREE_BASE_THREADING_LIB
 set(LRRT_IREE_BASE_TIME_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/internal/libiree_base_internal_time.a"
 )
-if(EXISTS "${LRRT_IREE_BASE_LIB}" AND EXISTS "${LRRT_IREE_HAL_LIB}")
+if(EXISTS "${LRRT_IREE_BASE_LIB}"
+   AND EXISTS "${LRRT_IREE_HAL_LIB}"
+   AND EXISTS "${LRRT_IREE_ASYNC_LIB}"
+   AND EXISTS "${LRRT_IREE_BASE_PATH_LIB}"
+   AND EXISTS "${LRRT_IREE_BASE_THREADING_LIB}"
+   AND EXISTS "${LRRT_IREE_BASE_TIME_LIB}"
+)
   add_executable(lrrt_iree_hal_driver_tests hal_driver.c hal_driver_test.cpp)
   target_include_directories(
     lrrt_iree_hal_driver_tests
@@ -56,6 +65,7 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}" AND EXISTS "${LRRT_IREE_HAL_LIB}")
     lrrt_iree_hal_driver_tests
     PRIVATE
       "${LRRT_IREE_HAL_LIB}"
+      "${LRRT_IREE_ASYNC_LIB}"
       "${LRRT_IREE_BASE_PATH_LIB}"
       "${LRRT_IREE_BASE_THREADING_LIB}"
       "${LRRT_IREE_BASE_LIB}"

@@ -23,14 +23,17 @@ The current skeleton has two layers and is compiled only when
 The native driver factory is the first step toward a seamless
 `iree-run-module --device=lrrt` path. At this stage it can be registered in an
 IREE HAL driver registry, created by name, and queried for one placeholder
-device. Device creation intentionally returns `IREE_STATUS_UNIMPLEMENTED` until
-the lrrt-backed `iree_hal_device_t`, allocator, executable cache, and queue
-submission path exist.
+device. It can also create a minimal lrrt-backed `iree_hal_device_t` with a
+stable id, host allocator, empty capabilities, and explicit unsupported paths.
+The device allocator, executable cache, command buffers, semaphores, and queue
+submission APIs intentionally return null or `IREE_STATUS_UNIMPLEMENTED` until
+they are backed by lrrt runtime objects.
 
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
 | driver factory | `lrrt_iree_hal_driver_module_register` | Registers the `lrrt` HAL driver factory with an IREE registry |
-| native HAL driver | `lrrt_iree_hal_driver_t` | Driver object only; device creation is not implemented yet |
+| native HAL driver | `lrrt_iree_hal_driver_t` | Creates the minimal native HAL device for `default` |
+| native HAL device | `lrrt_iree_hal_device_t` | Lifetime/id/query skeleton only; allocator and queue work are not implemented yet |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
 | command queue / submit path | `CommandQueue` | Owns `lrrt::Queue`; dispatches with `lr_launch_on_queue_with_dependencies` |
 | device allocation | `Buffer` | Owns `lrrt::DeviceBuffer`; allocates with `lr_malloc` through the C++ wrapper |

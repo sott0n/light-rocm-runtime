@@ -67,14 +67,45 @@ int test_lrrt_driver_registration() {
   iree_hal_device_t *device = nullptr;
   status = iree_hal_driver_create_default_device(
       driver, &create_params, iree_allocator_system(), &device);
-  if (iree_status_code(status) != IREE_STATUS_UNIMPLEMENTED || device) {
+  if (!iree_status_is_ok(status) || !device) {
     iree_status_ignore(status);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  if (!string_view_equal(iree_hal_device_id(device), "lrrt") ||
+      iree_hal_device_allocator(device) != nullptr) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_device_capabilities_t capabilities;
+  status = iree_hal_device_query_capabilities(device, &capabilities);
+  if (!iree_status_is_ok(status) ||
+      capabilities.flags != IREE_HAL_DEVICE_CAPABILITY_NONE) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  int64_t value = 0;
+  status = iree_hal_device_query_i64(device, IREE_SV("hal.device.id"),
+                                     IREE_SV("anything"), &value);
+  if (iree_status_code(status) != IREE_STATUS_NOT_FOUND || value != 0) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
     iree_hal_driver_release(driver);
     iree_hal_driver_registry_free(registry);
     return 1;
   }
   iree_status_ignore(status);
 
+  iree_hal_device_release(device);
   iree_hal_driver_release(driver);
   iree_hal_driver_registry_free(registry);
   return 0;
