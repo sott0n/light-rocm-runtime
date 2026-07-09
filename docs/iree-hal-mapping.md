@@ -29,9 +29,10 @@ skeleton. The allocator opens the first lrrt device and can allocate
 device-local, non-mappable `iree_hal_buffer_t` objects backed by `lr_malloc`.
 Those buffers release their lrrt allocation with `lr_free` when the HAL buffer
 is destroyed. Host-visible mapping, import/export, and virtual memory remain
-unsupported. Executable cache, command buffers, semaphores, and queue
-submission APIs also remain explicitly unsupported until they are backed by lrrt
-runtime objects.
+unsupported. The native device can create an executable cache skeleton that
+recognizes lrrt-owned HSACO formats, but executable preparation, command
+buffers, semaphores, and queue submission APIs remain explicitly unsupported
+until they are backed by lrrt runtime objects.
 
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
@@ -41,6 +42,7 @@ runtime objects.
 | native HAL allocator | `lrrt_iree_hal_allocator_t` | Owns the lrrt runtime/device lifetime needed by HAL buffers |
 | native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
 | HAL queue update/copy | `queue_update`, `queue_copy` | Uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy with empty semaphore lists |
+| native HAL executable cache | `lrrt_iree_hal_executable_cache_t` | Creates the cache object and recognizes `rocm-hsaco` / `amdgpu-hsaco` formats; executable preparation is still unsupported |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
 | command queue / submit path | `CommandQueue` | Owns `lrrt::Queue`; dispatches with `lr_launch_on_queue_with_dependencies` |
 | device allocation | `Buffer` | Owns `lrrt::DeviceBuffer`; allocates with `lr_malloc` through the C++ wrapper |
@@ -139,6 +141,7 @@ The first adapter prototype should reject these features explicitly:
 - host-visible mapped device allocations
 - file-backed HAL queue read/write operations
 - HAL queue transfer operations with semaphore dependencies
+- HAL executable preparation/loading
 - timeline semaphores
 - full IREE command buffer optimization
 - dynamic shape dispatch policy

@@ -228,6 +228,73 @@ int test_lrrt_driver_registration() {
     return 1;
   }
 
+  iree_hal_executable_cache_t *executable_cache = nullptr;
+  status = iree_hal_executable_cache_create(device, IREE_SV("test-cache"),
+                                            &executable_cache);
+  if (!iree_status_is_ok(status) || !executable_cache) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  if (!iree_hal_executable_cache_can_prepare_format(
+          executable_cache, (iree_hal_executable_caching_mode_t)0,
+          IREE_SV("rocm-hsaco")) ||
+      !iree_hal_executable_cache_can_prepare_format(
+          executable_cache, (iree_hal_executable_caching_mode_t)0,
+          IREE_SV("amdgpu-hsaco")) ||
+      iree_hal_executable_cache_can_prepare_format(
+          executable_cache, (iree_hal_executable_caching_mode_t)0,
+          IREE_SV("vmfb"))) {
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  const uint8_t hsaco_prefix[4] = {0x7f, 'E', 'L', 'F'};
+  char inferred_format[32] = {};
+  iree_host_size_t inferred_size = 0;
+  status = iree_hal_executable_cache_infer_format(
+      executable_cache, (iree_hal_executable_caching_mode_t)0,
+      iree_make_const_byte_span(hsaco_prefix, sizeof(hsaco_prefix)),
+      sizeof(inferred_format), inferred_format, &inferred_size);
+  if (!iree_status_is_ok(status) ||
+      std::strcmp(inferred_format, "rocm-hsaco") != 0 ||
+      inferred_size != sizeof(hsaco_prefix)) {
+    iree_status_ignore(status);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_executable_params_t executable_params;
+  iree_hal_executable_params_initialize(&executable_params);
+  executable_params.executable_format = IREE_SV("rocm-hsaco");
+  executable_params.executable_data =
+      iree_make_const_byte_span(hsaco_prefix, sizeof(hsaco_prefix));
+  iree_hal_executable_t *executable = nullptr;
+  status = iree_hal_executable_cache_prepare_executable(
+      executable_cache, &executable_params, &executable);
+  if (iree_status_code(status) != IREE_STATUS_UNIMPLEMENTED || executable) {
+    iree_status_ignore(status);
+    if (executable) {
+      iree_hal_executable_release(executable);
+    }
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_status_ignore(status);
+  iree_hal_executable_cache_release(executable_cache);
+
   iree_hal_device_capabilities_t capabilities;
   status = iree_hal_device_query_capabilities(device, &capabilities);
   if (!iree_status_is_ok(status) ||
