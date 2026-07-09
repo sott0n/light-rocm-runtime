@@ -25,18 +25,21 @@ The native driver factory is the first step toward a seamless
 IREE HAL driver registry, created by name, and queried for one placeholder
 device. It can also create a minimal lrrt-backed `iree_hal_device_t` with a
 stable id, host allocator, empty capabilities, and a device-owned HAL allocator
-skeleton. The allocator currently exposes lifetime/query methods only:
-compatibility reports `IREE_HAL_BUFFER_COMPATIBILITY_NONE`, buffer allocation
-returns `IREE_STATUS_UNIMPLEMENTED`, and virtual memory reports unavailable.
-Executable cache, command buffers, semaphores, and queue submission APIs also
-remain explicitly unsupported until they are backed by lrrt runtime objects.
+skeleton. The allocator opens the first lrrt device and can allocate
+device-local, non-mappable `iree_hal_buffer_t` objects backed by `lr_malloc`.
+Those buffers release their lrrt allocation with `lr_free` when the HAL buffer
+is destroyed. Host-visible mapping, import/export, and virtual memory remain
+unsupported. Executable cache, command buffers, semaphores, and queue
+submission APIs also remain explicitly unsupported until they are backed by lrrt
+runtime objects.
 
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
 | driver factory | `lrrt_iree_hal_driver_module_register` | Registers the `lrrt` HAL driver factory with an IREE registry |
 | native HAL driver | `lrrt_iree_hal_driver_t` | Creates the minimal native HAL device for `default` |
 | native HAL device | `lrrt_iree_hal_device_t` | Lifetime/id/query skeleton with an owned HAL allocator |
-| native HAL allocator | `lrrt_iree_hal_allocator_t` | Lifetime/query skeleton only; real buffer allocation is not implemented yet |
+| native HAL allocator | `lrrt_iree_hal_allocator_t` | Owns the lrrt runtime/device lifetime needed by HAL buffers |
+| native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
 | command queue / submit path | `CommandQueue` | Owns `lrrt::Queue`; dispatches with `lr_launch_on_queue_with_dependencies` |
 | device allocation | `Buffer` | Owns `lrrt::DeviceBuffer`; allocates with `lr_malloc` through the C++ wrapper |
@@ -133,6 +136,7 @@ The first adapter prototype should reject these features explicitly:
 - multiple independent hardware queues as a required semantic
 - external memory import/export
 - host-visible mapped device allocations
+- host-device HAL queue transfer operations
 - timeline semaphores
 - full IREE command buffer optimization
 - dynamic shape dispatch policy

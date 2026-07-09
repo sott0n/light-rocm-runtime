@@ -70,10 +70,17 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
       "${LRRT_IREE_BASE_THREADING_LIB}"
       "${LRRT_IREE_BASE_LIB}"
       "${LRRT_IREE_BASE_TIME_LIB}"
+      lrrt::lrrt
   )
   add_test(
     NAME lrrt_iree_hal_driver_tests
     COMMAND lrrt_iree_hal_driver_tests
+  )
+  set_tests_properties(
+    lrrt_iree_hal_driver_tests
+    PROPERTIES
+      LABELS "iree;gpu"
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
   )
 else()
   message(

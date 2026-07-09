@@ -100,15 +100,16 @@ int test_lrrt_driver_registration() {
     return 1;
   }
 
-  iree_hal_buffer_params_t buffer_params = {
-      IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
-      IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE,
-      0,
-  };
+  iree_hal_buffer_params_t buffer_params = {};
+  buffer_params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE;
+  buffer_params.access = IREE_HAL_MEMORY_ACCESS_ALL;
+  buffer_params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
   iree_device_size_t allocation_size = 128;
-  if (iree_hal_allocator_query_buffer_compatibility(
-          allocator, buffer_params, allocation_size, nullptr, nullptr) !=
-      IREE_HAL_BUFFER_COMPATIBILITY_NONE) {
+  iree_hal_buffer_compatibility_t compatibility =
+      iree_hal_allocator_query_buffer_compatibility(
+          allocator, buffer_params, allocation_size, nullptr, nullptr);
+  if ((compatibility & IREE_HAL_BUFFER_COMPATIBILITY_ALLOCATABLE) == 0 ||
+      (compatibility & IREE_HAL_BUFFER_COMPATIBILITY_QUEUE_DISPATCH) == 0) {
     iree_hal_device_release(device);
     iree_hal_driver_release(driver);
     iree_hal_driver_registry_free(registry);
@@ -118,14 +119,23 @@ int test_lrrt_driver_registration() {
   iree_hal_buffer_t *buffer = nullptr;
   status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 128,
                                               &buffer);
-  if (iree_status_code(status) != IREE_STATUS_UNIMPLEMENTED || buffer) {
+  if (!iree_status_is_ok(status) || !buffer ||
+      iree_hal_buffer_allocation_size(buffer) != 128 ||
+      iree_hal_buffer_byte_length(buffer) != 128 ||
+      iree_hal_buffer_memory_type(buffer) !=
+          IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL ||
+      iree_hal_buffer_allowed_usage(buffer) !=
+          IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE) {
     iree_status_ignore(status);
+    if (buffer) {
+      iree_hal_buffer_release(buffer);
+    }
     iree_hal_device_release(device);
     iree_hal_driver_release(driver);
     iree_hal_driver_registry_free(registry);
     return 1;
   }
-  iree_status_ignore(status);
+  iree_hal_buffer_release(buffer);
 
   if (iree_hal_allocator_supports_virtual_memory(allocator)) {
     iree_hal_device_release(device);

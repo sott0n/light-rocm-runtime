@@ -184,11 +184,11 @@ The current adapter skeleton mapping is tracked in
 The first native HAL entry point now exists as a minimal `lrrt` driver factory.
 `lrrt_iree_hal_driver_module_register` can register the factory in an IREE HAL
 driver registry, and the registry can create the `lrrt` driver and a minimal
-`iree_hal_device_t` by name. The device now owns a HAL allocator skeleton, but
-the allocator does not allocate lrrt device memory yet. This is not enough for
-`iree-run-module --device=lrrt` yet: the next required step is real lrrt-backed
-buffer allocation, followed by executable cache and queue submission
-implementation.
+`iree_hal_device_t` by name. The device now owns a HAL allocator that can
+create device-local, non-mappable IREE HAL buffers backed by lrrt `lr_malloc`
+allocations. This is not enough for `iree-run-module --device=lrrt` yet: the
+next required steps are HAL queue transfer support, executable cache loading,
+and queue dispatch submission.
 
 ### I2: Artifact inspection
 
