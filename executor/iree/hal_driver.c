@@ -378,6 +378,36 @@ lrrt_iree_hal_buffer_cast(iree_hal_buffer_t *base_buffer) {
   return (lrrt_iree_hal_buffer_t *)base_buffer;
 }
 
+static iree_status_t lrrt_iree_hal_buffer_device_range(
+    iree_hal_buffer_t *base_buffer, iree_device_size_t offset,
+    iree_device_size_t length, void **out_device_ptr) {
+  IREE_ASSERT_ARGUMENT(out_device_ptr);
+  *out_device_ptr = NULL;
+  if (!iree_hal_resource_is(base_buffer, &lrrt_iree_hal_buffer_vtable)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "buffer is not an lrrt HAL buffer");
+  }
+  iree_device_size_t byte_length = iree_hal_buffer_byte_length(base_buffer);
+  if (offset > byte_length || length > byte_length - offset) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "buffer range out of bounds: offset=%" PRIu64
+                            ", length=%" PRIu64 ", byte_length=%" PRIu64,
+                            (uint64_t)offset, (uint64_t)length,
+                            (uint64_t)byte_length);
+  }
+  lrrt_iree_hal_buffer_t *buffer = lrrt_iree_hal_buffer_cast(base_buffer);
+  *out_device_ptr = (uint8_t *)buffer->device_ptr + offset;
+  return iree_ok_status();
+}
+
+#if defined(LRRT_IREE_HAL_DRIVER_TESTING)
+iree_status_t
+lrrt_iree_hal_buffer_device_pointer_for_test(iree_hal_buffer_t *buffer,
+                                             void **out_device_ptr) {
+  return lrrt_iree_hal_buffer_device_range(buffer, 0, 0, out_device_ptr);
+}
+#endif
+
 static void lrrt_iree_hal_buffer_destroy(iree_hal_buffer_t *base_buffer) {
   lrrt_iree_hal_buffer_t *buffer = lrrt_iree_hal_buffer_cast(base_buffer);
   iree_allocator_t host_allocator = buffer->host_allocator;
@@ -677,6 +707,18 @@ static iree_status_t lrrt_iree_hal_device_assign_topology_info(
   iree_make_status(IREE_STATUS_UNIMPLEMENTED,                                  \
                    "lrrt HAL device " name " is not implemented yet")
 
+static iree_status_t lrrt_iree_hal_device_require_empty_semaphore_lists(
+    const char *operation, const iree_hal_semaphore_list_t wait_semaphore_list,
+    const iree_hal_semaphore_list_t signal_semaphore_list) {
+  if (!iree_hal_semaphore_list_is_empty(wait_semaphore_list) ||
+      !iree_hal_semaphore_list_is_empty(signal_semaphore_list)) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "lrrt HAL device %s only supports empty semaphore lists", operation);
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t lrrt_iree_hal_device_create_channel(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_channel_params_t params, iree_hal_channel_t **out_channel) {
@@ -830,17 +872,32 @@ static iree_status_t lrrt_iree_hal_device_queue_update(
     const void *source_buffer, iree_host_size_t source_offset,
     iree_hal_buffer_t *target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, iree_hal_update_flags_t flags) {
-  (void)device;
   (void)queue_affinity;
-  (void)wait_semaphore_list;
-  (void)signal_semaphore_list;
-  (void)source_buffer;
-  (void)source_offset;
-  (void)target_buffer;
-  (void)target_offset;
-  (void)length;
   (void)flags;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue update");
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
+      "queue update", wait_semaphore_list, signal_semaphore_list));
+  if (length == 0) {
+    return iree_ok_status();
+  }
+  if ((iree_hal_buffer_allowed_usage(target_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue update target buffer lacks transfer-target "
+                            "usage");
+  }
+
+  void *target_device_ptr = NULL;
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      target_buffer, target_offset, length, &target_device_ptr));
+  const uint8_t *source =
+      (const uint8_t *)source_buffer + (iree_host_size_t)source_offset;
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
+  lr_status_t lr_status =
+      lr_memcpy(allocator->device, target_device_ptr, source, (size_t)length,
+                LR_MEMCPY_HOST_TO_DEVICE);
+  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_copy(
@@ -850,17 +907,39 @@ static iree_status_t lrrt_iree_hal_device_queue_copy(
     iree_hal_buffer_t *source_buffer, iree_device_size_t source_offset,
     iree_hal_buffer_t *target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, iree_hal_copy_flags_t flags) {
-  (void)device;
   (void)queue_affinity;
-  (void)wait_semaphore_list;
-  (void)signal_semaphore_list;
-  (void)source_buffer;
-  (void)source_offset;
-  (void)target_buffer;
-  (void)target_offset;
-  (void)length;
   (void)flags;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue copy");
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
+      "queue copy", wait_semaphore_list, signal_semaphore_list));
+  if (length == 0) {
+    return iree_ok_status();
+  }
+  if ((iree_hal_buffer_allowed_usage(source_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE) == 0) {
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue copy source buffer lacks transfer-source "
+                            "usage");
+  }
+  if ((iree_hal_buffer_allowed_usage(target_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue copy target buffer lacks transfer-target "
+                            "usage");
+  }
+
+  void *source_device_ptr = NULL;
+  void *target_device_ptr = NULL;
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      source_buffer, source_offset, length, &source_device_ptr));
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      target_buffer, target_offset, length, &target_device_ptr));
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
+  lr_status_t lr_status =
+      lr_memcpy(allocator->device, target_device_ptr, source_device_ptr,
+                (size_t)length, LR_MEMCPY_DEVICE_TO_DEVICE);
+  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_read(

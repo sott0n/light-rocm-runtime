@@ -3,6 +3,8 @@
 #include <cstring>
 #include <stdio.h>
 
+#include "lrrt/lrrt.h"
+
 namespace {
 
 bool string_view_equal(iree_string_view_t value, const char *expected) {
@@ -101,7 +103,8 @@ int test_lrrt_driver_registration() {
   }
 
   iree_hal_buffer_params_t buffer_params = {};
-  buffer_params.usage = IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE;
+  buffer_params.usage =
+      IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE | IREE_HAL_BUFFER_USAGE_TRANSFER;
   buffer_params.access = IREE_HAL_MEMORY_ACCESS_ALL;
   buffer_params.type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL;
   iree_device_size_t allocation_size = 128;
@@ -109,6 +112,7 @@ int test_lrrt_driver_registration() {
       iree_hal_allocator_query_buffer_compatibility(
           allocator, buffer_params, allocation_size, nullptr, nullptr);
   if ((compatibility & IREE_HAL_BUFFER_COMPATIBILITY_ALLOCATABLE) == 0 ||
+      (compatibility & IREE_HAL_BUFFER_COMPATIBILITY_QUEUE_TRANSFER) == 0 ||
       (compatibility & IREE_HAL_BUFFER_COMPATIBILITY_QUEUE_DISPATCH) == 0) {
     iree_hal_device_release(device);
     iree_hal_driver_release(driver);
@@ -125,7 +129,8 @@ int test_lrrt_driver_registration() {
       iree_hal_buffer_memory_type(buffer) !=
           IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL ||
       iree_hal_buffer_allowed_usage(buffer) !=
-          IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE) {
+          (IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE |
+           IREE_HAL_BUFFER_USAGE_TRANSFER)) {
     iree_status_ignore(status);
     if (buffer) {
       iree_hal_buffer_release(buffer);
@@ -136,6 +141,85 @@ int test_lrrt_driver_registration() {
     return 1;
   }
   iree_hal_buffer_release(buffer);
+
+  iree_hal_buffer_t *source_buffer = nullptr;
+  iree_hal_buffer_t *target_buffer = nullptr;
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 32,
+                                              &source_buffer);
+  if (!iree_status_is_ok(status) || !source_buffer) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 32,
+                                              &target_buffer);
+  if (!iree_status_is_ok(status) || !target_buffer) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  const uint32_t source_values[4] = {3, 1, 4, 1};
+  status = iree_hal_device_queue_update(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+      iree_hal_semaphore_list_empty(), source_values, 0, source_buffer, 0,
+      sizeof(source_values), IREE_HAL_UPDATE_FLAG_NONE);
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(target_buffer);
+    iree_hal_buffer_release(source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  status = iree_hal_device_queue_copy(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+      iree_hal_semaphore_list_empty(), source_buffer, 0, target_buffer, 0,
+      sizeof(source_values), IREE_HAL_COPY_FLAG_NONE);
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(target_buffer);
+    iree_hal_buffer_release(source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  void *target_device_ptr = nullptr;
+  status = lrrt_iree_hal_buffer_device_pointer_for_test(target_buffer,
+                                                        &target_device_ptr);
+  if (!iree_status_is_ok(status) || !target_device_ptr) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(target_buffer);
+    iree_hal_buffer_release(source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  uint32_t copied_values[4] = {};
+  lr_device_t lrrt_device = {0};
+  if (lr_device_open(0, &lrrt_device) != LR_SUCCESS ||
+      lr_memcpy(lrrt_device, copied_values, target_device_ptr,
+                sizeof(copied_values),
+                LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS ||
+      std::memcmp(copied_values, source_values, sizeof(source_values)) != 0) {
+    iree_hal_buffer_release(target_buffer);
+    iree_hal_buffer_release(source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_buffer_release(target_buffer);
+  iree_hal_buffer_release(source_buffer);
 
   if (iree_hal_allocator_supports_virtual_memory(allocator)) {
     iree_hal_device_release(device);

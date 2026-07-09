@@ -40,6 +40,7 @@ runtime objects.
 | native HAL device | `lrrt_iree_hal_device_t` | Lifetime/id/query skeleton with an owned HAL allocator |
 | native HAL allocator | `lrrt_iree_hal_allocator_t` | Owns the lrrt runtime/device lifetime needed by HAL buffers |
 | native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
+| HAL queue update/copy | `queue_update`, `queue_copy` | Uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy with empty semaphore lists |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
 | command queue / submit path | `CommandQueue` | Owns `lrrt::Queue`; dispatches with `lr_launch_on_queue_with_dependencies` |
 | device allocation | `Buffer` | Owns `lrrt::DeviceBuffer`; allocates with `lr_malloc` through the C++ wrapper |
@@ -136,7 +137,8 @@ The first adapter prototype should reject these features explicitly:
 - multiple independent hardware queues as a required semantic
 - external memory import/export
 - host-visible mapped device allocations
-- host-device HAL queue transfer operations
+- file-backed HAL queue read/write operations
+- HAL queue transfer operations with semaphore dependencies
 - timeline semaphores
 - full IREE command buffer optimization
 - dynamic shape dispatch policy

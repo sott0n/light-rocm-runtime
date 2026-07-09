@@ -59,7 +59,9 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
   )
   target_compile_definitions(
     lrrt_iree_hal_driver_tests
-    PRIVATE IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
+    PRIVATE
+      IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
+      LRRT_IREE_HAL_DRIVER_TESTING
   )
   target_link_libraries(
     lrrt_iree_hal_driver_tests

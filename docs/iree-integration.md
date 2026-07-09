@@ -186,9 +186,11 @@ The first native HAL entry point now exists as a minimal `lrrt` driver factory.
 driver registry, and the registry can create the `lrrt` driver and a minimal
 `iree_hal_device_t` by name. The device now owns a HAL allocator that can
 create device-local, non-mappable IREE HAL buffers backed by lrrt `lr_malloc`
-allocations. This is not enough for `iree-run-module --device=lrrt` yet: the
-next required steps are HAL queue transfer support, executable cache loading,
-and queue dispatch submission.
+allocations. It also supports the first HAL queue transfer path with
+`queue_update` for host-to-device writes and `queue_copy` for device-to-device
+copies when semaphore lists are empty. This is not enough for
+`iree-run-module --device=lrrt` yet: the next required steps are executable
+cache loading, queue dispatch submission, and semaphore-backed ordering.
 
 ### I2: Artifact inspection
 
