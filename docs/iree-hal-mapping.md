@@ -12,12 +12,25 @@ outside `light-rocm-runtime`.
 
 ## Current Skeleton
 
-The current skeleton is a small C++ layer that names the adapter-owned concepts
-before binding directly to real IREE HAL types. It is compiled only when
-`LRRT_ENABLE_IREE_ADAPTER=ON`.
+The current skeleton has two layers and is compiled only when
+`LRRT_ENABLE_IREE_ADAPTER=ON`:
+
+- a small C++ adapter layer that names the lrrt-owned concepts used by the
+  existing metadata/HSACO dispatch probes
+- a minimal native IREE HAL driver factory named `lrrt`, registered through
+  `lrrt_iree_hal_driver_module_register`
+
+The native driver factory is the first step toward a seamless
+`iree-run-module --device=lrrt` path. At this stage it can be registered in an
+IREE HAL driver registry, created by name, and queried for one placeholder
+device. Device creation intentionally returns `IREE_STATUS_UNIMPLEMENTED` until
+the lrrt-backed `iree_hal_device_t`, allocator, executable cache, and queue
+submission path exist.
 
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
+| driver factory | `lrrt_iree_hal_driver_module_register` | Registers the `lrrt` HAL driver factory with an IREE registry |
+| native HAL driver | `lrrt_iree_hal_driver_t` | Driver object only; device creation is not implemented yet |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
 | command queue / submit path | `CommandQueue` | Owns `lrrt::Queue`; dispatches with `lr_launch_on_queue_with_dependencies` |
 | device allocation | `Buffer` | Owns `lrrt::DeviceBuffer`; allocates with `lr_malloc` through the C++ wrapper |

@@ -24,6 +24,55 @@ add_test(
   COMMAND lrrt_iree_adapter_contract_tests
 )
 
+set(LRRT_IREE_RUNTIME_BUILD_DIR
+    "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
+)
+set(LRRT_IREE_BASE_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/libiree_base_base.a"
+)
+set(LRRT_IREE_HAL_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/hal/libiree_hal_hal.a"
+)
+set(LRRT_IREE_BASE_PATH_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/internal/libiree_base_internal_path.a"
+)
+set(LRRT_IREE_BASE_THREADING_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/threading/libiree_base_threading_threading.a"
+)
+set(LRRT_IREE_BASE_TIME_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/internal/libiree_base_internal_time.a"
+)
+if(EXISTS "${LRRT_IREE_BASE_LIB}" AND EXISTS "${LRRT_IREE_HAL_LIB}")
+  add_executable(lrrt_iree_hal_driver_tests hal_driver.c hal_driver_test.cpp)
+  target_include_directories(
+    lrrt_iree_hal_driver_tests
+    PRIVATE "${LRRT_IREE_INCLUDE_DIR}"
+  )
+  target_compile_definitions(
+    lrrt_iree_hal_driver_tests
+    PRIVATE IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
+  )
+  target_link_libraries(
+    lrrt_iree_hal_driver_tests
+    PRIVATE
+      "${LRRT_IREE_HAL_LIB}"
+      "${LRRT_IREE_BASE_PATH_LIB}"
+      "${LRRT_IREE_BASE_THREADING_LIB}"
+      "${LRRT_IREE_BASE_LIB}"
+      "${LRRT_IREE_BASE_TIME_LIB}"
+  )
+  add_test(
+    NAME lrrt_iree_hal_driver_tests
+    COMMAND lrrt_iree_hal_driver_tests
+  )
+else()
+  message(
+    STATUS
+      "IREE HAL driver registration test disabled; IREE runtime static libs "
+      "were not found under ${LRRT_IREE_RUNTIME_BUILD_DIR}"
+  )
+endif()
+
 if(LRRT_IREE_COMPILE_EXECUTABLE AND LRRT_IREE_RUN_MODULE_EXECUTABLE)
   set(LRRT_IREE_PROBE_HSACO
       "${PROJECT_SOURCE_DIR}/build-iree-probe/minimal_mul_${LRRT_AMDGPU_TARGET}.hsaco"

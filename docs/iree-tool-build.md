@@ -83,7 +83,10 @@ cmake -S . -B build-iree \
 
 Add `build-iree-tools/tools` to `PATH` or pass the explicit tool paths in the
 environment used by future validation tests. The current adapter skeleton only
-requires headers, so missing tools are reported as CMake status messages.
+requires headers for metadata/HSACO probes. The native HAL driver registration
+test also uses the IREE runtime static libraries produced by
+`tools/build_iree_tools.sh`; if those libraries are absent, that specific test
+is skipped while the header-only adapter tests remain available.
 
 ## Why Not Build IREE From lrrt CMake
 
