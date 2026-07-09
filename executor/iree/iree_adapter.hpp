@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -65,6 +66,49 @@ struct ExportMetadata {
         shared_memory_bytes,
     };
   }
+
+  lr_launch_config_t
+  launch_config_for_workgroups(lr_dim3_t workgroup_count,
+                               uint32_t shared_memory_bytes = 0) const {
+    return launch_config(
+        lr_dim3_t{
+            workgroup_count.x * workgroup_size[0],
+            workgroup_count.y * workgroup_size[1],
+            workgroup_count.z * workgroup_size[2],
+        },
+        shared_memory_bytes);
+  }
+};
+
+class KernargBuilder {
+public:
+  explicit KernargBuilder(const ExportMetadata &export_metadata)
+      : export_metadata_(export_metadata) {}
+
+  std::vector<unsigned char>
+  pack_global_buffers(const std::vector<void *> &device_pointers) const {
+    if (device_pointers.size() != export_metadata_.bindings.size()) {
+      throw std::runtime_error("IREE kernarg buffer count mismatch");
+    }
+
+    std::vector<unsigned char> kernargs(device_pointers.size() *
+                                        sizeof(void *));
+    for (size_t i = 0; i < export_metadata_.bindings.size(); ++i) {
+      const BindingMetadata &binding = export_metadata_.bindings[i];
+      if (binding.index != i) {
+        throw std::runtime_error("IREE binding indices must be contiguous");
+      }
+      if (binding.type != "storage_buffer" || !binding.has_flag("Indirect")) {
+        throw std::runtime_error("unsupported IREE binding for kernarg pack");
+      }
+      std::memcpy(kernargs.data() + i * sizeof(void *), &device_pointers[i],
+                  sizeof(void *));
+    }
+    return kernargs;
+  }
+
+private:
+  const ExportMetadata &export_metadata_;
 };
 
 struct ExecutableMetadata {

@@ -76,6 +76,11 @@ The adapter still needs a real IREE HAL binding step to turn IREE buffer views
 and dispatch records into these metadata and kernarg values. That logic belongs
 in `executor/iree`, not in the C runtime core.
 
+The current adapter helper can pack contiguous `storage_buffer` bindings marked
+`Indirect` into the pointer-only kernarg layout used by the `simple_mul` probe.
+It also converts IREE-style workgroup counts into lrrt's total-grid launch
+configuration using the export workgroup size.
+
 ## Dispatch Contract
 
 The skeleton dispatch path is deliberately narrow:

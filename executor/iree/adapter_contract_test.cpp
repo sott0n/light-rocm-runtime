@@ -16,6 +16,7 @@ using lrrt::executor::iree::Executable;
 using lrrt::executor::iree::ExecutableMetadata;
 using lrrt::executor::iree::ExportMetadata;
 using lrrt::executor::iree::Fence;
+using lrrt::executor::iree::KernargBuilder;
 using lrrt::executor::iree::UnsupportedFeature;
 
 static_assert(!std::is_copy_constructible<Device>::value,
@@ -124,6 +125,17 @@ int test_metadata_contract() {
     return 1;
   }
 
+  const lr_launch_config_t workgroup_config =
+      export_metadata.launch_config_for_workgroups(lr_dim3_t{2, 3, 4});
+  if (workgroup_config.grid.x != 64 || workgroup_config.grid.y != 3 ||
+      workgroup_config.grid.z != 4) {
+    return 1;
+  }
+  if (workgroup_config.block.x != 32 || workgroup_config.block.y != 1 ||
+      workgroup_config.block.z != 1) {
+    return 1;
+  }
+
   return 0;
 }
 
@@ -164,6 +176,41 @@ int test_metadata_export_lookup() {
   return 1;
 }
 
+int test_kernarg_builder() {
+  const ExecutableMetadata metadata = minimal_mul_metadata();
+  const ExportMetadata &export_metadata = metadata.require_export_by_ordinal(0);
+  KernargBuilder builder(export_metadata);
+
+  void *lhs = reinterpret_cast<void *>(static_cast<uintptr_t>(0x1000));
+  void *rhs = reinterpret_cast<void *>(static_cast<uintptr_t>(0x2000));
+  void *out = reinterpret_cast<void *>(static_cast<uintptr_t>(0x3000));
+  const std::vector<void *> buffers = {lhs, rhs, out};
+  const std::vector<unsigned char> kernargs =
+      builder.pack_global_buffers(buffers);
+
+  if (kernargs.size() != 3 * sizeof(void *)) {
+    return 1;
+  }
+  const void *const *packed =
+      reinterpret_cast<const void *const *>(kernargs.data());
+  if (packed[0] != lhs || packed[1] != rhs || packed[2] != out) {
+    return 1;
+  }
+
+  try {
+    builder.pack_global_buffers({lhs});
+  } catch (const std::runtime_error &error) {
+    const std::string message = error.what();
+    if (message.find("IREE kernarg buffer count mismatch") ==
+        std::string::npos) {
+      return 1;
+    }
+    return 0;
+  }
+
+  return 1;
+}
+
 } // namespace
 
 int main() {
@@ -177,6 +224,9 @@ int main() {
     return 1;
   }
   if (test_metadata_export_lookup() != 0) {
+    return 1;
+  }
+  if (test_kernarg_builder() != 0) {
     return 1;
   }
   return 0;

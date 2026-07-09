@@ -93,9 +93,11 @@ tools are available, this path is available as an opt-in CTest:
 ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_(emit_hsaco_probe|hsaco_dispatch_smoke)'
 ```
 
-The smoke test loads the raw HSACO, resolves the exported kernel symbol,
-dispatches the current `simple_mul` kernel through lrrt, and checks the same
-`4xf32=10 40 90 160` result used by the IREE HIP runtime baseline.
+The smoke test loads the raw HSACO, resolves the exported kernel symbol from
+`ExecutableMetadata`, packs the three storage-buffer bindings through the
+adapter kernarg helper, dispatches the current `simple_mul` kernel through
+lrrt, and checks the same `4xf32=10 40 90 160` result used by the IREE HIP
+runtime baseline.
 
 ## Why Not Use Raw-HSACO VMFB As The Baseline
 
