@@ -34,16 +34,22 @@ HIP runtime expects this shape when loading the VMFB.
 ## Raw HSACO Path
 
 For lrrt, the useful artifact is the raw HSACO ELF image, not the HIP executable
-flatbuffer. IREE can emit that directly from the generated
-`executable-targets` MLIR:
+flatbuffer. The probe emits this by compiling a second VMFB with the ROCm
+container type set to raw HSACO, then extracting the ROCm executable payload
+member from the zip archive:
 
 ```sh
 build-iree-tools/tools/iree-compile \
-  --compile-mode=hal-executable \
+  --iree-hal-target-device=hip \
   --iree-rocm-target=gfx1101 \
   --iree-rocm-container-type=hsaco \
-  build-iree-probe/minimal_mul_gfx1101_executable_targets.mlir \
-  -o build-iree-probe/minimal_mul_gfx1101.hsaco
+  tools/iree_minimal_mul.mlir \
+  -o build-iree-probe/minimal_mul_gfx1101_raw_hsaco.vmfb
+
+unzip -p \
+  build-iree-probe/minimal_mul_gfx1101_raw_hsaco.vmfb \
+  simple_mul_dispatch_0_rocm_hsaco_fb.fb \
+  > build-iree-probe/minimal_mul_gfx1101.hsaco
 ```
 
 `tools/iree_compile_probe.sh --emit-hsaco` now runs this step after generating
@@ -72,13 +78,33 @@ simple_mul_dispatch_0_elementwise_4_f32
 That symbol is the value the adapter should pass to `lr_kernel_get` after
 loading the HSACO through `lr_module_load_hsaco`.
 
+This extraction route preserves the same workgroup requirement reported by the
+IREE HAL export summary: both the metadata summary and the emitted HSACO report
+`[32, 1, 1]` for the current `simple_mul` dispatch.
+
+The current `simple_mul` export count is one workgroup. Since lrrt launch
+configuration uses total grid size rather than workgroup count, the smoke test
+launches with `grid = [32, 1, 1]` and `block = [32, 1, 1]`.
+
+When lrrt is configured with `LRRT_ENABLE_IREE_ADAPTER=ON` and the local IREE
+tools are available, this path is available as an opt-in CTest:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_(emit_hsaco_probe|hsaco_dispatch_smoke)'
+```
+
+The smoke test loads the raw HSACO, resolves the exported kernel symbol,
+dispatches the current `simple_mul` kernel through lrrt, and checks the same
+`4xf32=10 40 90 160` result used by the IREE HIP runtime baseline.
+
 ## Why Not Use Raw-HSACO VMFB As The Baseline
 
 IREE also accepts `--iree-rocm-container-type=hsaco` when compiling a full VMFB,
-and the resulting zip member is a raw ELF image. However, that VMFB is not a
-valid IREE HIP runtime baseline in the current setup: `iree-run-module
---device=hip` expects the ROCm executable payload to have the HIP executable
-flatbuffer header, and fails when the payload is raw HSACO.
+and the resulting zip member is a raw ELF image. That is exactly the artifact
+extraction path used by `--emit-hsaco`. However, that VMFB is not a valid IREE
+HIP runtime baseline in the current setup: `iree-run-module --device=hip`
+expects the ROCm executable payload to have the HIP executable flatbuffer
+header, and fails when the payload is raw HSACO.
 
 Therefore the validation split is:
 

@@ -20,8 +20,8 @@ Options:
   --summary PATH       Write executable-target metadata JSON summary
   --out-dir DIR        Output directory (default: build-iree-probe)
   --target CHIP        ROCm target chip (default: gfx1101)
-  --emit-hsaco         Emit a raw HSACO image from executable-targets MLIR for
-                       lrrt module loading experiments.
+  --emit-hsaco         Emit a raw HSACO image from an IREE ROCm executable
+                       payload for lrrt module loading experiments.
   --hsaco PATH         Raw HSACO output path for --emit-hsaco
                        (default: <out-dir>/minimal_mul_<target>.hsaco)
   --try-vmfb           Also attempt full VMFB serialization. This may fail when
@@ -176,6 +176,8 @@ vmfb="${base}.vmfb"
 vmfb_log="${base}_vmfb.log"
 baseline_log="${base}_baseline.log"
 default_hsaco="${base}.hsaco"
+hsaco_vmfb="${base}_raw_hsaco.vmfb"
+hsaco_vmfb_log="${base}_raw_hsaco_vmfb.log"
 
 if [[ -z "${summary_path}" ]]; then
   summary_path="${default_summary}"
@@ -212,14 +214,32 @@ run "${repo_root}/tools/iree_metadata_summary.py" \
   -o "${summary_path}"
 
 hsaco_status="skipped"
+hsaco_failure=""
 if [[ "${emit_hsaco}" -eq 1 ]]; then
-  run "${iree_compile}" \
-    --compile-mode=hal-executable \
-    "--iree-rocm-target=${target}" \
+  if "${compile_common[@]}" \
     --iree-rocm-container-type=hsaco \
-    "${target_ir}" \
-    -o "${hsaco_path}"
-  hsaco_status="ok"
+    "${input}" \
+    -o "${hsaco_vmfb}" >"${hsaco_vmfb_log}" 2>&1; then
+    hsaco_member="$(
+      unzip -Z -1 "${hsaco_vmfb}" |
+        grep -E '_rocm_hsaco_fb\.fb$' |
+        head -n 1 || true
+    )"
+    if [[ -z "${hsaco_member}" ]]; then
+      hsaco_status="failed"
+      hsaco_failure="raw HSACO VMFB did not contain a ROCm executable payload"
+    else
+      printf '+ unzip -p %q %q > %q\n' \
+        "${hsaco_vmfb}" \
+        "${hsaco_member}" \
+        "${hsaco_path}"
+      unzip -p "${hsaco_vmfb}" "${hsaco_member}" >"${hsaco_path}"
+      hsaco_status="ok"
+    fi
+  else
+    hsaco_status="failed"
+    hsaco_failure="raw HSACO VMFB serialization did not complete"
+  fi
 fi
 
 vmfb_status="skipped"
@@ -281,6 +301,11 @@ echo "  metadata-summary: ${summary_path}"
 echo "  hsaco: ${hsaco_status}"
 if [[ "${emit_hsaco}" -eq 1 ]]; then
   echo "  hsaco-output: ${hsaco_path}"
+  echo "  hsaco-vmfb: ${hsaco_vmfb}"
+  if [[ -n "${hsaco_failure}" ]]; then
+    echo "  hsaco-failure: ${hsaco_failure}"
+    echo "  hsaco-vmfb-log: ${hsaco_vmfb_log}"
+  fi
 fi
 echo "  vmfb: ${vmfb_status}"
 if [[ "${vmfb_status}" == "failed" ]]; then
@@ -304,5 +329,8 @@ grep -n -E \
   "${target_ir}" || true
 
 if [[ "${run_baseline}" -eq 1 && "${baseline_status}" != "ok" ]]; then
+  exit 1
+fi
+if [[ "${emit_hsaco}" -eq 1 && "${hsaco_status}" != "ok" ]]; then
   exit 1
 fi

@@ -169,8 +169,8 @@ tools/iree_compile_probe.sh --emit-hsaco
 ```
 
 This writes `minimal_mul_<target>.hsaco` under `build-iree-probe/` by compiling
-the generated `executable-targets` MLIR in `hal-executable` mode with
-`--iree-rocm-container-type=hsaco`. The artifact split is documented in
+a raw-HSACO VMFB with `--iree-rocm-container-type=hsaco` and extracting its
+ROCm executable payload. The artifact split is documented in
 [IREE Artifact Extraction Notes](iree-artifact-extraction.md).
 
 ## Assumptions
