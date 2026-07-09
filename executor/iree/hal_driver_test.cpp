@@ -74,8 +74,60 @@ int test_lrrt_driver_registration() {
     return 1;
   }
 
-  if (!string_view_equal(iree_hal_device_id(device), "lrrt") ||
-      iree_hal_device_allocator(device) != nullptr) {
+  iree_hal_allocator_t *allocator = iree_hal_device_allocator(device);
+  if (!string_view_equal(iree_hal_device_id(device), "lrrt") || !allocator) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  if (!iree_status_is_ok(iree_hal_allocator_trim(allocator))) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_host_size_t heap_count = 99;
+  status =
+      iree_hal_allocator_query_memory_heaps(allocator, 0, nullptr, &heap_count);
+  if (!iree_status_is_ok(status) || heap_count != 0) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_buffer_params_t buffer_params = {
+      IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
+      IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE,
+      0,
+  };
+  iree_device_size_t allocation_size = 128;
+  if (iree_hal_allocator_query_buffer_compatibility(
+          allocator, buffer_params, allocation_size, nullptr, nullptr) !=
+      IREE_HAL_BUFFER_COMPATIBILITY_NONE) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_buffer_t *buffer = nullptr;
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 128,
+                                              &buffer);
+  if (iree_status_code(status) != IREE_STATUS_UNIMPLEMENTED || buffer) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_status_ignore(status);
+
+  if (iree_hal_allocator_supports_virtual_memory(allocator)) {
     iree_hal_device_release(device);
     iree_hal_driver_release(driver);
     iree_hal_driver_registry_free(registry);

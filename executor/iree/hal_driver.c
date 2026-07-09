@@ -12,14 +12,21 @@ typedef struct lrrt_iree_hal_driver_t {
   iree_string_view_t identifier;
 } lrrt_iree_hal_driver_t;
 
+typedef struct lrrt_iree_hal_allocator_t {
+  iree_hal_resource_t resource;
+  iree_allocator_t host_allocator;
+} lrrt_iree_hal_allocator_t;
+
 typedef struct lrrt_iree_hal_device_t {
   iree_hal_resource_t resource;
   iree_allocator_t host_allocator;
+  iree_hal_allocator_t *device_allocator;
   iree_string_view_t identifier;
   iree_hal_device_topology_info_t topology_info;
 } lrrt_iree_hal_device_t;
 
 static const iree_hal_driver_vtable_t lrrt_iree_hal_driver_vtable;
+static const iree_hal_allocator_vtable_t lrrt_iree_hal_allocator_vtable;
 static const iree_hal_device_vtable_t lrrt_iree_hal_device_vtable;
 
 static lrrt_iree_hal_driver_t *
@@ -28,10 +35,38 @@ lrrt_iree_hal_driver_cast(iree_hal_driver_t *base_driver) {
   return (lrrt_iree_hal_driver_t *)base_driver;
 }
 
+static lrrt_iree_hal_allocator_t *
+lrrt_iree_hal_allocator_cast(iree_hal_allocator_t *base_allocator) {
+  IREE_HAL_ASSERT_TYPE(base_allocator, &lrrt_iree_hal_allocator_vtable);
+  return (lrrt_iree_hal_allocator_t *)base_allocator;
+}
+
+static const lrrt_iree_hal_allocator_t *
+lrrt_iree_hal_allocator_const_cast(const iree_hal_allocator_t *base_allocator) {
+  IREE_HAL_ASSERT_TYPE(base_allocator, &lrrt_iree_hal_allocator_vtable);
+  return (const lrrt_iree_hal_allocator_t *)base_allocator;
+}
+
 static lrrt_iree_hal_device_t *
 lrrt_iree_hal_device_cast(iree_hal_device_t *base_device) {
   IREE_HAL_ASSERT_TYPE(base_device, &lrrt_iree_hal_device_vtable);
   return (lrrt_iree_hal_device_t *)base_device;
+}
+
+static iree_status_t
+lrrt_iree_hal_allocator_create(iree_allocator_t host_allocator,
+                               iree_hal_allocator_t **out_allocator) {
+  IREE_ASSERT_ARGUMENT(out_allocator);
+  *out_allocator = NULL;
+
+  lrrt_iree_hal_allocator_t *allocator = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(host_allocator, sizeof(*allocator),
+                                             (void **)&allocator));
+  iree_hal_resource_initialize(&lrrt_iree_hal_allocator_vtable,
+                               &allocator->resource);
+  allocator->host_allocator = host_allocator;
+  *out_allocator = (iree_hal_allocator_t *)allocator;
+  return iree_ok_status();
 }
 
 static iree_status_t
@@ -49,10 +84,18 @@ lrrt_iree_hal_device_create(iree_string_view_t identifier,
 
   iree_hal_resource_initialize(&lrrt_iree_hal_device_vtable, &device->resource);
   device->host_allocator = host_allocator;
+  device->device_allocator = NULL;
   memset(&device->topology_info, 0, sizeof(device->topology_info));
   iree_string_view_append_to_buffer(identifier, &device->identifier,
                                     (char *)device +
                                         iree_sizeof_struct(*device));
+
+  iree_status_t status =
+      lrrt_iree_hal_allocator_create(host_allocator, &device->device_allocator);
+  if (!iree_status_is_ok(status)) {
+    iree_allocator_free(host_allocator, device);
+    return status;
+  }
 
   *out_device = (iree_hal_device_t *)device;
   return iree_ok_status();
@@ -87,10 +130,234 @@ static void lrrt_iree_hal_driver_destroy(iree_hal_driver_t *base_driver) {
   iree_allocator_free(host_allocator, driver);
 }
 
+static void
+lrrt_iree_hal_allocator_destroy(iree_hal_allocator_t *base_allocator) {
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(base_allocator);
+  iree_allocator_t host_allocator = allocator->host_allocator;
+  iree_allocator_free(host_allocator, allocator);
+}
+
 static void lrrt_iree_hal_device_destroy(iree_hal_device_t *base_device) {
   lrrt_iree_hal_device_t *device = lrrt_iree_hal_device_cast(base_device);
   iree_allocator_t host_allocator = device->host_allocator;
+  iree_hal_allocator_release(device->device_allocator);
   iree_allocator_free(host_allocator, device);
+}
+
+static iree_allocator_t lrrt_iree_hal_allocator_host_allocator(
+    const iree_hal_allocator_t *base_allocator) {
+  const lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_const_cast(base_allocator);
+  return allocator->host_allocator;
+}
+
+static iree_status_t
+lrrt_iree_hal_allocator_trim(iree_hal_allocator_t *base_allocator) {
+  (void)base_allocator;
+  return iree_ok_status();
+}
+
+static void lrrt_iree_hal_allocator_query_statistics(
+    iree_hal_allocator_t *base_allocator,
+    iree_hal_allocator_statistics_t *out_statistics) {
+  (void)base_allocator;
+  IREE_ASSERT_ARGUMENT(out_statistics);
+  memset(out_statistics, 0, sizeof(*out_statistics));
+}
+
+static iree_status_t lrrt_iree_hal_allocator_query_memory_heaps(
+    iree_hal_allocator_t *base_allocator, iree_host_size_t capacity,
+    iree_hal_allocator_memory_heap_t *heaps, iree_host_size_t *out_count) {
+  (void)base_allocator;
+  (void)capacity;
+  (void)heaps;
+  if (out_count) {
+    *out_count = 0;
+  }
+  return iree_ok_status();
+}
+
+static iree_hal_buffer_compatibility_t
+lrrt_iree_hal_allocator_query_buffer_compatibility(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_params_t *params,
+    iree_device_size_t *allocation_size) {
+  (void)base_allocator;
+  (void)params;
+  (void)allocation_size;
+  return IREE_HAL_BUFFER_COMPATIBILITY_NONE;
+}
+
+#define LRRT_IREE_HAL_ALLOCATOR_UNIMPLEMENTED(name)                            \
+  iree_make_status(IREE_STATUS_UNIMPLEMENTED,                                  \
+                   "lrrt HAL allocator " name " is not implemented yet")
+
+static iree_status_t
+lrrt_iree_hal_allocator_allocate_buffer(iree_hal_allocator_t *base_allocator,
+                                        const iree_hal_buffer_params_t *params,
+                                        iree_device_size_t allocation_size,
+                                        iree_hal_buffer_t **out_buffer) {
+  (void)base_allocator;
+  (void)params;
+  (void)allocation_size;
+  IREE_ASSERT_ARGUMENT(out_buffer);
+  *out_buffer = NULL;
+  return LRRT_IREE_HAL_ALLOCATOR_UNIMPLEMENTED("buffer allocation");
+}
+
+static void
+lrrt_iree_hal_allocator_deallocate_buffer(iree_hal_allocator_t *base_allocator,
+                                          iree_hal_buffer_t *buffer) {
+  (void)base_allocator;
+  (void)buffer;
+}
+
+static iree_status_t lrrt_iree_hal_allocator_import_buffer(
+    iree_hal_allocator_t *base_allocator,
+    const iree_hal_buffer_params_t *params,
+    iree_hal_external_buffer_t *external_buffer,
+    iree_hal_buffer_release_callback_t release_callback,
+    iree_hal_buffer_t **out_buffer) {
+  (void)base_allocator;
+  (void)params;
+  (void)external_buffer;
+  (void)release_callback;
+  IREE_ASSERT_ARGUMENT(out_buffer);
+  *out_buffer = NULL;
+  return LRRT_IREE_HAL_ALLOCATOR_UNIMPLEMENTED("buffer import");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_export_buffer(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_t *buffer,
+    iree_hal_external_buffer_type_t requested_type,
+    iree_hal_external_buffer_flags_t requested_flags,
+    iree_hal_external_buffer_t *out_external_buffer) {
+  (void)base_allocator;
+  (void)buffer;
+  (void)requested_type;
+  (void)requested_flags;
+  IREE_ASSERT_ARGUMENT(out_external_buffer);
+  memset(out_external_buffer, 0, sizeof(*out_external_buffer));
+  return LRRT_IREE_HAL_ALLOCATOR_UNIMPLEMENTED("buffer export");
+}
+
+static bool lrrt_iree_hal_allocator_supports_virtual_memory(
+    iree_hal_allocator_t *base_allocator) {
+  (void)base_allocator;
+  return false;
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_query_granularity(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_params_t params,
+    iree_device_size_t *out_minimum_page_size,
+    iree_device_size_t *out_recommended_page_size) {
+  (void)base_allocator;
+  (void)params;
+  IREE_ASSERT_ARGUMENT(out_minimum_page_size);
+  IREE_ASSERT_ARGUMENT(out_recommended_page_size);
+  *out_minimum_page_size = 0;
+  *out_recommended_page_size = 0;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_reserve(
+    iree_hal_allocator_t *base_allocator,
+    iree_hal_queue_affinity_t queue_affinity, iree_device_size_t size,
+    iree_hal_buffer_t **out_virtual_buffer) {
+  (void)base_allocator;
+  (void)queue_affinity;
+  (void)size;
+  IREE_ASSERT_ARGUMENT(out_virtual_buffer);
+  *out_virtual_buffer = NULL;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_release(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_t *virtual_buffer) {
+  (void)base_allocator;
+  (void)virtual_buffer;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_physical_memory_allocate(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_params_t params,
+    iree_device_size_t size, iree_allocator_t host_allocator,
+    iree_hal_physical_memory_t **out_physical_memory) {
+  (void)base_allocator;
+  (void)params;
+  (void)size;
+  (void)host_allocator;
+  IREE_ASSERT_ARGUMENT(out_physical_memory);
+  *out_physical_memory = NULL;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_physical_memory_free(
+    iree_hal_allocator_t *base_allocator,
+    iree_hal_physical_memory_t *physical_memory) {
+  (void)base_allocator;
+  (void)physical_memory;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_map(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_t *virtual_buffer,
+    iree_device_size_t virtual_offset,
+    iree_hal_physical_memory_t *physical_memory,
+    iree_device_size_t physical_offset, iree_device_size_t size) {
+  (void)base_allocator;
+  (void)virtual_buffer;
+  (void)virtual_offset;
+  (void)physical_memory;
+  (void)physical_offset;
+  (void)size;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_unmap(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_t *virtual_buffer,
+    iree_device_size_t virtual_offset, iree_device_size_t size) {
+  (void)base_allocator;
+  (void)virtual_buffer;
+  (void)virtual_offset;
+  (void)size;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_protect(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_t *virtual_buffer,
+    iree_device_size_t virtual_offset, iree_device_size_t size,
+    iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_memory_protection_t protection) {
+  (void)base_allocator;
+  (void)virtual_buffer;
+  (void)virtual_offset;
+  (void)size;
+  (void)queue_affinity;
+  (void)protection;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
+}
+
+static iree_status_t lrrt_iree_hal_allocator_virtual_memory_advise(
+    iree_hal_allocator_t *base_allocator, iree_hal_buffer_t *virtual_buffer,
+    iree_device_size_t virtual_offset, iree_device_size_t size,
+    iree_hal_queue_affinity_t queue_affinity, iree_hal_memory_advice_t advice) {
+  (void)base_allocator;
+  (void)virtual_buffer;
+  (void)virtual_offset;
+  (void)size;
+  (void)queue_affinity;
+  (void)advice;
+  return iree_make_status(IREE_STATUS_UNAVAILABLE,
+                          "lrrt HAL allocator virtual memory is unavailable");
 }
 
 static iree_string_view_t
@@ -107,15 +374,17 @@ lrrt_iree_hal_device_host_allocator(iree_hal_device_t *base_device) {
 
 static iree_hal_allocator_t *
 lrrt_iree_hal_device_allocator(iree_hal_device_t *base_device) {
-  (void)base_device;
-  return NULL;
+  lrrt_iree_hal_device_t *device = lrrt_iree_hal_device_cast(base_device);
+  return device->device_allocator;
 }
 
 static void
 lrrt_iree_hal_device_replace_allocator(iree_hal_device_t *base_device,
                                        iree_hal_allocator_t *new_allocator) {
-  (void)base_device;
-  (void)new_allocator;
+  lrrt_iree_hal_device_t *device = lrrt_iree_hal_device_cast(base_device);
+  iree_hal_allocator_retain(new_allocator);
+  iree_hal_allocator_release(device->device_allocator);
+  device->device_allocator = new_allocator;
 }
 
 static void lrrt_iree_hal_device_replace_channel_provider(
@@ -598,6 +867,32 @@ static const iree_hal_driver_vtable_t lrrt_iree_hal_driver_vtable = {
     .dump_device_info = lrrt_iree_hal_driver_dump_device_info,
     .create_device_by_id = lrrt_iree_hal_driver_create_device_by_id,
     .create_device_by_path = lrrt_iree_hal_driver_create_device_by_path,
+};
+
+static const iree_hal_allocator_vtable_t lrrt_iree_hal_allocator_vtable = {
+    .destroy = lrrt_iree_hal_allocator_destroy,
+    .host_allocator = lrrt_iree_hal_allocator_host_allocator,
+    .trim = lrrt_iree_hal_allocator_trim,
+    .query_statistics = lrrt_iree_hal_allocator_query_statistics,
+    .query_memory_heaps = lrrt_iree_hal_allocator_query_memory_heaps,
+    .query_buffer_compatibility =
+        lrrt_iree_hal_allocator_query_buffer_compatibility,
+    .allocate_buffer = lrrt_iree_hal_allocator_allocate_buffer,
+    .deallocate_buffer = lrrt_iree_hal_allocator_deallocate_buffer,
+    .import_buffer = lrrt_iree_hal_allocator_import_buffer,
+    .export_buffer = lrrt_iree_hal_allocator_export_buffer,
+    .supports_virtual_memory = lrrt_iree_hal_allocator_supports_virtual_memory,
+    .virtual_memory_query_granularity =
+        lrrt_iree_hal_allocator_virtual_memory_query_granularity,
+    .virtual_memory_reserve = lrrt_iree_hal_allocator_virtual_memory_reserve,
+    .virtual_memory_release = lrrt_iree_hal_allocator_virtual_memory_release,
+    .physical_memory_allocate =
+        lrrt_iree_hal_allocator_physical_memory_allocate,
+    .physical_memory_free = lrrt_iree_hal_allocator_physical_memory_free,
+    .virtual_memory_map = lrrt_iree_hal_allocator_virtual_memory_map,
+    .virtual_memory_unmap = lrrt_iree_hal_allocator_virtual_memory_unmap,
+    .virtual_memory_protect = lrrt_iree_hal_allocator_virtual_memory_protect,
+    .virtual_memory_advise = lrrt_iree_hal_allocator_virtual_memory_advise,
 };
 
 static const iree_hal_device_vtable_t lrrt_iree_hal_device_vtable = {
