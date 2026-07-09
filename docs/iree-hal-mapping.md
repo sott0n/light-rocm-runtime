@@ -53,12 +53,14 @@ The current `tools/iree_compile_probe.sh --try-vmfb` output for
 | `exports[0].kernel.attributes` | `rocdl.kernel`, workgroup attributes | `KernelMetadata::attributes` | Confirms this is a ROCm kernel and records compiler launch constraints. |
 | `exports[0].dispatch` | executable, variant, symbol | `DispatchMetadata` | Connects the Stream dispatch site back to the executable export. |
 
-The metadata structs are intentionally plain data. They do not load HSACO,
-parse JSON, calculate tensor shapes, or own IREE runtime semantics. Their job
-is to make the adapter boundary explicit:
+The metadata structs are intentionally plain data. The adapter has a narrow
+JSON loader for the metadata summary schema, but the structs do not load HSACO,
+calculate tensor shapes, or own IREE runtime semantics. Their job is to make
+the adapter boundary explicit:
 
 ```text
-IREE executable metadata
+IREE executable metadata JSON
+  -> parse_executable_metadata_json
   -> ExecutableMetadata / ExportMetadata / BindingMetadata
   -> lrrt::Module, lrrt::Kernel, lr_launch_config_t, packed kernargs
   -> CommandQueue::dispatch
@@ -100,9 +102,9 @@ The adapter caller must provide:
 - a packed kernarg buffer matching the generated code object ABI
 - optional wait fences that belong to the same adapter device
 
-The adapter does not currently infer launch dimensions, pack IREE ABI
-arguments, or parse VMFB metadata. Those responsibilities belong to the next
-real IREE HAL binding step.
+The adapter does not currently infer dispatch workgroup counts from VM bytecode,
+pack general IREE ABI arguments, or parse VMFB metadata. Those responsibilities
+belong to the next real IREE HAL binding step.
 
 ## Initial Unsupported Features
 

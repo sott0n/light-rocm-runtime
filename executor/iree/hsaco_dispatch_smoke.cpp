@@ -1,40 +1,44 @@
 #include "iree_adapter.hpp"
+#include "metadata_json.hpp"
 
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <stdio.h>
-#include <utility>
 #include <vector>
 
 #ifndef LRRT_IREE_HSACO_PATH
 #define LRRT_IREE_HSACO_PATH "build-iree-probe/minimal_mul_gfx1101.hsaco"
 #endif
 
-#ifndef LRRT_IREE_KERNEL_SYMBOL
-#define LRRT_IREE_KERNEL_SYMBOL "simple_mul_dispatch_0_elementwise_4_f32"
+#ifndef LRRT_IREE_METADATA_PATH
+#define LRRT_IREE_METADATA_PATH                                                \
+  "build-iree-probe/minimal_mul_gfx1101_metadata.json"
 #endif
 
 namespace {
 
-using lrrt::executor::iree::BindingMetadata;
 using lrrt::executor::iree::ExecutableMetadata;
 using lrrt::executor::iree::ExportMetadata;
 using lrrt::executor::iree::KernargBuilder;
+using lrrt::executor::iree::parse_executable_metadata_json;
 
-std::vector<unsigned char> read_file(const char *path) {
+std::vector<unsigned char> read_file(const char *path, const char *label) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) {
-    throw std::runtime_error("failed to open IREE HSACO");
+    throw std::runtime_error(std::string("failed to open IREE ") + label +
+                             ": " + path);
   }
   const std::streamsize size = file.tellg();
   if (size <= 0) {
-    throw std::runtime_error("IREE HSACO is empty");
+    throw std::runtime_error(std::string("IREE ") + label +
+                             " is empty: " + path);
   }
   file.seekg(0, std::ios::beg);
   std::vector<unsigned char> data(static_cast<size_t>(size));
   if (!file.read(reinterpret_cast<char *>(data.data()), size)) {
-    throw std::runtime_error("failed to read IREE HSACO");
+    throw std::runtime_error(std::string("failed to read IREE ") + label +
+                             ": " + path);
   }
   return data;
 }
@@ -45,30 +49,6 @@ void expect_close(float actual, float expected, size_t index) {
             actual, expected);
     throw std::runtime_error("IREE HSACO dispatch result mismatch");
   }
-}
-
-ExecutableMetadata simple_mul_metadata() {
-  ExportMetadata export_metadata;
-  export_metadata.symbol = LRRT_IREE_KERNEL_SYMBOL;
-  export_metadata.ordinal = 0;
-  export_metadata.workgroup_size = {32, 1, 1};
-  export_metadata.subgroup_size = 32;
-  export_metadata.bindings = {
-      BindingMetadata{0, "storage_buffer", {"ReadOnly", "Indirect"}},
-      BindingMetadata{1, "storage_buffer", {"ReadOnly", "Indirect"}},
-      BindingMetadata{2, "storage_buffer", {"Indirect"}},
-  };
-  export_metadata.kernel.symbol = LRRT_IREE_KERNEL_SYMBOL;
-  export_metadata.dispatch.executable = "simple_mul_dispatch_0";
-  export_metadata.dispatch.variant = "rocm_hsaco_fb";
-  export_metadata.dispatch.symbol = LRRT_IREE_KERNEL_SYMBOL;
-
-  ExecutableMetadata metadata;
-  metadata.target = "gfx1101";
-  metadata.executable = "simple_mul_dispatch_0";
-  metadata.variant = "rocm_hsaco_fb";
-  metadata.exports = {std::move(export_metadata)};
-  return metadata;
 }
 
 void run_simple_mul(lrrt::Device device, const lrrt::Kernel &kernel,
@@ -114,10 +94,14 @@ int main() {
     }
 
     lrrt::Device device = runtime.open_device(0);
-    const ExecutableMetadata metadata = simple_mul_metadata();
+    const std::vector<unsigned char> metadata_json =
+        read_file(LRRT_IREE_METADATA_PATH, "metadata JSON");
+    const ExecutableMetadata metadata =
+        parse_executable_metadata_json(metadata_json);
     const ExportMetadata &export_metadata =
         metadata.require_export_by_ordinal(0);
-    const std::vector<unsigned char> hsaco = read_file(LRRT_IREE_HSACO_PATH);
+    const std::vector<unsigned char> hsaco =
+        read_file(LRRT_IREE_HSACO_PATH, "HSACO");
     lrrt::Module module(device, hsaco);
     lrrt::Kernel kernel = module.kernel(export_metadata.symbol.c_str());
     if (!kernel.get()) {

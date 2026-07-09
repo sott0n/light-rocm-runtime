@@ -1,6 +1,9 @@
 #include "iree_adapter.hpp"
+#include "metadata_json.hpp"
 
+#include <array>
 #include <stdexcept>
+#include <stdint.h>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -17,6 +20,7 @@ using lrrt::executor::iree::ExecutableMetadata;
 using lrrt::executor::iree::ExportMetadata;
 using lrrt::executor::iree::Fence;
 using lrrt::executor::iree::KernargBuilder;
+using lrrt::executor::iree::parse_executable_metadata_json;
 using lrrt::executor::iree::UnsupportedFeature;
 
 static_assert(!std::is_copy_constructible<Device>::value,
@@ -91,6 +95,41 @@ ExecutableMetadata minimal_mul_metadata() {
   metadata.exports = {std::move(export_metadata)};
   return metadata;
 }
+
+const char *kMinimalMulMetadataJson = R"json(
+{
+  "target": "gfx1101",
+  "executable": "simple_mul_dispatch_0",
+  "variant": "rocm_hsaco_fb",
+  "exports": [
+    {
+      "symbol": "simple_mul_dispatch_0_elementwise_4_f32",
+      "ordinal": 0,
+      "workgroup_size": [32, 1, 1],
+      "subgroup_size": 32,
+      "bindings": [
+        {"index": 0, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+        {"index": 1, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+        {"index": 2, "type": "storage_buffer", "flags": ["Indirect"]}
+      ],
+      "kernel": {
+        "symbol": "simple_mul_dispatch_0_elementwise_4_f32",
+        "attributes": [
+          "gpu.known_block_size",
+          "rocdl.flat_work_group_size",
+          "rocdl.kernel",
+          "rocdl.reqd_work_group_size"
+        ]
+      },
+      "dispatch": {
+        "executable": "simple_mul_dispatch_0",
+        "variant": "rocm_hsaco_fb",
+        "symbol": "simple_mul_dispatch_0_elementwise_4_f32"
+      }
+    }
+  ]
+}
+)json";
 
 int test_metadata_contract() {
   const ExecutableMetadata metadata = minimal_mul_metadata();
@@ -211,6 +250,42 @@ int test_kernarg_builder() {
   return 1;
 }
 
+int test_metadata_json_parser() {
+  const ExecutableMetadata metadata =
+      parse_executable_metadata_json(kMinimalMulMetadataJson);
+  if (metadata.target != "gfx1101" ||
+      metadata.executable != "simple_mul_dispatch_0" ||
+      metadata.variant != "rocm_hsaco_fb" || metadata.exports.size() != 1) {
+    return 1;
+  }
+
+  const ExportMetadata &export_metadata = metadata.require_export_by_ordinal(0);
+  if (export_metadata.symbol != "simple_mul_dispatch_0_elementwise_4_f32" ||
+      export_metadata.workgroup_size != std::array<uint32_t, 3>{32, 1, 1} ||
+      export_metadata.subgroup_size != 32 ||
+      export_metadata.bindings.size() != 3) {
+    return 1;
+  }
+  if (!export_metadata.bindings[0].has_flag("ReadOnly") ||
+      !export_metadata.bindings[2].has_flag("Indirect") ||
+      export_metadata.kernel.symbol != export_metadata.symbol ||
+      !export_metadata.kernel.has_attribute("rocdl.kernel") ||
+      export_metadata.dispatch.symbol != export_metadata.symbol) {
+    return 1;
+  }
+
+  try {
+    parse_executable_metadata_json(R"json({"target":"gfx1101"})json");
+  } catch (const std::runtime_error &error) {
+    const std::string message = error.what();
+    return message.find("missing IREE metadata field: executable") !=
+                   std::string::npos
+               ? 0
+               : 1;
+  }
+  return 1;
+}
+
 } // namespace
 
 int main() {
@@ -227,6 +302,9 @@ int main() {
     return 1;
   }
   if (test_kernarg_builder() != 0) {
+    return 1;
+  }
+  if (test_metadata_json_parser() != 0) {
     return 1;
   }
   return 0;

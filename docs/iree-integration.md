@@ -148,6 +148,10 @@ binding layout, workgroup size, subgroup size, kernel attributes, and dispatch
 path. It does not attempt to parse VM bytecode or implement IREE runtime
 semantics. The JSON contract is documented in
 [IREE Metadata Summary Schema](iree-metadata-schema.md).
+The experimental adapter reads this JSON through
+`parse_executable_metadata_json`, so the current lrrt HSACO dispatch smoke uses
+the same compiler-derived metadata summary instead of a hand-written C++
+fixture.
 
 On the current development machine, full VMFB serialization requires a recent
 LLD. The system `ld.lld` is version 14 and fails with

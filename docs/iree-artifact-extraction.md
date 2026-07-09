@@ -93,11 +93,11 @@ tools are available, this path is available as an opt-in CTest:
 ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_(emit_hsaco_probe|hsaco_dispatch_smoke)'
 ```
 
-The smoke test loads the raw HSACO, resolves the exported kernel symbol from
-`ExecutableMetadata`, packs the three storage-buffer bindings through the
-adapter kernarg helper, dispatches the current `simple_mul` kernel through
-lrrt, and checks the same `4xf32=10 40 90 160` result used by the IREE HIP
-runtime baseline.
+The smoke test loads the generated metadata JSON into `ExecutableMetadata`,
+loads the raw HSACO, resolves the exported kernel symbol from that metadata,
+packs the three storage-buffer bindings through the adapter kernarg helper,
+dispatches the current `simple_mul` kernel through lrrt, and checks the same
+`4xf32=10 40 90 160` result used by the IREE HIP runtime baseline.
 
 ## Why Not Use Raw-HSACO VMFB As The Baseline
 
@@ -122,7 +122,7 @@ The first lrrt-backed prototype should not parse VMFB in the runtime core. It
 can start from three explicit inputs:
 
 - raw HSACO bytes
-- `ExecutableMetadata` from the metadata summary
+- `ExecutableMetadata` parsed from the metadata summary JSON
 - caller-provided buffers and packed kernargs
 
 This keeps the lrrt runtime focused on low-overhead dispatch and predictable
