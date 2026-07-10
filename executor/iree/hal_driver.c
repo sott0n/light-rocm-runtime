@@ -58,6 +58,8 @@ typedef struct lrrt_iree_hal_device_t {
   iree_hal_device_topology_info_t topology_info;
 } lrrt_iree_hal_device_t;
 
+enum { LRRT_IREE_HAL_MAX_INLINE_BINDINGS = 64 };
+
 static const iree_hal_driver_vtable_t lrrt_iree_hal_driver_vtable;
 static const iree_hal_allocator_vtable_t lrrt_iree_hal_allocator_vtable;
 static const iree_hal_buffer_vtable_t lrrt_iree_hal_buffer_vtable;
@@ -426,11 +428,23 @@ static iree_status_t lrrt_iree_hal_buffer_device_range(
     iree_device_size_t length, void **out_device_ptr) {
   IREE_ASSERT_ARGUMENT(out_device_ptr);
   *out_device_ptr = NULL;
+  if (!base_buffer) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "buffer is null");
+  }
   if (!iree_hal_resource_is(base_buffer, &lrrt_iree_hal_buffer_vtable)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "buffer is not an lrrt HAL buffer");
   }
   iree_device_size_t byte_length = iree_hal_buffer_byte_length(base_buffer);
+  if (offset > byte_length) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "buffer range out of bounds: offset=%" PRIu64
+                            ", byte_length=%" PRIu64,
+                            (uint64_t)offset, (uint64_t)byte_length);
+  }
+  if (length == IREE_HAL_WHOLE_BUFFER) {
+    length = byte_length - offset;
+  }
   if (offset > byte_length || length > byte_length - offset) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                             "buffer range out of bounds: offset=%" PRIu64
@@ -441,6 +455,20 @@ static iree_status_t lrrt_iree_hal_buffer_device_range(
   lrrt_iree_hal_buffer_t *buffer = lrrt_iree_hal_buffer_cast(base_buffer);
   *out_device_ptr = (uint8_t *)buffer->device_ptr + offset;
   return iree_ok_status();
+}
+
+static iree_status_t
+lrrt_iree_hal_buffer_ref_device_range(iree_hal_buffer_ref_t buffer_ref,
+                                      void **out_device_ptr) {
+  IREE_ASSERT_ARGUMENT(out_device_ptr);
+  *out_device_ptr = NULL;
+  if (!buffer_ref.buffer) {
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "indirect HAL buffer references are not supported "
+                            "by lrrt queue dispatch yet");
+  }
+  return lrrt_iree_hal_buffer_device_range(buffer_ref.buffer, buffer_ref.offset,
+                                           buffer_ref.length, out_device_ptr);
 }
 
 #if defined(LRRT_IREE_HAL_DRIVER_TESTING)
@@ -785,6 +813,31 @@ static iree_status_t lrrt_iree_hal_executable_lookup_function_by_name(
   executable->functions[function_index].kernel = kernel;
   *out_function =
       iree_hal_executable_function_from_index((uint32_t)function_index);
+  return iree_ok_status();
+}
+
+static iree_status_t lrrt_iree_hal_executable_kernel_for_function(
+    iree_hal_executable_t *base_executable,
+    iree_hal_executable_function_t function, lr_kernel_t **out_kernel) {
+  IREE_ASSERT_ARGUMENT(out_kernel);
+  *out_kernel = NULL;
+  lrrt_iree_hal_executable_t *executable =
+      lrrt_iree_hal_executable_cast(base_executable);
+  if (!iree_hal_executable_function_is_index_in_range(
+          function, executable->function_count)) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "lrrt HAL executable function index %" PRIu64
+                            " is out of range; function count is %" PRIhsz,
+                            function.value, executable->function_count);
+  }
+  lr_kernel_t *kernel =
+      executable->functions[iree_hal_executable_function_index(function)]
+          .kernel;
+  if (!kernel) {
+    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                            "lrrt HAL executable function has no kernel");
+  }
+  *out_kernel = kernel;
   return iree_ok_status();
 }
 
@@ -1323,15 +1376,85 @@ static iree_status_t lrrt_iree_hal_device_queue_dispatch(
     iree_hal_dispatch_flags_t flags) {
   (void)device;
   (void)queue_affinity;
-  (void)wait_semaphore_list;
-  (void)signal_semaphore_list;
-  (void)executable;
-  (void)function;
-  (void)config;
-  (void)constants;
-  (void)bindings;
   (void)flags;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue dispatch");
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
+      "queue dispatch", wait_semaphore_list, signal_semaphore_list));
+  if (constants.data_length != 0) {
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "lrrt HAL queue dispatch does not support inline "
+                            "constants yet");
+  }
+  if (flags & (IREE_HAL_DISPATCH_FLAG_DYNAMIC_INDIRECT_PARAMETERS |
+               IREE_HAL_DISPATCH_FLAG_STATIC_INDIRECT_PARAMETERS |
+               IREE_HAL_DISPATCH_FLAG_CUSTOM_DIRECT_ARGUMENTS |
+               IREE_HAL_DISPATCH_FLAG_DYNAMIC_INDIRECT_ARGUMENTS |
+               IREE_HAL_DISPATCH_FLAG_STATIC_INDIRECT_ARGUMENTS)) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "lrrt HAL queue dispatch only supports direct static arguments");
+  }
+  if (config.workgroup_count_ref.buffer) {
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "lrrt HAL queue dispatch does not support "
+                            "indirect workgroup counts yet");
+  }
+  if (config.workgroup_count[0] == 0 || config.workgroup_count[1] == 0 ||
+      config.workgroup_count[2] == 0) {
+    return iree_ok_status();
+  }
+  if (config.workgroup_size[0] == 0 || config.workgroup_size[1] == 0 ||
+      config.workgroup_size[2] == 0) {
+    return iree_make_status(
+        IREE_STATUS_UNIMPLEMENTED,
+        "lrrt HAL queue dispatch requires explicit workgroup size metadata");
+  }
+  if (bindings.count > LRRT_IREE_HAL_MAX_INLINE_BINDINGS) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "lrrt HAL queue dispatch binding count %" PRIhsz
+                            " exceeds inline limit %d",
+                            bindings.count, LRRT_IREE_HAL_MAX_INLINE_BINDINGS);
+  }
+  if (bindings.count != 0 && !bindings.values) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "lrrt HAL queue dispatch binding list is null");
+  }
+
+  lr_kernel_t *kernel = NULL;
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_executable_kernel_for_function(
+      executable, function, &kernel));
+
+  void *kernargs[LRRT_IREE_HAL_MAX_INLINE_BINDINGS] = {0};
+  for (iree_host_size_t i = 0; i < bindings.count; ++i) {
+    const iree_hal_buffer_ref_t binding = bindings.values[i];
+    if (!binding.buffer) {
+      return iree_make_status(
+          IREE_STATUS_UNIMPLEMENTED,
+          "lrrt HAL queue dispatch binding %" PRIhsz
+          " uses an indirect buffer reference, which is not supported yet",
+          i);
+    }
+    if ((iree_hal_buffer_allowed_usage(binding.buffer) &
+         IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE) == 0) {
+      return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                              "lrrt HAL queue dispatch binding %" PRIhsz
+                              " lacks dispatch-storage usage",
+                              i);
+    }
+    IREE_RETURN_IF_ERROR(
+        lrrt_iree_hal_buffer_ref_device_range(binding, &kernargs[i]));
+  }
+
+  const lr_launch_config_t launch_config = {
+      {config.workgroup_count[0] * config.workgroup_size[0],
+       config.workgroup_count[1] * config.workgroup_size[1],
+       config.workgroup_count[2] * config.workgroup_size[2]},
+      {config.workgroup_size[0], config.workgroup_size[1],
+       config.workgroup_size[2]},
+      config.dynamic_workgroup_local_memory};
+  return lrrt_iree_hal_status_from_lr(
+      lr_launch(kernel, &launch_config, kernargs,
+                bindings.count * sizeof(kernargs[0])),
+      "lr_launch");
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_execute(

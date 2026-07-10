@@ -370,6 +370,129 @@ int test_lrrt_driver_registration() {
     iree_hal_driver_registry_free(registry);
     return 1;
   }
+
+  iree_hal_buffer_t *lhs_buffer = nullptr;
+  iree_hal_buffer_t *rhs_buffer = nullptr;
+  iree_hal_buffer_t *out_buffer = nullptr;
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params,
+                                              4 * sizeof(float), &lhs_buffer);
+  if (!iree_status_is_ok(status) || !lhs_buffer) {
+    iree_status_ignore(status);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params,
+                                              4 * sizeof(float), &rhs_buffer);
+  if (!iree_status_is_ok(status) || !rhs_buffer) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(lhs_buffer);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params,
+                                              4 * sizeof(float), &out_buffer);
+  if (!iree_status_is_ok(status) || !out_buffer) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(rhs_buffer);
+    iree_hal_buffer_release(lhs_buffer);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  const float lhs_values[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+  const float rhs_values[4] = {10.0f, 20.0f, 30.0f, 40.0f};
+  const float expected_values[4] = {10.0f, 40.0f, 90.0f, 160.0f};
+  status = iree_hal_device_queue_update(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+      iree_hal_semaphore_list_empty(), lhs_values, 0, lhs_buffer, 0,
+      sizeof(lhs_values), IREE_HAL_UPDATE_FLAG_NONE);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_update(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        iree_hal_semaphore_list_empty(), rhs_values, 0, rhs_buffer, 0,
+        sizeof(rhs_values), IREE_HAL_UPDATE_FLAG_NONE);
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(out_buffer);
+    iree_hal_buffer_release(rhs_buffer);
+    iree_hal_buffer_release(lhs_buffer);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_buffer_ref_t dispatch_refs[3] = {
+      iree_hal_make_buffer_ref(lhs_buffer, 0, sizeof(lhs_values)),
+      iree_hal_make_buffer_ref(rhs_buffer, 0, sizeof(rhs_values)),
+      iree_hal_make_buffer_ref(out_buffer, 0, sizeof(expected_values)),
+  };
+  const iree_hal_buffer_ref_list_t dispatch_bindings = {
+      3,
+      dispatch_refs,
+  };
+  iree_hal_dispatch_config_t dispatch_config =
+      iree_hal_make_static_dispatch_config(1, 1, 1);
+  dispatch_config.workgroup_size[0] = 32;
+  dispatch_config.workgroup_size[1] = 1;
+  dispatch_config.workgroup_size[2] = 1;
+  status = iree_hal_device_queue_dispatch(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+      iree_hal_semaphore_list_empty(), executable, function, dispatch_config,
+      iree_const_byte_span_empty(), dispatch_bindings,
+      IREE_HAL_DISPATCH_FLAG_NONE);
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(out_buffer);
+    iree_hal_buffer_release(rhs_buffer);
+    iree_hal_buffer_release(lhs_buffer);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  void *out_device_ptr = nullptr;
+  status =
+      lrrt_iree_hal_buffer_device_pointer_for_test(out_buffer, &out_device_ptr);
+  float actual_values[4] = {};
+  if (!iree_status_is_ok(status) || !out_device_ptr ||
+      lr_memcpy(lrrt_device, actual_values, out_device_ptr,
+                sizeof(actual_values),
+                LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS ||
+      std::memcmp(actual_values, expected_values, sizeof(expected_values)) !=
+          0) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(out_buffer);
+    iree_hal_buffer_release(rhs_buffer);
+    iree_hal_buffer_release(lhs_buffer);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_buffer_release(out_buffer);
+  iree_hal_buffer_release(rhs_buffer);
+  iree_hal_buffer_release(lhs_buffer);
   iree_hal_executable_release(executable);
 #endif
 
