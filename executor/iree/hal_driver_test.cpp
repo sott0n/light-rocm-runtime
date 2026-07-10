@@ -1,7 +1,9 @@
 #include "hal_driver.h"
 
 #include <cstring>
+#include <fstream>
 #include <stdio.h>
+#include <vector>
 
 #include "lrrt/lrrt.h"
 
@@ -10,6 +12,22 @@ namespace {
 bool string_view_equal(iree_string_view_t value, const char *expected) {
   return value.size == std::strlen(expected) &&
          std::memcmp(value.data, expected, value.size) == 0;
+}
+
+bool read_file(const char *path, std::vector<uint8_t> *out_data) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return false;
+  }
+  file.seekg(0, std::ios::end);
+  const std::streamoff size = file.tellg();
+  if (size <= 0) {
+    return false;
+  }
+  file.seekg(0, std::ios::beg);
+  out_data->resize(static_cast<size_t>(size));
+  return static_cast<bool>(
+      file.read(reinterpret_cast<char *>(out_data->data()), size));
 }
 
 int test_lrrt_driver_registration() {
@@ -281,7 +299,7 @@ int test_lrrt_driver_registration() {
   iree_hal_executable_t *executable = nullptr;
   status = iree_hal_executable_cache_prepare_executable(
       executable_cache, &executable_params, &executable);
-  if (iree_status_code(status) != IREE_STATUS_UNIMPLEMENTED || executable) {
+  if (iree_status_is_ok(status) || executable) {
     iree_status_ignore(status);
     if (executable) {
       iree_hal_executable_release(executable);
@@ -293,6 +311,68 @@ int test_lrrt_driver_registration() {
     return 1;
   }
   iree_status_ignore(status);
+
+#if defined(LRRT_IREE_PROBE_HSACO_PATH) && defined(LRRT_IREE_PROBE_SYMBOL)
+  std::vector<uint8_t> hsaco;
+  if (!read_file(LRRT_IREE_PROBE_HSACO_PATH, &hsaco)) {
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_executable_params_initialize(&executable_params);
+  executable_params.executable_format = IREE_SV("rocm-hsaco");
+  executable_params.executable_data =
+      iree_make_const_byte_span(hsaco.data(), hsaco.size());
+  status = iree_hal_executable_cache_prepare_executable(
+      executable_cache, &executable_params, &executable);
+  if (!iree_status_is_ok(status) || !executable ||
+      iree_hal_executable_function_count(executable) != 0) {
+    iree_status_ignore(status);
+    if (executable) {
+      iree_hal_executable_release(executable);
+    }
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_executable_function_t function =
+      iree_hal_executable_function_invalid();
+  status = iree_hal_executable_lookup_function_by_name(
+      executable, IREE_SV(LRRT_IREE_PROBE_SYMBOL), &function);
+  if (!iree_status_is_ok(status) ||
+      !iree_hal_executable_function_is_index_in_range(function, 1) ||
+      iree_hal_executable_function_count(executable) != 1) {
+    iree_status_ignore(status);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_executable_function_info_t function_info;
+  status =
+      iree_hal_executable_function_info(executable, function, &function_info);
+  if (!iree_status_is_ok(status) ||
+      !string_view_equal(function_info.name, LRRT_IREE_PROBE_SYMBOL) ||
+      function_info.parameter_count != 0) {
+    iree_status_ignore(status);
+    iree_hal_executable_release(executable);
+    iree_hal_executable_cache_release(executable_cache);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_executable_release(executable);
+#endif
+
   iree_hal_executable_cache_release(executable_cache);
 
   iree_hal_device_capabilities_t capabilities;

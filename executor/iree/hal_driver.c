@@ -32,8 +32,23 @@ typedef struct lrrt_iree_hal_buffer_t {
 typedef struct lrrt_iree_hal_executable_cache_t {
   iree_hal_resource_t resource;
   iree_allocator_t host_allocator;
+  lr_device_t device;
   iree_string_view_t identifier;
 } lrrt_iree_hal_executable_cache_t;
+
+typedef struct lrrt_iree_hal_executable_function_t {
+  iree_string_view_t name;
+  lr_kernel_t *kernel;
+} lrrt_iree_hal_executable_function_t;
+
+typedef struct lrrt_iree_hal_executable_t {
+  iree_hal_resource_t resource;
+  iree_allocator_t host_allocator;
+  lr_module_t *module;
+  iree_host_size_t function_count;
+  iree_host_size_t function_capacity;
+  lrrt_iree_hal_executable_function_t *functions;
+} lrrt_iree_hal_executable_t;
 
 typedef struct lrrt_iree_hal_device_t {
   iree_hal_resource_t resource;
@@ -48,6 +63,7 @@ static const iree_hal_allocator_vtable_t lrrt_iree_hal_allocator_vtable;
 static const iree_hal_buffer_vtable_t lrrt_iree_hal_buffer_vtable;
 static const iree_hal_executable_cache_vtable_t
     lrrt_iree_hal_executable_cache_vtable;
+static const iree_hal_executable_vtable_t lrrt_iree_hal_executable_vtable;
 static const iree_hal_device_vtable_t lrrt_iree_hal_device_vtable;
 
 static const iree_string_view_t kLrrtIreeHalExecutableFormatRocmHsaco =
@@ -648,9 +664,165 @@ static lrrt_iree_hal_executable_cache_t *lrrt_iree_hal_executable_cache_cast(
   return (lrrt_iree_hal_executable_cache_t *)base_executable_cache;
 }
 
+static lrrt_iree_hal_executable_t *
+lrrt_iree_hal_executable_cast(iree_hal_executable_t *base_executable) {
+  IREE_HAL_ASSERT_TYPE(base_executable, &lrrt_iree_hal_executable_vtable);
+  return (lrrt_iree_hal_executable_t *)base_executable;
+}
+
+static void
+lrrt_iree_hal_executable_destroy(iree_hal_executable_t *base_executable) {
+  lrrt_iree_hal_executable_t *executable =
+      lrrt_iree_hal_executable_cast(base_executable);
+  iree_allocator_t host_allocator = executable->host_allocator;
+  for (iree_host_size_t i = 0; i < executable->function_count; ++i) {
+    iree_allocator_free(host_allocator,
+                        (void *)executable->functions[i].name.data);
+  }
+  iree_allocator_free(host_allocator, executable->functions);
+  if (executable->module) {
+    lr_module_destroy(executable->module);
+  }
+  iree_allocator_free(host_allocator, executable);
+}
+
+static iree_host_size_t lrrt_iree_hal_executable_function_count(
+    iree_hal_executable_t *base_executable) {
+  lrrt_iree_hal_executable_t *executable =
+      lrrt_iree_hal_executable_cast(base_executable);
+  return executable->function_count;
+}
+
+static iree_status_t lrrt_iree_hal_executable_function_info(
+    iree_hal_executable_t *base_executable,
+    iree_hal_executable_function_t function,
+    iree_hal_executable_function_info_t *out_info) {
+  lrrt_iree_hal_executable_t *executable =
+      lrrt_iree_hal_executable_cast(base_executable);
+  if (!iree_hal_executable_function_is_index_in_range(
+          function, executable->function_count)) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "lrrt HAL executable function index %" PRIu64
+                            " is out of range; function count is %" PRIhsz,
+                            function.value, executable->function_count);
+  }
+  memset(out_info, 0, sizeof(*out_info));
+  out_info->name =
+      executable->functions[iree_hal_executable_function_index(function)].name;
+  out_info->flags = IREE_HAL_EXECUTABLE_FUNCTION_FLAG_NONE;
+  return iree_ok_status();
+}
+
+static iree_status_t lrrt_iree_hal_executable_function_parameters(
+    iree_hal_executable_t *base_executable,
+    iree_hal_executable_function_t function, iree_host_size_t capacity,
+    iree_hal_executable_function_parameter_t *out_parameters) {
+  lrrt_iree_hal_executable_t *executable =
+      lrrt_iree_hal_executable_cast(base_executable);
+  (void)capacity;
+  (void)out_parameters;
+  if (!iree_hal_executable_function_is_index_in_range(
+          function, executable->function_count)) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "lrrt HAL executable function index %" PRIu64
+                            " is out of range; function count is %" PRIhsz,
+                            function.value, executable->function_count);
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t lrrt_iree_hal_executable_lookup_function_by_name(
+    iree_hal_executable_t *base_executable, iree_string_view_t name,
+    iree_hal_executable_function_t *out_function) {
+  IREE_ASSERT_ARGUMENT(out_function);
+  *out_function = iree_hal_executable_function_invalid();
+  if (iree_string_view_is_empty(name)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "lrrt HAL executable function name is empty");
+  }
+
+  lrrt_iree_hal_executable_t *executable =
+      lrrt_iree_hal_executable_cast(base_executable);
+  for (iree_host_size_t i = 0; i < executable->function_count; ++i) {
+    if (iree_string_view_equal(executable->functions[i].name, name)) {
+      *out_function = iree_hal_executable_function_from_index((uint32_t)i);
+      return iree_ok_status();
+    }
+  }
+
+  char *kernel_name = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(
+      executable->host_allocator, name.size + 1, (void **)&kernel_name));
+  memcpy(kernel_name, name.data, name.size);
+  kernel_name[name.size] = '\0';
+
+  lr_kernel_t *kernel = NULL;
+  lr_status_t lr_status =
+      lr_kernel_get(executable->module, kernel_name, &kernel);
+  if (lr_status != LR_SUCCESS) {
+    iree_allocator_free(executable->host_allocator, kernel_name);
+    if (lr_status == LR_ERROR_INVALID_ARGUMENT) {
+      return iree_make_status(IREE_STATUS_NOT_FOUND,
+                              "lrrt HAL executable function '%.*s' not found",
+                              (int)name.size, name.data);
+    }
+    return lrrt_iree_hal_status_from_lr(lr_status, "lr_kernel_get");
+  }
+
+  if (executable->function_count == executable->function_capacity) {
+    iree_status_t status = iree_allocator_grow_array(
+        executable->host_allocator, executable->function_count + 1,
+        sizeof(*executable->functions), &executable->function_capacity,
+        (void **)&executable->functions);
+    if (!iree_status_is_ok(status)) {
+      iree_allocator_free(executable->host_allocator, kernel_name);
+      return status;
+    }
+  }
+  const iree_host_size_t function_index = executable->function_count++;
+  executable->functions[function_index].name =
+      iree_make_string_view(kernel_name, name.size);
+  executable->functions[function_index].kernel = kernel;
+  *out_function =
+      iree_hal_executable_function_from_index((uint32_t)function_index);
+  return iree_ok_status();
+}
+
+static iree_status_t lrrt_iree_hal_executable_lookup_global_by_name(
+    iree_hal_executable_t *base_executable, iree_string_view_t name,
+    iree_hal_queue_affinity_t queue_affinity, iree_hal_buffer_t **out_buffer) {
+  (void)base_executable;
+  (void)name;
+  (void)queue_affinity;
+  IREE_ASSERT_ARGUMENT(out_buffer);
+  *out_buffer = NULL;
+  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                          "lrrt HAL executable globals are not implemented");
+}
+
+static iree_status_t
+lrrt_iree_hal_executable_create(lr_module_t *module,
+                                iree_allocator_t host_allocator,
+                                iree_hal_executable_t **out_executable) {
+  IREE_ASSERT_ARGUMENT(out_executable);
+  *out_executable = NULL;
+  lrrt_iree_hal_executable_t *executable = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(
+      host_allocator, sizeof(*executable), (void **)&executable));
+  iree_hal_resource_initialize(&lrrt_iree_hal_executable_vtable,
+                               &executable->resource);
+  executable->host_allocator = host_allocator;
+  executable->module = module;
+  executable->function_count = 0;
+  executable->function_capacity = 0;
+  executable->functions = NULL;
+  *out_executable = (iree_hal_executable_t *)executable;
+  return iree_ok_status();
+}
+
 static iree_status_t lrrt_iree_hal_executable_cache_create(
     iree_string_view_t identifier, iree_allocator_t host_allocator,
-    iree_hal_executable_cache_t **out_executable_cache) {
+    lr_device_t device, iree_hal_executable_cache_t **out_executable_cache) {
   IREE_ASSERT_ARGUMENT(out_executable_cache);
   *out_executable_cache = NULL;
 
@@ -662,6 +834,7 @@ static iree_status_t lrrt_iree_hal_executable_cache_create(
   iree_hal_resource_initialize(&lrrt_iree_hal_executable_cache_vtable,
                                &executable_cache->resource);
   executable_cache->host_allocator = host_allocator;
+  executable_cache->device = device;
   iree_string_view_append_to_buffer(identifier, &executable_cache->identifier,
                                     (char *)executable_cache +
                                         iree_sizeof_struct(*executable_cache));
@@ -714,7 +887,6 @@ static iree_status_t lrrt_iree_hal_executable_cache_prepare_executable(
     iree_hal_executable_cache_t *base_executable_cache,
     const iree_hal_executable_params_t *executable_params,
     iree_hal_executable_t **out_executable) {
-  (void)base_executable_cache;
   IREE_ASSERT_ARGUMENT(out_executable);
   *out_executable = NULL;
   if (!executable_params) {
@@ -731,9 +903,28 @@ static iree_status_t lrrt_iree_hal_executable_cache_prepare_executable(
                             (int)executable_params->executable_format.size,
                             executable_params->executable_format.data);
   }
-  return iree_make_status(
-      IREE_STATUS_UNIMPLEMENTED,
-      "lrrt HAL executable preparation is not implemented yet");
+  if (iree_const_byte_span_is_empty(executable_params->executable_data)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "lrrt HAL executable preparation requires non-empty HSACO data");
+  }
+
+  lrrt_iree_hal_executable_cache_t *executable_cache =
+      lrrt_iree_hal_executable_cache_cast(base_executable_cache);
+  lr_module_t *module = NULL;
+  lr_status_t lr_status = lr_module_load_hsaco(
+      executable_cache->device, executable_params->executable_data.data,
+      executable_params->executable_data.data_length, &module);
+  if (lr_status != LR_SUCCESS) {
+    return lrrt_iree_hal_status_from_lr(lr_status, "lr_module_load_hsaco");
+  }
+
+  iree_status_t status = lrrt_iree_hal_executable_create(
+      module, executable_cache->host_allocator, out_executable);
+  if (!iree_status_is_ok(status)) {
+    lr_module_destroy(module);
+  }
+  return status;
 }
 
 static iree_string_view_t
@@ -883,8 +1074,11 @@ static iree_status_t lrrt_iree_hal_device_create_executable_cache(
     iree_hal_executable_cache_t **out_executable_cache) {
   lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
   IREE_ASSERT_ARGUMENT(out_executable_cache);
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
   return lrrt_iree_hal_executable_cache_create(
-      identifier, lrrt_device->host_allocator, out_executable_cache);
+      identifier, lrrt_device->host_allocator, allocator->device,
+      out_executable_cache);
 }
 
 static iree_status_t lrrt_iree_hal_device_import_file(
@@ -1334,6 +1528,15 @@ static const iree_hal_executable_cache_vtable_t
         .infer_format = lrrt_iree_hal_executable_cache_infer_format,
         .can_prepare_format = lrrt_iree_hal_executable_cache_can_prepare_format,
         .prepare_executable = lrrt_iree_hal_executable_cache_prepare_executable,
+};
+
+static const iree_hal_executable_vtable_t lrrt_iree_hal_executable_vtable = {
+    .destroy = lrrt_iree_hal_executable_destroy,
+    .function_count = lrrt_iree_hal_executable_function_count,
+    .function_info = lrrt_iree_hal_executable_function_info,
+    .function_parameters = lrrt_iree_hal_executable_function_parameters,
+    .lookup_function_by_name = lrrt_iree_hal_executable_lookup_function_by_name,
+    .lookup_global_by_name = lrrt_iree_hal_executable_lookup_global_by_name,
 };
 
 static const iree_hal_device_vtable_t lrrt_iree_hal_device_vtable = {

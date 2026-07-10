@@ -99,6 +99,19 @@ if(LRRT_IREE_COMPILE_EXECUTABLE AND LRRT_IREE_RUN_MODULE_EXECUTABLE)
   set(LRRT_IREE_PROBE_METADATA
       "${PROJECT_SOURCE_DIR}/build-iree-probe/minimal_mul_${LRRT_AMDGPU_TARGET}_metadata.json"
   )
+  if(TARGET lrrt_iree_hal_driver_tests)
+    target_compile_definitions(
+      lrrt_iree_hal_driver_tests
+      PRIVATE
+        LRRT_IREE_PROBE_HSACO_PATH="${LRRT_IREE_PROBE_HSACO}"
+        LRRT_IREE_PROBE_SYMBOL="simple_mul_dispatch_0_elementwise_4_f32"
+    )
+    set_tests_properties(
+      lrrt_iree_hal_driver_tests
+      PROPERTIES
+        FIXTURES_REQUIRED lrrt_iree_hsaco
+    )
+  endif()
 
   add_executable(lrrt_iree_hsaco_dispatch_smoke hsaco_dispatch_smoke.cpp)
   target_link_libraries(lrrt_iree_hsaco_dispatch_smoke PRIVATE lrrt::iree_adapter)

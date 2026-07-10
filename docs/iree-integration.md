@@ -189,10 +189,10 @@ create device-local, non-mappable IREE HAL buffers backed by lrrt `lr_malloc`
 allocations. It also supports the first HAL queue transfer path with
 `queue_update` for host-to-device writes and `queue_copy` for device-to-device
 copies when semaphore lists are empty. The device can now create an executable
-cache skeleton and negotiate the initial lrrt-owned HSACO formats, but it still
-rejects actual executable preparation. This is not enough for
-`iree-run-module --device=lrrt` yet: the next required steps are executable
-loading, queue dispatch submission, and semaphore-backed ordering.
+cache, negotiate the initial lrrt-owned HSACO formats, prepare raw HSACO with
+`lr_module_load_hsaco`, and resolve function names with `lr_kernel_get`. This
+is not enough for `iree-run-module --device=lrrt` yet: the next required steps
+are queue dispatch submission and semaphore-backed ordering.
 
 ### I2: Artifact inspection
 
