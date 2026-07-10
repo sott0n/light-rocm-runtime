@@ -438,26 +438,56 @@ int test_lrrt_driver_registration() {
   }
 
   iree_hal_buffer_ref_t dispatch_refs[3] = {
-      iree_hal_make_buffer_ref(lhs_buffer, 0, sizeof(lhs_values)),
-      iree_hal_make_buffer_ref(rhs_buffer, 0, sizeof(rhs_values)),
-      iree_hal_make_buffer_ref(out_buffer, 0, sizeof(expected_values)),
+      iree_hal_make_indirect_buffer_ref(0, 0, sizeof(lhs_values)),
+      iree_hal_make_indirect_buffer_ref(1, 0, sizeof(rhs_values)),
+      iree_hal_make_indirect_buffer_ref(2, 0, sizeof(expected_values)),
   };
   const iree_hal_buffer_ref_list_t dispatch_bindings = {
       3,
       dispatch_refs,
+  };
+  iree_hal_buffer_binding_t binding_table_entries[3] = {
+      {lhs_buffer, 0, sizeof(lhs_values)},
+      {rhs_buffer, 0, sizeof(rhs_values)},
+      {out_buffer, 0, sizeof(expected_values)},
+  };
+  const iree_hal_buffer_binding_table_t binding_table = {
+      3,
+      binding_table_entries,
   };
   iree_hal_dispatch_config_t dispatch_config =
       iree_hal_make_static_dispatch_config(1, 1, 1);
   dispatch_config.workgroup_size[0] = 32;
   dispatch_config.workgroup_size[1] = 1;
   dispatch_config.workgroup_size[2] = 1;
-  status = iree_hal_device_queue_dispatch(
-      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
-      iree_hal_semaphore_list_empty(), executable, function, dispatch_config,
-      iree_const_byte_span_empty(), dispatch_bindings,
-      IREE_HAL_DISPATCH_FLAG_NONE);
+  iree_hal_command_buffer_t *command_buffer = nullptr;
+  status = iree_hal_command_buffer_create(
+      device, IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT,
+      IREE_HAL_COMMAND_CATEGORY_DISPATCH, IREE_HAL_QUEUE_AFFINITY_ANY,
+      /*binding_capacity=*/3, &command_buffer);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_begin(command_buffer);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_dispatch(
+        command_buffer, executable, function, dispatch_config,
+        iree_const_byte_span_empty(), dispatch_bindings,
+        IREE_HAL_DISPATCH_FLAG_NONE);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_end(command_buffer);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_execute(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        iree_hal_semaphore_list_empty(), command_buffer, binding_table,
+        IREE_HAL_EXECUTE_FLAG_NONE);
+  }
   if (!iree_status_is_ok(status)) {
     iree_status_ignore(status);
+    if (command_buffer) {
+      iree_hal_command_buffer_release(command_buffer);
+    }
     iree_hal_buffer_release(out_buffer);
     iree_hal_buffer_release(rhs_buffer);
     iree_hal_buffer_release(lhs_buffer);
@@ -468,6 +498,7 @@ int test_lrrt_driver_registration() {
     iree_hal_driver_registry_free(registry);
     return 1;
   }
+  iree_hal_command_buffer_release(command_buffer);
 
   void *out_device_ptr = nullptr;
   status =

@@ -34,9 +34,13 @@ lrrt-owned HSACO formats, prepares a raw HSACO into an lrrt module, and lazily
 resolves exported function names into lrrt kernels. It can submit a narrow
 direct `queue_dispatch` path for static workgroup counts, explicit workgroup
 sizes, empty semaphore lists, no inline constants, and pointer-only
-storage-buffer bindings. Command buffers, semaphores, indirect dispatch
-parameters, and general IREE ABI packing remain explicitly unsupported until
-they are backed by lrrt runtime objects.
+storage-buffer bindings. It also has a minimal dispatch-only command buffer
+path: `iree_hal_command_buffer_dispatch` records static dispatch records and
+`queue_execute` replays them through the same lrrt launch path, resolving
+indirect buffer slots from the submission binding table. Semaphores, command
+buffer transfer commands, indirect dispatch parameters, and general IREE ABI
+packing remain explicitly unsupported until they are backed by lrrt runtime
+objects.
 
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
@@ -47,6 +51,7 @@ they are backed by lrrt runtime objects.
 | native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
 | HAL queue update/copy | `queue_update`, `queue_copy` | Uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy with empty semaphore lists |
 | HAL queue dispatch | `queue_dispatch` | Packs direct HAL storage-buffer bindings as raw device pointers and submits one static dispatch with `lr_launch` |
+| HAL command buffer dispatch | `command_buffer_dispatch`, `queue_execute` | Records static dispatches and replays them through `lr_launch`, including indirect binding-table resolution |
 | native HAL executable cache | `lrrt_iree_hal_executable_cache_t` | Recognizes `rocm-hsaco` / `amdgpu-hsaco` formats and prepares raw HSACO with `lr_module_load_hsaco` |
 | native HAL executable | `lrrt_iree_hal_executable_t` | Owns the prepared lrrt module and lazily resolves function names with `lr_kernel_get` |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
@@ -138,7 +143,7 @@ pack general IREE ABI arguments, or parse VMFB metadata. Those responsibilities
 belong to the next real IREE HAL binding step.
 
 The native HAL driver now has the first equivalent C-level path for direct
-queue dispatch:
+queue dispatch and dispatch-only command buffer execution:
 
 ```text
 iree_hal_device_queue_dispatch
@@ -147,14 +152,23 @@ iree_hal_device_queue_dispatch
   -> direct iree_hal_buffer_ref_list_t bindings
   -> pointer-only kernarg buffer
   -> lr_launch
+
+iree_hal_command_buffer_dispatch
+  -> record executable function index + dispatch config + buffer refs
+iree_hal_device_queue_execute
+  -> resolve indirect refs from iree_hal_buffer_binding_table_t
+  -> pointer-only kernarg buffer
+  -> lr_launch
 ```
 
 This path is intentionally stricter than full IREE HAL semantics. It requires
 the caller to provide explicit `workgroup_size`, uses the static
 `workgroup_count`, rejects semaphore lists, rejects constants, rejects indirect
-workgroup parameters, and rejects indirect argument modes. This keeps the first
-adapter dispatch test tied to the actual lrrt dispatcher without pretending to
-support the full VMFB execution contract yet.
+workgroup parameters, and rejects indirect argument modes. Command buffer
+execution currently records only dispatch commands; command-buffer update,
+copy, fill, event, and collective commands are still explicit unsupported
+paths. This keeps the first adapter dispatch test tied to the actual lrrt
+dispatcher without pretending to support the full VMFB execution contract yet.
 
 ## Initial Unsupported Features
 
@@ -169,7 +183,7 @@ The first adapter prototype should reject these features explicitly:
 - timeline semaphores
 - indirect dispatch parameters
 - general IREE HAL ABI constant/scalar packing
-- full IREE command buffer optimization
+- command-buffer transfer commands and full command buffer optimization
 - dynamic shape dispatch policy
 - VMFB parsing in the lrrt runtime core
 - graph-level scheduling or tensor semantics
