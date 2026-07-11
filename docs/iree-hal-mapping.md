@@ -22,6 +22,12 @@ The current skeleton has two layers and is compiled only when
   `lrrt_iree_hal_register_all` entry point for registering the lrrt factory in
   IREE's default HAL driver registry
 
+The native HAL driver is built as a reusable CMake target,
+`lrrt::iree_hal_driver`, when the required IREE runtime static libraries are
+available. Repo-local smoke tools link that target instead of compiling the
+driver implementation directly, keeping the registration and driver/device
+implementation as adapter-owned code rather than smoke-runner-local code.
+
 The native driver factory is the first step toward a seamless
 `iree-run-module --device=lrrt` path. The low-level module registration
 function keeps the same shape as IREE's built-in driver modules and accepts an

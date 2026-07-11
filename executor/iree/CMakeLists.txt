@@ -63,35 +63,23 @@ set(LRRT_IREE_IO_FILE_HANDLE_LIB
 set(LRRT_IREE_FLATCC_PARSING_LIB
     "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/flatcc/libflatcc_parsing.a"
 )
-if(EXISTS "${LRRT_IREE_BASE_LIB}"
-   AND EXISTS "${LRRT_IREE_HAL_LIB}"
-   AND EXISTS "${LRRT_IREE_ASYNC_LIB}"
-   AND EXISTS "${LRRT_IREE_ASYNC_PLATFORM_LIB}"
-   AND EXISTS "${LRRT_IREE_BASE_PATH_LIB}"
-   AND EXISTS "${LRRT_IREE_BASE_THREADING_LIB}"
-   AND EXISTS "${LRRT_IREE_BASE_TIME_LIB}"
-   AND EXISTS "${LRRT_IREE_EXECUTABLE_HEADER_LIB}"
-   AND EXISTS "${LRRT_IREE_FILES_LIB}"
-   AND EXISTS "${LRRT_IREE_IO_FILE_HANDLE_LIB}"
-   AND EXISTS "${LRRT_IREE_FLATCC_PARSING_LIB}"
-)
-  add_executable(lrrt_iree_hal_driver_tests hal_driver.c hal_driver_test.cpp)
+
+function(lrrt_configure_iree_hal_driver_target target_name)
   target_include_directories(
-    lrrt_iree_hal_driver_tests
-    PRIVATE
+    ${target_name}
+    PUBLIC
+      "${PROJECT_SOURCE_DIR}"
       "${LRRT_IREE_INCLUDE_DIR}"
       "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
       "${PROJECT_SOURCE_DIR}/third_party/iree/third_party/flatcc/include"
   )
   target_compile_definitions(
-    lrrt_iree_hal_driver_tests
-    PRIVATE
-      IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
-      LRRT_IREE_HAL_DRIVER_TESTING
+    ${target_name}
+    PUBLIC IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
   )
   target_link_libraries(
-    lrrt_iree_hal_driver_tests
-    PRIVATE
+    ${target_name}
+    PUBLIC
       "-Wl,--start-group"
       "${LRRT_IREE_HAL_LIB}"
       "${LRRT_IREE_ASYNC_PLATFORM_LIB}"
@@ -106,6 +94,43 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
       "${LRRT_IREE_FLATCC_PARSING_LIB}"
       "-Wl,--end-group"
       lrrt::lrrt
+  )
+endfunction()
+
+if(EXISTS "${LRRT_IREE_BASE_LIB}"
+   AND EXISTS "${LRRT_IREE_HAL_LIB}"
+   AND EXISTS "${LRRT_IREE_ASYNC_LIB}"
+   AND EXISTS "${LRRT_IREE_ASYNC_PLATFORM_LIB}"
+   AND EXISTS "${LRRT_IREE_BASE_PATH_LIB}"
+   AND EXISTS "${LRRT_IREE_BASE_THREADING_LIB}"
+   AND EXISTS "${LRRT_IREE_BASE_TIME_LIB}"
+   AND EXISTS "${LRRT_IREE_EXECUTABLE_HEADER_LIB}"
+   AND EXISTS "${LRRT_IREE_FILES_LIB}"
+   AND EXISTS "${LRRT_IREE_IO_FILE_HANDLE_LIB}"
+   AND EXISTS "${LRRT_IREE_FLATCC_PARSING_LIB}"
+)
+  add_library(lrrt_iree_hal_driver STATIC hal_driver.c)
+  add_library(lrrt::iree_hal_driver ALIAS lrrt_iree_hal_driver)
+  lrrt_configure_iree_hal_driver_target(lrrt_iree_hal_driver)
+
+  add_library(lrrt_iree_hal_driver_testing STATIC hal_driver.c)
+  lrrt_configure_iree_hal_driver_target(lrrt_iree_hal_driver_testing)
+  target_compile_definitions(
+    lrrt_iree_hal_driver_testing
+    PRIVATE
+      LRRT_IREE_HAL_DRIVER_TESTING
+  )
+
+  add_executable(lrrt_iree_hal_driver_tests hal_driver_test.cpp)
+  target_compile_definitions(
+    lrrt_iree_hal_driver_tests
+    PRIVATE
+      LRRT_IREE_HAL_DRIVER_TESTING
+  )
+  target_link_libraries(
+    lrrt_iree_hal_driver_tests
+    PRIVATE
+      lrrt_iree_hal_driver_testing
   )
   add_test(
     NAME lrrt_iree_hal_driver_tests
@@ -125,7 +150,7 @@ else()
   )
 endif()
 
-if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
+if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
   file(
     GLOB_RECURSE
     LRRT_IREE_RUNTIME_STATIC_LIBS
@@ -133,23 +158,11 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
     "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src/iree/*.a"
     "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/*.a"
   )
-  add_executable(lrrt_iree_run_module_smoke hal_driver.c run_module_smoke.c)
-  target_include_directories(
-    lrrt_iree_run_module_smoke
-    PRIVATE
-      "${PROJECT_SOURCE_DIR}"
-      "${LRRT_IREE_INCLUDE_DIR}"
-      "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
-      "${PROJECT_SOURCE_DIR}/third_party/iree/third_party/flatcc/include"
-  )
-  target_compile_definitions(
-    lrrt_iree_run_module_smoke
-    PRIVATE IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
-  )
+  add_executable(lrrt_iree_run_module_smoke run_module_smoke.c)
   target_link_libraries(
     lrrt_iree_run_module_smoke
     PRIVATE
-      lrrt::lrrt
+      lrrt::iree_hal_driver
       "-Wl,--start-group"
       ${LRRT_IREE_RUNTIME_STATIC_LIBS}
       "-Wl,--end-group"
@@ -227,6 +240,12 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
         "IREE lrrt VMFB smoke test disabled; iree-compile was not found"
     )
   endif()
+elseif(NOT TARGET lrrt_iree_hal_driver)
+  message(
+    STATUS
+      "IREE lrrt run-module smoke disabled; lrrt IREE HAL driver target "
+      "was not available"
+  )
 else()
   message(
     STATUS
