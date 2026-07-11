@@ -332,6 +332,106 @@ int test_lrrt_driver_registration() {
   iree_hal_buffer_release(target_buffer);
   iree_hal_buffer_release(source_buffer);
 
+  iree_hal_buffer_t *cb_source_buffer = nullptr;
+  iree_hal_buffer_t *cb_target_buffer = nullptr;
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 16,
+                                              &cb_source_buffer);
+  if (!iree_status_is_ok(status) || !cb_source_buffer) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 16,
+                                              &cb_target_buffer);
+  if (!iree_status_is_ok(status) || !cb_target_buffer) {
+    iree_status_ignore(status);
+    iree_hal_buffer_release(cb_source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  const uint32_t cb_source_values[2] = {0x11111111u, 0x22222222u};
+  const uint32_t cb_fill_pattern = 0xA5A5A5A5u;
+  iree_hal_command_buffer_t *transfer_command_buffer = nullptr;
+  status = iree_hal_command_buffer_create(
+      device, IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT,
+      IREE_HAL_COMMAND_CATEGORY_TRANSFER, IREE_HAL_QUEUE_AFFINITY_ANY,
+      /*binding_capacity=*/2, &transfer_command_buffer);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_begin(transfer_command_buffer);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_update_buffer(
+        transfer_command_buffer, cb_source_values, /*source_offset=*/0,
+        iree_hal_make_buffer_ref(cb_source_buffer, 0, sizeof(cb_source_values)),
+        IREE_HAL_UPDATE_FLAG_NONE);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_fill_buffer(
+        transfer_command_buffer,
+        iree_hal_make_buffer_ref(cb_target_buffer, 0, 16), &cb_fill_pattern,
+        sizeof(cb_fill_pattern), IREE_HAL_FILL_FLAG_NONE);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_copy_buffer(
+        transfer_command_buffer,
+        iree_hal_make_indirect_buffer_ref(0, 0, sizeof(cb_source_values)),
+        iree_hal_make_indirect_buffer_ref(1, 0, sizeof(cb_source_values)),
+        IREE_HAL_COPY_FLAG_NONE);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_command_buffer_end(transfer_command_buffer);
+  }
+  iree_hal_buffer_binding_t transfer_bindings[2] = {
+      {cb_source_buffer, 0, 16},
+      {cb_target_buffer, 0, 16},
+  };
+  const iree_hal_buffer_binding_table_t transfer_binding_table = {
+      2,
+      transfer_bindings,
+  };
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_execute(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        iree_hal_semaphore_list_empty(), transfer_command_buffer,
+        transfer_binding_table, IREE_HAL_EXECUTE_FLAG_NONE);
+  }
+  void *cb_target_device_ptr = nullptr;
+  status =
+      iree_status_join(status, lrrt_iree_hal_buffer_device_pointer_for_test(
+                                   cb_target_buffer, &cb_target_device_ptr));
+  uint32_t cb_actual_values[4] = {};
+  const uint32_t cb_expected_values[4] = {
+      cb_source_values[0],
+      cb_source_values[1],
+      cb_fill_pattern,
+      cb_fill_pattern,
+  };
+  if (!iree_status_is_ok(status) || !cb_target_device_ptr ||
+      lr_memcpy(lrrt_device, cb_actual_values, cb_target_device_ptr,
+                sizeof(cb_actual_values),
+                LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS ||
+      std::memcmp(cb_actual_values, cb_expected_values,
+                  sizeof(cb_expected_values)) != 0) {
+    iree_status_ignore(status);
+    if (transfer_command_buffer) {
+      iree_hal_command_buffer_release(transfer_command_buffer);
+    }
+    iree_hal_buffer_release(cb_target_buffer);
+    iree_hal_buffer_release(cb_source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_command_buffer_release(transfer_command_buffer);
+  iree_hal_buffer_release(cb_target_buffer);
+  iree_hal_buffer_release(cb_source_buffer);
+
   if (iree_hal_allocator_supports_virtual_memory(allocator)) {
     iree_hal_device_release(device);
     iree_hal_driver_release(driver);

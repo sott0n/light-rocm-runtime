@@ -66,6 +66,13 @@ typedef struct lrrt_iree_hal_semaphore_t {
 
 enum { LRRT_IREE_HAL_MAX_INLINE_BINDINGS = 64 };
 
+typedef enum lrrt_iree_hal_command_kind_t {
+  LRRT_IREE_HAL_COMMAND_UPDATE,
+  LRRT_IREE_HAL_COMMAND_COPY,
+  LRRT_IREE_HAL_COMMAND_FILL,
+  LRRT_IREE_HAL_COMMAND_DISPATCH,
+} lrrt_iree_hal_command_kind_t;
+
 typedef struct lrrt_iree_hal_dispatch_record_t {
   iree_hal_executable_t *executable;
   iree_hal_executable_function_t function;
@@ -75,12 +82,42 @@ typedef struct lrrt_iree_hal_dispatch_record_t {
   iree_hal_buffer_ref_t *bindings;
 } lrrt_iree_hal_dispatch_record_t;
 
+typedef struct lrrt_iree_hal_update_record_t {
+  void *source_buffer;
+  iree_host_size_t source_offset;
+  iree_hal_buffer_ref_t target_ref;
+  iree_hal_update_flags_t flags;
+} lrrt_iree_hal_update_record_t;
+
+typedef struct lrrt_iree_hal_copy_record_t {
+  iree_hal_buffer_ref_t source_ref;
+  iree_hal_buffer_ref_t target_ref;
+  iree_hal_copy_flags_t flags;
+} lrrt_iree_hal_copy_record_t;
+
+typedef struct lrrt_iree_hal_fill_record_t {
+  uint8_t pattern[4];
+  iree_host_size_t pattern_length;
+  iree_hal_buffer_ref_t target_ref;
+  iree_hal_fill_flags_t flags;
+} lrrt_iree_hal_fill_record_t;
+
+typedef struct lrrt_iree_hal_command_record_t {
+  lrrt_iree_hal_command_kind_t kind;
+  union {
+    lrrt_iree_hal_update_record_t update;
+    lrrt_iree_hal_copy_record_t copy;
+    lrrt_iree_hal_fill_record_t fill;
+    lrrt_iree_hal_dispatch_record_t dispatch;
+  } payload;
+} lrrt_iree_hal_command_record_t;
+
 typedef struct lrrt_iree_hal_command_buffer_t {
   iree_hal_command_buffer_t base;
   iree_allocator_t host_allocator;
-  iree_host_size_t dispatch_count;
-  iree_host_size_t dispatch_capacity;
-  lrrt_iree_hal_dispatch_record_t *dispatches;
+  iree_host_size_t command_count;
+  iree_host_size_t command_capacity;
+  lrrt_iree_hal_command_record_t *commands;
 } lrrt_iree_hal_command_buffer_t;
 
 static const iree_hal_driver_vtable_t lrrt_iree_hal_driver_vtable;
@@ -1131,6 +1168,91 @@ lrrt_iree_hal_dispatch_record_reset(lrrt_iree_hal_dispatch_record_t *record,
   }
 }
 
+static void lrrt_iree_hal_buffer_ref_retain(iree_hal_buffer_ref_t ref) {
+  if (ref.buffer) {
+    iree_hal_buffer_retain(ref.buffer);
+  }
+}
+
+static void lrrt_iree_hal_buffer_ref_release(iree_hal_buffer_ref_t ref) {
+  if (ref.buffer) {
+    iree_hal_buffer_release(ref.buffer);
+  }
+}
+
+static void
+lrrt_iree_hal_update_record_reset(lrrt_iree_hal_update_record_t *record,
+                                  iree_allocator_t host_allocator) {
+  if (!record) {
+    return;
+  }
+  lrrt_iree_hal_buffer_ref_release(record->target_ref);
+  iree_allocator_free(host_allocator, record->source_buffer);
+  memset(record, 0, sizeof(*record));
+}
+
+static void
+lrrt_iree_hal_copy_record_reset(lrrt_iree_hal_copy_record_t *record) {
+  if (!record) {
+    return;
+  }
+  lrrt_iree_hal_buffer_ref_release(record->source_ref);
+  lrrt_iree_hal_buffer_ref_release(record->target_ref);
+  memset(record, 0, sizeof(*record));
+}
+
+static void
+lrrt_iree_hal_fill_record_reset(lrrt_iree_hal_fill_record_t *record) {
+  if (!record) {
+    return;
+  }
+  lrrt_iree_hal_buffer_ref_release(record->target_ref);
+  memset(record, 0, sizeof(*record));
+}
+
+static void
+lrrt_iree_hal_command_record_reset(lrrt_iree_hal_command_record_t *record,
+                                   iree_allocator_t host_allocator) {
+  if (!record) {
+    return;
+  }
+  switch (record->kind) {
+  case LRRT_IREE_HAL_COMMAND_UPDATE:
+    lrrt_iree_hal_update_record_reset(&record->payload.update, host_allocator);
+    break;
+  case LRRT_IREE_HAL_COMMAND_COPY:
+    lrrt_iree_hal_copy_record_reset(&record->payload.copy);
+    break;
+  case LRRT_IREE_HAL_COMMAND_FILL:
+    lrrt_iree_hal_fill_record_reset(&record->payload.fill);
+    break;
+  case LRRT_IREE_HAL_COMMAND_DISPATCH:
+    lrrt_iree_hal_dispatch_record_reset(&record->payload.dispatch,
+                                        host_allocator);
+    break;
+  }
+  memset(record, 0, sizeof(*record));
+}
+
+static iree_status_t lrrt_iree_hal_command_buffer_append(
+    lrrt_iree_hal_command_buffer_t *command_buffer,
+    lrrt_iree_hal_command_record_t **out_record) {
+  IREE_ASSERT_ARGUMENT(out_record);
+  *out_record = NULL;
+  if (command_buffer->command_count == command_buffer->command_capacity) {
+    IREE_RETURN_IF_ERROR(iree_allocator_grow_array(
+        command_buffer->host_allocator, command_buffer->command_count + 1,
+        sizeof(*command_buffer->commands), &command_buffer->command_capacity,
+        (void **)&command_buffer->commands));
+  }
+  lrrt_iree_hal_command_record_t *record =
+      &command_buffer->commands[command_buffer->command_count];
+  memset(record, 0, sizeof(*record));
+  ++command_buffer->command_count;
+  *out_record = record;
+  return iree_ok_status();
+}
+
 static iree_status_t
 lrrt_iree_hal_semaphore_create(uint64_t initial_value,
                                iree_allocator_t host_allocator,
@@ -1364,9 +1486,9 @@ static iree_status_t lrrt_iree_hal_device_create_command_buffer(
       binding_capacity, validation_state, &lrrt_iree_hal_command_buffer_vtable,
       &command_buffer->base);
   command_buffer->host_allocator = lrrt_device->host_allocator;
-  command_buffer->dispatch_count = 0;
-  command_buffer->dispatch_capacity = 0;
-  command_buffer->dispatches = NULL;
+  command_buffer->command_count = 0;
+  command_buffer->command_capacity = 0;
+  command_buffer->commands = NULL;
 
   *out_command_buffer = &command_buffer->base;
   return iree_ok_status();
@@ -1475,6 +1597,52 @@ static iree_status_t lrrt_iree_hal_device_queue_dealloca(
   return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue deallocation");
 }
 
+static iree_status_t lrrt_iree_hal_device_fill_now(
+    iree_hal_device_t *device, iree_hal_buffer_t *target_buffer,
+    iree_device_size_t target_offset, iree_device_size_t length,
+    const void *pattern, iree_host_size_t pattern_length) {
+  if (length == 0) {
+    return iree_ok_status();
+  }
+  if (!pattern ||
+      (pattern_length != 1 && pattern_length != 2 && pattern_length != 4)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "queue fill pattern length must be 1, 2, or 4");
+  }
+  if ((target_offset % pattern_length) != 0 || (length % pattern_length) != 0) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "queue fill range is not pattern-aligned");
+  }
+  if ((iree_hal_buffer_allowed_usage(target_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue fill target buffer lacks transfer-target "
+                            "usage");
+  }
+
+  void *target_device_ptr = NULL;
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      target_buffer, target_offset, length, &target_device_ptr));
+
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
+  void *scratch = NULL;
+  IREE_RETURN_IF_ERROR(iree_allocator_malloc(
+      lrrt_device->host_allocator, (iree_host_size_t)length, &scratch));
+  uint8_t *bytes = (uint8_t *)scratch;
+  for (iree_device_size_t offset = 0; offset < length;
+       offset += pattern_length) {
+    memcpy(bytes + offset, pattern, pattern_length);
+  }
+
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
+  lr_status_t lr_status =
+      lr_memcpy(allocator->device, target_device_ptr, scratch, (size_t)length,
+                LR_MEMCPY_HOST_TO_DEVICE);
+  iree_allocator_free(lrrt_device->host_allocator, scratch);
+  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+}
+
 static iree_status_t lrrt_iree_hal_device_queue_fill(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
@@ -1482,17 +1650,42 @@ static iree_status_t lrrt_iree_hal_device_queue_fill(
     iree_hal_buffer_t *target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, const void *pattern,
     iree_host_size_t pattern_length, iree_hal_fill_flags_t flags) {
-  (void)device;
   (void)queue_affinity;
-  (void)wait_semaphore_list;
-  (void)signal_semaphore_list;
-  (void)target_buffer;
-  (void)target_offset;
-  (void)length;
-  (void)pattern;
-  (void)pattern_length;
   (void)flags;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue fill");
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue fill", wait_semaphore_list));
+  iree_status_t status = lrrt_iree_hal_device_fill_now(
+      device, target_buffer, target_offset, length, pattern, pattern_length);
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue fill", signal_semaphore_list, status);
+}
+
+static iree_status_t lrrt_iree_hal_device_update_now(
+    iree_hal_device_t *device, const void *source_buffer,
+    iree_host_size_t source_offset, iree_hal_buffer_t *target_buffer,
+    iree_device_size_t target_offset, iree_device_size_t length) {
+  if (length == 0) {
+    return iree_ok_status();
+  }
+  if ((iree_hal_buffer_allowed_usage(target_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue update target buffer lacks "
+                            "transfer-target usage");
+  }
+
+  void *target_device_ptr = NULL;
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      target_buffer, target_offset, length, &target_device_ptr));
+  const uint8_t *source =
+      (const uint8_t *)source_buffer + (iree_host_size_t)source_offset;
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
+  lr_status_t lr_status =
+      lr_memcpy(allocator->device, target_device_ptr, source, (size_t)length,
+                LR_MEMCPY_HOST_TO_DEVICE);
+  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_update(
@@ -1504,39 +1697,48 @@ static iree_status_t lrrt_iree_hal_device_queue_update(
     iree_device_size_t length, iree_hal_update_flags_t flags) {
   (void)queue_affinity;
   (void)flags;
-  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue update", wait_semaphore_list));
+  iree_status_t status =
+      lrrt_iree_hal_device_update_now(device, source_buffer, source_offset,
+                                      target_buffer, target_offset, length);
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue update", signal_semaphore_list, status);
+}
+
+static iree_status_t lrrt_iree_hal_device_copy_now(
+    iree_hal_device_t *device, iree_hal_buffer_t *source_buffer,
+    iree_device_size_t source_offset, iree_hal_buffer_t *target_buffer,
+    iree_device_size_t target_offset, iree_device_size_t length) {
   if (length == 0) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue update", signal_semaphore_list, iree_ok_status());
+    return iree_ok_status();
+  }
+  if ((iree_hal_buffer_allowed_usage(source_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE) == 0) {
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue copy source buffer lacks transfer-source "
+                            "usage");
   }
   if ((iree_hal_buffer_allowed_usage(target_buffer) &
        IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue update", signal_semaphore_list,
-        iree_make_status(IREE_STATUS_PERMISSION_DENIED,
-                         "queue update target buffer lacks transfer-target "
-                         "usage"));
+    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                            "queue copy target buffer lacks transfer-target "
+                            "usage");
   }
 
+  void *source_device_ptr = NULL;
   void *target_device_ptr = NULL;
-  iree_status_t status = lrrt_iree_hal_buffer_device_range(
-      target_buffer, target_offset, length, &target_device_ptr);
-  if (!iree_status_is_ok(status)) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue update", signal_semaphore_list, status);
-  }
-  const uint8_t *source =
-      (const uint8_t *)source_buffer + (iree_host_size_t)source_offset;
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      source_buffer, source_offset, length, &source_device_ptr));
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+      target_buffer, target_offset, length, &target_device_ptr));
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
   lrrt_iree_hal_allocator_t *allocator =
       lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
   lr_status_t lr_status =
-      lr_memcpy(allocator->device, target_device_ptr, source, (size_t)length,
-                LR_MEMCPY_HOST_TO_DEVICE);
-  return lrrt_iree_hal_device_end_synchronous_submission(
-      "queue update", signal_semaphore_list,
-      lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy"));
+      lr_memcpy(allocator->device, target_device_ptr, source_device_ptr,
+                (size_t)length, LR_MEMCPY_DEVICE_TO_DEVICE);
+  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_copy(
@@ -1548,50 +1750,13 @@ static iree_status_t lrrt_iree_hal_device_queue_copy(
     iree_device_size_t length, iree_hal_copy_flags_t flags) {
   (void)queue_affinity;
   (void)flags;
-  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue copy", wait_semaphore_list));
-  if (length == 0) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue copy", signal_semaphore_list, iree_ok_status());
-  }
-  if ((iree_hal_buffer_allowed_usage(source_buffer) &
-       IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE) == 0) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue copy", signal_semaphore_list,
-        iree_make_status(IREE_STATUS_PERMISSION_DENIED,
-                         "queue copy source buffer lacks transfer-source "
-                         "usage"));
-  }
-  if ((iree_hal_buffer_allowed_usage(target_buffer) &
-       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue copy", signal_semaphore_list,
-        iree_make_status(IREE_STATUS_PERMISSION_DENIED,
-                         "queue copy target buffer lacks transfer-target "
-                         "usage"));
-  }
-
-  void *source_device_ptr = NULL;
-  void *target_device_ptr = NULL;
-  iree_status_t status = lrrt_iree_hal_buffer_device_range(
-      source_buffer, source_offset, length, &source_device_ptr);
-  if (iree_status_is_ok(status)) {
-    status = lrrt_iree_hal_buffer_device_range(target_buffer, target_offset,
-                                               length, &target_device_ptr);
-  }
-  if (!iree_status_is_ok(status)) {
-    return lrrt_iree_hal_device_end_synchronous_submission(
-        "queue copy", signal_semaphore_list, status);
-  }
-  lrrt_iree_hal_allocator_t *allocator =
-      lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
-  lr_status_t lr_status =
-      lr_memcpy(allocator->device, target_device_ptr, source_device_ptr,
-                (size_t)length, LR_MEMCPY_DEVICE_TO_DEVICE);
+  iree_status_t status =
+      lrrt_iree_hal_device_copy_now(device, source_buffer, source_offset,
+                                    target_buffer, target_offset, length);
   return lrrt_iree_hal_device_end_synchronous_submission(
-      "queue copy", signal_semaphore_list,
-      lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy"));
+      "queue copy", signal_semaphore_list, status);
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_read(
@@ -1801,16 +1966,50 @@ static iree_status_t lrrt_iree_hal_command_buffer_require_dispatch_shape(
   return iree_ok_status();
 }
 
+static iree_status_t lrrt_iree_hal_command_buffer_record_buffer_ref(
+    iree_hal_command_buffer_t *base_command_buffer, iree_hal_buffer_ref_t ref) {
+  if (ref.buffer) {
+    return iree_ok_status();
+  }
+  const uint32_t required_binding_count = ref.buffer_slot + 1;
+  if (required_binding_count > base_command_buffer->binding_capacity) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "lrrt HAL command buffer indirect binding slot %u "
+                            "exceeds capacity %u",
+                            ref.buffer_slot,
+                            base_command_buffer->binding_capacity);
+  }
+  if (required_binding_count > base_command_buffer->binding_count) {
+    base_command_buffer->binding_count = required_binding_count;
+  }
+  return iree_ok_status();
+}
+
+static iree_status_t lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+    iree_hal_buffer_binding_table_t binding_table, iree_hal_buffer_ref_t ref,
+    iree_hal_buffer_ref_t *out_ref) {
+  IREE_ASSERT_ARGUMENT(out_ref);
+  *out_ref = (iree_hal_buffer_ref_t){0};
+  IREE_RETURN_IF_ERROR(
+      iree_hal_buffer_binding_table_resolve_ref(binding_table, ref, out_ref));
+  if (!out_ref->buffer) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "lrrt HAL command buffer buffer reference resolved to null buffer");
+  }
+  return iree_ok_status();
+}
+
 static void lrrt_iree_hal_command_buffer_destroy(
     iree_hal_command_buffer_t *base_command_buffer) {
   lrrt_iree_hal_command_buffer_t *command_buffer =
       lrrt_iree_hal_command_buffer_cast(base_command_buffer);
   iree_allocator_t host_allocator = command_buffer->host_allocator;
-  for (iree_host_size_t i = 0; i < command_buffer->dispatch_count; ++i) {
-    lrrt_iree_hal_dispatch_record_reset(&command_buffer->dispatches[i],
-                                        host_allocator);
+  for (iree_host_size_t i = 0; i < command_buffer->command_count; ++i) {
+    lrrt_iree_hal_command_record_reset(&command_buffer->commands[i],
+                                       host_allocator);
   }
-  iree_allocator_free(host_allocator, command_buffer->dispatches);
+  iree_allocator_free(host_allocator, command_buffer->commands);
   iree_allocator_free(host_allocator, command_buffer);
 }
 
@@ -1818,11 +2017,12 @@ static iree_status_t lrrt_iree_hal_command_buffer_begin(
     iree_hal_command_buffer_t *base_command_buffer) {
   lrrt_iree_hal_command_buffer_t *command_buffer =
       lrrt_iree_hal_command_buffer_cast(base_command_buffer);
-  for (iree_host_size_t i = 0; i < command_buffer->dispatch_count; ++i) {
-    lrrt_iree_hal_dispatch_record_reset(&command_buffer->dispatches[i],
-                                        command_buffer->host_allocator);
+  for (iree_host_size_t i = 0; i < command_buffer->command_count; ++i) {
+    lrrt_iree_hal_command_record_reset(&command_buffer->commands[i],
+                                       command_buffer->host_allocator);
   }
-  command_buffer->dispatch_count = 0;
+  command_buffer->command_count = 0;
+  base_command_buffer->binding_count = 0;
   return iree_ok_status();
 }
 
@@ -1927,41 +2127,86 @@ static iree_status_t lrrt_iree_hal_command_buffer_fill_buffer(
     iree_hal_command_buffer_t *base_command_buffer,
     iree_hal_buffer_ref_t target_ref, const void *pattern,
     iree_host_size_t pattern_length, iree_hal_fill_flags_t flags) {
-  (void)base_command_buffer;
-  (void)target_ref;
-  (void)pattern;
-  (void)pattern_length;
-  (void)flags;
-  return iree_make_status(
-      IREE_STATUS_UNIMPLEMENTED,
-      "lrrt HAL command buffer fill is not implemented yet");
+  if (!pattern ||
+      pattern_length > sizeof(((lrrt_iree_hal_fill_record_t *)0)->pattern)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "lrrt HAL command buffer fill pattern is invalid");
+  }
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_record_buffer_ref(
+      base_command_buffer, target_ref));
+  lrrt_iree_hal_command_buffer_t *command_buffer =
+      lrrt_iree_hal_command_buffer_cast(base_command_buffer);
+  lrrt_iree_hal_command_record_t *command = NULL;
+  IREE_RETURN_IF_ERROR(
+      lrrt_iree_hal_command_buffer_append(command_buffer, &command));
+  command->kind = LRRT_IREE_HAL_COMMAND_FILL;
+  lrrt_iree_hal_fill_record_t *record = &command->payload.fill;
+  memcpy(record->pattern, pattern, pattern_length);
+  record->pattern_length = pattern_length;
+  record->target_ref = target_ref;
+  record->flags = flags;
+  lrrt_iree_hal_buffer_ref_retain(record->target_ref);
+  return iree_ok_status();
 }
 
 static iree_status_t lrrt_iree_hal_command_buffer_update_buffer(
     iree_hal_command_buffer_t *base_command_buffer, const void *source_buffer,
     iree_host_size_t source_offset, iree_hal_buffer_ref_t target_ref,
     iree_hal_update_flags_t flags) {
-  (void)base_command_buffer;
-  (void)source_buffer;
-  (void)source_offset;
-  (void)target_ref;
-  (void)flags;
-  return iree_make_status(
-      IREE_STATUS_UNIMPLEMENTED,
-      "lrrt HAL command buffer update is not implemented yet");
+  if (target_ref.length != 0 && !source_buffer) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "lrrt HAL command buffer update source buffer is null");
+  }
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_record_buffer_ref(
+      base_command_buffer, target_ref));
+  lrrt_iree_hal_command_buffer_t *command_buffer =
+      lrrt_iree_hal_command_buffer_cast(base_command_buffer);
+  lrrt_iree_hal_command_record_t *command = NULL;
+  IREE_RETURN_IF_ERROR(
+      lrrt_iree_hal_command_buffer_append(command_buffer, &command));
+  command->kind = LRRT_IREE_HAL_COMMAND_UPDATE;
+  lrrt_iree_hal_update_record_t *record = &command->payload.update;
+  record->target_ref = target_ref;
+  record->flags = flags;
+  if (target_ref.length != 0) {
+    iree_status_t status = iree_allocator_malloc(
+        command_buffer->host_allocator, (iree_host_size_t)target_ref.length,
+        &record->source_buffer);
+    if (!iree_status_is_ok(status)) {
+      --command_buffer->command_count;
+      memset(command, 0, sizeof(*command));
+      return status;
+    }
+    memcpy(record->source_buffer,
+           (const uint8_t *)source_buffer + source_offset,
+           (iree_host_size_t)target_ref.length);
+  }
+  lrrt_iree_hal_buffer_ref_retain(record->target_ref);
+  return iree_ok_status();
 }
 
 static iree_status_t lrrt_iree_hal_command_buffer_copy_buffer(
     iree_hal_command_buffer_t *base_command_buffer,
     iree_hal_buffer_ref_t source_ref, iree_hal_buffer_ref_t target_ref,
     iree_hal_copy_flags_t flags) {
-  (void)base_command_buffer;
-  (void)source_ref;
-  (void)target_ref;
-  (void)flags;
-  return iree_make_status(
-      IREE_STATUS_UNIMPLEMENTED,
-      "lrrt HAL command buffer copy is not implemented yet");
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_record_buffer_ref(
+      base_command_buffer, source_ref));
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_record_buffer_ref(
+      base_command_buffer, target_ref));
+  lrrt_iree_hal_command_buffer_t *command_buffer =
+      lrrt_iree_hal_command_buffer_cast(base_command_buffer);
+  lrrt_iree_hal_command_record_t *command = NULL;
+  IREE_RETURN_IF_ERROR(
+      lrrt_iree_hal_command_buffer_append(command_buffer, &command));
+  command->kind = LRRT_IREE_HAL_COMMAND_COPY;
+  lrrt_iree_hal_copy_record_t *record = &command->payload.copy;
+  record->source_ref = source_ref;
+  record->target_ref = target_ref;
+  record->flags = flags;
+  lrrt_iree_hal_buffer_ref_retain(record->source_ref);
+  lrrt_iree_hal_buffer_ref_retain(record->target_ref);
+  return iree_ok_status();
 }
 
 static iree_status_t lrrt_iree_hal_command_buffer_collective(
@@ -1990,21 +2235,20 @@ static iree_status_t lrrt_iree_hal_command_buffer_dispatch(
   lrrt_iree_hal_command_buffer_t *command_buffer =
       lrrt_iree_hal_command_buffer_cast(base_command_buffer);
 
-  if (command_buffer->dispatch_count == command_buffer->dispatch_capacity) {
-    IREE_RETURN_IF_ERROR(iree_allocator_grow_array(
-        command_buffer->host_allocator, command_buffer->dispatch_count + 1,
-        sizeof(*command_buffer->dispatches), &command_buffer->dispatch_capacity,
-        (void **)&command_buffer->dispatches));
-  }
-
-  lrrt_iree_hal_dispatch_record_t *record =
-      &command_buffer->dispatches[command_buffer->dispatch_count];
-  memset(record, 0, sizeof(*record));
+  lrrt_iree_hal_command_record_t *command = NULL;
+  IREE_RETURN_IF_ERROR(
+      lrrt_iree_hal_command_buffer_append(command_buffer, &command));
+  command->kind = LRRT_IREE_HAL_COMMAND_DISPATCH;
+  lrrt_iree_hal_dispatch_record_t *record = &command->payload.dispatch;
   if (bindings.count != 0) {
-    IREE_RETURN_IF_ERROR(
-        iree_allocator_malloc(command_buffer->host_allocator,
-                              bindings.count * sizeof(*record->bindings),
-                              (void **)&record->bindings));
+    iree_status_t status = iree_allocator_malloc(
+        command_buffer->host_allocator,
+        bindings.count * sizeof(*record->bindings), (void **)&record->bindings);
+    if (!iree_status_is_ok(status)) {
+      --command_buffer->command_count;
+      memset(command, 0, sizeof(*command));
+      return status;
+    }
     memcpy(record->bindings, bindings.values,
            bindings.count * sizeof(*record->bindings));
   }
@@ -2019,25 +2263,17 @@ static iree_status_t lrrt_iree_hal_command_buffer_dispatch(
     if (record->bindings[i].buffer) {
       iree_hal_buffer_retain(record->bindings[i].buffer);
     } else {
-      const uint32_t required_binding_count =
-          record->bindings[i].buffer_slot + 1;
-      if (required_binding_count > base_command_buffer->binding_capacity) {
-        lrrt_iree_hal_dispatch_record_reset(record,
-                                            command_buffer->host_allocator);
-        return iree_make_status(
-            IREE_STATUS_OUT_OF_RANGE,
-            "lrrt HAL command buffer indirect binding slot %u exceeds "
-            "capacity %u",
-            record->bindings[i].buffer_slot,
-            base_command_buffer->binding_capacity);
-      }
-      if (required_binding_count > base_command_buffer->binding_count) {
-        base_command_buffer->binding_count = required_binding_count;
+      iree_status_t status = lrrt_iree_hal_command_buffer_record_buffer_ref(
+          base_command_buffer, record->bindings[i]);
+      if (!iree_status_is_ok(status)) {
+        lrrt_iree_hal_command_record_reset(command,
+                                           command_buffer->host_allocator);
+        --command_buffer->command_count;
+        return status;
       }
     }
   }
 
-  ++command_buffer->dispatch_count;
   return iree_ok_status();
 }
 
@@ -2065,16 +2301,65 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
   if (iree_status_is_ok(status)) {
     lrrt_iree_hal_command_buffer_t *lrrt_command_buffer =
         lrrt_iree_hal_command_buffer_cast(command_buffer);
-    for (iree_host_size_t i = 0; i < lrrt_command_buffer->dispatch_count; ++i) {
-      const lrrt_iree_hal_dispatch_record_t *record =
-          &lrrt_command_buffer->dispatches[i];
-      const iree_hal_buffer_ref_list_t bindings = {
-          record->binding_count,
-          record->bindings,
-      };
-      status = lrrt_iree_hal_device_dispatch_now(
-          record->executable, record->function, record->config,
-          iree_const_byte_span_empty(), bindings, binding_table, record->flags);
+    for (iree_host_size_t i = 0; i < lrrt_command_buffer->command_count; ++i) {
+      const lrrt_iree_hal_command_record_t *command =
+          &lrrt_command_buffer->commands[i];
+      switch (command->kind) {
+      case LRRT_IREE_HAL_COMMAND_UPDATE: {
+        const lrrt_iree_hal_update_record_t *record = &command->payload.update;
+        iree_hal_buffer_ref_t target_ref = {0};
+        status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+            binding_table, record->target_ref, &target_ref);
+        if (iree_status_is_ok(status)) {
+          status = lrrt_iree_hal_device_update_now(
+              device, record->source_buffer, record->source_offset,
+              target_ref.buffer, target_ref.offset, target_ref.length);
+        }
+        break;
+      }
+      case LRRT_IREE_HAL_COMMAND_COPY: {
+        const lrrt_iree_hal_copy_record_t *record = &command->payload.copy;
+        iree_hal_buffer_ref_t source_ref = {0};
+        iree_hal_buffer_ref_t target_ref = {0};
+        status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+            binding_table, record->source_ref, &source_ref);
+        if (iree_status_is_ok(status)) {
+          status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+              binding_table, record->target_ref, &target_ref);
+        }
+        if (iree_status_is_ok(status)) {
+          status = lrrt_iree_hal_device_copy_now(
+              device, source_ref.buffer, source_ref.offset, target_ref.buffer,
+              target_ref.offset, target_ref.length);
+        }
+        break;
+      }
+      case LRRT_IREE_HAL_COMMAND_FILL: {
+        const lrrt_iree_hal_fill_record_t *record = &command->payload.fill;
+        iree_hal_buffer_ref_t target_ref = {0};
+        status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+            binding_table, record->target_ref, &target_ref);
+        if (iree_status_is_ok(status)) {
+          status = lrrt_iree_hal_device_fill_now(
+              device, target_ref.buffer, target_ref.offset, target_ref.length,
+              record->pattern, record->pattern_length);
+        }
+        break;
+      }
+      case LRRT_IREE_HAL_COMMAND_DISPATCH: {
+        const lrrt_iree_hal_dispatch_record_t *record =
+            &command->payload.dispatch;
+        const iree_hal_buffer_ref_list_t bindings = {
+            record->binding_count,
+            record->bindings,
+        };
+        status = lrrt_iree_hal_device_dispatch_now(
+            record->executable, record->function, record->config,
+            iree_const_byte_span_empty(), bindings, binding_table,
+            record->flags);
+        break;
+      }
+      }
       if (!iree_status_is_ok(status)) {
         break;
       }
