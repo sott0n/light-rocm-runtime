@@ -299,6 +299,46 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
     )
 
     lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_attention_softmax_vmfb_probe
+      lrrt_iree_attention_softmax_run_module_vmfb_smoke
+      lrrt_iree_attention_softmax_vmfb
+      tools/iree_attention_softmax.mlir
+      attention_softmax
+      attention_softmax
+      "2x2xf32=\\[4 6\\]\\[4 6\\]"
+      "--input=2x2xf32=0 0 0 0"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=2 4 6 8"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_attention_residual_vmfb_probe
+      lrrt_iree_attention_residual_run_module_vmfb_smoke
+      lrrt_iree_attention_residual_vmfb
+      tools/iree_attention_residual.mlir
+      attention_residual
+      attention_residual
+      "2x2xf32=\\[5 8\\]\\[7 10\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=0 0 0 0"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=2 4 6 8"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_rope_apply_vmfb_probe
+      lrrt_iree_rope_apply_run_module_vmfb_smoke
+      lrrt_iree_rope_apply_vmfb
+      tools/iree_rope_apply.mlir
+      rope_apply
+      rope_apply
+      "2x2xf32=\\[1 2\\]\\[-4 3\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2xf32=1 0"
+      "--input=2xf32=0 1"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
       lrrt_iree_qwen_ffn_mini_vmfb_probe
       lrrt_iree_qwen_ffn_mini_run_module_vmfb_smoke
       lrrt_iree_qwen_ffn_mini_vmfb
@@ -307,6 +347,23 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       qwen_ffn_mini
       "2x2xf32=\\[1 4\\]\\[9 16\\]"
       "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_mini_decoder_layer_vmfb_probe
+      lrrt_iree_mini_decoder_layer_run_module_vmfb_smoke
+      lrrt_iree_mini_decoder_layer_vmfb
+      tools/iree_mini_decoder_layer.mlir
+      mini_decoder_layer
+      mini_decoder_layer
+      "2x2xf32=\\[30 72\\]\\[56 110\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=0 0 0 0"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=2 4 6 8"
       "--input=2x2xf32=1 0 0 1"
       "--input=2x2xf32=1 0 0 1"
       "--input=2x2xf32=1 0 0 1"

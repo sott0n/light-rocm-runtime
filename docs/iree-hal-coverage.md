@@ -116,7 +116,11 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Mini decoder-block VMFB | ✅ | Runs a small static-shape block with norm-like elementwise scale/bias, activation, and two matmul stages. | `lrrt_iree_mini_decoder_block_run_module_vmfb_smoke` |
 | RMSNorm-like VMFB | ✅ | Runs a static-shape row reduction followed by elementwise normalization and scaling. | `lrrt_iree_rmsnorm_like_run_module_vmfb_smoke` |
 | Attention-score VMFB | ✅ | Runs a small `Q x K^T` score matmul through the lrrt HAL path. | `lrrt_iree_attention_score_run_module_vmfb_smoke` |
+| Attention softmax VMFB | ✅ | Runs `Q x K^T`, `exp`, row-sum reduction, probability normalization, and `softmax(QK) x V`. | `lrrt_iree_attention_softmax_run_module_vmfb_smoke` |
+| Attention residual VMFB | ✅ | Runs the attention softmax path and adds the attention output back to an input residual. | `lrrt_iree_attention_residual_run_module_vmfb_smoke` |
+| RoPE VMFB | ✅ | Runs a static-shape rotary pair transform for a Q/K-like tensor. | `lrrt_iree_rope_apply_run_module_vmfb_smoke` |
 | Qwen FFN mini VMFB | ✅ | Runs gate projection, up projection, activation/gating, and down projection. | `lrrt_iree_qwen_ffn_mini_run_module_vmfb_smoke` |
+| Mini decoder-layer VMFB | ✅ | Runs attention softmax/residual, FFN gate/up/down, and final residual in one IREE entry point. | `lrrt_iree_mini_decoder_layer_run_module_vmfb_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |

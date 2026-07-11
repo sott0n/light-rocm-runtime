@@ -318,6 +318,53 @@ small `Q x K^T` score matmul through `--device=lrrt`. The expected output is:
 2x2xf32=[5 11][11 25]
 ```
 
+The attention-softmax VMFB smoke test extends that path through softmax and the
+value matmul:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_attention_softmax_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_attention_softmax.mlir` to
+`build-iree-probe/attention_softmax/attention_softmax_<target>.vmfb` and runs
+`attention_softmax` through `--device=lrrt`. The workload computes `Q x K^T`,
+`exp`, row-sum reduction, probability normalization, and `softmax(QK) x V`.
+The expected output is:
+
+```text
+2x2xf32=[4 6][4 6]
+```
+
+The attention-residual VMFB smoke test adds the block handoff after attention:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_attention_residual_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_attention_residual.mlir` to
+`build-iree-probe/attention_residual/attention_residual_<target>.vmfb` and runs
+`attention_residual` through `--device=lrrt`. It computes the same attention
+softmax path, then adds the attention output to the input residual. The
+expected output is:
+
+```text
+2x2xf32=[5 8][7 10]
+```
+
+The RoPE VMFB smoke test checks a static-shape rotary pair transform:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_rope_apply_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_rope_apply.mlir` to
+`build-iree-probe/rope_apply/rope_apply_<target>.vmfb` and runs `rope_apply`
+through `--device=lrrt`. The expected output is:
+
+```text
+2x2xf32=[1 2][-4 3]
+```
+
 The Qwen FFN mini VMFB smoke test checks the gate/up/down projection shape:
 
 ```sh
@@ -342,6 +389,23 @@ The expected output is:
 
 ```text
 2x2xf32=[1 4][9 16]
+```
+
+The mini decoder-layer VMFB smoke test combines the small attention and FFN
+paths in one IREE entry point:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_mini_decoder_layer_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_mini_decoder_layer.mlir` to
+`build-iree-probe/mini_decoder_layer/mini_decoder_layer_<target>.vmfb` and
+runs `mini_decoder_layer` through `--device=lrrt`. It computes attention
+softmax, attention residual, Qwen-shaped FFN, and final FFN residual. The
+expected output is:
+
+```text
+2x2xf32=[30 72][56 110]
 ```
 
 The multi-export VMFB smoke test checks a different adapter path:
