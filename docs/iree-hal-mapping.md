@@ -4,11 +4,16 @@
 
 This document records the current contract between IREE HAL concepts and the
 experimental lrrt-backed adapter skeleton in `executor/iree`. It is intentionally
-about the adapter boundary, not the runtime core.
+about the adapter boundary, not the runtime core. It explains how IREE HAL
+concepts map onto lrrt concepts; it is not the status checklist for every
+implemented or unsupported entry point.
 
 The adapter should translate IREE HAL-level operations into lrrt C API calls
 while keeping IREE VM, Flow, Stream, graph scheduling, and frontend semantics
 outside `light-rocm-runtime`.
+
+For the current implementation matrix, including test coverage and unsupported
+features, see [IREE HAL Adapter Coverage](iree-hal-coverage.md).
 
 ## Current Skeleton
 
@@ -235,35 +240,28 @@ commands are still explicit unsupported paths. This keeps the first adapter
 dispatch test tied to the actual lrrt dispatcher without pretending to support
 the full VMFB execution contract yet.
 
-## Initial Unsupported Features
+## Unsupported Feature Policy
 
-The first adapter prototype should reject unsupported features explicitly:
+The adapter should reject unsupported HAL features explicitly at the adapter
+boundary. Unsupported behavior should not silently fall back to a different
+runtime path, and it should not leak IREE VM, Flow, Stream, graph scheduling, or
+tensor semantics into the lrrt C runtime core.
 
-| Unsupported feature | Current status | Why it matters |
-| --- | --- | --- |
-| Multiple devices | Not implemented | The driver exposes one `default` device backed by `lr_device_open(0)`. |
-| Multiple independent hardware queues as a required semantic | Not implemented | Queue operations are synchronous adapter operations over the current lrrt device path. |
-| External memory import/export | Not implemented | `import_buffer` and `export_buffer` return `UNIMPLEMENTED`; no external handle ownership exists yet. |
-| Direct host-visible GPU mapping | Not implemented | HAL map APIs use a host shadow buffer, not a mapped GPU allocation. |
-| Virtual memory / physical memory APIs | Not implemented | `supports_virtual_memory` is false and virtual memory methods return unavailable. |
-| File-backed HAL import/read/write | Implemented for host-backed handles | File import wraps IREE file handles; `queue_read` and `queue_write` perform synchronous transfers through lrrt-visible buffers. |
-| HAL channels / collectives | Not implemented | Channel creation and command-buffer collective operations return `UNIMPLEMENTED`. |
-| HAL events | Not implemented | Event creation and command-buffer signal/reset/wait event operations return `UNIMPLEMENTED`. |
-| Queue host calls | Not implemented | `queue_host_call` returns `UNIMPLEMENTED`. |
-| Queue pool backend / allocation pools | Not implemented | Queue pool backend query and non-null queue allocation pools are rejected. |
-| Device-native semaphore implementation | Not implemented | Semaphores are host-side timeline semaphores used for ordering synchronous adapter submissions. |
-| External semaphore timepoint import/export | Not implemented | Timepoint import/export methods return `UNIMPLEMENTED`. |
-| Indirect dispatch workgroup parameters | Not implemented | Dispatch requires static `workgroup_count`; `workgroup_count_ref` is rejected. |
-| Dispatch constants / scalar ABI packing | Not implemented | Dispatch rejects non-empty constants and only packs pointer-only storage-buffer bindings. |
-| General indirect argument modes | Not implemented | Direct dispatch requires direct buffers; command-buffer dispatch can resolve indirect binding slots from the submission binding table only. |
-| Full command buffer optimization | Not implemented | Command buffers record minimal transfer/dispatch commands and replay them synchronously. |
-| Dynamic shape dispatch policy | Not implemented | Workgroup counts and sizes must be provided by compiled metadata or explicit dispatch config. |
-| VMFB parsing in the lrrt runtime core | Non-goal | VMFB handling belongs to IREE tooling/runtime and the adapter, not `include/lrrt/lrrt.h`. |
-| Graph-level scheduling or tensor semantics | Non-goal | lrrt remains a low-overhead dispatcher and predictable resource manager. |
+The unsupported surface currently falls into these categories:
 
-Unsupported features should fail at the adapter boundary using
-`UnsupportedFeature` or an equivalent IREE status once real IREE HAL types are
-introduced.
+| Category | Boundary rule |
+| --- | --- |
+| Device topology and queue policy | Expose only the lrrt-backed device and queue semantics that lrrt can actually provide. |
+| External ownership | Reject external memory and semaphore import/export until lrrt has a clear ownership model for those handles. |
+| Direct host-visible mapping | Keep the host-shadow mapping bridge explicit; do not present it as zero-copy GPU mapping. |
+| Dynamic dispatch semantics | Reject dynamic workgroup parameters, general scalar ABI packing, and shape-driven dispatch policy until the adapter has real metadata support. |
+| HAL side channels | Reject channels, events, host calls, collectives, profiling, and capture paths until they are intentionally mapped to lrrt primitives. |
+| Runtime-core leakage | Keep VMFB parsing, VM invocation, graph scheduling, and tensor semantics outside `include/lrrt/lrrt.h`. |
+
+The exact current status for individual HAL entry points is tracked in
+[IREE HAL Adapter Coverage](iree-hal-coverage.md). This mapping document should
+describe why a concept maps or does not map to lrrt; the coverage document
+should say whether the current implementation supports it today.
 
 ## Runtime Core Boundary
 

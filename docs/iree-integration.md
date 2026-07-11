@@ -179,7 +179,9 @@ reason for keeping it separate from the IREE baseline VMFB are documented in
   changes, unless they are generally useful for dispatch/resource management.
 
 The current adapter skeleton mapping is tracked in
-[IREE HAL Adapter Mapping](iree-hal-mapping.md).
+[IREE HAL Adapter Mapping](iree-hal-mapping.md). The current implementation
+status is tracked separately in
+[IREE HAL Adapter Coverage](iree-hal-coverage.md).
 
 The first native HAL entry point now exists as a minimal `lrrt` driver factory.
 `lrrt_iree_hal_driver_module_register` can register the factory in an IREE HAL
