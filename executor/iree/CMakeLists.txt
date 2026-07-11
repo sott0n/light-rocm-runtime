@@ -131,26 +131,42 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
       LRRT_IREE_HAL_DRIVER_TESTING
   )
 
-  add_executable(lrrt_iree_hal_driver_tests hal_driver_test.cpp)
-  target_compile_definitions(
-    lrrt_iree_hal_driver_tests
-    PRIVATE
-      LRRT_IREE_HAL_DRIVER_TESTING
+  function(lrrt_add_iree_hal_driver_test target source)
+    add_executable(${target} ${source})
+    target_compile_definitions(
+      ${target}
+      PRIVATE
+        LRRT_IREE_HAL_DRIVER_TESTING
+    )
+    target_link_libraries(${target} PRIVATE lrrt_iree_hal_driver_testing)
+    add_test(NAME ${target} COMMAND ${target})
+    set_tests_properties(
+      ${target}
+      PROPERTIES
+        LABELS "iree;gpu"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  endfunction()
+
+  lrrt_add_iree_hal_driver_test(
+    lrrt_iree_hal_driver_registration_tests
+    hal_driver_registration_test.cpp
   )
-  target_link_libraries(
-    lrrt_iree_hal_driver_tests
-    PRIVATE
-      lrrt_iree_hal_driver_testing
+  lrrt_add_iree_hal_driver_test(
+    lrrt_iree_hal_driver_allocator_tests
+    hal_driver_allocator_test.cpp
   )
-  add_test(
-    NAME lrrt_iree_hal_driver_tests
-    COMMAND lrrt_iree_hal_driver_tests
+  lrrt_add_iree_hal_driver_test(
+    lrrt_iree_hal_driver_transfer_tests
+    hal_driver_transfer_test.cpp
   )
-  set_tests_properties(
-    lrrt_iree_hal_driver_tests
-    PROPERTIES
-      LABELS "iree;gpu"
-      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  lrrt_add_iree_hal_driver_test(
+    lrrt_iree_hal_driver_unsupported_tests
+    hal_driver_unsupported_test.cpp
+  )
+  lrrt_add_iree_hal_driver_test(
+    lrrt_iree_hal_driver_executable_tests
+    hal_driver_executable_test.cpp
   )
 else()
   message(
@@ -271,15 +287,15 @@ if(LRRT_IREE_COMPILE_EXECUTABLE AND LRRT_IREE_RUN_MODULE_EXECUTABLE)
   set(LRRT_IREE_PROBE_METADATA
       "${PROJECT_SOURCE_DIR}/build-iree-probe/minimal_mul_${LRRT_AMDGPU_TARGET}_metadata.json"
   )
-  if(TARGET lrrt_iree_hal_driver_tests)
+  if(TARGET lrrt_iree_hal_driver_executable_tests)
     target_compile_definitions(
-      lrrt_iree_hal_driver_tests
+      lrrt_iree_hal_driver_executable_tests
       PRIVATE
         LRRT_IREE_PROBE_HSACO_PATH="${LRRT_IREE_PROBE_HSACO}"
         LRRT_IREE_PROBE_SYMBOL="simple_mul_dispatch_0_elementwise_4_f32"
     )
     set_tests_properties(
-      lrrt_iree_hal_driver_tests
+      lrrt_iree_hal_driver_executable_tests
       PROPERTIES
         FIXTURES_REQUIRED lrrt_iree_hsaco
     )

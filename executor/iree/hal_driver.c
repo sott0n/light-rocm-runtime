@@ -2778,6 +2778,108 @@ static iree_status_t lrrt_iree_hal_command_buffer_dispatch(
   return iree_ok_status();
 }
 
+static iree_status_t lrrt_iree_hal_device_replay_update_command(
+    iree_hal_device_t *device, const lrrt_iree_hal_update_record_t *record,
+    iree_hal_buffer_binding_table_t binding_table) {
+  iree_hal_buffer_ref_t target_ref = {0};
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+      binding_table, record->target_ref, &target_ref));
+  return lrrt_iree_hal_device_update_now(
+      device, record->source_buffer, record->source_offset, target_ref.buffer,
+      target_ref.offset, target_ref.length);
+}
+
+static iree_status_t lrrt_iree_hal_device_replay_copy_command(
+    iree_hal_device_t *device, const lrrt_iree_hal_copy_record_t *record,
+    iree_hal_buffer_binding_table_t binding_table) {
+  iree_hal_buffer_ref_t source_ref = {0};
+  iree_hal_buffer_ref_t target_ref = {0};
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+      binding_table, record->source_ref, &source_ref));
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+      binding_table, record->target_ref, &target_ref));
+  return lrrt_iree_hal_device_copy_now(device, source_ref.buffer,
+                                       source_ref.offset, target_ref.buffer,
+                                       target_ref.offset, target_ref.length);
+}
+
+static iree_status_t lrrt_iree_hal_device_replay_fill_command(
+    iree_hal_device_t *device, const lrrt_iree_hal_fill_record_t *record,
+    iree_hal_buffer_binding_table_t binding_table) {
+  iree_hal_buffer_ref_t target_ref = {0};
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_command_buffer_resolve_buffer_ref(
+      binding_table, record->target_ref, &target_ref));
+  return lrrt_iree_hal_device_fill_now(device, target_ref.buffer,
+                                       target_ref.offset, target_ref.length,
+                                       record->pattern, record->pattern_length);
+}
+
+static iree_status_t lrrt_iree_hal_device_replay_dispatch_command(
+    const lrrt_iree_hal_dispatch_record_t *record,
+    iree_hal_buffer_binding_table_t binding_table) {
+  const iree_hal_buffer_ref_list_t bindings = {
+      record->binding_count,
+      record->bindings,
+  };
+  return lrrt_iree_hal_device_dispatch_now(
+      record->executable, record->function, record->config,
+      iree_const_byte_span_empty(), bindings, binding_table, record->flags);
+}
+
+static iree_status_t lrrt_iree_hal_device_replay_command(
+    iree_hal_device_t *device, const lrrt_iree_hal_command_record_t *command,
+    iree_host_size_t command_index,
+    iree_hal_buffer_binding_table_t binding_table) {
+  switch (command->kind) {
+  case LRRT_IREE_HAL_COMMAND_UPDATE: {
+    const lrrt_iree_hal_update_record_t *record = &command->payload.update;
+    lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                         "]=update length=%" PRIu64,
+                         command_index, (uint64_t)record->target_ref.length);
+    return lrrt_iree_hal_device_replay_update_command(device, record,
+                                                      binding_table);
+  }
+  case LRRT_IREE_HAL_COMMAND_COPY: {
+    const lrrt_iree_hal_copy_record_t *record = &command->payload.copy;
+    lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                         "]=copy length=%" PRIu64,
+                         command_index, (uint64_t)record->target_ref.length);
+    return lrrt_iree_hal_device_replay_copy_command(device, record,
+                                                    binding_table);
+  }
+  case LRRT_IREE_HAL_COMMAND_FILL: {
+    const lrrt_iree_hal_fill_record_t *record = &command->payload.fill;
+    lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                         "]=fill length=%" PRIu64,
+                         command_index, (uint64_t)record->target_ref.length);
+    return lrrt_iree_hal_device_replay_fill_command(device, record,
+                                                    binding_table);
+  }
+  case LRRT_IREE_HAL_COMMAND_DISPATCH: {
+    const lrrt_iree_hal_dispatch_record_t *record = &command->payload.dispatch;
+    lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                         "]=dispatch bindings=%" PRIhsz,
+                         command_index, record->binding_count);
+    return lrrt_iree_hal_device_replay_dispatch_command(record, binding_table);
+  }
+  }
+  return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                          "lrrt HAL command buffer contains unknown command");
+}
+
+static iree_status_t lrrt_iree_hal_device_replay_command_buffer(
+    iree_hal_device_t *device,
+    const lrrt_iree_hal_command_buffer_t *command_buffer,
+    iree_hal_buffer_binding_table_t binding_table) {
+  lrrt_iree_hal_tracef("queue execute commands=%" PRIhsz,
+                       command_buffer->command_count);
+  for (iree_host_size_t i = 0; i < command_buffer->command_count; ++i) {
+    IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_replay_command(
+        device, &command_buffer->commands[i], i, binding_table));
+  }
+  return iree_ok_status();
+}
+
 static iree_status_t lrrt_iree_hal_device_queue_execute(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
@@ -2807,83 +2909,8 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
   if (iree_status_is_ok(status)) {
     lrrt_iree_hal_command_buffer_t *lrrt_command_buffer =
         lrrt_iree_hal_command_buffer_cast(command_buffer);
-    lrrt_iree_hal_tracef("queue execute commands=%" PRIhsz,
-                         lrrt_command_buffer->command_count);
-    for (iree_host_size_t i = 0; i < lrrt_command_buffer->command_count; ++i) {
-      const lrrt_iree_hal_command_record_t *command =
-          &lrrt_command_buffer->commands[i];
-      switch (command->kind) {
-      case LRRT_IREE_HAL_COMMAND_UPDATE: {
-        const lrrt_iree_hal_update_record_t *record = &command->payload.update;
-        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
-                             "]=update length=%" PRIu64,
-                             i, (uint64_t)record->target_ref.length);
-        iree_hal_buffer_ref_t target_ref = {0};
-        status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
-            binding_table, record->target_ref, &target_ref);
-        if (iree_status_is_ok(status)) {
-          status = lrrt_iree_hal_device_update_now(
-              device, record->source_buffer, record->source_offset,
-              target_ref.buffer, target_ref.offset, target_ref.length);
-        }
-        break;
-      }
-      case LRRT_IREE_HAL_COMMAND_COPY: {
-        const lrrt_iree_hal_copy_record_t *record = &command->payload.copy;
-        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
-                             "]=copy length=%" PRIu64,
-                             i, (uint64_t)record->target_ref.length);
-        iree_hal_buffer_ref_t source_ref = {0};
-        iree_hal_buffer_ref_t target_ref = {0};
-        status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
-            binding_table, record->source_ref, &source_ref);
-        if (iree_status_is_ok(status)) {
-          status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
-              binding_table, record->target_ref, &target_ref);
-        }
-        if (iree_status_is_ok(status)) {
-          status = lrrt_iree_hal_device_copy_now(
-              device, source_ref.buffer, source_ref.offset, target_ref.buffer,
-              target_ref.offset, target_ref.length);
-        }
-        break;
-      }
-      case LRRT_IREE_HAL_COMMAND_FILL: {
-        const lrrt_iree_hal_fill_record_t *record = &command->payload.fill;
-        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
-                             "]=fill length=%" PRIu64,
-                             i, (uint64_t)record->target_ref.length);
-        iree_hal_buffer_ref_t target_ref = {0};
-        status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
-            binding_table, record->target_ref, &target_ref);
-        if (iree_status_is_ok(status)) {
-          status = lrrt_iree_hal_device_fill_now(
-              device, target_ref.buffer, target_ref.offset, target_ref.length,
-              record->pattern, record->pattern_length);
-        }
-        break;
-      }
-      case LRRT_IREE_HAL_COMMAND_DISPATCH: {
-        const lrrt_iree_hal_dispatch_record_t *record =
-            &command->payload.dispatch;
-        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
-                             "]=dispatch bindings=%" PRIhsz,
-                             i, record->binding_count);
-        const iree_hal_buffer_ref_list_t bindings = {
-            record->binding_count,
-            record->bindings,
-        };
-        status = lrrt_iree_hal_device_dispatch_now(
-            record->executable, record->function, record->config,
-            iree_const_byte_span_empty(), bindings, binding_table,
-            record->flags);
-        break;
-      }
-      }
-      if (!iree_status_is_ok(status)) {
-        break;
-      }
-    }
+    status = lrrt_iree_hal_device_replay_command_buffer(
+        device, lrrt_command_buffer, binding_table);
   }
   return lrrt_iree_hal_device_end_synchronous_submission(
       "queue execute", signal_semaphore_list, status);
