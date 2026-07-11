@@ -8,6 +8,7 @@
 #include "iree/async/semaphore.h"
 #include "iree/hal/resource.h"
 #include "iree/hal/utils/executable_header.h"
+#include "iree/hal/utils/file_registry.h"
 #include "iree/schemas/hip_executable_def_reader.h"
 #include "iree/schemas/hip_executable_def_verifier.h"
 #include "lrrt/lrrt.h"
@@ -1773,14 +1774,12 @@ static iree_status_t lrrt_iree_hal_device_import_file(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_memory_access_t access, iree_io_file_handle_t *handle,
     iree_hal_external_file_flags_t flags, iree_hal_file_t **out_file) {
-  (void)device;
-  (void)queue_affinity;
-  (void)access;
-  (void)handle;
   (void)flags;
   IREE_ASSERT_ARGUMENT(out_file);
-  *out_file = NULL;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("file import");
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
+  return iree_hal_file_from_handle(
+      lrrt_device->device_allocator, queue_affinity, access, handle,
+      /*proactor=*/NULL, lrrt_device->host_allocator, out_file);
 }
 
 static iree_status_t lrrt_iree_hal_device_create_semaphore(
@@ -2033,17 +2032,56 @@ static iree_status_t lrrt_iree_hal_device_queue_read(
     iree_hal_file_t *source_file, uint64_t source_offset,
     iree_hal_buffer_t *target_buffer, iree_device_size_t target_offset,
     iree_device_size_t length, iree_hal_read_flags_t flags) {
-  (void)device;
   (void)queue_affinity;
-  (void)wait_semaphore_list;
-  (void)signal_semaphore_list;
-  (void)source_file;
-  (void)source_offset;
-  (void)target_buffer;
-  (void)target_offset;
-  (void)length;
   (void)flags;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue read");
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue read", wait_semaphore_list));
+
+  iree_status_t status = iree_ok_status();
+  if (length != 0) {
+    status =
+        iree_hal_file_validate_access(source_file, IREE_HAL_MEMORY_ACCESS_READ);
+  }
+  if (iree_status_is_ok(status) && length != 0 &&
+      (iree_hal_buffer_allowed_usage(target_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
+    status = iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                              "queue read target buffer lacks "
+                              "transfer-target usage");
+  }
+  if (iree_status_is_ok(status) && length != 0 &&
+      length > UINT64_MAX - source_offset) {
+    status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "queue read file range overflows uint64");
+  }
+  if (iree_status_is_ok(status) && length != 0) {
+    uint64_t file_length = iree_hal_file_length(source_file);
+    if (file_length > 0 && source_offset + length > file_length) {
+      status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                                "queue read range [%" PRIu64 ", %" PRIu64
+                                ") exceeds file length %" PRIu64,
+                                source_offset, source_offset + (uint64_t)length,
+                                file_length);
+    }
+  }
+  if (iree_status_is_ok(status) && length != 0) {
+    iree_hal_buffer_t *storage_buffer =
+        iree_hal_file_storage_buffer(source_file);
+    if (storage_buffer) {
+      status = lrrt_iree_hal_device_copy_now(
+          device, storage_buffer, (iree_device_size_t)source_offset,
+          target_buffer, target_offset, length);
+    } else if (!iree_hal_file_supports_synchronous_io(source_file)) {
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "queue read source file does not support "
+                                "synchronous I/O");
+    } else {
+      status = iree_hal_file_read(source_file, source_offset, target_buffer,
+                                  target_offset, length);
+    }
+  }
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue read", signal_semaphore_list, status);
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_write(
@@ -2053,17 +2091,46 @@ static iree_status_t lrrt_iree_hal_device_queue_write(
     iree_hal_buffer_t *source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t *target_file, uint64_t target_offset,
     iree_device_size_t length, iree_hal_write_flags_t flags) {
-  (void)device;
   (void)queue_affinity;
-  (void)wait_semaphore_list;
-  (void)signal_semaphore_list;
-  (void)source_buffer;
-  (void)source_offset;
-  (void)target_file;
-  (void)target_offset;
-  (void)length;
   (void)flags;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("queue write");
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue write", wait_semaphore_list));
+
+  iree_status_t status = iree_ok_status();
+  if (length != 0) {
+    status = iree_hal_file_validate_access(target_file,
+                                           IREE_HAL_MEMORY_ACCESS_WRITE);
+  }
+  if (iree_status_is_ok(status) && length != 0 &&
+      (iree_hal_buffer_allowed_usage(source_buffer) &
+       IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE) == 0) {
+    status = iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                              "queue write source buffer lacks "
+                              "transfer-source usage");
+  }
+  if (iree_status_is_ok(status) && length != 0 &&
+      length > UINT64_MAX - target_offset) {
+    status = iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                              "queue write file range overflows uint64");
+  }
+  if (iree_status_is_ok(status) && length != 0) {
+    iree_hal_buffer_t *storage_buffer =
+        iree_hal_file_storage_buffer(target_file);
+    if (storage_buffer) {
+      status = lrrt_iree_hal_device_copy_now(
+          device, source_buffer, source_offset, storage_buffer,
+          (iree_device_size_t)target_offset, length);
+    } else if (!iree_hal_file_supports_synchronous_io(target_file)) {
+      status = iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                                "queue write target file does not support "
+                                "synchronous I/O");
+    } else {
+      status = iree_hal_file_write(target_file, target_offset, source_buffer,
+                                   source_offset, length);
+    }
+  }
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue write", signal_semaphore_list, status);
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_host_call(

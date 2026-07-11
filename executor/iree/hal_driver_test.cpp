@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <vector>
 
+#include "iree/io/file_handle.h"
 #include "lrrt/lrrt.h"
 
 namespace {
@@ -514,6 +515,109 @@ int test_lrrt_driver_registration() {
   }
   iree_hal_buffer_release(target_buffer);
   iree_hal_buffer_release(source_buffer);
+
+  iree_hal_buffer_t *file_transfer_buffer = nullptr;
+  status = iree_hal_allocator_allocate_buffer(allocator, buffer_params, 16,
+                                              &file_transfer_buffer);
+  if (!iree_status_is_ok(status) || !file_transfer_buffer) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  uint32_t file_source_values[4] = {8, 6, 7, 5};
+  iree_io_file_handle_t *source_handle = nullptr;
+  status = iree_io_file_handle_wrap_host_allocation(
+      IREE_IO_FILE_ACCESS_READ,
+      iree_make_byte_span(reinterpret_cast<uint8_t *>(file_source_values),
+                          sizeof(file_source_values)),
+      iree_io_file_handle_release_callback_null(), iree_allocator_system(),
+      &source_handle);
+  iree_hal_file_t *source_file = nullptr;
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_file_import(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, IREE_HAL_MEMORY_ACCESS_READ,
+        source_handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE, &source_file);
+  }
+  if (source_handle) {
+    iree_io_file_handle_release(source_handle);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_read(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        iree_hal_semaphore_list_empty(), source_file, /*source_offset=*/0,
+        file_transfer_buffer, /*target_offset=*/0, sizeof(file_source_values),
+        IREE_HAL_READ_FLAG_NONE);
+  }
+  void *file_transfer_device_ptr = nullptr;
+  status = iree_status_join(
+      status, lrrt_iree_hal_buffer_device_pointer_for_test(
+                  file_transfer_buffer, &file_transfer_device_ptr));
+  uint32_t file_readback_values[4] = {};
+  if (iree_status_is_ok(status)) {
+    if (lr_memcpy(lrrt_device, file_readback_values, file_transfer_device_ptr,
+                  sizeof(file_readback_values),
+                  LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS) {
+      status = iree_make_status(IREE_STATUS_INTERNAL,
+                                "queue read device readback failed");
+    }
+  }
+  if (!iree_status_is_ok(status) || !source_file ||
+      std::memcmp(file_readback_values, file_source_values,
+                  sizeof(file_source_values)) != 0) {
+    iree_status_ignore(status);
+    if (source_file) {
+      iree_hal_file_release(source_file);
+    }
+    iree_hal_buffer_release(file_transfer_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_file_release(source_file);
+
+  uint32_t file_target_values[4] = {};
+  iree_io_file_handle_t *target_handle = nullptr;
+  status = iree_io_file_handle_wrap_host_allocation(
+      IREE_IO_FILE_ACCESS_WRITE,
+      iree_make_byte_span(reinterpret_cast<uint8_t *>(file_target_values),
+                          sizeof(file_target_values)),
+      iree_io_file_handle_release_callback_null(), iree_allocator_system(),
+      &target_handle);
+  iree_hal_file_t *target_file = nullptr;
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_file_import(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, IREE_HAL_MEMORY_ACCESS_WRITE,
+        target_handle, IREE_HAL_EXTERNAL_FILE_FLAG_NONE, &target_file);
+  }
+  if (target_handle) {
+    iree_io_file_handle_release(target_handle);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_write(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        iree_hal_semaphore_list_empty(), file_transfer_buffer,
+        /*source_offset=*/0, target_file, /*target_offset=*/0,
+        sizeof(file_target_values), IREE_HAL_WRITE_FLAG_NONE);
+  }
+  if (!iree_status_is_ok(status) || !target_file ||
+      std::memcmp(file_target_values, file_source_values,
+                  sizeof(file_source_values)) != 0) {
+    iree_status_ignore(status);
+    if (target_file) {
+      iree_hal_file_release(target_file);
+    }
+    iree_hal_buffer_release(file_transfer_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_file_release(target_file);
+  iree_hal_buffer_release(file_transfer_buffer);
 
   iree_hal_buffer_t *cb_source_buffer = nullptr;
   iree_hal_buffer_t *cb_target_buffer = nullptr;

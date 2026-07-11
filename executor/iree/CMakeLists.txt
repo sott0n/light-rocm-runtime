@@ -36,6 +36,9 @@ set(LRRT_IREE_HAL_LIB
 set(LRRT_IREE_ASYNC_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/async/libiree_async_async.a"
 )
+set(LRRT_IREE_ASYNC_PLATFORM_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/async/libiree_async_platform.a"
+)
 set(LRRT_IREE_BASE_PATH_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/internal/libiree_base_internal_path.a"
 )
@@ -51,16 +54,25 @@ set(LRRT_IREE_TOOLING_RUN_MODULE_LIB
 set(LRRT_IREE_EXECUTABLE_HEADER_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/hal/utils/libiree_hal_utils_executable_header.a"
 )
+set(LRRT_IREE_FILES_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/hal/utils/libiree_hal_utils_files.a"
+)
+set(LRRT_IREE_IO_FILE_HANDLE_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/io/libiree_io_file_handle.a"
+)
 set(LRRT_IREE_FLATCC_PARSING_LIB
     "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/flatcc/libflatcc_parsing.a"
 )
 if(EXISTS "${LRRT_IREE_BASE_LIB}"
    AND EXISTS "${LRRT_IREE_HAL_LIB}"
    AND EXISTS "${LRRT_IREE_ASYNC_LIB}"
+   AND EXISTS "${LRRT_IREE_ASYNC_PLATFORM_LIB}"
    AND EXISTS "${LRRT_IREE_BASE_PATH_LIB}"
    AND EXISTS "${LRRT_IREE_BASE_THREADING_LIB}"
    AND EXISTS "${LRRT_IREE_BASE_TIME_LIB}"
    AND EXISTS "${LRRT_IREE_EXECUTABLE_HEADER_LIB}"
+   AND EXISTS "${LRRT_IREE_FILES_LIB}"
+   AND EXISTS "${LRRT_IREE_IO_FILE_HANDLE_LIB}"
    AND EXISTS "${LRRT_IREE_FLATCC_PARSING_LIB}"
 )
   add_executable(lrrt_iree_hal_driver_tests hal_driver.c hal_driver_test.cpp)
@@ -80,14 +92,19 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
   target_link_libraries(
     lrrt_iree_hal_driver_tests
     PRIVATE
+      "-Wl,--start-group"
       "${LRRT_IREE_HAL_LIB}"
-      "${LRRT_IREE_ASYNC_LIB}"
+      "${LRRT_IREE_ASYNC_PLATFORM_LIB}"
       "${LRRT_IREE_BASE_PATH_LIB}"
       "${LRRT_IREE_BASE_THREADING_LIB}"
       "${LRRT_IREE_BASE_LIB}"
       "${LRRT_IREE_BASE_TIME_LIB}"
       "${LRRT_IREE_EXECUTABLE_HEADER_LIB}"
+      "${LRRT_IREE_FILES_LIB}"
+      "${LRRT_IREE_ASYNC_LIB}"
+      "${LRRT_IREE_IO_FILE_HANDLE_LIB}"
       "${LRRT_IREE_FLATCC_PARSING_LIB}"
+      "-Wl,--end-group"
       lrrt::lrrt
   )
   add_test(
