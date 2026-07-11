@@ -191,6 +191,30 @@ is:
 2x2xf32=[2 6][6 12]
 ```
 
+The mixed-matmul VMFB smoke test checks a one-function path with two distinct
+generated dispatch symbols:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_mixed_matmuls_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_mixed_matmuls.mlir` to
+`build-iree-probe/mixed_matmuls/mixed_matmuls_<target>.vmfb` and runs
+`mixed_matmuls` through `--device=lrrt`. The function performs a 2x2 matmul and
+then a 2x3 matmul, producing two separate ROCm dispatch symbols in one IREE
+entry point:
+
+```text
+mixed_matmuls_dispatch_0_matmul_2x2x2_f32
+mixed_matmuls_dispatch_1_matmul_2x3x2_f32
+```
+
+The expected output is:
+
+```text
+2x3xf32=[9 12 15][19 26 33]
+```
+
 The multi-export VMFB smoke test checks a different adapter path:
 
 ```sh

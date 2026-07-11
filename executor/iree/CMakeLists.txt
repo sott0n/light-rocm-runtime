@@ -236,6 +236,19 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--input=2x2xf32=2 0 0 3"
     )
 
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_mixed_matmuls_vmfb_probe
+      lrrt_iree_mixed_matmuls_run_module_vmfb_smoke
+      lrrt_iree_mixed_matmuls_vmfb
+      tools/iree_mixed_matmuls.mlir
+      mixed_matmuls
+      mixed_matmuls
+      "2x3xf32=\\[9 12 15\\]\\[19 26 33\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x3xf32=1 2 3 4 5 6"
+    )
+
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_multi_export_vmfb_probe
       lrrt_iree_multi_export_vmfb
