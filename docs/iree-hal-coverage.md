@@ -72,11 +72,11 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | `rocm-hsaco-fb` VMFB executable payload | ✅/❌ | Repo-local smoke runs can consume IREE VMFBs whose executable payload resolves to the supported HSACO path. | `lrrt_iree_*_run_module_vmfb_smoke` |
 | Function lookup by name | ✅ | Lazily resolves exported symbols with `lr_kernel_get`. | `lrrt_iree_hal_driver_executable_tests` |
 | Function info | ✅/❌ | Reports the minimal function metadata needed by the current path. | `lrrt_iree_hal_driver_executable_tests` |
-| Queue dispatch | ✅/❌ | Dispatches static workgroup counts with explicit workgroup size and pointer-only storage-buffer bindings. | `lrrt_iree_hal_driver_executable_tests`, VMFB smoke tests |
+| Queue dispatch | ✅/❌ | Dispatches static workgroup counts with explicit workgroup size, storage-buffer bindings, and inline constant bytes. | `lrrt_iree_hal_driver_executable_tests`, VMFB smoke tests |
 | Command-buffer dispatch | ✅/❌ | Records dispatch commands and replays them through the same lrrt launch path. | `lrrt_iree_hal_driver_executable_tests` |
-| Dispatch constants | ❌ | Non-empty inline constants are rejected. | Implementation contract |
+| Dispatch constants | ✅/❌ | Appends IREE inline constant bytes after storage-buffer pointer kernargs for direct static dispatch. | `lrrt_iree_qwen_ffn_mini_run_module_vmfb_smoke` |
 | Indirect workgroup counts | ❌ | Dispatch requires static workgroup counts. | Implementation contract |
-| General IREE ABI packing | ❌ | Only pointer-only storage-buffer kernargs are packed. | Implementation contract |
+| General IREE ABI packing | ❌ | Only storage-buffer pointers plus inline constant bytes are packed. | Implementation contract |
 | Dynamic shape dispatch policy | ❌ | The adapter does not infer dynamic shapes or dispatch sizes. | Non-goal for current adapter |
 
 ## Command Buffers And Queue Execution
@@ -114,6 +114,9 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Mixed matmul VMFB | ✅ | Runs a VMFB with more than one generated dispatch shape. | `lrrt_iree_mixed_matmuls_run_module_vmfb_smoke` |
 | Fused ML subgraph VMFB | ✅ | Runs an IREE-lowered `matmul + add + ReLU` workload; the current compiler fuses it into one ROCm dispatch. | `lrrt_iree_matmul_add_relu_run_module_vmfb_smoke` |
 | Mini decoder-block VMFB | ✅ | Runs a small static-shape block with norm-like elementwise scale/bias, activation, and two matmul stages. | `lrrt_iree_mini_decoder_block_run_module_vmfb_smoke` |
+| RMSNorm-like VMFB | ✅ | Runs a static-shape row reduction followed by elementwise normalization and scaling. | `lrrt_iree_rmsnorm_like_run_module_vmfb_smoke` |
+| Attention-score VMFB | ✅ | Runs a small `Q x K^T` score matmul through the lrrt HAL path. | `lrrt_iree_attention_score_run_module_vmfb_smoke` |
+| Qwen FFN mini VMFB | ✅ | Runs gate projection, up projection, activation/gating, and down projection. | `lrrt_iree_qwen_ffn_mini_run_module_vmfb_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |

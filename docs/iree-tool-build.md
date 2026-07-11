@@ -287,6 +287,63 @@ The expected output is:
 2x2xf32=[7 10][17 26]
 ```
 
+The RMSNorm-like VMFB smoke test checks a normalization-shaped reduction path:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_rmsnorm_like_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_rmsnorm_like.mlir` to
+`build-iree-probe/rmsnorm_like/rmsnorm_like_<target>.vmfb` and runs
+`rmsnorm_like` through `--device=lrrt`. The workload reduces each row to a
+sum-of-squares value, applies `rsqrt(mean_square)`, and scales each hidden
+element. The expected output is:
+
+```text
+2x2xf32=[1 2][1 2]
+```
+
+The attention-score VMFB smoke test checks the first matmul shape needed by
+attention:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_attention_score_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_attention_score.mlir` to
+`build-iree-probe/attention_score/attention_score_<target>.vmfb` and runs a
+small `Q x K^T` score matmul through `--device=lrrt`. The expected output is:
+
+```text
+2x2xf32=[5 11][11 25]
+```
+
+The Qwen FFN mini VMFB smoke test checks the gate/up/down projection shape:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_qwen_ffn_mini_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_qwen_ffn_mini.mlir` to
+`build-iree-probe/qwen_ffn_mini/qwen_ffn_mini_<target>.vmfb` and runs
+`qwen_ffn_mini` through `--device=lrrt`. The workload computes gate and up
+projections, applies a simple ReLU gate, multiplies by the up projection, and
+then applies a down projection. The current compiler reuses one matmul
+executable with inline constants for two dispatch sites, so this smoke also
+checks lrrt HAL's minimal inline-constant kernarg packing:
+
+```text
+qwen_ffn_mini_dispatch_0_matmul_2x2x2_f32
+qwen_ffn_mini_dispatch_1_matmul_2x2x2_f32
+qwen_ffn_mini_dispatch_0_matmul_2x2x2_f32
+```
+
+The expected output is:
+
+```text
+2x2xf32=[1 4][9 16]
+```
+
 The multi-export VMFB smoke test checks a different adapter path:
 
 ```sh

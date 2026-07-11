@@ -274,6 +274,44 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--input=2x2xf32=1 2 3 4"
     )
 
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_rmsnorm_like_vmfb_probe
+      lrrt_iree_rmsnorm_like_run_module_vmfb_smoke
+      lrrt_iree_rmsnorm_like_vmfb
+      tools/iree_rmsnorm_like.mlir
+      rmsnorm_like
+      rmsnorm_like
+      "2x2xf32=\\[1 2\\]\\[1 2\\]"
+      "--input=2x2xf32=1 1 2 2"
+      "--input=2xf32=1 2"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_attention_score_vmfb_probe
+      lrrt_iree_attention_score_run_module_vmfb_smoke
+      lrrt_iree_attention_score_vmfb
+      tools/iree_attention_score.mlir
+      attention_score
+      attention_score
+      "2x2xf32=\\[5 11\\]\\[11 25\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 3 2 4"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_qwen_ffn_mini_vmfb_probe
+      lrrt_iree_qwen_ffn_mini_run_module_vmfb_smoke
+      lrrt_iree_qwen_ffn_mini_vmfb
+      tools/iree_qwen_ffn_mini.mlir
+      qwen_ffn_mini
+      qwen_ffn_mini
+      "2x2xf32=\\[1 4\\]\\[9 16\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+    )
+
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_multi_export_vmfb_probe
       lrrt_iree_multi_export_vmfb

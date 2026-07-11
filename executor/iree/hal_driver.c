@@ -89,6 +89,8 @@ typedef struct lrrt_iree_hal_dispatch_record_t {
   iree_hal_executable_function_t function;
   iree_hal_dispatch_config_t config;
   iree_hal_dispatch_flags_t flags;
+  void *constants;
+  iree_host_size_t constants_length;
   iree_host_size_t binding_count;
   iree_hal_buffer_ref_t *bindings;
 } lrrt_iree_hal_dispatch_record_t;
@@ -1507,8 +1509,11 @@ lrrt_iree_hal_dispatch_record_reset(lrrt_iree_hal_dispatch_record_t *record,
     }
   }
   iree_allocator_free(host_allocator, record->bindings);
+  iree_allocator_free(host_allocator, record->constants);
   record->bindings = NULL;
+  record->constants = NULL;
   record->binding_count = 0;
+  record->constants_length = 0;
   if (record->executable) {
     iree_hal_executable_release(record->executable);
     record->executable = NULL;
@@ -2298,11 +2303,6 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
     const iree_hal_buffer_ref_list_t bindings,
     iree_hal_buffer_binding_table_t binding_table,
     iree_hal_dispatch_flags_t flags) {
-  if (constants.data_length != 0) {
-    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                            "lrrt HAL dispatch does not support inline "
-                            "constants yet");
-  }
   if (flags & (IREE_HAL_DISPATCH_FLAG_DYNAMIC_INDIRECT_PARAMETERS |
                IREE_HAL_DISPATCH_FLAG_STATIC_INDIRECT_PARAMETERS |
                IREE_HAL_DISPATCH_FLAG_CUSTOM_DIRECT_ARGUMENTS |
@@ -2344,25 +2344,49 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
   const lrrt_iree_hal_executable_function_t *function_state =
       &lrrt_executable->functions[function_index];
 
-  void *kernargs[LRRT_IREE_HAL_MAX_INLINE_BINDINGS] = {0};
+  const size_t binding_args_size = bindings.count * sizeof(void *);
+  const size_t kernargs_size = binding_args_size + constants.data_length;
+  uint8_t *kernargs = NULL;
+  if (kernargs_size != 0) {
+    kernargs = (uint8_t *)malloc(kernargs_size);
+    if (!kernargs) {
+      return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                              "lrrt HAL dispatch failed to allocate kernargs");
+    }
+    memset(kernargs, 0, kernargs_size);
+  }
   for (iree_host_size_t i = 0; i < bindings.count; ++i) {
     iree_hal_buffer_ref_t binding = {0};
-    IREE_RETURN_IF_ERROR(iree_hal_buffer_binding_table_resolve_ref(
-        binding_table, bindings.values[i], &binding));
+    iree_status_t status = iree_hal_buffer_binding_table_resolve_ref(
+        binding_table, bindings.values[i], &binding);
+    if (!iree_status_is_ok(status)) {
+      free(kernargs);
+      return status;
+    }
     if (!binding.buffer) {
+      free(kernargs);
       return iree_make_status(
           IREE_STATUS_INVALID_ARGUMENT,
           "lrrt HAL dispatch binding %" PRIhsz " resolved to null buffer", i);
     }
     if ((iree_hal_buffer_allowed_usage(binding.buffer) &
          IREE_HAL_BUFFER_USAGE_DISPATCH_STORAGE) == 0) {
+      free(kernargs);
       return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
                               "lrrt HAL dispatch binding %" PRIhsz
                               " lacks dispatch-storage usage",
                               i);
     }
-    IREE_RETURN_IF_ERROR(
-        lrrt_iree_hal_buffer_ref_device_range(binding, &kernargs[i]));
+    void *device_ptr = NULL;
+    status = lrrt_iree_hal_buffer_ref_device_range(binding, &device_ptr);
+    if (!iree_status_is_ok(status)) {
+      free(kernargs);
+      return status;
+    }
+    memcpy(kernargs + i * sizeof(device_ptr), &device_ptr, sizeof(device_ptr));
+  }
+  if (constants.data_length != 0) {
+    memcpy(kernargs + binding_args_size, constants.data, constants.data_length);
   }
 
   const lr_launch_config_t launch_config = {
@@ -2374,16 +2398,17 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
       resolved_config.dynamic_workgroup_local_memory};
   lrrt_iree_hal_tracef(
       "dispatch launch function='%.*s' wg_count=%ux%ux%u wg_size=%ux%ux%u "
-      "bindings=%" PRIhsz " local_memory=%u",
+      "bindings=%" PRIhsz " constants=%" PRIhsz " local_memory=%u",
       (int)function_state->name.size, function_state->name.data,
       resolved_config.workgroup_count[0], resolved_config.workgroup_count[1],
       resolved_config.workgroup_count[2], resolved_config.workgroup_size[0],
       resolved_config.workgroup_size[1], resolved_config.workgroup_size[2],
-      bindings.count, resolved_config.dynamic_workgroup_local_memory);
-  return lrrt_iree_hal_status_from_lr(
-      lr_launch(kernel, &launch_config, kernargs,
-                bindings.count * sizeof(kernargs[0])),
-      "lr_launch");
+      bindings.count, constants.data_length,
+      resolved_config.dynamic_workgroup_local_memory);
+  iree_status_t status = lrrt_iree_hal_status_from_lr(
+      lr_launch(kernel, &launch_config, kernargs, kernargs_size), "lr_launch");
+  free(kernargs);
+  return status;
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_dispatch(
@@ -2412,12 +2437,7 @@ static iree_status_t lrrt_iree_hal_command_buffer_require_dispatch_shape(
     const iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
     const iree_hal_buffer_ref_list_t bindings,
     iree_hal_dispatch_flags_t flags) {
-  if (constants.data_length != 0) {
-    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
-                            "lrrt HAL command buffer %s does not support "
-                            "inline constants yet",
-                            operation);
-  }
+  (void)constants;
   if (flags & (IREE_HAL_DISPATCH_FLAG_DYNAMIC_INDIRECT_PARAMETERS |
                IREE_HAL_DISPATCH_FLAG_STATIC_INDIRECT_PARAMETERS |
                IREE_HAL_DISPATCH_FLAG_CUSTOM_DIRECT_ARGUMENTS |
@@ -2756,6 +2776,19 @@ static iree_status_t lrrt_iree_hal_command_buffer_dispatch(
   record->config = config;
   record->flags = flags;
   record->binding_count = bindings.count;
+  record->constants_length = constants.data_length;
+  if (constants.data_length != 0) {
+    iree_status_t status =
+        iree_allocator_malloc(command_buffer->host_allocator,
+                              constants.data_length, &record->constants);
+    if (!iree_status_is_ok(status)) {
+      lrrt_iree_hal_command_record_reset(command,
+                                         command_buffer->host_allocator);
+      --command_buffer->command_count;
+      return status;
+    }
+    memcpy(record->constants, constants.data, constants.data_length);
+  }
 
   iree_hal_executable_retain(executable);
   for (iree_host_size_t i = 0; i < record->binding_count; ++i) {
@@ -2821,9 +2854,11 @@ static iree_status_t lrrt_iree_hal_device_replay_dispatch_command(
       record->binding_count,
       record->bindings,
   };
-  return lrrt_iree_hal_device_dispatch_now(
-      record->executable, record->function, record->config,
-      iree_const_byte_span_empty(), bindings, binding_table, record->flags);
+  const iree_const_byte_span_t constants = iree_make_const_byte_span(
+      (const uint8_t *)record->constants, record->constants_length);
+  return lrrt_iree_hal_device_dispatch_now(record->executable, record->function,
+                                           record->config, constants, bindings,
+                                           binding_table, record->flags);
 }
 
 static iree_status_t lrrt_iree_hal_device_replay_command(
