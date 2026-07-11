@@ -85,6 +85,100 @@ bool test_allocator_buffers() {
                      sizeof(mapped_values)) == 0;
 }
 
+bool test_buffer_mapping_flush_invalidate() {
+  HalFixture fixture;
+  if (!fixture.setup()) {
+    return false;
+  }
+
+  const iree_hal_buffer_params_t host_params = host_buffer_params();
+  BufferPtr buffer;
+  const uint32_t zeros[4] = {};
+  const uint32_t mapped_values[2] = {0xAABBCCDDu, 0x11223344u};
+  const uint32_t device_values[4] = {5, 6, 7, 8};
+  const uint32_t expected_after_flush[4] = {
+      0,
+      mapped_values[0],
+      mapped_values[1],
+      0,
+  };
+  uint32_t actual_values[4] = {};
+  void *device_ptr = nullptr;
+  lr_device_t lrrt_device = {0};
+
+  if (!expect_ok(iree_hal_allocator_allocate_buffer(
+                     fixture.allocator, host_params, 16, buffer.out()),
+                 "allocate mapping buffer") ||
+      !expect_ok(
+          iree_hal_buffer_map_write(buffer.get(), 0, zeros, sizeof(zeros)),
+          "zero mapping buffer") ||
+      !expect_ok(lrrt_iree_hal_buffer_device_pointer_for_test(buffer.get(),
+                                                              &device_ptr),
+                 "mapping device pointer") ||
+      lr_device_open(0, &lrrt_device) != LR_SUCCESS) {
+    return false;
+  }
+
+  iree_hal_buffer_mapping_t write_mapping = {};
+  if (!expect_ok(iree_hal_buffer_map_range(
+                     buffer.get(), IREE_HAL_MAPPING_MODE_SCOPED,
+                     IREE_HAL_MEMORY_ACCESS_WRITE, /*byte_offset=*/4,
+                     /*byte_length=*/sizeof(mapped_values), &write_mapping),
+                 "map range write")) {
+    return false;
+  }
+  std::memcpy(write_mapping.contents.data, mapped_values,
+              sizeof(mapped_values));
+  const bool write_ok = expect_ok(iree_hal_buffer_mapping_flush_range(
+                                      &write_mapping, /*byte_offset=*/0,
+                                      /*byte_length=*/sizeof(mapped_values)),
+                                  "flush mapped range") &&
+                        expect_ok(iree_hal_buffer_unmap_range(&write_mapping),
+                                  "unmap write range");
+  if (!write_ok) {
+    iree_status_ignore(iree_hal_buffer_unmap_range(&write_mapping));
+    return false;
+  }
+
+  if (lr_memcpy(lrrt_device, actual_values, device_ptr, sizeof(actual_values),
+                LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS ||
+      std::memcmp(actual_values, expected_after_flush,
+                  sizeof(expected_after_flush)) != 0) {
+    fprintf(stderr, "mapped flush did not update device allocation\n");
+    return false;
+  }
+
+  if (lr_memcpy(lrrt_device, device_ptr, device_values, sizeof(device_values),
+                LR_MEMCPY_HOST_TO_DEVICE) != LR_SUCCESS) {
+    return false;
+  }
+
+  iree_hal_buffer_mapping_t read_mapping = {};
+  if (!expect_ok(iree_hal_buffer_map_range(
+                     buffer.get(), IREE_HAL_MAPPING_MODE_SCOPED,
+                     IREE_HAL_MEMORY_ACCESS_READ, /*byte_offset=*/0,
+                     /*byte_length=*/sizeof(actual_values), &read_mapping),
+                 "map range read")) {
+    return false;
+  }
+  std::memset(read_mapping.contents.data, 0, sizeof(actual_values));
+  const bool read_ok =
+      expect_ok(iree_hal_buffer_mapping_invalidate_range(
+                    &read_mapping, /*byte_offset=*/0,
+                    /*byte_length=*/sizeof(actual_values)),
+                "invalidate mapped range") &&
+      std::memcmp(read_mapping.contents.data, device_values,
+                  sizeof(device_values)) == 0 &&
+      expect_ok(iree_hal_buffer_unmap_range(&read_mapping), "unmap read range");
+  if (!read_ok) {
+    iree_status_ignore(iree_hal_buffer_unmap_range(&read_mapping));
+    fprintf(stderr, "mapped invalidate did not refresh host shadow\n");
+    return false;
+  }
+
+  return true;
+}
+
 bool test_queue_alloca_dealloca() {
   HalFixture fixture;
   if (!fixture.setup()) {
@@ -145,7 +239,8 @@ bool test_queue_alloca_dealloca() {
 }
 
 bool test_allocator_suite() {
-  return test_allocator_buffers() && test_queue_alloca_dealloca();
+  return test_allocator_buffers() && test_buffer_mapping_flush_invalidate() &&
+         test_queue_alloca_dealloca();
 }
 
 } // namespace
