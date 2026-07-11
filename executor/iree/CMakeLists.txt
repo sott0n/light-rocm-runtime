@@ -312,6 +312,31 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
     )
 
     lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_kv_cache_read_vmfb_probe
+      lrrt_iree_kv_cache_read_run_module_vmfb_smoke
+      lrrt_iree_kv_cache_read_vmfb
+      tools/iree_kv_cache_read.mlir
+      kv_cache_read_attention
+      kv_cache_read_attention
+      "2x2xf32=\\[4 6\\]\\[4 6\\]"
+      "--input=2x2xf32=0 0 0 0"
+      "--input=2x3xf32=1 0 0 1 1 1"
+      "--input=3x2xf32=2 4 4 6 6 8"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_kv_cache_update_vmfb_probe
+      lrrt_iree_kv_cache_update_run_module_vmfb_smoke
+      lrrt_iree_kv_cache_update_vmfb
+      tools/iree_kv_cache_update.mlir
+      kv_cache_update
+      kv_cache_update
+      "3x2xf32=\\[1 2\\]\\[3 4\\]\\[5 6\\]"
+      "--input=3x2xf32=1 2 3 4 0 0"
+      "--input=2xf32=5 6"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
       lrrt_iree_attention_residual_vmfb_probe
       lrrt_iree_attention_residual_run_module_vmfb_smoke
       lrrt_iree_attention_residual_vmfb
@@ -364,6 +389,23 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--input=2x2xf32=0 0 0 0"
       "--input=2x2xf32=1 0 0 1"
       "--input=2x2xf32=2 4 6 8"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+    )
+
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_mini_decoder_layer_kv_cache_vmfb_probe
+      lrrt_iree_mini_decoder_layer_kv_cache_run_module_vmfb_smoke
+      lrrt_iree_mini_decoder_layer_kv_cache_vmfb
+      tools/iree_mini_decoder_layer_kv_cache.mlir
+      mini_decoder_layer_kv_cache
+      mini_decoder_layer_kv_cache
+      "2x2xf32=\\[30 72\\]\\[56 110\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=0 0 0 0"
+      "--input=2x3xf32=1 0 0 1 1 1"
+      "--input=3x2xf32=2 4 4 6 6 8"
       "--input=2x2xf32=1 0 0 1"
       "--input=2x2xf32=1 0 0 1"
       "--input=2x2xf32=1 0 0 1"
