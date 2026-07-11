@@ -191,6 +191,24 @@ is:
 2x2xf32=[2 6][6 12]
 ```
 
+The multi-export VMFB smoke test checks a different adapter path:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_multi_export_(vmfb_probe|.*run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_multi_export.mlir` to
+`build-iree-probe/multi_export/multi_export_<target>.vmfb`. That VMFB contains
+two separate IREE entry points and two generated ROCm kernel symbols:
+`simple_mul_dispatch_0_elementwise_4_f32` and
+`simple_add_dispatch_0_elementwise_4_f32`. The smoke runs both entry points
+through the same VMFB with `--device=lrrt` and checks:
+
+```text
+4xf32=10 40 90 160
+4xf32=11 22 33 44
+```
+
 The probe also writes `minimal_mul_<target>_metadata.json` by running
 `tools/iree_metadata_summary.py` on the generated `executable-targets` MLIR.
 This gives later adapter work a stable, reviewable view of the exported

@@ -142,17 +142,8 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
   )
 
   if(LRRT_IREE_COMPILE_EXECUTABLE)
-    function(lrrt_add_iree_vmfb_smoke
-             probe_test
-             run_test
-             fixture
-             input_mlir
-             artifact_stem
-             function_name
-             expected_output)
+    function(lrrt_add_iree_vmfb_probe probe_test fixture input_mlir artifact_stem)
       set(_probe_dir "${PROJECT_SOURCE_DIR}/build-iree-probe/${artifact_stem}")
-      set(_probe_vmfb "${_probe_dir}/${artifact_stem}_${LRRT_AMDGPU_TARGET}.vmfb")
-
       add_test(
         NAME ${probe_test}
         COMMAND
@@ -171,7 +162,11 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
           LABELS "iree"
           WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
       )
+    endfunction()
 
+    function(lrrt_add_iree_vmfb_run run_test fixture artifact_stem function_name expected_output)
+      set(_probe_dir "${PROJECT_SOURCE_DIR}/build-iree-probe/${artifact_stem}")
+      set(_probe_vmfb "${_probe_dir}/${artifact_stem}_${LRRT_AMDGPU_TARGET}.vmfb")
       add_test(
         NAME ${run_test}
         COMMAND
@@ -189,6 +184,30 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
           LABELS "iree;gpu"
           PASS_REGULAR_EXPRESSION "${expected_output}"
           WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      )
+    endfunction()
+
+    function(lrrt_add_iree_vmfb_smoke
+             probe_test
+             run_test
+             fixture
+             input_mlir
+             artifact_stem
+             function_name
+             expected_output)
+      lrrt_add_iree_vmfb_probe(
+        ${probe_test}
+        ${fixture}
+        ${input_mlir}
+        ${artifact_stem}
+      )
+      lrrt_add_iree_vmfb_run(
+        ${run_test}
+        ${fixture}
+        ${artifact_stem}
+        ${function_name}
+        "${expected_output}"
+        ${ARGN}
       )
     endfunction()
 
@@ -215,6 +234,31 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--input=2x2xf32=1 2 3 4"
       "--input=2x2xf32=1 0 0 1"
       "--input=2x2xf32=2 0 0 3"
+    )
+
+    lrrt_add_iree_vmfb_probe(
+      lrrt_iree_multi_export_vmfb_probe
+      lrrt_iree_multi_export_vmfb
+      tools/iree_multi_export.mlir
+      multi_export
+    )
+    lrrt_add_iree_vmfb_run(
+      lrrt_iree_multi_export_mul_run_module_vmfb_smoke
+      lrrt_iree_multi_export_vmfb
+      multi_export
+      simple_mul
+      "4xf32=10 40 90 160"
+      "--input=4xf32=1 2 3 4"
+      "--input=4xf32=10 20 30 40"
+    )
+    lrrt_add_iree_vmfb_run(
+      lrrt_iree_multi_export_add_run_module_vmfb_smoke
+      lrrt_iree_multi_export_vmfb
+      multi_export
+      simple_add
+      "4xf32=11 22 33 44"
+      "--input=4xf32=1 2 3 4"
+      "--input=4xf32=10 20 30 40"
     )
   else()
     message(
