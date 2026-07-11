@@ -124,6 +124,8 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Qwen FFN mini VMFB | ✅ | Runs gate projection, up projection, activation/gating, and down projection. | `lrrt_iree_qwen_ffn_mini_run_module_vmfb_smoke` |
 | Mini decoder-layer VMFB | ✅ | Runs attention softmax/residual, FFN gate/up/down, and final residual in one IREE entry point. | `lrrt_iree_mini_decoder_layer_run_module_vmfb_smoke` |
 | Mini decoder-layer with KV cache VMFB | ✅ | Runs the mini decoder-layer shape with cached K/V inputs instead of per-call K/V tensors. | `lrrt_iree_mini_decoder_layer_kv_cache_run_module_vmfb_smoke` |
+| Mini decoder-layer with RoPE and KV cache VMFB | ✅ | Runs RoPE on Q before cached K/V attention, then continues through the mini decoder-layer FFN path. | `lrrt_iree_mini_decoder_layer_rope_kv_cache_run_module_vmfb_smoke` |
+| Token-step KV cache VMFB | ✅ | Runs a fixed-shape one-token step that applies RoPE, updates K/V cache slots, and reads the updated cache for attention. | `lrrt_iree_token_step_kv_cache_run_module_vmfb_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |
@@ -146,3 +148,10 @@ VMFBs. The remaining "seamless" gap is not the core dispatch path; it is
 packaging/registration outside the repo-local smoke runner plus broader HAL
 surface coverage for programs that require more than static pointer-only
 dispatches and synchronous transfer semantics.
+
+The IREE KV cache smoke tests use static tensor inputs rather than runtime-core
+cache semantics. The current small-cache layout is `key_cache_transposed` as
+`[head_dim, cache_tokens]` and `value_cache` as `[cache_tokens, head_dim]`.
+The lrrt HAL adapter only receives these as ordinary buffer bindings; cache
+slot selection, RoPE placement, and attention semantics remain in the IREE
+program or an executor above the runtime.
