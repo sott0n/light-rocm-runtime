@@ -80,3 +80,73 @@ function(lrrt_find_iree)
     message(STATUS "IREE runner: ${LRRT_IREE_RUN_MODULE_EXECUTABLE}")
   endif()
 endfunction()
+
+function(lrrt_add_iree_vmfb_probe probe_test fixture input_mlir artifact_stem)
+  set(_probe_dir "${PROJECT_SOURCE_DIR}/build-iree-probe/${artifact_stem}")
+  add_test(
+    NAME ${probe_test}
+    COMMAND
+      "${PROJECT_SOURCE_DIR}/tools/iree_compile_probe.sh"
+      --iree-compile "${LRRT_IREE_COMPILE_EXECUTABLE}"
+      --input "${PROJECT_SOURCE_DIR}/${input_mlir}"
+      --target "${LRRT_AMDGPU_TARGET}"
+      --artifact-stem "${artifact_stem}"
+      --out-dir "${_probe_dir}"
+      --try-vmfb
+  )
+  set_tests_properties(
+    ${probe_test}
+    PROPERTIES
+      FIXTURES_SETUP ${fixture}
+      LABELS "iree"
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endfunction()
+
+function(lrrt_add_iree_vmfb_run run_test fixture artifact_stem function_name
+         expected_output)
+  set(_probe_dir "${PROJECT_SOURCE_DIR}/build-iree-probe/${artifact_stem}")
+  set(_probe_vmfb "${_probe_dir}/${artifact_stem}_${LRRT_AMDGPU_TARGET}.vmfb")
+  add_test(
+    NAME ${run_test}
+    COMMAND
+      lrrt_iree_run_module_smoke
+      --device=lrrt
+      "--module=${_probe_vmfb}"
+      "--function=${function_name}"
+      ${ARGN}
+      --output=-
+  )
+  set_tests_properties(
+    ${run_test}
+    PROPERTIES
+      FIXTURES_REQUIRED ${fixture}
+      LABELS "iree;gpu"
+      PASS_REGULAR_EXPRESSION "${expected_output}"
+      WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+  )
+endfunction()
+
+function(lrrt_add_iree_vmfb_smoke
+         probe_test
+         run_test
+         fixture
+         input_mlir
+         artifact_stem
+         function_name
+         expected_output)
+  lrrt_add_iree_vmfb_probe(
+    ${probe_test}
+    ${fixture}
+    ${input_mlir}
+    ${artifact_stem}
+  )
+  lrrt_add_iree_vmfb_run(
+    ${run_test}
+    ${fixture}
+    ${artifact_stem}
+    ${function_name}
+    "${expected_output}"
+    ${ARGN}
+  )
+endfunction()
