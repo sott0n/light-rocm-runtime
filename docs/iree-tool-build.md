@@ -261,6 +261,32 @@ The expected output is:
 2x2xf32=[9 0][0 17]
 ```
 
+The mini decoder-block VMFB smoke test checks a small static-shape workload
+that is closer to a transformer block than a single fused matmul:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_mini_decoder_block_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_mini_decoder_block.mlir` to
+`build-iree-probe/mini_decoder_block/mini_decoder_block_<target>.vmfb` and
+runs `mini_decoder_block` through `--device=lrrt`. The function applies a
+norm-like elementwise scale/bias, a 2x2 up projection, ReLU, and a 2x2 down
+projection. With the current compiler pipeline, this produces three ROCm
+dispatch symbols that exercise an elementwise-to-matmul-to-matmul handoff:
+
+```text
+mini_decoder_block_dispatch_0_elementwise_4_f32
+mini_decoder_block_dispatch_1_matmul_2x2x2_f32
+mini_decoder_block_dispatch_2_matmul_2x2x2_f32
+```
+
+The expected output is:
+
+```text
+2x2xf32=[7 10][17 26]
+```
+
 The multi-export VMFB smoke test checks a different adapter path:
 
 ```sh

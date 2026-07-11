@@ -259,6 +259,21 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--input=2x2xf32=8 -3 -7 13"
     )
 
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_mini_decoder_block_vmfb_probe
+      lrrt_iree_mini_decoder_block_run_module_vmfb_smoke
+      lrrt_iree_mini_decoder_block_vmfb
+      tools/iree_mini_decoder_block.mlir
+      mini_decoder_block
+      mini_decoder_block
+      "2x2xf32=\\[7 10\\]\\[17 26\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 0.5 2 1"
+      "--input=2x2xf32=0 1 -1 0"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 2 3 4"
+    )
+
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_multi_export_vmfb_probe
       lrrt_iree_multi_export_vmfb
