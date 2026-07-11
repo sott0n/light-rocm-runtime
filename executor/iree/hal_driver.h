@@ -1,16 +1,12 @@
 #ifndef LRRT_EXECUTOR_IREE_HAL_DRIVER_H_
 #define LRRT_EXECUTOR_IREE_HAL_DRIVER_H_
 
-#include "iree/hal/api.h"
+#include "executor/iree/registration/driver_module.h"
+#include "executor/iree/registration/init.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-iree_status_t
-lrrt_iree_hal_driver_module_register(iree_hal_driver_registry_t *registry);
-
-iree_status_t lrrt_iree_hal_register_all(void);
 
 #if defined(LRRT_IREE_HAL_DRIVER_TESTING)
 iree_status_t

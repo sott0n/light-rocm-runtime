@@ -61,12 +61,20 @@ int test_lrrt_driver_registration() {
     return 1;
   }
 
-  status = lrrt_iree_hal_driver_module_register(registry);
+  status = lrrt_iree_hal_register_all_available_drivers(registry);
   if (!iree_status_is_ok(status)) {
     iree_status_ignore(status);
     iree_hal_driver_registry_free(registry);
     return 1;
   }
+
+  status = lrrt_iree_hal_driver_module_register(registry);
+  if (!iree_status_is_already_exists(status)) {
+    iree_status_ignore(status);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_status_free(status);
 
   iree_host_size_t driver_info_count = 0;
   iree_hal_driver_info_t *driver_infos = nullptr;

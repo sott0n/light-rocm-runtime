@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "executor/iree/registration/driver_module.h"
 #include "iree/async/semaphore.h"
-#include "iree/hal/driver_registry.h"
 #include "iree/hal/resource.h"
 #include "iree/hal/utils/executable_header.h"
 #include "iree/hal/utils/file_registry.h"
@@ -2988,14 +2988,4 @@ lrrt_iree_hal_driver_module_register(iree_hal_driver_registry_t *registry) {
       .try_create = lrrt_iree_hal_driver_factory_try_create,
   };
   return iree_hal_driver_registry_register_factory(registry, &factory);
-}
-
-iree_status_t lrrt_iree_hal_register_all(void) {
-  iree_status_t status =
-      lrrt_iree_hal_driver_module_register(iree_hal_driver_registry_default());
-  if (iree_status_is_already_exists(status)) {
-    iree_status_free(status);
-    return iree_ok_status();
-  }
-  return status;
 }

@@ -183,7 +183,9 @@ The current adapter skeleton mapping is tracked in
 
 The first native HAL entry point now exists as a minimal `lrrt` driver factory.
 `lrrt_iree_hal_driver_module_register` can register the factory in an IREE HAL
-driver registry, while `lrrt_iree_hal_register_all` provides an idempotent
+driver registry. `lrrt_iree_hal_register_all_available_drivers(registry)` now
+provides the lrrt-owned aggregate registration shape for callers that manage an
+explicit registry, while `lrrt_iree_hal_register_all` remains the idempotent
 tooling entry point that registers the same factory with IREE's default HAL
 driver registry. The registry can create the `lrrt` driver and a minimal
 `iree_hal_device_t` by name. The device now owns a HAL allocator that can

@@ -18,9 +18,10 @@ The current skeleton has two layers and is compiled only when
 - a small C++ adapter layer that names the lrrt-owned concepts used by the
   existing metadata/HSACO dispatch probes
 - a minimal native IREE HAL driver factory named `lrrt`, registered through
-  `lrrt_iree_hal_driver_module_register`, plus a tooling-oriented
-  `lrrt_iree_hal_register_all` entry point for registering the lrrt factory in
-  IREE's default HAL driver registry
+  `executor/iree/registration/driver_module.h`, plus an
+  `executor/iree/registration/init.h` registration layer that mirrors IREE's
+  `iree_hal_register_all_available_drivers(registry)` shape for user-provided
+  drivers
 
 The native HAL driver is built as a reusable CMake target,
 `lrrt::iree_hal_driver`, when the required IREE runtime static libraries are
@@ -31,7 +32,9 @@ implementation as adapter-owned code rather than smoke-runner-local code.
 The native driver factory is the first step toward a seamless
 `iree-run-module --device=lrrt` path. The low-level module registration
 function keeps the same shape as IREE's built-in driver modules and accepts an
-explicit registry. The higher-level `lrrt_iree_hal_register_all` helper is
+explicit registry. `lrrt_iree_hal_register_all_available_drivers(registry)` is
+the lrrt-owned aggregate registration entry point for callers that manage their
+own IREE registry. The higher-level `lrrt_iree_hal_register_all` helper is
 idempotent and registers the same factory with `iree_hal_driver_registry_default`
 so smoke runners and future embedded tooling entry points do not need to know
 the registry plumbing. At this stage the driver can be created by name and
@@ -62,6 +65,7 @@ unsupported until they are backed by lrrt runtime objects.
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
 | driver factory | `lrrt_iree_hal_driver_module_register` | Registers the `lrrt` HAL driver factory with an explicit IREE registry |
+| user driver aggregate registration | `lrrt_iree_hal_register_all_available_drivers` | Registers all lrrt-provided HAL drivers with a caller-owned IREE registry |
 | default registration entry point | `lrrt_iree_hal_register_all` | Idempotently registers the `lrrt` factory with IREE's default HAL driver registry for tooling-style execution |
 | native HAL driver | `lrrt_iree_hal_driver_t` | Creates the minimal native HAL device for `default` |
 | native HAL device | `lrrt_iree_hal_device_t` | Lifetime/id/query skeleton with an owned HAL allocator |

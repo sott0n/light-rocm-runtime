@@ -109,11 +109,21 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
    AND EXISTS "${LRRT_IREE_IO_FILE_HANDLE_LIB}"
    AND EXISTS "${LRRT_IREE_FLATCC_PARSING_LIB}"
 )
-  add_library(lrrt_iree_hal_driver STATIC hal_driver.c)
+  add_library(
+    lrrt_iree_hal_driver
+    STATIC
+      hal_driver.c
+      registration/init.c
+  )
   add_library(lrrt::iree_hal_driver ALIAS lrrt_iree_hal_driver)
   lrrt_configure_iree_hal_driver_target(lrrt_iree_hal_driver)
 
-  add_library(lrrt_iree_hal_driver_testing STATIC hal_driver.c)
+  add_library(
+    lrrt_iree_hal_driver_testing
+    STATIC
+      hal_driver.c
+      registration/init.c
+  )
   lrrt_configure_iree_hal_driver_target(lrrt_iree_hal_driver_testing)
   target_compile_definitions(
     lrrt_iree_hal_driver_testing
