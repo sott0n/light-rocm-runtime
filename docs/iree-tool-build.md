@@ -157,6 +157,22 @@ available as an opt-in CTest:
 ctest --test-dir build-iree/adapter --output-on-failure -R lrrt_iree_baseline_probe
 ```
 
+When the local IREE runtime static libraries are also available, the lrrt HAL
+adapter path has its own VMFB smoke test:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This test first serializes `tools/iree_minimal_mul.mlir` to
+`build-iree-probe/lrrt-vmfb/minimal_mul_<target>.vmfb`, then runs that VMFB
+through `lrrt_iree_run_module_smoke --device=lrrt`. The expected output is the
+same minimal multiply result:
+
+```text
+4xf32=10 40 90 160
+```
+
 The probe also writes `minimal_mul_<target>_metadata.json` by running
 `tools/iree_metadata_summary.py` on the generated `executable-targets` MLIR.
 This gives later adapter work a stable, reviewable view of the exported

@@ -140,6 +140,57 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       m
       pthread
   )
+
+  if(LRRT_IREE_COMPILE_EXECUTABLE)
+    set(LRRT_IREE_LRRT_VMFB_PROBE_DIR
+        "${PROJECT_SOURCE_DIR}/build-iree-probe/lrrt-vmfb"
+    )
+    set(LRRT_IREE_LRRT_VMFB_PROBE
+        "${LRRT_IREE_LRRT_VMFB_PROBE_DIR}/minimal_mul_${LRRT_AMDGPU_TARGET}.vmfb"
+    )
+
+    add_test(
+      NAME lrrt_iree_vmfb_probe
+      COMMAND
+        "${PROJECT_SOURCE_DIR}/tools/iree_compile_probe.sh"
+        --iree-compile "${LRRT_IREE_COMPILE_EXECUTABLE}"
+        --target "${LRRT_AMDGPU_TARGET}"
+        --out-dir "${LRRT_IREE_LRRT_VMFB_PROBE_DIR}"
+        --try-vmfb
+    )
+    set_tests_properties(
+      lrrt_iree_vmfb_probe
+      PROPERTIES
+        FIXTURES_SETUP lrrt_iree_vmfb
+        LABELS "iree"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+
+    add_test(
+      NAME lrrt_iree_run_module_vmfb_smoke
+      COMMAND
+        lrrt_iree_run_module_smoke
+        --device=lrrt
+        "--module=${LRRT_IREE_LRRT_VMFB_PROBE}"
+        --function=simple_mul
+        "--input=4xf32=1 2 3 4"
+        "--input=4xf32=10 20 30 40"
+        --output=-
+    )
+    set_tests_properties(
+      lrrt_iree_run_module_vmfb_smoke
+      PROPERTIES
+        FIXTURES_REQUIRED lrrt_iree_vmfb
+        LABELS "iree;gpu"
+        PASS_REGULAR_EXPRESSION "4xf32=10 40 90 160"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+  else()
+    message(
+      STATUS
+        "IREE lrrt VMFB smoke test disabled; iree-compile was not found"
+    )
+  endif()
 else()
   message(
     STATUS
