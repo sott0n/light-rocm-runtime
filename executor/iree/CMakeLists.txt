@@ -45,17 +45,31 @@ set(LRRT_IREE_BASE_THREADING_LIB
 set(LRRT_IREE_BASE_TIME_LIB
     "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/base/internal/libiree_base_internal_time.a"
 )
+set(LRRT_IREE_TOOLING_RUN_MODULE_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/tooling/libiree_tooling_run_module.a"
+)
+set(LRRT_IREE_EXECUTABLE_HEADER_LIB
+    "${LRRT_IREE_RUNTIME_BUILD_DIR}/iree/hal/utils/libiree_hal_utils_executable_header.a"
+)
+set(LRRT_IREE_FLATCC_PARSING_LIB
+    "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/flatcc/libflatcc_parsing.a"
+)
 if(EXISTS "${LRRT_IREE_BASE_LIB}"
    AND EXISTS "${LRRT_IREE_HAL_LIB}"
    AND EXISTS "${LRRT_IREE_ASYNC_LIB}"
    AND EXISTS "${LRRT_IREE_BASE_PATH_LIB}"
    AND EXISTS "${LRRT_IREE_BASE_THREADING_LIB}"
    AND EXISTS "${LRRT_IREE_BASE_TIME_LIB}"
+   AND EXISTS "${LRRT_IREE_EXECUTABLE_HEADER_LIB}"
+   AND EXISTS "${LRRT_IREE_FLATCC_PARSING_LIB}"
 )
   add_executable(lrrt_iree_hal_driver_tests hal_driver.c hal_driver_test.cpp)
   target_include_directories(
     lrrt_iree_hal_driver_tests
-    PRIVATE "${LRRT_IREE_INCLUDE_DIR}"
+    PRIVATE
+      "${LRRT_IREE_INCLUDE_DIR}"
+      "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
+      "${PROJECT_SOURCE_DIR}/third_party/iree/third_party/flatcc/include"
   )
   target_compile_definitions(
     lrrt_iree_hal_driver_tests
@@ -72,6 +86,8 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
       "${LRRT_IREE_BASE_THREADING_LIB}"
       "${LRRT_IREE_BASE_LIB}"
       "${LRRT_IREE_BASE_TIME_LIB}"
+      "${LRRT_IREE_EXECUTABLE_HEADER_LIB}"
+      "${LRRT_IREE_FLATCC_PARSING_LIB}"
       lrrt::lrrt
   )
   add_test(
@@ -89,6 +105,46 @@ else()
     STATUS
       "IREE HAL driver registration test disabled; IREE runtime static libs "
       "were not found under ${LRRT_IREE_RUNTIME_BUILD_DIR}"
+  )
+endif()
+
+if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
+  file(
+    GLOB_RECURSE
+    LRRT_IREE_RUNTIME_STATIC_LIBS
+    CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src/iree/*.a"
+    "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/*.a"
+  )
+  add_executable(lrrt_iree_run_module_smoke hal_driver.c run_module_smoke.c)
+  target_include_directories(
+    lrrt_iree_run_module_smoke
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}"
+      "${LRRT_IREE_INCLUDE_DIR}"
+      "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
+      "${PROJECT_SOURCE_DIR}/third_party/iree/third_party/flatcc/include"
+  )
+  target_compile_definitions(
+    lrrt_iree_run_module_smoke
+    PRIVATE IREE_ALLOCATOR_SYSTEM_CTL=iree_allocator_libc_ctl
+  )
+  target_link_libraries(
+    lrrt_iree_run_module_smoke
+    PRIVATE
+      lrrt::lrrt
+      "-Wl,--start-group"
+      ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+      "-Wl,--end-group"
+      dl
+      m
+      pthread
+  )
+else()
+  message(
+    STATUS
+      "IREE lrrt run-module smoke disabled; IREE run_module static library "
+      "was not found under ${LRRT_IREE_RUNTIME_BUILD_DIR}"
   )
 endif()
 
