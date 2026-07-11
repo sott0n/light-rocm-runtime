@@ -239,6 +239,28 @@ The expected output is:
 2x3xf32=[9 12 15][19 26 33]
 ```
 
+The matmul-add-ReLU VMFB smoke test checks a small ML subgraph shape:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_matmul_add_relu_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_matmul_add_relu.mlir` to
+`build-iree-probe/matmul_add_relu/matmul_add_relu_<target>.vmfb` and runs
+`matmul_add_relu` through `--device=lrrt`. The function computes a 2x2 matmul,
+adds a 2x2 bias tensor, and applies ReLU. With the current compiler pipeline,
+this subgraph is fused into one ROCm dispatch symbol:
+
+```text
+matmul_add_relu_dispatch_0_matmul_2x2x2_f32
+```
+
+The expected output is:
+
+```text
+2x2xf32=[9 0][0 17]
+```
+
 The multi-export VMFB smoke test checks a different adapter path:
 
 ```sh

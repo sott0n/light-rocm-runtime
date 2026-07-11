@@ -112,6 +112,7 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Single dispatch VMFB | ✅ | Runs the minimal multiply VMFB through `--device=lrrt`. | `lrrt_iree_run_module_vmfb_smoke` |
 | Ordered multi-dispatch VMFB | ✅ | Runs a two-dispatch graph and validates command ordering. | `lrrt_iree_two_dispatch_run_module_vmfb_smoke` |
 | Mixed matmul VMFB | ✅ | Runs a VMFB with more than one generated dispatch shape. | `lrrt_iree_mixed_matmuls_run_module_vmfb_smoke` |
+| Fused ML subgraph VMFB | ✅ | Runs an IREE-lowered `matmul + add + ReLU` workload; the current compiler fuses it into one ROCm dispatch. | `lrrt_iree_matmul_add_relu_run_module_vmfb_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |
