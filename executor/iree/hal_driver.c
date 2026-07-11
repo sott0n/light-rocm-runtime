@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "iree/async/semaphore.h"
 #include "iree/hal/resource.h"
 #include "lrrt/lrrt.h"
 
@@ -58,6 +59,11 @@ typedef struct lrrt_iree_hal_device_t {
   iree_hal_device_topology_info_t topology_info;
 } lrrt_iree_hal_device_t;
 
+typedef struct lrrt_iree_hal_semaphore_t {
+  iree_async_semaphore_t async;
+  iree_allocator_t host_allocator;
+} lrrt_iree_hal_semaphore_t;
+
 enum { LRRT_IREE_HAL_MAX_INLINE_BINDINGS = 64 };
 
 typedef struct lrrt_iree_hal_dispatch_record_t {
@@ -83,6 +89,7 @@ static const iree_hal_buffer_vtable_t lrrt_iree_hal_buffer_vtable;
 static const iree_hal_executable_cache_vtable_t
     lrrt_iree_hal_executable_cache_vtable;
 static const iree_hal_executable_vtable_t lrrt_iree_hal_executable_vtable;
+static const iree_hal_semaphore_vtable_t lrrt_iree_hal_semaphore_vtable;
 static const iree_hal_command_buffer_vtable_t
     lrrt_iree_hal_command_buffer_vtable;
 static const iree_hal_device_vtable_t lrrt_iree_hal_device_vtable;
@@ -123,6 +130,12 @@ static lrrt_iree_hal_command_buffer_t *
 lrrt_iree_hal_command_buffer_cast(iree_hal_command_buffer_t *base_buffer) {
   IREE_HAL_ASSERT_TYPE(base_buffer, &lrrt_iree_hal_command_buffer_vtable);
   return (lrrt_iree_hal_command_buffer_t *)base_buffer;
+}
+
+static lrrt_iree_hal_semaphore_t *
+lrrt_iree_hal_semaphore_cast(iree_hal_semaphore_t *base_semaphore) {
+  IREE_HAL_ASSERT_TYPE(base_semaphore, &lrrt_iree_hal_semaphore_vtable);
+  return (lrrt_iree_hal_semaphore_t *)base_semaphore;
 }
 
 static iree_status_t lrrt_iree_hal_status_from_lr(lr_status_t status,
@@ -1118,17 +1131,202 @@ lrrt_iree_hal_dispatch_record_reset(lrrt_iree_hal_dispatch_record_t *record,
   }
 }
 
-static iree_status_t lrrt_iree_hal_device_require_empty_semaphore_lists(
-    const char *operation, const iree_hal_semaphore_list_t wait_semaphore_list,
-    const iree_hal_semaphore_list_t signal_semaphore_list) {
-  if (!iree_hal_semaphore_list_is_empty(wait_semaphore_list) ||
-      !iree_hal_semaphore_list_is_empty(signal_semaphore_list)) {
-    return iree_make_status(
-        IREE_STATUS_UNIMPLEMENTED,
-        "lrrt HAL device %s only supports empty semaphore lists", operation);
+static iree_status_t
+lrrt_iree_hal_semaphore_create(uint64_t initial_value,
+                               iree_allocator_t host_allocator,
+                               iree_hal_semaphore_t **out_semaphore) {
+  IREE_ASSERT_ARGUMENT(out_semaphore);
+  *out_semaphore = NULL;
+
+  lrrt_iree_hal_semaphore_t *semaphore = NULL;
+  iree_host_size_t frontier_offset = 0;
+  iree_host_size_t total_size = 0;
+  IREE_RETURN_IF_ERROR(
+      iree_async_semaphore_layout(sizeof(*semaphore), /*frontier_capacity=*/0,
+                                  &frontier_offset, &total_size));
+  IREE_RETURN_IF_ERROR(
+      iree_allocator_malloc(host_allocator, total_size, (void **)&semaphore));
+  memset(semaphore, 0, total_size);
+
+  iree_atomic_ref_count_init(&semaphore->async.ref_count);
+  semaphore->async.vtable =
+      (const iree_async_semaphore_vtable_t *)&lrrt_iree_hal_semaphore_vtable;
+  semaphore->async.proactor = NULL;
+  iree_atomic_store(&semaphore->async.timeline_value, (int64_t)initial_value,
+                    iree_memory_order_release);
+  iree_atomic_store(&semaphore->async.last_untainted_value,
+                    (int64_t)initial_value, iree_memory_order_release);
+  iree_slim_mutex_initialize(&semaphore->async.mutex);
+  iree_atomic_store(&semaphore->async.failure_status, 0,
+                    iree_memory_order_release);
+  semaphore->async.timepoints_head = NULL;
+  semaphore->async.frontier_capacity = 0;
+  semaphore->async.frontier =
+      (iree_async_frontier_t *)((uint8_t *)semaphore + frontier_offset);
+  iree_async_frontier_initialize(semaphore->async.frontier, 0);
+  semaphore->host_allocator = host_allocator;
+
+  *out_semaphore = iree_hal_semaphore_cast(&semaphore->async);
+  return iree_ok_status();
+}
+
+static void
+lrrt_iree_hal_semaphore_destroy(iree_async_semaphore_t *base_semaphore) {
+  lrrt_iree_hal_semaphore_t *semaphore =
+      lrrt_iree_hal_semaphore_cast(iree_hal_semaphore_cast(base_semaphore));
+  iree_allocator_t host_allocator = semaphore->host_allocator;
+  iree_async_semaphore_deinitialize(&semaphore->async);
+  iree_allocator_free(host_allocator, semaphore);
+}
+
+static uint64_t
+lrrt_iree_hal_semaphore_query(iree_async_semaphore_t *base_semaphore) {
+  iree_status_t failure = (iree_status_t)iree_atomic_load(
+      &base_semaphore->failure_status, iree_memory_order_acquire);
+  if (!iree_status_is_ok(failure)) {
+    return iree_hal_status_as_semaphore_failure(failure);
+  }
+  return (uint64_t)iree_atomic_load(&base_semaphore->timeline_value,
+                                    iree_memory_order_acquire);
+}
+
+static iree_status_t
+lrrt_iree_hal_semaphore_signal(iree_async_semaphore_t *base_semaphore,
+                               uint64_t new_value,
+                               const iree_async_frontier_t *frontier) {
+  iree_status_t status = iree_async_semaphore_advance_timeline(
+      base_semaphore, new_value, frontier);
+  if (iree_status_is_ok(status)) {
+    iree_async_semaphore_dispatch_timepoints(base_semaphore, new_value);
+    return iree_ok_status();
+  }
+
+  uint64_t current_value = 0;
+  iree_status_t query_status = iree_hal_semaphore_query(
+      iree_hal_semaphore_cast(base_semaphore), &current_value);
+  if (iree_status_is_ok(query_status) && current_value >= new_value) {
+    iree_status_ignore(status);
+    return iree_ok_status();
+  }
+  iree_status_ignore(query_status);
+  return status;
+}
+
+static iree_status_t
+lrrt_iree_hal_semaphore_wait(iree_hal_semaphore_t *base_semaphore,
+                             uint64_t value, iree_timeout_t timeout,
+                             iree_async_wait_flags_t flags) {
+  return iree_async_semaphore_multi_wait(
+      IREE_ASYNC_WAIT_MODE_ALL, (iree_async_semaphore_t **)&base_semaphore,
+      &value, 1, timeout, flags, iree_allocator_system());
+}
+
+static iree_status_t lrrt_iree_hal_semaphore_import_timepoint(
+    iree_hal_semaphore_t *base_semaphore, uint64_t value,
+    iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_external_timepoint_t external_timepoint) {
+  (void)base_semaphore;
+  (void)value;
+  (void)queue_affinity;
+  (void)external_timepoint;
+  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                          "lrrt HAL semaphore timepoint import is not "
+                          "implemented yet");
+}
+
+static iree_status_t lrrt_iree_hal_semaphore_export_timepoint(
+    iree_hal_semaphore_t *base_semaphore, uint64_t value,
+    iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_external_timepoint_type_t requested_type,
+    iree_hal_external_timepoint_flags_t requested_flags,
+    iree_hal_external_timepoint_t *IREE_RESTRICT out_external_timepoint) {
+  (void)base_semaphore;
+  (void)value;
+  (void)queue_affinity;
+  (void)requested_type;
+  (void)requested_flags;
+  IREE_ASSERT_ARGUMENT(out_external_timepoint);
+  memset(out_external_timepoint, 0, sizeof(*out_external_timepoint));
+  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                          "lrrt HAL semaphore timepoint export is not "
+                          "implemented yet");
+}
+
+static bool
+lrrt_iree_hal_semaphore_is_lrrt(iree_hal_semaphore_t *base_semaphore) {
+  return iree_hal_resource_is(base_semaphore, &lrrt_iree_hal_semaphore_vtable);
+}
+
+static iree_status_t lrrt_iree_hal_device_validate_semaphore_list(
+    const char *operation, iree_hal_semaphore_list_t semaphore_list) {
+  if (iree_hal_semaphore_list_is_empty(semaphore_list)) {
+    return iree_ok_status();
+  }
+  if (!semaphore_list.semaphores || !semaphore_list.payload_values) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "lrrt HAL device %s semaphore list is malformed",
+                            operation);
+  }
+  for (iree_host_size_t i = 0; i < semaphore_list.count; ++i) {
+    if (!lrrt_iree_hal_semaphore_is_lrrt(semaphore_list.semaphores[i])) {
+      return iree_make_status(
+          IREE_STATUS_INVALID_ARGUMENT,
+          "lrrt HAL device %s requires lrrt-owned semaphores", operation);
+    }
   }
   return iree_ok_status();
 }
+
+static iree_status_t lrrt_iree_hal_device_wait_semaphore_list(
+    const char *operation, iree_hal_semaphore_list_t semaphore_list) {
+  IREE_RETURN_IF_ERROR(
+      lrrt_iree_hal_device_validate_semaphore_list(operation, semaphore_list));
+  return iree_hal_semaphore_list_wait(semaphore_list, iree_infinite_timeout(),
+                                      IREE_ASYNC_WAIT_FLAG_NONE);
+}
+
+static iree_status_t lrrt_iree_hal_device_finish_queue_operation(
+    const char *operation, iree_hal_semaphore_list_t signal_semaphore_list,
+    iree_status_t status) {
+  iree_status_t signal_list_status =
+      lrrt_iree_hal_device_validate_semaphore_list(operation,
+                                                   signal_semaphore_list);
+  if (!iree_status_is_ok(signal_list_status)) {
+    iree_status_ignore(status);
+    return signal_list_status;
+  }
+  if (!iree_status_is_ok(status)) {
+    iree_hal_semaphore_list_fail(signal_semaphore_list,
+                                 iree_status_clone(status));
+    return status;
+  }
+  return iree_hal_semaphore_list_signal(signal_semaphore_list, NULL);
+}
+
+static iree_status_t lrrt_iree_hal_device_begin_synchronous_submission(
+    const char *operation, iree_hal_semaphore_list_t wait_semaphore_list) {
+  return lrrt_iree_hal_device_wait_semaphore_list(operation,
+                                                  wait_semaphore_list);
+}
+
+static iree_status_t lrrt_iree_hal_device_end_synchronous_submission(
+    const char *operation, iree_hal_semaphore_list_t signal_semaphore_list,
+    iree_status_t status) {
+  return lrrt_iree_hal_device_finish_queue_operation(
+      operation, signal_semaphore_list, status);
+}
+
+static const iree_hal_semaphore_vtable_t lrrt_iree_hal_semaphore_vtable = {
+    .async =
+        {
+            .destroy = lrrt_iree_hal_semaphore_destroy,
+            .query = lrrt_iree_hal_semaphore_query,
+            .signal = lrrt_iree_hal_semaphore_signal,
+        },
+    .wait = lrrt_iree_hal_semaphore_wait,
+    .import_timepoint = lrrt_iree_hal_semaphore_import_timepoint,
+    .export_timepoint = lrrt_iree_hal_semaphore_export_timepoint,
+};
 
 static iree_status_t lrrt_iree_hal_device_create_channel(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
@@ -1215,21 +1413,22 @@ static iree_status_t lrrt_iree_hal_device_create_semaphore(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
     uint64_t initial_value, iree_hal_semaphore_flags_t flags,
     iree_hal_semaphore_t **out_semaphore) {
-  (void)device;
+  lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
   (void)queue_affinity;
-  (void)initial_value;
   (void)flags;
   IREE_ASSERT_ARGUMENT(out_semaphore);
-  *out_semaphore = NULL;
-  return LRRT_IREE_HAL_DEVICE_UNIMPLEMENTED("semaphore creation");
+  return lrrt_iree_hal_semaphore_create(
+      initial_value, lrrt_device->host_allocator, out_semaphore);
 }
 
 static iree_hal_semaphore_compatibility_t
 lrrt_iree_hal_device_query_semaphore_compatibility(
     iree_hal_device_t *device, iree_hal_semaphore_t *semaphore) {
   (void)device;
-  (void)semaphore;
-  return IREE_HAL_SEMAPHORE_COMPATIBILITY_NONE;
+  if (!lrrt_iree_hal_semaphore_is_lrrt(semaphore)) {
+    return IREE_HAL_SEMAPHORE_COMPATIBILITY_NONE;
+  }
+  return IREE_HAL_SEMAPHORE_COMPATIBILITY_ALL;
 }
 
 static iree_status_t lrrt_iree_hal_device_query_queue_pool_backend(
@@ -1306,21 +1505,28 @@ static iree_status_t lrrt_iree_hal_device_queue_update(
   (void)queue_affinity;
   (void)flags;
   lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
-      "queue update", wait_semaphore_list, signal_semaphore_list));
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue update", wait_semaphore_list));
   if (length == 0) {
-    return iree_ok_status();
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue update", signal_semaphore_list, iree_ok_status());
   }
   if ((iree_hal_buffer_allowed_usage(target_buffer) &
        IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
-    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
-                            "queue update target buffer lacks transfer-target "
-                            "usage");
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue update", signal_semaphore_list,
+        iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                         "queue update target buffer lacks transfer-target "
+                         "usage"));
   }
 
   void *target_device_ptr = NULL;
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
-      target_buffer, target_offset, length, &target_device_ptr));
+  iree_status_t status = lrrt_iree_hal_buffer_device_range(
+      target_buffer, target_offset, length, &target_device_ptr);
+  if (!iree_status_is_ok(status)) {
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue update", signal_semaphore_list, status);
+  }
   const uint8_t *source =
       (const uint8_t *)source_buffer + (iree_host_size_t)source_offset;
   lrrt_iree_hal_allocator_t *allocator =
@@ -1328,7 +1534,9 @@ static iree_status_t lrrt_iree_hal_device_queue_update(
   lr_status_t lr_status =
       lr_memcpy(allocator->device, target_device_ptr, source, (size_t)length,
                 LR_MEMCPY_HOST_TO_DEVICE);
-  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue update", signal_semaphore_list,
+      lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy"));
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_copy(
@@ -1341,36 +1549,49 @@ static iree_status_t lrrt_iree_hal_device_queue_copy(
   (void)queue_affinity;
   (void)flags;
   lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
-      "queue copy", wait_semaphore_list, signal_semaphore_list));
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue copy", wait_semaphore_list));
   if (length == 0) {
-    return iree_ok_status();
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue copy", signal_semaphore_list, iree_ok_status());
   }
   if ((iree_hal_buffer_allowed_usage(source_buffer) &
        IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE) == 0) {
-    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
-                            "queue copy source buffer lacks transfer-source "
-                            "usage");
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue copy", signal_semaphore_list,
+        iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                         "queue copy source buffer lacks transfer-source "
+                         "usage"));
   }
   if ((iree_hal_buffer_allowed_usage(target_buffer) &
        IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET) == 0) {
-    return iree_make_status(IREE_STATUS_PERMISSION_DENIED,
-                            "queue copy target buffer lacks transfer-target "
-                            "usage");
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue copy", signal_semaphore_list,
+        iree_make_status(IREE_STATUS_PERMISSION_DENIED,
+                         "queue copy target buffer lacks transfer-target "
+                         "usage"));
   }
 
   void *source_device_ptr = NULL;
   void *target_device_ptr = NULL;
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
-      source_buffer, source_offset, length, &source_device_ptr));
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
-      target_buffer, target_offset, length, &target_device_ptr));
+  iree_status_t status = lrrt_iree_hal_buffer_device_range(
+      source_buffer, source_offset, length, &source_device_ptr);
+  if (iree_status_is_ok(status)) {
+    status = lrrt_iree_hal_buffer_device_range(target_buffer, target_offset,
+                                               length, &target_device_ptr);
+  }
+  if (!iree_status_is_ok(status)) {
+    return lrrt_iree_hal_device_end_synchronous_submission(
+        "queue copy", signal_semaphore_list, status);
+  }
   lrrt_iree_hal_allocator_t *allocator =
       lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
   lr_status_t lr_status =
       lr_memcpy(allocator->device, target_device_ptr, source_device_ptr,
                 (size_t)length, LR_MEMCPY_DEVICE_TO_DEVICE);
-  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue copy", signal_semaphore_list,
+      lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy"));
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_read(
@@ -1523,11 +1744,13 @@ static iree_status_t lrrt_iree_hal_device_queue_dispatch(
     iree_hal_dispatch_flags_t flags) {
   (void)device;
   (void)queue_affinity;
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
-      "queue dispatch", wait_semaphore_list, signal_semaphore_list));
-  return lrrt_iree_hal_device_dispatch_now(
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue dispatch", wait_semaphore_list));
+  iree_status_t status = lrrt_iree_hal_device_dispatch_now(
       executable, function, config, constants, bindings,
       iree_hal_buffer_binding_table_empty(), flags);
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue dispatch", signal_semaphore_list, status);
 }
 
 static iree_status_t lrrt_iree_hal_command_buffer_require_dispatch_shape(
@@ -1828,30 +2051,37 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
   (void)device;
   (void)queue_affinity;
   (void)flags;
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_require_empty_semaphore_lists(
-      "queue execute", wait_semaphore_list, signal_semaphore_list));
-  IREE_RETURN_IF_ERROR(iree_hal_command_buffer_validate_submission(
-      command_buffer, binding_table));
-  if (!iree_hal_resource_is(&command_buffer->resource,
+  IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
+      "queue execute", wait_semaphore_list));
+  iree_status_t status = iree_hal_command_buffer_validate_submission(
+      command_buffer, binding_table);
+  if (iree_status_is_ok(status) &&
+      !iree_hal_resource_is(&command_buffer->resource,
                             &lrrt_iree_hal_command_buffer_vtable)) {
-    return iree_make_status(
+    status = iree_make_status(
         IREE_STATUS_INVALID_ARGUMENT,
         "lrrt HAL queue execute requires an lrrt command buffer");
   }
-  lrrt_iree_hal_command_buffer_t *lrrt_command_buffer =
-      lrrt_iree_hal_command_buffer_cast(command_buffer);
-  for (iree_host_size_t i = 0; i < lrrt_command_buffer->dispatch_count; ++i) {
-    const lrrt_iree_hal_dispatch_record_t *record =
-        &lrrt_command_buffer->dispatches[i];
-    const iree_hal_buffer_ref_list_t bindings = {
-        record->binding_count,
-        record->bindings,
-    };
-    IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_dispatch_now(
-        record->executable, record->function, record->config,
-        iree_const_byte_span_empty(), bindings, binding_table, record->flags));
+  if (iree_status_is_ok(status)) {
+    lrrt_iree_hal_command_buffer_t *lrrt_command_buffer =
+        lrrt_iree_hal_command_buffer_cast(command_buffer);
+    for (iree_host_size_t i = 0; i < lrrt_command_buffer->dispatch_count; ++i) {
+      const lrrt_iree_hal_dispatch_record_t *record =
+          &lrrt_command_buffer->dispatches[i];
+      const iree_hal_buffer_ref_list_t bindings = {
+          record->binding_count,
+          record->bindings,
+      };
+      status = lrrt_iree_hal_device_dispatch_now(
+          record->executable, record->function, record->config,
+          iree_const_byte_span_empty(), bindings, binding_table, record->flags);
+      if (!iree_status_is_ok(status)) {
+        break;
+      }
+    }
   }
-  return iree_ok_status();
+  return lrrt_iree_hal_device_end_synchronous_submission(
+      "queue execute", signal_semaphore_list, status);
 }
 
 static iree_status_t

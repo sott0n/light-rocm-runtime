@@ -33,14 +33,15 @@ unsupported. The native device can create an executable cache that recognizes
 lrrt-owned HSACO formats, prepares a raw HSACO into an lrrt module, and lazily
 resolves exported function names into lrrt kernels. It can submit a narrow
 direct `queue_dispatch` path for static workgroup counts, explicit workgroup
-sizes, empty semaphore lists, no inline constants, and pointer-only
+sizes, lrrt-owned HAL semaphore lists, no inline constants, and pointer-only
 storage-buffer bindings. It also has a minimal dispatch-only command buffer
 path: `iree_hal_command_buffer_dispatch` records static dispatch records and
 `queue_execute` replays them through the same lrrt launch path, resolving
-indirect buffer slots from the submission binding table. Semaphores, command
-buffer transfer commands, indirect dispatch parameters, and general IREE ABI
-packing remain explicitly unsupported until they are backed by lrrt runtime
-objects.
+indirect buffer slots from the submission binding table. The semaphore support
+is host-side timeline ordering for the current synchronous queue operations,
+not a native device semaphore implementation. Command buffer transfer commands,
+indirect dispatch parameters, and general IREE ABI packing remain explicitly
+unsupported until they are backed by lrrt runtime objects.
 
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
@@ -49,9 +50,10 @@ objects.
 | native HAL device | `lrrt_iree_hal_device_t` | Lifetime/id/query skeleton with an owned HAL allocator |
 | native HAL allocator | `lrrt_iree_hal_allocator_t` | Owns the lrrt runtime/device lifetime needed by HAL buffers |
 | native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
-| HAL queue update/copy | `queue_update`, `queue_copy` | Uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy with empty semaphore lists |
-| HAL queue dispatch | `queue_dispatch` | Packs direct HAL storage-buffer bindings as raw device pointers and submits one static dispatch with `lr_launch` |
-| HAL command buffer dispatch | `command_buffer_dispatch`, `queue_execute` | Records static dispatches and replays them through `lr_launch`, including indirect binding-table resolution |
+| HAL queue update/copy | `queue_update`, `queue_copy` | Waits on lrrt-owned semaphore lists, uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy, then signals completion semaphores |
+| HAL queue dispatch | `queue_dispatch` | Waits on lrrt-owned semaphore lists, packs direct HAL storage-buffer bindings as raw device pointers, submits one static dispatch with `lr_launch`, then signals completion semaphores |
+| HAL command buffer dispatch | `command_buffer_dispatch`, `queue_execute` | Records static dispatches and replays them through `lr_launch`, including indirect binding-table resolution and lrrt-owned semaphore wait/signal lists |
+| HAL semaphore | `create_semaphore`, queue wait/signal lists | Provides host-side timeline semaphore ordering for synchronous lrrt queue operations |
 | native HAL executable cache | `lrrt_iree_hal_executable_cache_t` | Recognizes `rocm-hsaco` / `amdgpu-hsaco` formats and prepares raw HSACO with `lr_module_load_hsaco` |
 | native HAL executable | `lrrt_iree_hal_executable_t` | Owns the prepared lrrt module and lazily resolves function names with `lr_kernel_get` |
 | device / driver instance | `lrrt::executor::iree::Device` | Owns `lrrt::Runtime`, opens one `lrrt::Device`, owns one default `CommandQueue` |
@@ -163,12 +165,13 @@ iree_hal_device_queue_execute
 
 This path is intentionally stricter than full IREE HAL semantics. It requires
 the caller to provide explicit `workgroup_size`, uses the static
-`workgroup_count`, rejects semaphore lists, rejects constants, rejects indirect
-workgroup parameters, and rejects indirect argument modes. Command buffer
-execution currently records only dispatch commands; command-buffer update,
-copy, fill, event, and collective commands are still explicit unsupported
-paths. This keeps the first adapter dispatch test tied to the actual lrrt
-dispatcher without pretending to support the full VMFB execution contract yet.
+`workgroup_count`, requires lrrt-owned HAL semaphores for queue wait/signal
+lists, rejects constants, rejects indirect workgroup parameters, and rejects
+indirect argument modes. Command buffer execution currently records only
+dispatch commands; command-buffer update, copy, fill, event, and collective
+commands are still explicit unsupported paths. This keeps the first adapter
+dispatch test tied to the actual lrrt dispatcher without pretending to support
+the full VMFB execution contract yet.
 
 ## Initial Unsupported Features
 
@@ -179,8 +182,7 @@ The first adapter prototype should reject these features explicitly:
 - external memory import/export
 - host-visible mapped device allocations
 - file-backed HAL queue read/write operations
-- HAL queue transfer or dispatch operations with semaphore dependencies
-- timeline semaphores
+- device-native semaphore implementation
 - indirect dispatch parameters
 - general IREE HAL ABI constant/scalar packing
 - command-buffer transfer commands and full command buffer optimization

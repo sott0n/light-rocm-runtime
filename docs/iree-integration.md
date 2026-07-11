@@ -188,19 +188,22 @@ driver registry, and the registry can create the `lrrt` driver and a minimal
 create device-local, non-mappable IREE HAL buffers backed by lrrt `lr_malloc`
 allocations. It also supports the first HAL queue transfer path with
 `queue_update` for host-to-device writes and `queue_copy` for device-to-device
-copies when semaphore lists are empty. The device can now create an executable
-cache, negotiate the initial lrrt-owned HSACO formats, prepare raw HSACO with
-`lr_module_load_hsaco`, and resolve function names with `lr_kernel_get`. It can
-also submit the first narrow HAL `queue_dispatch` path by packing direct
-storage-buffer bindings as raw device pointers and calling `lr_launch` for a
-static workgroup dispatch with explicit workgroup size metadata. The same
-dispatch can now also be recorded into a minimal HAL command buffer and replayed
-through `queue_execute`; this path supports indirect buffer slots resolved from
-the submission binding table. This is not enough for
-`iree-run-module --device=lrrt` yet: the next required steps are
-semaphore-backed ordering, command-buffer transfer commands if the IREE runtime
-emits them, default workgroup metadata handling, and connecting real VMFB
-executable payloads to this lrrt-backed HAL driver path.
+copies. These queue operations now accept lrrt-owned HAL semaphore wait/signal
+lists and implement host-side timeline ordering around the current synchronous
+lrrt work. The device can now create an executable cache, negotiate the initial
+lrrt-owned HSACO formats, prepare raw HSACO with `lr_module_load_hsaco`, and
+resolve function names with `lr_kernel_get`. It can also submit the first narrow
+HAL `queue_dispatch` path by packing direct storage-buffer bindings as raw
+device pointers and calling `lr_launch` for a static workgroup dispatch with
+explicit workgroup size metadata. The same dispatch can now also be recorded
+into a minimal HAL command buffer and replayed through `queue_execute`; this
+path supports indirect buffer slots resolved from the submission binding table
+and lrrt-owned semaphore wait/signal lists. This is not enough for
+`iree-run-module --device=lrrt` yet: the next required steps are command-buffer
+transfer commands if the IREE runtime emits them, default workgroup metadata
+handling, connecting real VMFB executable payloads to this lrrt-backed HAL
+driver path, and eventually replacing host-side semaphore ordering with
+device-native synchronization if lrrt grows that primitive.
 
 ### I2: Artifact inspection
 

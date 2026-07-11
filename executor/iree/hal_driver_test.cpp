@@ -109,6 +109,99 @@ int test_lrrt_driver_registration() {
     return 1;
   }
 
+  iree_hal_semaphore_t *timeline_semaphore = nullptr;
+  status = iree_hal_semaphore_create(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY,
+      /*initial_value=*/3, IREE_HAL_SEMAPHORE_FLAG_NONE, &timeline_semaphore);
+  uint64_t semaphore_value = 0;
+  if (!iree_status_is_ok(status) || !timeline_semaphore ||
+      iree_hal_device_query_semaphore_compatibility(
+          device, timeline_semaphore) != IREE_HAL_SEMAPHORE_COMPATIBILITY_ALL ||
+      !iree_status_is_ok(
+          iree_hal_semaphore_query(timeline_semaphore, &semaphore_value)) ||
+      semaphore_value != 3 ||
+      !iree_status_is_ok(iree_hal_semaphore_signal(timeline_semaphore, 5,
+                                                   /*frontier=*/nullptr)) ||
+      !iree_status_is_ok(iree_hal_semaphore_wait(timeline_semaphore, 5,
+                                                 iree_immediate_timeout(),
+                                                 IREE_ASYNC_WAIT_FLAG_NONE)) ||
+      !iree_status_is_ok(
+          iree_hal_semaphore_query(timeline_semaphore, &semaphore_value)) ||
+      semaphore_value != 5) {
+    iree_status_ignore(status);
+    if (timeline_semaphore) {
+      iree_hal_semaphore_release(timeline_semaphore);
+    }
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_semaphore_release(timeline_semaphore);
+
+  iree_hal_semaphore_t *update_signal = nullptr;
+  iree_hal_semaphore_t *copy_signal = nullptr;
+  status =
+      iree_hal_semaphore_create(device, IREE_HAL_QUEUE_AFFINITY_ANY, 0,
+                                IREE_HAL_SEMAPHORE_FLAG_NONE, &update_signal);
+  if (iree_status_is_ok(status)) {
+    status =
+        iree_hal_semaphore_create(device, IREE_HAL_QUEUE_AFFINITY_ANY, 0,
+                                  IREE_HAL_SEMAPHORE_FLAG_NONE, &copy_signal);
+  }
+  uint64_t update_signal_value = 1;
+  uint64_t copy_signal_value = 2;
+  iree_hal_semaphore_t *update_signal_ptrs[1] = {update_signal};
+  iree_hal_semaphore_t *copy_signal_ptrs[1] = {copy_signal};
+  iree_hal_semaphore_list_t update_signal_list = {
+      1,
+      update_signal_ptrs,
+      &update_signal_value,
+  };
+  iree_hal_semaphore_list_t copy_wait_list = {
+      1,
+      update_signal_ptrs,
+      &update_signal_value,
+  };
+  iree_hal_semaphore_list_t copy_signal_list = {
+      1,
+      copy_signal_ptrs,
+      &copy_signal_value,
+  };
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_update(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+        update_signal_list, /*source_buffer=*/nullptr, /*source_offset=*/0,
+        /*target_buffer=*/nullptr, /*target_offset=*/0, /*length=*/0,
+        IREE_HAL_UPDATE_FLAG_NONE);
+  }
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_device_queue_copy(
+        device, IREE_HAL_QUEUE_AFFINITY_ANY, copy_wait_list, copy_signal_list,
+        /*source_buffer=*/nullptr, /*source_offset=*/0,
+        /*target_buffer=*/nullptr, /*target_offset=*/0, /*length=*/0,
+        IREE_HAL_COPY_FLAG_NONE);
+  }
+  uint64_t observed_copy_signal = 0;
+  if (!iree_status_is_ok(status) ||
+      !iree_status_is_ok(
+          iree_hal_semaphore_query(copy_signal, &observed_copy_signal)) ||
+      observed_copy_signal != copy_signal_value) {
+    iree_status_ignore(status);
+    if (copy_signal) {
+      iree_hal_semaphore_release(copy_signal);
+    }
+    if (update_signal) {
+      iree_hal_semaphore_release(update_signal);
+    }
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_semaphore_release(copy_signal);
+  iree_hal_semaphore_release(update_signal);
+
   iree_host_size_t heap_count = 99;
   status =
       iree_hal_allocator_query_memory_heaps(allocator, 0, nullptr, &heap_count);
