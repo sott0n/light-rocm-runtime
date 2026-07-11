@@ -131,6 +131,66 @@ const char *kMinimalMulMetadataJson = R"json(
 }
 )json";
 
+const char *kMultiExecutableMetadataJson = R"json(
+{
+  "target": "gfx1101",
+  "executables": [
+    {
+      "executable": "mixed_matmuls_dispatch_0",
+      "variant": "rocm_hsaco_fb",
+      "exports": [
+        {
+          "symbol": "mixed_matmuls_dispatch_0_matmul_2x2x2_f32",
+          "ordinal": 0,
+          "workgroup_size": [2, 2, 1],
+          "subgroup_size": 32,
+          "bindings": [
+            {"index": 0, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+            {"index": 1, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+            {"index": 2, "type": "storage_buffer", "flags": ["Indirect"]}
+          ],
+          "kernel": {
+            "symbol": "mixed_matmuls_dispatch_0_matmul_2x2x2_f32",
+            "attributes": ["rocdl.kernel"]
+          },
+          "dispatch": {
+            "executable": "mixed_matmuls_dispatch_0",
+            "variant": "rocm_hsaco_fb",
+            "symbol": "mixed_matmuls_dispatch_0_matmul_2x2x2_f32"
+          }
+        }
+      ]
+    },
+    {
+      "executable": "mixed_matmuls_dispatch_1",
+      "variant": "rocm_hsaco_fb",
+      "exports": [
+        {
+          "symbol": "mixed_matmuls_dispatch_1_matmul_2x3x2_f32",
+          "ordinal": 0,
+          "workgroup_size": [2, 3, 1],
+          "subgroup_size": 32,
+          "bindings": [
+            {"index": 0, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+            {"index": 1, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+            {"index": 2, "type": "storage_buffer", "flags": ["Indirect"]}
+          ],
+          "kernel": {
+            "symbol": "mixed_matmuls_dispatch_1_matmul_2x3x2_f32",
+            "attributes": ["rocdl.kernel"]
+          },
+          "dispatch": {
+            "executable": "mixed_matmuls_dispatch_1",
+            "variant": "rocm_hsaco_fb",
+            "symbol": "mixed_matmuls_dispatch_1_matmul_2x3x2_f32"
+          }
+        }
+      ]
+    }
+  ]
+}
+)json";
+
 int test_metadata_contract() {
   const ExecutableMetadata metadata = minimal_mul_metadata();
   if (metadata.target != "gfx1101" || metadata.exports.size() != 1) {
@@ -286,6 +346,28 @@ int test_metadata_json_parser() {
   return 1;
 }
 
+int test_multi_executable_metadata_json_parser() {
+  const ExecutableMetadata metadata =
+      parse_executable_metadata_json(kMultiExecutableMetadataJson);
+  if (metadata.target != "gfx1101" ||
+      metadata.executable != "mixed_matmuls_dispatch_0" ||
+      metadata.variant != "rocm_hsaco_fb" || metadata.exports.size() != 2) {
+    return 1;
+  }
+
+  const ExportMetadata &first = metadata.require_export_by_symbol(
+      "mixed_matmuls_dispatch_0_matmul_2x2x2_f32");
+  const ExportMetadata &second = metadata.require_export_by_symbol(
+      "mixed_matmuls_dispatch_1_matmul_2x3x2_f32");
+  if (first.dispatch.executable != "mixed_matmuls_dispatch_0" ||
+      first.workgroup_size != std::array<uint32_t, 3>{2, 2, 1} ||
+      second.dispatch.executable != "mixed_matmuls_dispatch_1" ||
+      second.workgroup_size != std::array<uint32_t, 3>{2, 3, 1}) {
+    return 1;
+  }
+  return 0;
+}
+
 } // namespace
 
 int main() {
@@ -305,6 +387,9 @@ int main() {
     return 1;
   }
   if (test_metadata_json_parser() != 0) {
+    return 1;
+  }
+  if (test_multi_executable_metadata_json_parser() != 0) {
     return 1;
   }
   return 0;

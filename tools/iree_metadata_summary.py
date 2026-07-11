@@ -34,18 +34,32 @@ def parse_bindings(layout: str) -> list[dict[str, object]]:
     return bindings
 
 
+def find_matching_brace(text: str, open_brace: int) -> int:
+    depth = 0
+    for index in range(open_brace, len(text)):
+        char = text[index]
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+    raise ValueError("unbalanced MLIR braces")
+
+
+def iter_named_blocks(text: str, pattern: re.Pattern[str]):
+    for match in pattern.finditer(text):
+        open_brace = text.find("{", match.end() - 1)
+        if open_brace == -1:
+            raise ValueError(f"missing block body for {match.group('name')}")
+        close_brace = find_matching_brace(text, open_brace)
+        yield match.group("name"), text[open_brace + 1 : close_brace]
+
+
 def parse_iree_metadata(text: str) -> dict[str, object]:
     target_match = re.search(r'arch = "([^"]+)"', text)
     if not target_match:
         raise ValueError("missing ROCm target arch")
-
-    executable_match = re.search(r"hal\.executable\s+\w+\s+@([\w$.-]+)", text)
-    if not executable_match:
-        raise ValueError("missing hal.executable")
-
-    variant_match = re.search(r"hal\.executable\.variant\s+\w+\s+@([\w$.-]+)", text)
-    if not variant_match:
-        raise ValueError("missing hal.executable.variant")
 
     export_re = re.compile(
         r"hal\.executable\.export\s+\w+\s+@(?P<symbol>[\w$.-]+)"
@@ -71,65 +85,92 @@ def parse_iree_metadata(text: str) -> dict[str, object]:
         for match in dispatch_re.finditer(text)
     }
 
-    exports = []
-    for export_match in export_matches:
-        attributes_start = export_match.end()
-        attributes_match = re.search(
-            r"attributes\s+\{(?P<attrs>[^}]*)\}", text[attributes_start:], re.S
-        )
-        if not attributes_match:
-            raise ValueError("missing executable export attributes")
-        attrs = attributes_match.group("attrs")
+    executable_re = re.compile(
+        r"hal\.executable\s+\w+\s+@(?P<name>[\w$.-]+)\s*\{", re.S
+    )
+    variant_re = re.compile(
+        r"hal\.executable\.variant\s+\w+\s+@(?P<name>[\w$.-]+)\s+target", re.S
+    )
 
-        workgroup_match = re.search(r"workgroup_size\s*=\s*\[([^\]]+)\]", attrs)
-        if not workgroup_match:
-            raise ValueError("missing workgroup_size")
-        subgroup_match = re.search(r"subgroup_size\s*=\s*(\d+)\s*:\s*index", attrs)
-        if not subgroup_match:
-            raise ValueError("missing subgroup_size")
+    executables = []
+    for executable_name, executable_body in iter_named_blocks(text, executable_re):
+        variant_match = variant_re.search(executable_body)
+        if not variant_match:
+            raise ValueError(f"missing hal.executable.variant: {executable_name}")
+        variant = variant_match.group("name")
+        export_matches = list(export_re.finditer(executable_body))
+        if not export_matches:
+            raise ValueError(f"missing hal.executable.export: {executable_name}")
 
-        symbol = export_match.group("symbol")
-        kernel_re = re.compile(
-            rf"llvm\.func\s+@{re.escape(symbol)}"
-            r"\((?P<args>.*?)\)\s+attributes\s+\{(?P<attrs>[^}]*)\}",
-            re.S,
-        )
-        kernel_match = kernel_re.search(text)
-        if not kernel_match:
-            raise ValueError(f"missing lowered llvm.func kernel: {symbol}")
-        dispatch = dispatches.get(symbol)
-        if dispatch is None:
-            raise ValueError(f"missing stream.cmd.dispatch: {symbol}")
+        exports = []
+        for export_match in export_matches:
+            attributes_start = export_match.end()
+            attributes_match = re.search(
+                r"attributes\s+\{(?P<attrs>[^}]*)\}",
+                executable_body[attributes_start:],
+                re.S,
+            )
+            if not attributes_match:
+                raise ValueError("missing executable export attributes")
+            attrs = attributes_match.group("attrs")
 
-        exports.append(
-            {
-                "symbol": symbol,
-                "ordinal": int(export_match.group("ordinal")),
-                "workgroup_size": parse_vector(workgroup_match.group(1)),
-                "subgroup_size": int(subgroup_match.group(1)),
-                "bindings": parse_bindings(export_match.group("layout")),
-                "kernel": {
+            workgroup_match = re.search(r"workgroup_size\s*=\s*\[([^\]]+)\]", attrs)
+            if not workgroup_match:
+                raise ValueError("missing workgroup_size")
+            subgroup_match = re.search(r"subgroup_size\s*=\s*(\d+)\s*:\s*index", attrs)
+            if not subgroup_match:
+                raise ValueError("missing subgroup_size")
+
+            symbol = export_match.group("symbol")
+            kernel_re = re.compile(
+                rf"llvm\.func\s+@{re.escape(symbol)}"
+                r"\((?P<args>.*?)\)\s+attributes\s+\{(?P<attrs>[^}]*)\}",
+                re.S,
+            )
+            kernel_match = kernel_re.search(executable_body)
+            if not kernel_match:
+                raise ValueError(f"missing lowered llvm.func kernel: {symbol}")
+            dispatch = dispatches.get(symbol)
+            if dispatch is None:
+                raise ValueError(f"missing stream.cmd.dispatch: {symbol}")
+
+            exports.append(
+                {
                     "symbol": symbol,
-                    "attributes": sorted(
-                        attr
-                        for attr in (
-                            "rocdl.kernel",
-                            "rocdl.flat_work_group_size",
-                            "rocdl.reqd_work_group_size",
-                            "gpu.known_block_size",
-                        )
-                        if attr in kernel_match.group("attrs")
-                    ),
-                },
-                "dispatch": dispatch,
+                    "ordinal": int(export_match.group("ordinal")),
+                    "workgroup_size": parse_vector(workgroup_match.group(1)),
+                    "subgroup_size": int(subgroup_match.group(1)),
+                    "bindings": parse_bindings(export_match.group("layout")),
+                    "kernel": {
+                        "symbol": symbol,
+                        "attributes": sorted(
+                            attr
+                            for attr in (
+                                "rocdl.kernel",
+                                "rocdl.flat_work_group_size",
+                                "rocdl.reqd_work_group_size",
+                                "gpu.known_block_size",
+                            )
+                            if attr in kernel_match.group("attrs")
+                        ),
+                    },
+                    "dispatch": dispatch,
+                }
+            )
+        executables.append(
+            {
+                "executable": executable_name,
+                "variant": variant,
+                "exports": exports,
             }
         )
 
+    if not executables:
+        raise ValueError("missing hal.executable")
+
     return {
         "target": target_match.group(1),
-        "executable": executable_match.group(1),
-        "variant": variant_match.group(1),
-        "exports": exports,
+        "executables": executables,
     }
 
 

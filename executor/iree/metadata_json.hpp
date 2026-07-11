@@ -199,6 +199,14 @@ inline const JsonValue &require_field(const JsonValue &object,
   return it->second;
 }
 
+inline const JsonValue *find_field(const JsonValue &object, const char *field) {
+  if (object.type != JsonValue::Type::kObject) {
+    throw std::runtime_error("IREE metadata value is not an object");
+  }
+  const auto it = object.object.find(field);
+  return it == object.object.end() ? nullptr : &it->second;
+}
+
 inline std::string require_string(const JsonValue &object, const char *field) {
   const JsonValue &value = require_field(object, field);
   if (value.type != JsonValue::Type::kString) {
@@ -302,6 +310,27 @@ inline ExportMetadata parse_export_metadata(const JsonValue &value) {
   return export_metadata;
 }
 
+inline void parse_executable_entry_metadata(const JsonValue &value,
+                                            ExecutableMetadata *metadata) {
+  const std::string executable = require_string(value, "executable");
+  const std::string variant = require_string(value, "variant");
+  if (metadata->executable.empty()) {
+    metadata->executable = executable;
+  }
+  if (metadata->variant.empty()) {
+    metadata->variant = variant;
+  }
+
+  const JsonValue &exports = require_field(value, "exports");
+  if (exports.type != JsonValue::Type::kArray || exports.array.empty()) {
+    throw std::runtime_error("IREE metadata exports must be a non-empty array");
+  }
+  metadata->exports.reserve(metadata->exports.size() + exports.array.size());
+  for (const JsonValue &export_value : exports.array) {
+    metadata->exports.push_back(parse_export_metadata(export_value));
+  }
+}
+
 } // namespace detail
 
 inline ExecutableMetadata parse_executable_metadata_json(const void *data,
@@ -311,17 +340,19 @@ inline ExecutableMetadata parse_executable_metadata_json(const void *data,
 
   ExecutableMetadata metadata;
   metadata.target = detail::require_string(root, "target");
-  metadata.executable = detail::require_string(root, "executable");
-  metadata.variant = detail::require_string(root, "variant");
 
-  const detail::JsonValue &exports = detail::require_field(root, "exports");
-  if (exports.type != detail::JsonValue::Type::kArray ||
-      exports.array.empty()) {
-    throw std::runtime_error("IREE metadata exports must be a non-empty array");
-  }
-  metadata.exports.reserve(exports.array.size());
-  for (const detail::JsonValue &export_value : exports.array) {
-    metadata.exports.push_back(detail::parse_export_metadata(export_value));
+  if (const detail::JsonValue *executables =
+          detail::find_field(root, "executables")) {
+    if (executables->type != detail::JsonValue::Type::kArray ||
+        executables->array.empty()) {
+      throw std::runtime_error(
+          "IREE metadata executables must be a non-empty array");
+    }
+    for (const detail::JsonValue &executable_value : executables->array) {
+      detail::parse_executable_entry_metadata(executable_value, &metadata);
+    }
+  } else {
+    detail::parse_executable_entry_metadata(root, &metadata);
   }
   return metadata;
 }

@@ -17,9 +17,19 @@ semantics.
 | Field | Type | Required | Adapter mapping | Meaning |
 | --- | --- | --- | --- | --- |
 | `target` | string | yes | `ExecutableMetadata::target` | ROCm target architecture such as `gfx1101`. |
-| `executable` | string | yes | `ExecutableMetadata::executable` | IREE HAL executable name. |
-| `variant` | string | yes | `ExecutableMetadata::variant` | Executable variant name, currently expected to identify the ROCm HSACO path. |
-| `exports` | array of export objects | yes | `ExecutableMetadata::exports` | Exported dispatch entry points in the executable. |
+| `executables` | array of executable objects | yes | flattened into `ExecutableMetadata::exports` | IREE HAL executables found in the `executable-targets` MLIR. |
+
+The current C++ parser also accepts the older single-executable shape with
+top-level `executable`, `variant`, and `exports` fields for existing tests and
+probes. New summaries should use `executables`.
+
+## Executable Object
+
+| Field | Type | Required | Adapter mapping | Meaning |
+| --- | --- | --- | --- | --- |
+| `executable` | string | yes | `ExecutableMetadata::executable` for the first executable; `ExportMetadata::dispatch.executable` for each export | IREE HAL executable name. |
+| `variant` | string | yes | `ExecutableMetadata::variant` for the first executable; `ExportMetadata::dispatch.variant` for each export | Executable variant name, currently expected to identify the ROCm HSACO path. |
+| `exports` | array of export objects | yes | `ExecutableMetadata::exports` | Exported dispatch entry points in this executable. |
 
 ## Export Object
 
@@ -71,38 +81,68 @@ adapter investigation:
 ## Current Minimal Example
 
 For `tools/iree_minimal_mul.mlir`, the generated summary currently has one
-export:
+executable with one export:
 
 ```json
 {
   "target": "gfx1101",
-  "executable": "simple_mul_dispatch_0",
-  "variant": "rocm_hsaco_fb",
-  "exports": [
+  "executables": [
     {
-      "symbol": "simple_mul_dispatch_0_elementwise_4_f32",
-      "ordinal": 0,
-      "workgroup_size": [32, 1, 1],
-      "subgroup_size": 32,
-      "bindings": [
-        {"index": 0, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
-        {"index": 1, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
-        {"index": 2, "type": "storage_buffer", "flags": ["Indirect"]}
-      ],
-      "kernel": {
-        "symbol": "simple_mul_dispatch_0_elementwise_4_f32",
-        "attributes": [
-          "gpu.known_block_size",
-          "rocdl.flat_work_group_size",
-          "rocdl.kernel",
-          "rocdl.reqd_work_group_size"
-        ]
-      },
-      "dispatch": {
-        "executable": "simple_mul_dispatch_0",
-        "variant": "rocm_hsaco_fb",
-        "symbol": "simple_mul_dispatch_0_elementwise_4_f32"
-      }
+      "executable": "simple_mul_dispatch_0",
+      "variant": "rocm_hsaco_fb",
+      "exports": [
+        {
+          "symbol": "simple_mul_dispatch_0_elementwise_4_f32",
+          "ordinal": 0,
+          "workgroup_size": [32, 1, 1],
+          "subgroup_size": 32,
+          "bindings": [
+            {"index": 0, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+            {"index": 1, "type": "storage_buffer", "flags": ["ReadOnly", "Indirect"]},
+            {"index": 2, "type": "storage_buffer", "flags": ["Indirect"]}
+          ],
+          "kernel": {
+            "symbol": "simple_mul_dispatch_0_elementwise_4_f32",
+            "attributes": [
+              "gpu.known_block_size",
+              "rocdl.flat_work_group_size",
+              "rocdl.kernel",
+              "rocdl.reqd_work_group_size"
+            ]
+          },
+          "dispatch": {
+            "executable": "simple_mul_dispatch_0",
+            "variant": "rocm_hsaco_fb",
+            "symbol": "simple_mul_dispatch_0_elementwise_4_f32"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+For `tools/iree_mixed_matmuls.mlir`, the same IREE entry point lowers into two
+HAL executables. The summary preserves that shape instead of pretending there
+is only one top-level executable:
+
+```json
+{
+  "target": "gfx1101",
+  "executables": [
+    {
+      "executable": "mixed_matmuls_dispatch_0",
+      "variant": "rocm_hsaco_fb",
+      "exports": [
+        {"symbol": "mixed_matmuls_dispatch_0_matmul_2x2x2_f32", "...": "..."}
+      ]
+    },
+    {
+      "executable": "mixed_matmuls_dispatch_1",
+      "variant": "rocm_hsaco_fb",
+      "exports": [
+        {"symbol": "mixed_matmuls_dispatch_1_matmul_2x3x2_f32", "...": "..."}
+      ]
     }
   ]
 }
@@ -122,6 +162,11 @@ BindingMetadata list
 DispatchMetadata
   -> cross-check the Stream dispatch target
 ```
+
+`ExecutableMetadata::executable` and `ExecutableMetadata::variant` are retained
+as first-executable compatibility fields. For multi-executable summaries, use
+`ExportMetadata::dispatch.executable` and `ExportMetadata::dispatch.variant`
+when the exact executable owner matters.
 
 ## Non-Goals
 

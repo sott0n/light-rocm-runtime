@@ -84,16 +84,16 @@ The current `tools/iree_compile_probe.sh --try-vmfb` output for
 | Summary field | Current value | Adapter metadata | lrrt use |
 | --- | --- | --- | --- |
 | `target` | `gfx1101` | `ExecutableMetadata::target` | Validate that the code object matches the selected AMD GPU. |
-| `executable` | `simple_mul_dispatch_0` | `ExecutableMetadata::executable` | Names the HAL executable that owns the dispatch. |
-| `variant` | `rocm_hsaco_fb` | `ExecutableMetadata::variant` | Identifies the ROCm HSACO variant that should provide the loaded image. |
-| `exports[0].symbol` | `simple_mul_dispatch_0_elementwise_4_f32` | `ExportMetadata::symbol` | Entry point name passed to `lr_kernel_get`. |
-| `exports[0].ordinal` | `0` | `ExportMetadata::ordinal` | Stable export index for adapter-side lookup. |
-| `exports[0].workgroup_size` | `[32, 1, 1]` | `ExportMetadata::workgroup_size` | Converted to `lr_launch_config_t::block`. |
-| `exports[0].subgroup_size` | `32` | `ExportMetadata::subgroup_size` | Validation/diagnostic metadata; lrrt does not schedule waves directly. |
-| `exports[0].bindings` | three `storage_buffer` bindings | `BindingMetadata` | Defines the buffer argument order that the adapter must pack into kernargs. |
-| `exports[0].kernel.symbol` | same as export symbol | `KernelMetadata::symbol` | Cross-checks the lowered LLVM kernel symbol. |
-| `exports[0].kernel.attributes` | `rocdl.kernel`, workgroup attributes | `KernelMetadata::attributes` | Confirms this is a ROCm kernel and records compiler launch constraints. |
-| `exports[0].dispatch` | executable, variant, symbol | `DispatchMetadata` | Connects the Stream dispatch site back to the executable export. |
+| `executables[0].executable` | `simple_mul_dispatch_0` | `ExecutableMetadata::executable` compatibility field | Names the HAL executable that owns the dispatch. |
+| `executables[0].variant` | `rocm_hsaco_fb` | `ExecutableMetadata::variant` compatibility field | Identifies the ROCm HSACO variant that should provide the loaded image. |
+| `executables[0].exports[0].symbol` | `simple_mul_dispatch_0_elementwise_4_f32` | `ExportMetadata::symbol` | Entry point name passed to `lr_kernel_get`. |
+| `executables[0].exports[0].ordinal` | `0` | `ExportMetadata::ordinal` | Stable export index for adapter-side lookup within the owning executable. |
+| `executables[0].exports[0].workgroup_size` | `[32, 1, 1]` | `ExportMetadata::workgroup_size` | Converted to `lr_launch_config_t::block`. |
+| `executables[0].exports[0].subgroup_size` | `32` | `ExportMetadata::subgroup_size` | Validation/diagnostic metadata; lrrt does not schedule waves directly. |
+| `executables[0].exports[0].bindings` | three `storage_buffer` bindings | `BindingMetadata` | Defines the buffer argument order that the adapter must pack into kernargs. |
+| `executables[0].exports[0].kernel.symbol` | same as export symbol | `KernelMetadata::symbol` | Cross-checks the lowered LLVM kernel symbol. |
+| `executables[0].exports[0].kernel.attributes` | `rocdl.kernel`, workgroup attributes | `KernelMetadata::attributes` | Confirms this is a ROCm kernel and records compiler launch constraints. |
+| `executables[0].exports[0].dispatch` | executable, variant, symbol | `DispatchMetadata` | Connects the Stream dispatch site back to the executable export. |
 
 The metadata structs are intentionally plain data. The adapter has a narrow
 JSON loader for the metadata summary schema, but the structs do not load HSACO,
@@ -107,6 +107,11 @@ IREE executable metadata JSON
   -> lrrt::Module, lrrt::Kernel, lr_launch_config_t, packed kernargs
   -> CommandQueue::dispatch
 ```
+
+The parser flattens all `executables[*].exports[*]` into
+`ExecutableMetadata::exports` for the existing adapter helpers. When a VMFB has
+more than one HAL executable, `ExportMetadata::dispatch.executable` records the
+specific executable that owns each export.
 
 For the current minimal multiply probe, the binding layout is:
 
