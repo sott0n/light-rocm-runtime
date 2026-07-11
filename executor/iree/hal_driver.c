@@ -1,8 +1,11 @@
 #include "hal_driver.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "executor/iree/registration/driver_module.h"
@@ -149,6 +152,30 @@ static const iree_string_view_t kLrrtIreeHalExecutableFormatRocmHsacoFb =
 static uint32_t g_lrrt_iree_hal_runtime_ref_count = 0;
 static bool g_lrrt_iree_hal_owns_runtime = false;
 
+static bool lrrt_iree_hal_trace_enabled(void) {
+  const char *value = getenv("LRRT_IREE_TRACE");
+  return value && value[0] != '\0' && strcmp(value, "0") != 0 &&
+         strcmp(value, "false") != 0 && strcmp(value, "FALSE") != 0;
+}
+
+static void lrrt_iree_hal_tracef(const char *format, ...) {
+  if (!lrrt_iree_hal_trace_enabled()) {
+    return;
+  }
+  fprintf(stderr, "[lrrt-iree] ");
+  va_list args;
+  va_start(args, format);
+  vfprintf(stderr, format, args);
+  va_end(args);
+  fputc('\n', stderr);
+}
+
+static void lrrt_iree_hal_trace_status(const char *operation,
+                                       iree_status_t status) {
+  lrrt_iree_hal_tracef("%s end status=%s", operation,
+                       iree_status_is_ok(status) ? "ok" : "error");
+}
+
 static lrrt_iree_hal_driver_t *
 lrrt_iree_hal_driver_cast(iree_hal_driver_t *base_driver) {
   IREE_HAL_ASSERT_TYPE(base_driver, &lrrt_iree_hal_driver_vtable);
@@ -184,6 +211,9 @@ lrrt_iree_hal_semaphore_cast(iree_hal_semaphore_t *base_semaphore) {
   IREE_HAL_ASSERT_TYPE(base_semaphore, &lrrt_iree_hal_semaphore_vtable);
   return (lrrt_iree_hal_semaphore_t *)base_semaphore;
 }
+
+static uint64_t
+lrrt_iree_hal_semaphore_query(iree_async_semaphore_t *base_semaphore);
 
 static iree_status_t lrrt_iree_hal_status_from_lr(lr_status_t status,
                                                   const char *operation) {
@@ -222,6 +252,8 @@ static iree_status_t lrrt_iree_hal_copy_string_view(iree_string_view_t value,
 }
 
 static iree_status_t lrrt_iree_hal_runtime_retain(void) {
+  lrrt_iree_hal_tracef("runtime retain begin ref_count=%u",
+                       g_lrrt_iree_hal_runtime_ref_count);
   if (g_lrrt_iree_hal_runtime_ref_count == 0) {
     lr_status_t lr_status = lr_init();
     if (lr_status == LR_SUCCESS) {
@@ -233,6 +265,9 @@ static iree_status_t lrrt_iree_hal_runtime_retain(void) {
     }
   }
   ++g_lrrt_iree_hal_runtime_ref_count;
+  lrrt_iree_hal_tracef("runtime retain end ref_count=%u owns_runtime=%d",
+                       g_lrrt_iree_hal_runtime_ref_count,
+                       g_lrrt_iree_hal_owns_runtime ? 1 : 0);
   return iree_ok_status();
 }
 
@@ -240,11 +275,17 @@ static void lrrt_iree_hal_runtime_release(void) {
   if (g_lrrt_iree_hal_runtime_ref_count == 0) {
     return;
   }
+  lrrt_iree_hal_tracef("runtime release begin ref_count=%u",
+                       g_lrrt_iree_hal_runtime_ref_count);
   --g_lrrt_iree_hal_runtime_ref_count;
   if (g_lrrt_iree_hal_runtime_ref_count == 0 && g_lrrt_iree_hal_owns_runtime) {
+    lrrt_iree_hal_tracef("runtime shutdown");
     lr_shutdown();
     g_lrrt_iree_hal_owns_runtime = false;
   }
+  lrrt_iree_hal_tracef("runtime release end ref_count=%u owns_runtime=%d",
+                       g_lrrt_iree_hal_runtime_ref_count,
+                       g_lrrt_iree_hal_owns_runtime ? 1 : 0);
 }
 
 static iree_status_t
@@ -254,6 +295,7 @@ lrrt_iree_hal_allocator_create(iree_allocator_t host_allocator,
   IREE_ASSERT_ARGUMENT(out_allocator);
   *out_allocator = NULL;
 
+  lrrt_iree_hal_tracef("allocator create begin");
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_runtime_retain());
 
   uint32_t device_count = 0;
@@ -267,6 +309,7 @@ lrrt_iree_hal_allocator_create(iree_allocator_t host_allocator,
     return iree_make_status(IREE_STATUS_UNAVAILABLE,
                             "lrrt HAL allocator found no AMD GPU devices");
   }
+  lrrt_iree_hal_tracef("allocator found device_count=%u", device_count);
 
   lr_device_t lrrt_device = {0};
   lr_status = lr_device_open(0, &lrrt_device);
@@ -288,6 +331,7 @@ lrrt_iree_hal_allocator_create(iree_allocator_t host_allocator,
   allocator->device = lrrt_device;
   allocator->hal_device = hal_device;
   *out_allocator = (iree_hal_allocator_t *)allocator;
+  lrrt_iree_hal_tracef("allocator create end device_index=0");
   return iree_ok_status();
 }
 
@@ -298,6 +342,8 @@ lrrt_iree_hal_device_create(iree_string_view_t identifier,
   IREE_ASSERT_ARGUMENT(out_device);
   *out_device = NULL;
 
+  lrrt_iree_hal_tracef("device create begin id='%.*s'", (int)identifier.size,
+                       identifier.data);
   lrrt_iree_hal_device_t *device = NULL;
   const iree_host_size_t total_size =
       iree_sizeof_struct(*device) + identifier.size;
@@ -320,6 +366,8 @@ lrrt_iree_hal_device_create(iree_string_view_t identifier,
   }
 
   *out_device = (iree_hal_device_t *)device;
+  lrrt_iree_hal_tracef("device create end id='%.*s'", (int)identifier.size,
+                       identifier.data);
   return iree_ok_status();
 }
 
@@ -330,6 +378,8 @@ lrrt_iree_hal_driver_create(iree_string_view_t identifier,
   IREE_ASSERT_ARGUMENT(out_driver);
   *out_driver = NULL;
 
+  lrrt_iree_hal_tracef("driver create begin id='%.*s'", (int)identifier.size,
+                       identifier.data);
   lrrt_iree_hal_driver_t *driver = NULL;
   const iree_host_size_t total_size =
       iree_sizeof_struct(*driver) + identifier.size;
@@ -343,11 +393,15 @@ lrrt_iree_hal_driver_create(iree_string_view_t identifier,
                                         iree_sizeof_struct(*driver));
 
   *out_driver = (iree_hal_driver_t *)driver;
+  lrrt_iree_hal_tracef("driver create end id='%.*s'", (int)identifier.size,
+                       identifier.data);
   return iree_ok_status();
 }
 
 static void lrrt_iree_hal_driver_destroy(iree_hal_driver_t *base_driver) {
   lrrt_iree_hal_driver_t *driver = lrrt_iree_hal_driver_cast(base_driver);
+  lrrt_iree_hal_tracef("driver destroy id='%.*s'", (int)driver->identifier.size,
+                       driver->identifier.data);
   iree_allocator_t host_allocator = driver->host_allocator;
   iree_allocator_free(host_allocator, driver);
 }
@@ -356,6 +410,7 @@ static void
 lrrt_iree_hal_allocator_destroy(iree_hal_allocator_t *base_allocator) {
   lrrt_iree_hal_allocator_t *allocator =
       lrrt_iree_hal_allocator_cast(base_allocator);
+  lrrt_iree_hal_tracef("allocator destroy");
   iree_allocator_t host_allocator = allocator->host_allocator;
   lrrt_iree_hal_runtime_release();
   iree_allocator_free(host_allocator, allocator);
@@ -363,6 +418,8 @@ lrrt_iree_hal_allocator_destroy(iree_hal_allocator_t *base_allocator) {
 
 static void lrrt_iree_hal_device_destroy(iree_hal_device_t *base_device) {
   lrrt_iree_hal_device_t *device = lrrt_iree_hal_device_cast(base_device);
+  lrrt_iree_hal_tracef("device destroy id='%.*s'", (int)device->identifier.size,
+                       device->identifier.data);
   iree_allocator_t host_allocator = device->host_allocator;
   iree_hal_allocator_release(device->device_allocator);
   iree_allocator_free(host_allocator, device);
@@ -455,6 +512,10 @@ lrrt_iree_hal_allocator_allocate_buffer(iree_hal_allocator_t *base_allocator,
 
   lrrt_iree_hal_allocator_t *allocator =
       lrrt_iree_hal_allocator_cast(base_allocator);
+  lrrt_iree_hal_tracef("buffer allocate size=%" PRIu64 " type=0x%" PRIx64
+                       " usage=0x%" PRIx64,
+                       (uint64_t)allocation_size, (uint64_t)params->type,
+                       (uint64_t)params->usage);
   void *device_ptr = NULL;
   lr_status_t lr_status =
       lr_malloc(allocator->device, (size_t)allocation_size, &device_ptr);
@@ -489,6 +550,9 @@ lrrt_iree_hal_allocator_allocate_buffer(iree_hal_allocator_t *base_allocator,
   iree_hal_allocator_retain(base_allocator);
 
   *out_buffer = &buffer->base;
+  lrrt_iree_hal_tracef(
+      "buffer allocate end buffer=%p device_ptr=%p size=%" PRIu64,
+      (void *)&buffer->base, device_ptr, (uint64_t)allocation_size);
   return iree_ok_status();
 }
 
@@ -563,6 +627,9 @@ lrrt_iree_hal_buffer_device_pointer_for_test(iree_hal_buffer_t *buffer,
 
 static void lrrt_iree_hal_buffer_destroy(iree_hal_buffer_t *base_buffer) {
   lrrt_iree_hal_buffer_t *buffer = lrrt_iree_hal_buffer_cast(base_buffer);
+  lrrt_iree_hal_tracef("buffer destroy buffer=%p device_ptr=%p size=%" PRIu64,
+                       (void *)base_buffer, buffer->device_ptr,
+                       (uint64_t)iree_hal_buffer_allocation_size(base_buffer));
   iree_allocator_t host_allocator = buffer->host_allocator;
   if (buffer->host_shadow_ptr) {
     iree_allocator_free(host_allocator, buffer->host_shadow_ptr);
@@ -902,6 +969,8 @@ static iree_status_t lrrt_iree_hal_executable_add_function(
   kernel_name[name.size] = '\0';
 
   lr_kernel_t *kernel = NULL;
+  lrrt_iree_hal_tracef("executable add function name='%.*s'", (int)name.size,
+                       name.data);
   lr_status_t lr_status =
       lr_kernel_get(executable->module, kernel_name, &kernel);
   if (lr_status != LR_SUCCESS) {
@@ -948,11 +1017,16 @@ static iree_status_t lrrt_iree_hal_executable_lookup_function_by_name(
                             "lrrt HAL executable function name is empty");
   }
 
+  lrrt_iree_hal_tracef("executable lookup function name='%.*s'", (int)name.size,
+                       name.data);
   lrrt_iree_hal_executable_t *executable =
       lrrt_iree_hal_executable_cast(base_executable);
   for (iree_host_size_t i = 0; i < executable->function_count; ++i) {
     if (iree_string_view_equal(executable->functions[i].name, name)) {
       *out_function = iree_hal_executable_function_from_index((uint32_t)i);
+      lrrt_iree_hal_tracef(
+          "executable lookup function hit name='%.*s' index=%" PRIhsz,
+          (int)name.size, name.data, i);
       return iree_ok_status();
     }
   }
@@ -1049,6 +1123,7 @@ lrrt_iree_hal_executable_create(lr_module_t *module,
   executable->function_capacity = 0;
   executable->functions = NULL;
   *out_executable = (iree_hal_executable_t *)executable;
+  lrrt_iree_hal_tracef("executable create module=%p", (void *)module);
   return iree_ok_status();
 }
 
@@ -1072,6 +1147,8 @@ static iree_status_t lrrt_iree_hal_executable_cache_create(
                                         iree_sizeof_struct(*executable_cache));
 
   *out_executable_cache = (iree_hal_executable_cache_t *)executable_cache;
+  lrrt_iree_hal_tracef("executable cache create id='%.*s'",
+                       (int)identifier.size, identifier.data);
   return iree_ok_status();
 }
 
@@ -1079,6 +1156,9 @@ static void lrrt_iree_hal_executable_cache_destroy(
     iree_hal_executable_cache_t *base_executable_cache) {
   lrrt_iree_hal_executable_cache_t *executable_cache =
       lrrt_iree_hal_executable_cache_cast(base_executable_cache);
+  lrrt_iree_hal_tracef("executable cache destroy id='%.*s'",
+                       (int)executable_cache->identifier.size,
+                       executable_cache->identifier.data);
   iree_allocator_t host_allocator = executable_cache->host_allocator;
   iree_allocator_free(host_allocator, executable_cache);
 }
@@ -1245,11 +1325,19 @@ static iree_status_t lrrt_iree_hal_executable_cache_prepare_executable(
         "lrrt HAL executable preparation requires non-empty HSACO data");
   }
 
+  lrrt_iree_hal_tracef("executable prepare begin format='%.*s' bytes=%" PRIhsz,
+                       (int)executable_params->executable_format.size,
+                       executable_params->executable_format.data,
+                       executable_params->executable_data.data_length);
   iree_const_byte_span_t module_data = executable_params->executable_data;
   if (iree_string_view_equal(executable_params->executable_format,
                              kLrrtIreeHalExecutableFormatRocmHsacoFb)) {
-    IREE_RETURN_IF_ERROR(lrrt_iree_hal_extract_rocm_hsaco_fb(
-        executable_params->executable_data, &module_data));
+    iree_status_t extract_status = lrrt_iree_hal_extract_rocm_hsaco_fb(
+        executable_params->executable_data, &module_data);
+    if (!iree_status_is_ok(extract_status)) {
+      lrrt_iree_hal_trace_status("executable prepare", extract_status);
+      return extract_status;
+    }
   }
 
   lrrt_iree_hal_executable_cache_t *executable_cache =
@@ -1259,13 +1347,17 @@ static iree_status_t lrrt_iree_hal_executable_cache_prepare_executable(
       lr_module_load_hsaco(executable_cache->device, module_data.data,
                            module_data.data_length, &module);
   if (lr_status != LR_SUCCESS) {
-    return lrrt_iree_hal_status_from_lr(lr_status, "lr_module_load_hsaco");
+    iree_status_t status =
+        lrrt_iree_hal_status_from_lr(lr_status, "lr_module_load_hsaco");
+    lrrt_iree_hal_trace_status("executable prepare", status);
+    return status;
   }
 
   iree_status_t status = lrrt_iree_hal_executable_create(
       module, executable_cache->host_allocator, out_executable);
   if (!iree_status_is_ok(status)) {
     lr_module_destroy(module);
+    lrrt_iree_hal_trace_status("executable prepare", status);
     return status;
   }
   if (iree_string_view_equal(executable_params->executable_format,
@@ -1278,6 +1370,7 @@ static iree_status_t lrrt_iree_hal_executable_cache_prepare_executable(
     iree_hal_executable_release(*out_executable);
     *out_executable = NULL;
   }
+  lrrt_iree_hal_trace_status("executable prepare", status);
   return status;
 }
 
@@ -1543,6 +1636,8 @@ lrrt_iree_hal_semaphore_create(uint64_t initial_value,
   semaphore->host_allocator = host_allocator;
 
   *out_semaphore = iree_hal_semaphore_cast(&semaphore->async);
+  lrrt_iree_hal_tracef("semaphore create initial_value=%" PRIu64,
+                       initial_value);
   return iree_ok_status();
 }
 
@@ -1550,6 +1645,8 @@ static void
 lrrt_iree_hal_semaphore_destroy(iree_async_semaphore_t *base_semaphore) {
   lrrt_iree_hal_semaphore_t *semaphore =
       lrrt_iree_hal_semaphore_cast(iree_hal_semaphore_cast(base_semaphore));
+  lrrt_iree_hal_tracef("semaphore destroy current_value=%" PRIu64,
+                       lrrt_iree_hal_semaphore_query(base_semaphore));
   iree_allocator_t host_allocator = semaphore->host_allocator;
   iree_async_semaphore_deinitialize(&semaphore->async);
   iree_allocator_free(host_allocator, semaphore);
@@ -1570,6 +1667,7 @@ static iree_status_t
 lrrt_iree_hal_semaphore_signal(iree_async_semaphore_t *base_semaphore,
                                uint64_t new_value,
                                const iree_async_frontier_t *frontier) {
+  lrrt_iree_hal_tracef("semaphore signal value=%" PRIu64, new_value);
   iree_status_t status = iree_async_semaphore_advance_timeline(
       base_semaphore, new_value, frontier);
   if (iree_status_is_ok(status)) {
@@ -1592,9 +1690,12 @@ static iree_status_t
 lrrt_iree_hal_semaphore_wait(iree_hal_semaphore_t *base_semaphore,
                              uint64_t value, iree_timeout_t timeout,
                              iree_async_wait_flags_t flags) {
-  return iree_async_semaphore_multi_wait(
+  lrrt_iree_hal_tracef("semaphore wait value=%" PRIu64, value);
+  iree_status_t status = iree_async_semaphore_multi_wait(
       IREE_ASYNC_WAIT_MODE_ALL, (iree_async_semaphore_t **)&base_semaphore,
       &value, 1, timeout, flags, iree_allocator_system());
+  lrrt_iree_hal_trace_status("semaphore wait", status);
+  return status;
 }
 
 static iree_status_t lrrt_iree_hal_semaphore_import_timepoint(
@@ -1657,6 +1758,8 @@ static iree_status_t lrrt_iree_hal_device_wait_semaphore_list(
     const char *operation, iree_hal_semaphore_list_t semaphore_list) {
   IREE_RETURN_IF_ERROR(
       lrrt_iree_hal_device_validate_semaphore_list(operation, semaphore_list));
+  lrrt_iree_hal_tracef("%s wait semaphores=%" PRIhsz, operation,
+                       semaphore_list.count);
   return iree_hal_semaphore_list_wait(semaphore_list, iree_infinite_timeout(),
                                       IREE_ASYNC_WAIT_FLAG_NONE);
 }
@@ -1674,13 +1777,18 @@ static iree_status_t lrrt_iree_hal_device_finish_queue_operation(
   if (!iree_status_is_ok(status)) {
     iree_hal_semaphore_list_fail(signal_semaphore_list,
                                  iree_status_clone(status));
+    lrrt_iree_hal_tracef("%s fail semaphores=%" PRIhsz, operation,
+                         signal_semaphore_list.count);
     return status;
   }
+  lrrt_iree_hal_tracef("%s signal semaphores=%" PRIhsz, operation,
+                       signal_semaphore_list.count);
   return iree_hal_semaphore_list_signal(signal_semaphore_list, NULL);
 }
 
 static iree_status_t lrrt_iree_hal_device_begin_synchronous_submission(
     const char *operation, iree_hal_semaphore_list_t wait_semaphore_list) {
+  lrrt_iree_hal_tracef("%s begin", operation);
   return lrrt_iree_hal_device_wait_semaphore_list(operation,
                                                   wait_semaphore_list);
 }
@@ -1688,8 +1796,10 @@ static iree_status_t lrrt_iree_hal_device_begin_synchronous_submission(
 static iree_status_t lrrt_iree_hal_device_end_synchronous_submission(
     const char *operation, iree_hal_semaphore_list_t signal_semaphore_list,
     iree_status_t status) {
-  return lrrt_iree_hal_device_finish_queue_operation(
+  iree_status_t final_status = lrrt_iree_hal_device_finish_queue_operation(
       operation, signal_semaphore_list, status);
+  lrrt_iree_hal_trace_status(operation, final_status);
+  return final_status;
 }
 
 static const iree_hal_semaphore_vtable_t lrrt_iree_hal_semaphore_vtable = {
@@ -1745,6 +1855,10 @@ static iree_status_t lrrt_iree_hal_device_create_command_buffer(
   command_buffer->commands = NULL;
 
   *out_command_buffer = &command_buffer->base;
+  lrrt_iree_hal_tracef("command buffer create mode=0x%x categories=0x%x "
+                       "binding_capacity=%" PRIhsz,
+                       (uint32_t)mode, (uint32_t)command_categories,
+                       binding_capacity);
   return iree_ok_status();
 }
 
@@ -1766,6 +1880,8 @@ static iree_status_t lrrt_iree_hal_device_create_executable_cache(
   IREE_ASSERT_ARGUMENT(out_executable_cache);
   lrrt_iree_hal_allocator_t *allocator =
       lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
+  lrrt_iree_hal_tracef("device create executable cache id='%.*s'",
+                       (int)identifier.size, identifier.data);
   return lrrt_iree_hal_executable_cache_create(
       identifier, lrrt_device->host_allocator, allocator->device,
       out_executable_cache);
@@ -1778,6 +1894,8 @@ static iree_status_t lrrt_iree_hal_device_import_file(
   (void)flags;
   IREE_ASSERT_ARGUMENT(out_file);
   lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
+  lrrt_iree_hal_tracef("device import file access=0x%" PRIx64,
+                       (uint64_t)access);
   return iree_hal_file_from_handle(
       lrrt_device->device_allocator, queue_affinity, access, handle,
       /*proactor=*/NULL, lrrt_device->host_allocator, out_file);
@@ -1791,6 +1909,8 @@ static iree_status_t lrrt_iree_hal_device_create_semaphore(
   (void)queue_affinity;
   (void)flags;
   IREE_ASSERT_ARGUMENT(out_semaphore);
+  lrrt_iree_hal_tracef("device create semaphore initial_value=%" PRIu64,
+                       initial_value);
   return lrrt_iree_hal_semaphore_create(
       initial_value, lrrt_device->host_allocator, out_semaphore);
 }
@@ -1832,6 +1952,8 @@ static iree_status_t lrrt_iree_hal_device_queue_alloca(
 
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue allocation", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue allocation size=%" PRIu64,
+                       (uint64_t)allocation_size);
 
   iree_hal_buffer_params_t local_params = params;
   local_params.queue_affinity = queue_affinity;
@@ -1921,6 +2043,10 @@ static iree_status_t lrrt_iree_hal_device_queue_fill(
   (void)flags;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue fill", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue fill target_offset=%" PRIu64 " length=%" PRIu64
+                       " pattern_length=%" PRIhsz,
+                       (uint64_t)target_offset, (uint64_t)length,
+                       pattern_length);
   iree_status_t status = lrrt_iree_hal_device_fill_now(
       device, target_buffer, target_offset, length, pattern, pattern_length);
   return lrrt_iree_hal_device_end_synchronous_submission(
@@ -1966,6 +2092,10 @@ static iree_status_t lrrt_iree_hal_device_queue_update(
   (void)flags;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue update", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue update source_offset=%" PRIhsz
+                       " target_offset=%" PRIu64 " length=%" PRIu64,
+                       source_offset, (uint64_t)target_offset,
+                       (uint64_t)length);
   iree_status_t status =
       lrrt_iree_hal_device_update_now(device, source_buffer, source_offset,
                                       target_buffer, target_offset, length);
@@ -2019,6 +2149,10 @@ static iree_status_t lrrt_iree_hal_device_queue_copy(
   (void)flags;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue copy", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue copy source_offset=%" PRIu64
+                       " target_offset=%" PRIu64 " length=%" PRIu64,
+                       (uint64_t)source_offset, (uint64_t)target_offset,
+                       (uint64_t)length);
   iree_status_t status =
       lrrt_iree_hal_device_copy_now(device, source_buffer, source_offset,
                                     target_buffer, target_offset, length);
@@ -2037,6 +2171,10 @@ static iree_status_t lrrt_iree_hal_device_queue_read(
   (void)flags;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue read", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue read source_offset=%" PRIu64
+                       " target_offset=%" PRIu64 " length=%" PRIu64,
+                       source_offset, (uint64_t)target_offset,
+                       (uint64_t)length);
 
   iree_status_t status = iree_ok_status();
   if (length != 0) {
@@ -2096,6 +2234,10 @@ static iree_status_t lrrt_iree_hal_device_queue_write(
   (void)flags;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue write", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue write source_offset=%" PRIu64
+                       " target_offset=%" PRIu64 " length=%" PRIu64,
+                       (uint64_t)source_offset, target_offset,
+                       (uint64_t)length);
 
   iree_status_t status = iree_ok_status();
   if (length != 0) {
@@ -2196,6 +2338,11 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
   lr_kernel_t *kernel = NULL;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_executable_kernel_for_function(
       executable, function, &kernel));
+  const lrrt_iree_hal_executable_t *lrrt_executable =
+      lrrt_iree_hal_executable_cast(executable);
+  const uint32_t function_index = iree_hal_executable_function_index(function);
+  const lrrt_iree_hal_executable_function_t *function_state =
+      &lrrt_executable->functions[function_index];
 
   void *kernargs[LRRT_IREE_HAL_MAX_INLINE_BINDINGS] = {0};
   for (iree_host_size_t i = 0; i < bindings.count; ++i) {
@@ -2225,6 +2372,14 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
       {resolved_config.workgroup_size[0], resolved_config.workgroup_size[1],
        resolved_config.workgroup_size[2]},
       resolved_config.dynamic_workgroup_local_memory};
+  lrrt_iree_hal_tracef(
+      "dispatch launch function='%.*s' wg_count=%ux%ux%u wg_size=%ux%ux%u "
+      "bindings=%" PRIhsz " local_memory=%u",
+      (int)function_state->name.size, function_state->name.data,
+      resolved_config.workgroup_count[0], resolved_config.workgroup_count[1],
+      resolved_config.workgroup_count[2], resolved_config.workgroup_size[0],
+      resolved_config.workgroup_size[1], resolved_config.workgroup_size[2],
+      bindings.count, resolved_config.dynamic_workgroup_local_memory);
   return lrrt_iree_hal_status_from_lr(
       lr_launch(kernel, &launch_config, kernargs,
                 bindings.count * sizeof(kernargs[0])),
@@ -2243,6 +2398,7 @@ static iree_status_t lrrt_iree_hal_device_queue_dispatch(
   (void)queue_affinity;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
       "queue dispatch", wait_semaphore_list));
+  lrrt_iree_hal_tracef("queue dispatch bindings=%" PRIhsz, bindings.count);
   iree_status_t status = lrrt_iree_hal_device_dispatch_now(
       executable, function, config, constants, bindings,
       iree_hal_buffer_binding_table_empty(), flags);
@@ -2334,6 +2490,8 @@ static void lrrt_iree_hal_command_buffer_destroy(
     iree_hal_command_buffer_t *base_command_buffer) {
   lrrt_iree_hal_command_buffer_t *command_buffer =
       lrrt_iree_hal_command_buffer_cast(base_command_buffer);
+  lrrt_iree_hal_tracef("command buffer destroy commands=%" PRIhsz,
+                       command_buffer->command_count);
   iree_allocator_t host_allocator = command_buffer->host_allocator;
   for (iree_host_size_t i = 0; i < command_buffer->command_count; ++i) {
     lrrt_iree_hal_command_record_reset(&command_buffer->commands[i],
@@ -2353,12 +2511,16 @@ static iree_status_t lrrt_iree_hal_command_buffer_begin(
   }
   command_buffer->command_count = 0;
   base_command_buffer->binding_count = 0;
+  lrrt_iree_hal_tracef("command buffer begin");
   return iree_ok_status();
 }
 
 static iree_status_t lrrt_iree_hal_command_buffer_end(
     iree_hal_command_buffer_t *base_command_buffer) {
-  (void)base_command_buffer;
+  lrrt_iree_hal_command_buffer_t *command_buffer =
+      lrrt_iree_hal_command_buffer_cast(base_command_buffer);
+  lrrt_iree_hal_tracef("command buffer end commands=%" PRIhsz,
+                       command_buffer->command_count);
   return iree_ok_status();
 }
 
@@ -2476,6 +2638,8 @@ static iree_status_t lrrt_iree_hal_command_buffer_fill_buffer(
   record->target_ref = target_ref;
   record->flags = flags;
   lrrt_iree_hal_buffer_ref_retain(record->target_ref);
+  lrrt_iree_hal_tracef("command buffer record fill length=%" PRIu64,
+                       (uint64_t)target_ref.length);
   return iree_ok_status();
 }
 
@@ -2513,6 +2677,8 @@ static iree_status_t lrrt_iree_hal_command_buffer_update_buffer(
            (iree_host_size_t)target_ref.length);
   }
   lrrt_iree_hal_buffer_ref_retain(record->target_ref);
+  lrrt_iree_hal_tracef("command buffer record update length=%" PRIu64,
+                       (uint64_t)target_ref.length);
   return iree_ok_status();
 }
 
@@ -2536,6 +2702,8 @@ static iree_status_t lrrt_iree_hal_command_buffer_copy_buffer(
   record->flags = flags;
   lrrt_iree_hal_buffer_ref_retain(record->source_ref);
   lrrt_iree_hal_buffer_ref_retain(record->target_ref);
+  lrrt_iree_hal_tracef("command buffer record copy length=%" PRIu64,
+                       (uint64_t)target_ref.length);
   return iree_ok_status();
 }
 
@@ -2605,6 +2773,8 @@ static iree_status_t lrrt_iree_hal_command_buffer_dispatch(
     }
   }
 
+  lrrt_iree_hal_tracef("command buffer record dispatch bindings=%" PRIhsz,
+                       record->binding_count);
   return iree_ok_status();
 }
 
@@ -2637,12 +2807,17 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
   if (iree_status_is_ok(status)) {
     lrrt_iree_hal_command_buffer_t *lrrt_command_buffer =
         lrrt_iree_hal_command_buffer_cast(command_buffer);
+    lrrt_iree_hal_tracef("queue execute commands=%" PRIhsz,
+                         lrrt_command_buffer->command_count);
     for (iree_host_size_t i = 0; i < lrrt_command_buffer->command_count; ++i) {
       const lrrt_iree_hal_command_record_t *command =
           &lrrt_command_buffer->commands[i];
       switch (command->kind) {
       case LRRT_IREE_HAL_COMMAND_UPDATE: {
         const lrrt_iree_hal_update_record_t *record = &command->payload.update;
+        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                             "]=update length=%" PRIu64,
+                             i, (uint64_t)record->target_ref.length);
         iree_hal_buffer_ref_t target_ref = {0};
         status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
             binding_table, record->target_ref, &target_ref);
@@ -2655,6 +2830,9 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
       }
       case LRRT_IREE_HAL_COMMAND_COPY: {
         const lrrt_iree_hal_copy_record_t *record = &command->payload.copy;
+        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                             "]=copy length=%" PRIu64,
+                             i, (uint64_t)record->target_ref.length);
         iree_hal_buffer_ref_t source_ref = {0};
         iree_hal_buffer_ref_t target_ref = {0};
         status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
@@ -2672,6 +2850,9 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
       }
       case LRRT_IREE_HAL_COMMAND_FILL: {
         const lrrt_iree_hal_fill_record_t *record = &command->payload.fill;
+        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                             "]=fill length=%" PRIu64,
+                             i, (uint64_t)record->target_ref.length);
         iree_hal_buffer_ref_t target_ref = {0};
         status = lrrt_iree_hal_command_buffer_resolve_buffer_ref(
             binding_table, record->target_ref, &target_ref);
@@ -2685,6 +2866,9 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
       case LRRT_IREE_HAL_COMMAND_DISPATCH: {
         const lrrt_iree_hal_dispatch_record_t *record =
             &command->payload.dispatch;
+        lrrt_iree_hal_tracef("queue execute command[%" PRIhsz
+                             "]=dispatch bindings=%" PRIhsz,
+                             i, record->binding_count);
         const iree_hal_buffer_ref_list_t bindings = {
             record->binding_count,
             record->bindings,
@@ -2777,6 +2961,7 @@ static iree_status_t lrrt_iree_hal_driver_query_available_devices(
 
   *out_device_info_count = 1;
   *out_device_infos = device_infos;
+  lrrt_iree_hal_tracef("driver query available devices count=1");
   return iree_ok_status();
 }
 
@@ -2806,6 +2991,8 @@ static iree_status_t lrrt_iree_hal_driver_create_device_by_id(
                             "unknown lrrt HAL device id: %" PRIuPTR,
                             (uintptr_t)device_id);
   }
+  lrrt_iree_hal_tracef("driver create device by id=%" PRIuPTR,
+                       (uintptr_t)device_id);
   return lrrt_iree_hal_device_create(IREE_SV("lrrt"), host_allocator,
                                      out_device);
 }
@@ -2829,6 +3016,8 @@ static iree_status_t lrrt_iree_hal_driver_create_device_by_path(
                             "unknown lrrt HAL device path: '%.*s'",
                             (int)device_path.size, device_path.data);
   }
+  lrrt_iree_hal_tracef("driver create device by path='%.*s'",
+                       (int)device_path.size, device_path.data);
   return lrrt_iree_hal_device_create(IREE_SV("lrrt"), host_allocator,
                                      out_device);
 }
@@ -2964,6 +3153,8 @@ static iree_status_t lrrt_iree_hal_driver_factory_enumerate(
   }};
   *out_driver_info_count = IREE_ARRAYSIZE(driver_infos);
   *out_driver_infos = driver_infos;
+  lrrt_iree_hal_tracef("driver factory enumerate count=%" PRIhsz,
+                       *out_driver_info_count);
   return iree_ok_status();
 }
 
@@ -2977,6 +3168,8 @@ static iree_status_t lrrt_iree_hal_driver_factory_try_create(
                             "lrrt HAL driver factory does not provide '%.*s'",
                             (int)driver_name.size, driver_name.data);
   }
+  lrrt_iree_hal_tracef("driver factory create name='%.*s'",
+                       (int)driver_name.size, driver_name.data);
   return lrrt_iree_hal_driver_create(driver_name, host_allocator, out_driver);
 }
 
@@ -2987,5 +3180,6 @@ lrrt_iree_hal_driver_module_register(iree_hal_driver_registry_t *registry) {
       .enumerate = lrrt_iree_hal_driver_factory_enumerate,
       .try_create = lrrt_iree_hal_driver_factory_try_create,
   };
+  lrrt_iree_hal_tracef("driver module register");
   return iree_hal_driver_registry_register_factory(registry, &factory);
 }

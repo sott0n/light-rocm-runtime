@@ -62,6 +62,14 @@ synchronous queue operations, not a native device semaphore implementation.
 Indirect dispatch parameters and general IREE ABI packing remain explicitly
 unsupported until they are backed by lrrt runtime objects.
 
+Set `LRRT_IREE_TRACE=1` to enable adapter-owned trace logging on `stderr`.
+Tracing is opt-in and silent by default. It records the major HAL boundary
+events that are useful when debugging the seamless IREE path: driver and device
+creation, executable cache preparation, function lookup, buffer allocation,
+queue transfer and dispatch submissions, command buffer replay, and host-side
+semaphore waits/signals. The trace is diagnostic only; it must not change queue
+ordering, synchronization, or normal test output.
+
 | IREE HAL concept | Current adapter skeleton | lrrt mapping |
 | --- | --- | --- |
 | driver factory | `lrrt_iree_hal_driver_module_register` | Registers the `lrrt` HAL driver factory with an explicit IREE registry |
