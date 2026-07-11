@@ -26,15 +26,17 @@ IREE HAL driver registry, created by name, and queried for one placeholder
 device. It can also create a minimal lrrt-backed `iree_hal_device_t` with a
 stable id, host allocator, empty capabilities, and a device-owned HAL allocator
 skeleton. The allocator opens the first lrrt device and can allocate
-device-local, non-mappable `iree_hal_buffer_t` objects backed by `lr_malloc`.
-Those buffers release their lrrt allocation with `lr_free` when the HAL buffer
-is destroyed. Host-visible mapping, import/export, and virtual memory remain
-unsupported. The native device can create an executable cache that recognizes
-lrrt-owned HSACO formats, prepares a raw HSACO into an lrrt module, and lazily
-resolves exported function names into lrrt kernels. It can submit a narrow
-direct `queue_dispatch` path for static workgroup counts, explicit workgroup
-sizes, lrrt-owned HAL semaphore lists, no inline constants, and pointer-only
-storage-buffer bindings. It also has a minimal command buffer path:
+device-local `iree_hal_buffer_t` objects backed by `lr_malloc`. Those buffers
+release their lrrt allocation with `lr_free` when the HAL buffer is destroyed.
+The buffer vtable supports HAL map/unmap/invalidate/flush through an
+adapter-owned host shadow buffer; it does not expose a direct host-visible
+mapping of the GPU allocation. External memory import/export and virtual memory
+remain unsupported. The native device can create an executable cache that
+recognizes lrrt-owned HSACO formats, prepares a raw HSACO into an lrrt module,
+and lazily resolves exported function names into lrrt kernels. It can submit a
+narrow direct `queue_dispatch` path for static workgroup counts, explicit
+workgroup sizes, lrrt-owned HAL semaphore lists, no inline constants, and
+pointer-only storage-buffer bindings. It also has a minimal command buffer path:
 `iree_hal_command_buffer_update_buffer`, `fill_buffer`, `copy_buffer`, and
 `dispatch` record ordered commands, and `queue_execute` replays them through
 synchronous lrrt memory copies and the same lrrt launch path. Transfer and
@@ -51,6 +53,7 @@ unsupported until they are backed by lrrt runtime objects.
 | native HAL device | `lrrt_iree_hal_device_t` | Lifetime/id/query skeleton with an owned HAL allocator |
 | native HAL allocator | `lrrt_iree_hal_allocator_t` | Owns the lrrt runtime/device lifetime needed by HAL buffers |
 | native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
+| HAL buffer mapping | `map_range`, `unmap_range`, `invalidate_range`, `flush_range` | Uses an adapter-owned host shadow allocation and `lr_memcpy` to synchronize with the lrrt device allocation |
 | HAL queue update/copy | `queue_update`, `queue_copy` | Waits on lrrt-owned semaphore lists, uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy, then signals completion semaphores |
 | HAL queue dispatch | `queue_dispatch` | Waits on lrrt-owned semaphore lists, packs direct HAL storage-buffer bindings as raw device pointers, submits one static dispatch with `lr_launch`, then signals completion semaphores |
 | HAL command buffer execution | `command_buffer_update_buffer`, `command_buffer_fill_buffer`, `command_buffer_copy_buffer`, `command_buffer_dispatch`, `queue_execute` | Records ordered transfer and static dispatch commands, then replays them with synchronous `lr_memcpy` / `lr_launch`, including indirect binding-table resolution and lrrt-owned semaphore wait/signal lists |
@@ -122,6 +125,28 @@ The current adapter helper can pack contiguous `storage_buffer` bindings marked
 It also converts IREE-style workgroup counts into lrrt's total-grid launch
 configuration using the export workgroup size.
 
+## Buffer Mapping Semantics
+
+The lrrt HAL driver keeps buffer storage simple: every HAL buffer owns a device
+allocation from `lr_malloc`. Mapping does not return a pointer into that device
+allocation. Instead, `map_range` allocates or reuses a host shadow buffer owned
+by `lrrt_iree_hal_buffer_t` and returns a span inside that shadow allocation.
+
+The current synchronization rules are:
+
+| Operation | Current behavior |
+| --- | --- |
+| `map_range(..., READ, ...)` / `iree_hal_buffer_map_read` | Copies the requested device range into the host shadow with `lr_memcpy(..., LR_MEMCPY_DEVICE_TO_HOST)` before returning the mapped span. |
+| `map_range(..., WRITE, ...)` / `iree_hal_buffer_map_write` | Returns a writable host shadow span. The write becomes visible to the device when the mapping is unmapped. |
+| `unmap_range` for a writable mapping | Copies the written range from the host shadow back to the device allocation with `lr_memcpy(..., LR_MEMCPY_HOST_TO_DEVICE)`. |
+| `invalidate_range` | Refreshes the host shadow range from device memory. |
+| `flush_range` | Copies the host shadow range to device memory if a shadow allocation exists; otherwise it is a no-op. |
+
+This is a correctness bridge for IREE tooling and small smoke tests. It is not
+a zero-copy host-visible allocation model, and it should not be treated as a
+performance feature. Queue transfers and dispatches still operate on the lrrt
+device allocation.
+
 ## Dispatch Contract
 
 The skeleton dispatch path is deliberately narrow:
@@ -180,20 +205,29 @@ the full VMFB execution contract yet.
 
 ## Initial Unsupported Features
 
-The first adapter prototype should reject these features explicitly:
+The first adapter prototype should reject unsupported features explicitly:
 
-- multiple devices
-- multiple independent hardware queues as a required semantic
-- external memory import/export
-- host-visible mapped device allocations
-- file-backed HAL queue read/write operations
-- device-native semaphore implementation
-- indirect dispatch parameters
-- general IREE HAL ABI constant/scalar packing
-- full command buffer optimization
-- dynamic shape dispatch policy
-- VMFB parsing in the lrrt runtime core
-- graph-level scheduling or tensor semantics
+| Unsupported feature | Current status | Why it matters |
+| --- | --- | --- |
+| Multiple devices | Not implemented | The driver exposes one `default` device backed by `lr_device_open(0)`. |
+| Multiple independent hardware queues as a required semantic | Not implemented | Queue operations are synchronous adapter operations over the current lrrt device path. |
+| External memory import/export | Not implemented | `import_buffer` and `export_buffer` return `UNIMPLEMENTED`; no external handle ownership exists yet. |
+| Direct host-visible GPU mapping | Not implemented | HAL map APIs use a host shadow buffer, not a mapped GPU allocation. |
+| Virtual memory / physical memory APIs | Not implemented | `supports_virtual_memory` is false and virtual memory methods return unavailable. |
+| File-backed HAL import/read/write | Not implemented | File import plus `queue_read` and `queue_write` return `UNIMPLEMENTED`. |
+| HAL channels / collectives | Not implemented | Channel creation and command-buffer collective operations return `UNIMPLEMENTED`. |
+| HAL events | Not implemented | Event creation and command-buffer signal/reset/wait event operations return `UNIMPLEMENTED`. |
+| Queue host calls | Not implemented | `queue_host_call` returns `UNIMPLEMENTED`. |
+| Queue pool backend / allocation pools | Not implemented | Queue pool backend query and non-null queue allocation pools are rejected. |
+| Device-native semaphore implementation | Not implemented | Semaphores are host-side timeline semaphores used for ordering synchronous adapter submissions. |
+| External semaphore timepoint import/export | Not implemented | Timepoint import/export methods return `UNIMPLEMENTED`. |
+| Indirect dispatch workgroup parameters | Not implemented | Dispatch requires static `workgroup_count`; `workgroup_count_ref` is rejected. |
+| Dispatch constants / scalar ABI packing | Not implemented | Dispatch rejects non-empty constants and only packs pointer-only storage-buffer bindings. |
+| General indirect argument modes | Not implemented | Direct dispatch requires direct buffers; command-buffer dispatch can resolve indirect binding slots from the submission binding table only. |
+| Full command buffer optimization | Not implemented | Command buffers record minimal transfer/dispatch commands and replay them synchronously. |
+| Dynamic shape dispatch policy | Not implemented | Workgroup counts and sizes must be provided by compiled metadata or explicit dispatch config. |
+| VMFB parsing in the lrrt runtime core | Non-goal | VMFB handling belongs to IREE tooling/runtime and the adapter, not `include/lrrt/lrrt.h`. |
+| Graph-level scheduling or tensor semantics | Non-goal | lrrt remains a low-overhead dispatcher and predictable resource manager. |
 
 Unsupported features should fail at the adapter boundary using
 `UnsupportedFeature` or an equivalent IREE status once real IREE HAL types are

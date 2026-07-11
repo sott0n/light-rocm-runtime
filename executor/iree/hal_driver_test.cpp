@@ -292,8 +292,9 @@ int test_lrrt_driver_registration() {
   iree_hal_buffer_release(buffer);
 
   iree_hal_buffer_params_t host_buffer_params = {};
-  host_buffer_params.usage =
-      IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE | IREE_HAL_BUFFER_USAGE_MAPPING;
+  host_buffer_params.usage = IREE_HAL_BUFFER_USAGE_TRANSFER_SOURCE |
+                             IREE_HAL_BUFFER_USAGE_TRANSFER_TARGET |
+                             IREE_HAL_BUFFER_USAGE_MAPPING;
   host_buffer_params.access = IREE_HAL_MEMORY_ACCESS_ALL;
   host_buffer_params.type = IREE_HAL_MEMORY_TYPE_HOST_LOCAL;
   compatibility = iree_hal_allocator_query_buffer_compatibility(
@@ -319,8 +320,48 @@ int test_lrrt_driver_registration() {
     status = iree_hal_buffer_map_read(mapped_buffer, 0, mapped_readback,
                                       sizeof(mapped_readback));
   }
+  void *mapped_device_ptr = nullptr;
+  uint32_t mapped_device_readback[4] = {};
+  lr_device_t lrrt_device = {0};
+  if (iree_status_is_ok(status)) {
+    status = lrrt_iree_hal_buffer_device_pointer_for_test(mapped_buffer,
+                                                          &mapped_device_ptr);
+  }
+  if (iree_status_is_ok(status) &&
+      (lr_device_open(0, &lrrt_device) != LR_SUCCESS ||
+       lr_memcpy(lrrt_device, mapped_device_readback, mapped_device_ptr,
+                 sizeof(mapped_device_readback),
+                 LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS)) {
+    status =
+        iree_make_status(IREE_STATUS_INTERNAL, "mapped device readback failed");
+  }
   if (!iree_status_is_ok(status) ||
-      std::memcmp(mapped_readback, mapped_values, sizeof(mapped_values)) != 0) {
+      std::memcmp(mapped_readback, mapped_values, sizeof(mapped_values)) != 0 ||
+      std::memcmp(mapped_device_readback, mapped_values,
+                  sizeof(mapped_values)) != 0) {
+    iree_status_ignore(status);
+    if (mapped_buffer) {
+      iree_hal_buffer_release(mapped_buffer);
+    }
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  const uint32_t mapped_updated_values[4] = {19, 23, 29, 31};
+  uint32_t mapped_updated_readback[4] = {};
+  status = iree_hal_device_queue_update(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+      iree_hal_semaphore_list_empty(), mapped_updated_values, 0, mapped_buffer,
+      0, sizeof(mapped_updated_values), IREE_HAL_UPDATE_FLAG_NONE);
+  if (iree_status_is_ok(status)) {
+    status = iree_hal_buffer_map_read(mapped_buffer, 0, mapped_updated_readback,
+                                      sizeof(mapped_updated_readback));
+  }
+  if (!iree_status_is_ok(status) ||
+      std::memcmp(mapped_updated_readback, mapped_updated_values,
+                  sizeof(mapped_updated_values)) != 0) {
     iree_status_ignore(status);
     if (mapped_buffer) {
       iree_hal_buffer_release(mapped_buffer);
@@ -460,9 +501,7 @@ int test_lrrt_driver_registration() {
     return 1;
   }
   uint32_t copied_values[4] = {};
-  lr_device_t lrrt_device = {0};
-  if (lr_device_open(0, &lrrt_device) != LR_SUCCESS ||
-      lr_memcpy(lrrt_device, copied_values, target_device_ptr,
+  if (lr_memcpy(lrrt_device, copied_values, target_device_ptr,
                 sizeof(copied_values),
                 LR_MEMCPY_DEVICE_TO_HOST) != LR_SUCCESS ||
       std::memcmp(copied_values, source_values, sizeof(source_values)) != 0) {
