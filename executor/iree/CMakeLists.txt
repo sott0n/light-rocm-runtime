@@ -184,18 +184,28 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
     "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src/iree/*.a"
     "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/*.a"
   )
-  add_executable(lrrt_iree_run_module_smoke run_module_smoke.c)
-  target_link_libraries(
-    lrrt_iree_run_module_smoke
-    PRIVATE
-      lrrt::iree_hal_driver
-      "-Wl,--start-group"
-      ${LRRT_IREE_RUNTIME_STATIC_LIBS}
-      "-Wl,--end-group"
-      dl
-      m
-      pthread
-  )
+  function(lrrt_add_iree_run_module_launcher target)
+    add_executable(${target} run_module.c)
+    target_compile_definitions(
+      ${target}
+      PRIVATE
+        LRRT_IREE_RUN_MODULE_TOOL_NAME="${target}"
+    )
+    target_link_libraries(
+      ${target}
+      PRIVATE
+        lrrt::iree_hal_driver
+        "-Wl,--start-group"
+        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+        "-Wl,--end-group"
+        dl
+        m
+        pthread
+    )
+  endfunction()
+
+  lrrt_add_iree_run_module_launcher(lrrt_iree_run_module)
+  lrrt_add_iree_run_module_launcher(lrrt_iree_run_module_smoke)
 
   if(LRRT_IREE_COMPILE_EXECUTABLE)
     lrrt_add_iree_vmfb_smoke(

@@ -205,17 +205,16 @@ explicit workgroup size metadata. Transfer and dispatch operations can now also
 be recorded into a minimal HAL command buffer and replayed through
 `queue_execute`; this path supports ordered update/fill/copy/dispatch records,
 indirect buffer slots resolved from the submission binding table, and
-lrrt-owned semaphore wait/signal lists. The local
-`lrrt_iree_run_module_smoke` binary now uses the default-registry registration
-entry point before calling IREE's run-module tooling path. Its driver
-implementation is linked through the reusable `lrrt::iree_hal_driver` target
-instead of being compiled directly into the smoke runner, so the smoke binary is
-now only a thin tooling harness around the adapter-owned registration/device
-implementation. The remaining work for a fully seamless upstream-style
-`iree-run-module --device=lrrt` path is to package or load the registration
-entry point outside this repo-local smoke binary, and eventually replace
-host-side semaphore ordering with device-native synchronization if lrrt grows
-that primitive.
+lrrt-owned semaphore wait/signal lists. The `lrrt_iree_run_module` launcher now
+uses the default-registry registration entry point before calling IREE's
+run-module tooling path. Its driver implementation is linked through the
+reusable `lrrt::iree_hal_driver` target instead of being compiled directly into
+the launcher, so the executable is a thin IREE run-module compatible entry point
+around the adapter-owned registration/device implementation. The remaining work
+for a fully upstream-style `iree-run-module --device=lrrt` path is to package
+or load the registration entry point into a stock IREE tool binary, and
+eventually replace host-side semaphore ordering with device-native
+synchronization if lrrt grows that primitive.
 
 ### I2: Artifact inspection
 

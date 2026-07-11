@@ -166,12 +166,36 @@ ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_(vmfb_prob
 
 This test first serializes `tools/iree_minimal_mul.mlir` to
 `build-iree-probe/minimal_mul/minimal_mul_<target>.vmfb`, then runs that VMFB
-through `lrrt_iree_run_module_smoke --device=lrrt`. The expected output is the
+through `lrrt_iree_run_module --device=lrrt`. The expected output is the
 same minimal multiply result:
 
 ```text
 4xf32=10 40 90 160
 ```
+
+The `lrrt_iree_run_module` binary is the current seamless adapter launcher. It
+is intentionally shaped like `iree-run-module`: it accepts the same run-module
+flags, registers the lrrt HAL driver with IREE's default HAL registry, and then
+calls IREE's run-module tooling path. This is different from taking an
+unmodified stock `iree-run-module` binary and loading `lrrt` at runtime; the
+current pinned IREE tooling path registers HAL drivers compiled into the
+process and does not expose a general external HAL-driver plugin flag.
+
+Manual run:
+
+```sh
+build-iree/adapter/lrrt_iree_run_module \
+  --device=lrrt \
+  --module=build-iree-probe/minimal_mul/minimal_mul_<target>.vmfb \
+  --function=simple_mul \
+  "--input=4xf32=1 2 3 4" \
+  "--input=4xf32=10 20 30 40" \
+  --output=-
+```
+
+`lrrt_iree_run_module_smoke` is kept as a compatibility target for existing
+CTest names and local scripts, but new manual usage should prefer
+`lrrt_iree_run_module`.
 
 The adapter also has a two-dispatch VMFB smoke test:
 

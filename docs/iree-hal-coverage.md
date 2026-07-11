@@ -22,7 +22,7 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Area | Current status | Current behavior | Coverage |
 | --- | --- | --- | --- |
 | Driver module registration | ✅ | Registers the `lrrt` HAL driver factory into an explicit IREE registry. | `lrrt_iree_hal_driver_registration_tests` |
-| Default registry registration | ✅ | `lrrt_iree_hal_register_all` idempotently registers `lrrt` with IREE's default registry. | `lrrt_iree_hal_driver_registration_tests`, `lrrt_iree_run_module_smoke` |
+| Default registry registration | ✅ | `lrrt_iree_hal_register_all` idempotently registers `lrrt` with IREE's default registry. | `lrrt_iree_hal_driver_registration_tests`, `lrrt_iree_run_module` |
 | Driver creation by name | ✅ | Creates the native `lrrt` HAL driver from the registered factory. | `lrrt_iree_hal_driver_registration_tests` |
 | Device enumeration | ✅ | Reports one placeholder `default` device. | `lrrt_iree_hal_driver_registration_tests` |
 | Device creation | ✅ | Creates one `iree_hal_device_t` backed by lrrt device index `0`. | `lrrt_iree_hal_driver_registration_tests` |
@@ -108,12 +108,12 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 
 | Area | Current status | Current behavior | Coverage |
 | --- | --- | --- | --- |
-| Repo-local run-module smoke runner | ✅ | `lrrt_iree_run_module_smoke` registers the lrrt driver then uses IREE run-module tooling. | `lrrt_iree_*_run_module_vmfb_smoke` |
+| lrrt-linked run-module launcher | ✅ | `lrrt_iree_run_module` registers the lrrt driver then uses IREE run-module tooling. | `lrrt_iree_*_run_module_vmfb_smoke` |
 | Single dispatch VMFB | ✅ | Runs the minimal multiply VMFB through `--device=lrrt`. | `lrrt_iree_run_module_vmfb_smoke` |
 | Ordered multi-dispatch VMFB | ✅ | Runs a two-dispatch graph and validates command ordering. | `lrrt_iree_two_dispatch_run_module_vmfb_smoke` |
 | Mixed matmul VMFB | ✅ | Runs a VMFB with more than one generated dispatch shape. | `lrrt_iree_mixed_matmuls_run_module_vmfb_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
-| Upstream-style external `iree-run-module --device=lrrt` | ❌ | The seamless path still depends on repo-local registration/linkage. | Remaining integration task |
+| Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |
 
 ## Explicit Non-Coverage

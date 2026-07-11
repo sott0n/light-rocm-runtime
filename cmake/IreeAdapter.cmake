@@ -110,7 +110,7 @@ function(lrrt_add_iree_vmfb_run run_test fixture artifact_stem function_name
   add_test(
     NAME ${run_test}
     COMMAND
-      lrrt_iree_run_module_smoke
+      lrrt_iree_run_module
       --device=lrrt
       "--module=${_probe_vmfb}"
       "--function=${function_name}"
