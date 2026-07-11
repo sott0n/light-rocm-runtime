@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <vector>
 
+#include "iree/hal/channel.h"
+#include "iree/hal/event.h"
 #include "iree/io/file_handle.h"
 #include "lrrt/lrrt.h"
 
@@ -29,6 +31,34 @@ bool read_file(const char *path, std::vector<uint8_t> *out_data) {
   out_data->resize(static_cast<size_t>(size));
   return static_cast<bool>(
       file.read(reinterpret_cast<char *>(out_data->data()), size));
+}
+
+bool expect_unimplemented(iree_status_t status, const char *label) {
+  if (iree_status_is_unimplemented(status)) {
+    iree_status_free(status);
+    return true;
+  }
+  fprintf(stderr, "%s did not return IREE_STATUS_UNIMPLEMENTED\n", label);
+  iree_status_ignore(status);
+  return false;
+}
+
+bool expect_unavailable(iree_status_t status, const char *label) {
+  if (iree_status_is_unavailable(status)) {
+    iree_status_free(status);
+    return true;
+  }
+  fprintf(stderr, "%s did not return IREE_STATUS_UNAVAILABLE\n", label);
+  iree_status_ignore(status);
+  return false;
+}
+
+iree_status_t no_op_host_call(void *user_data, const uint64_t args[4],
+                              iree_hal_host_call_context_t *context) {
+  (void)user_data;
+  (void)args;
+  (void)context;
+  return iree_ok_status();
 }
 
 int test_lrrt_driver_registration() {
@@ -749,6 +779,113 @@ int test_lrrt_driver_registration() {
   iree_hal_buffer_release(cb_source_buffer);
 
   if (iree_hal_allocator_supports_virtual_memory(allocator)) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  uint32_t external_storage[4] = {};
+  iree_hal_external_buffer_t external_buffer = {};
+  external_buffer.type = IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION;
+  external_buffer.size = sizeof(external_storage);
+  external_buffer.handle.host_allocation.ptr = external_storage;
+  iree_hal_buffer_t *imported_buffer = nullptr;
+  status = iree_hal_allocator_import_buffer(
+      allocator, host_buffer_params, &external_buffer,
+      iree_hal_buffer_release_callback_null(), &imported_buffer);
+  if (!expect_unimplemented(status, "external buffer import") ||
+      imported_buffer != nullptr) {
+    if (imported_buffer) {
+      iree_hal_buffer_release(imported_buffer);
+    }
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_buffer_t *export_source_buffer = nullptr;
+  status = iree_hal_allocator_allocate_buffer(allocator, host_buffer_params, 16,
+                                              &export_source_buffer);
+  if (!iree_status_is_ok(status) || !export_source_buffer) {
+    iree_status_ignore(status);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_external_buffer_t exported_buffer = {};
+  status = iree_hal_allocator_export_buffer(
+      allocator, export_source_buffer,
+      IREE_HAL_EXTERNAL_BUFFER_TYPE_HOST_ALLOCATION,
+      IREE_HAL_EXTERNAL_BUFFER_FLAG_NONE, &exported_buffer);
+  if (!expect_unimplemented(status, "external buffer export") ||
+      exported_buffer.type != IREE_HAL_EXTERNAL_BUFFER_TYPE_NONE) {
+    iree_hal_buffer_release(export_source_buffer);
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_buffer_release(export_source_buffer);
+
+  iree_device_size_t minimum_page_size = 1;
+  iree_device_size_t recommended_page_size = 1;
+  status = iree_hal_allocator_virtual_memory_query_granularity(
+      allocator, host_buffer_params, &minimum_page_size,
+      &recommended_page_size);
+  if (!expect_unavailable(status, "virtual memory granularity") ||
+      minimum_page_size != 0 || recommended_page_size != 0) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+  iree_hal_buffer_t *virtual_buffer = reinterpret_cast<iree_hal_buffer_t *>(1);
+  status = iree_hal_allocator_virtual_memory_reserve(
+      allocator, IREE_HAL_QUEUE_AFFINITY_ANY, 4096, &virtual_buffer);
+  if (!expect_unavailable(status, "virtual memory reserve") ||
+      virtual_buffer != nullptr) {
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_channel_t *channel = reinterpret_cast<iree_hal_channel_t *>(1);
+  status = iree_hal_channel_create(device, IREE_HAL_QUEUE_AFFINITY_ANY,
+                                   iree_hal_channel_params_t{}, &channel);
+  if (!expect_unimplemented(status, "channel creation") || channel != nullptr) {
+    if (channel) {
+      iree_hal_channel_release(channel);
+    }
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  iree_hal_event_t *event = reinterpret_cast<iree_hal_event_t *>(1);
+  status = iree_hal_event_create(device, IREE_HAL_QUEUE_AFFINITY_ANY,
+                                 IREE_HAL_EVENT_FLAG_NONE, &event);
+  if (!expect_unimplemented(status, "event creation") || event != nullptr) {
+    if (event) {
+      iree_hal_event_release(event);
+    }
+    iree_hal_device_release(device);
+    iree_hal_driver_release(driver);
+    iree_hal_driver_registry_free(registry);
+    return 1;
+  }
+
+  const iree_hal_host_call_t host_call =
+      iree_hal_make_host_call(no_op_host_call, nullptr);
+  status = iree_hal_device_queue_host_call(
+      device, IREE_HAL_QUEUE_AFFINITY_ANY, iree_hal_semaphore_list_empty(),
+      iree_hal_semaphore_list_empty(), host_call, nullptr,
+      IREE_HAL_HOST_CALL_FLAG_NONE);
+  if (!expect_unimplemented(status, "queue host call")) {
     iree_hal_device_release(device);
     iree_hal_driver_release(driver);
     iree_hal_driver_registry_free(registry);

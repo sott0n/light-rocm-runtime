@@ -73,6 +73,7 @@ unsupported until they are backed by lrrt runtime objects.
 | native HAL buffer | `lrrt_iree_hal_buffer_t` | Wraps an `iree_hal_buffer_t` around an `lr_malloc` device allocation |
 | HAL buffer mapping | `map_range`, `unmap_range`, `invalidate_range`, `flush_range` | Uses an adapter-owned host shadow allocation and `lr_memcpy` to synchronize with the lrrt device allocation |
 | HAL queue update/copy | `queue_update`, `queue_copy` | Waits on lrrt-owned semaphore lists, uses synchronous `lr_memcpy` for host-to-device update and device-to-device copy, then signals completion semaphores |
+| HAL queue read/write | `import_file`, `queue_read`, `queue_write` | Wraps IREE file handles and performs synchronous file-to-buffer / buffer-to-file transfers through lrrt-visible HAL buffers |
 | HAL queue dispatch | `queue_dispatch` | Waits on lrrt-owned semaphore lists, packs direct HAL storage-buffer bindings as raw device pointers, submits one static dispatch with `lr_launch`, then signals completion semaphores |
 | HAL command buffer execution | `command_buffer_update_buffer`, `command_buffer_fill_buffer`, `command_buffer_copy_buffer`, `command_buffer_dispatch`, `queue_execute` | Records ordered transfer and static dispatch commands, then replays them with synchronous `lr_memcpy` / `lr_launch`, including indirect binding-table resolution and lrrt-owned semaphore wait/signal lists |
 | HAL semaphore | `create_semaphore`, queue wait/signal lists | Provides host-side timeline semaphore ordering for synchronous lrrt queue operations |
@@ -237,7 +238,7 @@ The first adapter prototype should reject unsupported features explicitly:
 | External memory import/export | Not implemented | `import_buffer` and `export_buffer` return `UNIMPLEMENTED`; no external handle ownership exists yet. |
 | Direct host-visible GPU mapping | Not implemented | HAL map APIs use a host shadow buffer, not a mapped GPU allocation. |
 | Virtual memory / physical memory APIs | Not implemented | `supports_virtual_memory` is false and virtual memory methods return unavailable. |
-| File-backed HAL import/read/write | Not implemented | File import plus `queue_read` and `queue_write` return `UNIMPLEMENTED`. |
+| File-backed HAL import/read/write | Implemented for host-backed handles | File import wraps IREE file handles; `queue_read` and `queue_write` perform synchronous transfers through lrrt-visible buffers. |
 | HAL channels / collectives | Not implemented | Channel creation and command-buffer collective operations return `UNIMPLEMENTED`. |
 | HAL events | Not implemented | Event creation and command-buffer signal/reset/wait event operations return `UNIMPLEMENTED`. |
 | Queue host calls | Not implemented | `queue_host_call` returns `UNIMPLEMENTED`. |
