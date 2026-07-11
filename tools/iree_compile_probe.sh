@@ -19,6 +19,8 @@ Options:
                        (default: /opt/rocm/llvm/bin when present)
   --summary PATH       Write executable-target metadata JSON summary
   --out-dir DIR        Output directory (default: build-iree-probe)
+  --artifact-stem NAME Artifact filename stem before _<target>
+                       (default: minimal_mul)
   --target CHIP        ROCm target chip (default: gfx1101)
   --emit-hsaco         Emit a raw HSACO image from an IREE ROCm executable
                        payload for lrrt module loading experiments.
@@ -49,6 +51,7 @@ lld_dir=""
 out_dir="${repo_root}/build-iree-probe"
 summary_path=""
 target="gfx1101"
+artifact_stem="minimal_mul"
 emit_hsaco=0
 try_vmfb=0
 run_baseline=0
@@ -80,6 +83,10 @@ while [[ $# -gt 0 ]]; do
     ;;
   --out-dir)
     out_dir="$2"
+    shift 2
+    ;;
+  --artifact-stem)
+    artifact_stem="$2"
     shift 2
     ;;
   --target)
@@ -143,6 +150,11 @@ if [[ ! -f "${input}" ]]; then
   exit 1
 fi
 
+if [[ -z "${artifact_stem}" ]]; then
+  echo "--artifact-stem must not be empty" >&2
+  exit 1
+fi
+
 if [[ "${run_baseline}" -eq 1 && ! -x "${iree_run_module}" ]]; then
   cat >&2 <<EOF
 iree-run-module was not found or is not executable:
@@ -168,7 +180,7 @@ fi
 
 mkdir -p "${out_dir}"
 
-base="${out_dir}/minimal_mul_${target}"
+base="${out_dir}/${artifact_stem}_${target}"
 config_ir="${base}_executable_configurations.mlir"
 target_ir="${base}_executable_targets.mlir"
 default_summary="${base}_metadata.json"

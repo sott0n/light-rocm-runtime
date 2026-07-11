@@ -142,48 +142,79 @@ if(EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
   )
 
   if(LRRT_IREE_COMPILE_EXECUTABLE)
-    set(LRRT_IREE_LRRT_VMFB_PROBE_DIR
-        "${PROJECT_SOURCE_DIR}/build-iree-probe/lrrt-vmfb"
-    )
-    set(LRRT_IREE_LRRT_VMFB_PROBE
-        "${LRRT_IREE_LRRT_VMFB_PROBE_DIR}/minimal_mul_${LRRT_AMDGPU_TARGET}.vmfb"
-    )
+    function(lrrt_add_iree_vmfb_smoke
+             probe_test
+             run_test
+             fixture
+             input_mlir
+             artifact_stem
+             function_name
+             expected_output)
+      set(_probe_dir "${PROJECT_SOURCE_DIR}/build-iree-probe/${artifact_stem}")
+      set(_probe_vmfb "${_probe_dir}/${artifact_stem}_${LRRT_AMDGPU_TARGET}.vmfb")
 
-    add_test(
-      NAME lrrt_iree_vmfb_probe
-      COMMAND
-        "${PROJECT_SOURCE_DIR}/tools/iree_compile_probe.sh"
-        --iree-compile "${LRRT_IREE_COMPILE_EXECUTABLE}"
-        --target "${LRRT_AMDGPU_TARGET}"
-        --out-dir "${LRRT_IREE_LRRT_VMFB_PROBE_DIR}"
-        --try-vmfb
-    )
-    set_tests_properties(
+      add_test(
+        NAME ${probe_test}
+        COMMAND
+          "${PROJECT_SOURCE_DIR}/tools/iree_compile_probe.sh"
+          --iree-compile "${LRRT_IREE_COMPILE_EXECUTABLE}"
+          --input "${PROJECT_SOURCE_DIR}/${input_mlir}"
+          --target "${LRRT_AMDGPU_TARGET}"
+          --artifact-stem "${artifact_stem}"
+          --out-dir "${_probe_dir}"
+          --try-vmfb
+      )
+      set_tests_properties(
+        ${probe_test}
+        PROPERTIES
+          FIXTURES_SETUP ${fixture}
+          LABELS "iree"
+          WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      )
+
+      add_test(
+        NAME ${run_test}
+        COMMAND
+          lrrt_iree_run_module_smoke
+          --device=lrrt
+          "--module=${_probe_vmfb}"
+          "--function=${function_name}"
+          ${ARGN}
+          --output=-
+      )
+      set_tests_properties(
+        ${run_test}
+        PROPERTIES
+          FIXTURES_REQUIRED ${fixture}
+          LABELS "iree;gpu"
+          PASS_REGULAR_EXPRESSION "${expected_output}"
+          WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      )
+    endfunction()
+
+    lrrt_add_iree_vmfb_smoke(
       lrrt_iree_vmfb_probe
-      PROPERTIES
-        FIXTURES_SETUP lrrt_iree_vmfb
-        LABELS "iree"
-        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      lrrt_iree_run_module_vmfb_smoke
+      lrrt_iree_vmfb
+      tools/iree_minimal_mul.mlir
+      minimal_mul
+      simple_mul
+      "4xf32=10 40 90 160"
+      "--input=4xf32=1 2 3 4"
+      "--input=4xf32=10 20 30 40"
     )
 
-    add_test(
-      NAME lrrt_iree_run_module_vmfb_smoke
-      COMMAND
-        lrrt_iree_run_module_smoke
-        --device=lrrt
-        "--module=${LRRT_IREE_LRRT_VMFB_PROBE}"
-        --function=simple_mul
-        "--input=4xf32=1 2 3 4"
-        "--input=4xf32=10 20 30 40"
-        --output=-
-    )
-    set_tests_properties(
-      lrrt_iree_run_module_vmfb_smoke
-      PROPERTIES
-        FIXTURES_REQUIRED lrrt_iree_vmfb
-        LABELS "iree;gpu"
-        PASS_REGULAR_EXPRESSION "4xf32=10 40 90 160"
-        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_two_dispatch_vmfb_probe
+      lrrt_iree_two_dispatch_run_module_vmfb_smoke
+      lrrt_iree_two_dispatch_vmfb
+      tools/iree_two_dispatch.mlir
+      two_dispatch
+      two_matmuls
+      "2x2xf32=\\[2 6\\]\\[6 12\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=2 0 0 3"
     )
   else()
     message(

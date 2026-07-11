@@ -165,12 +165,30 @@ ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_(vmfb_prob
 ```
 
 This test first serializes `tools/iree_minimal_mul.mlir` to
-`build-iree-probe/lrrt-vmfb/minimal_mul_<target>.vmfb`, then runs that VMFB
+`build-iree-probe/minimal_mul/minimal_mul_<target>.vmfb`, then runs that VMFB
 through `lrrt_iree_run_module_smoke --device=lrrt`. The expected output is the
 same minimal multiply result:
 
 ```text
 4xf32=10 40 90 160
+```
+
+The adapter also has a two-dispatch VMFB smoke test:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure -R 'lrrt_iree_two_dispatch_(vmfb_probe|run_module_vmfb_smoke)'
+```
+
+This serializes `tools/iree_two_dispatch.mlir` to
+`build-iree-probe/two_dispatch/two_dispatch_<target>.vmfb` and runs
+`two_matmuls` through `--device=lrrt`. The function dispatches the same 2x2
+matmul kernel twice with an intermediate device buffer, so it checks more than
+single-kernel launch: the lrrt HAL path must preserve command ordering and
+handoff the first dispatch output into the second dispatch. The expected output
+is:
+
+```text
+2x2xf32=[2 6][6 12]
 ```
 
 The probe also writes `minimal_mul_<target>_metadata.json` by running
