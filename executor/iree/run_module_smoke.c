@@ -21,8 +21,7 @@ int main(int argc, char **argv) {
   IREE_TRACE_ZONE_BEGIN(z0);
 
   iree_allocator_t host_allocator = iree_allocator_system();
-  iree_status_t status =
-      lrrt_iree_hal_driver_module_register(iree_hal_driver_registry_default());
+  iree_status_t status = lrrt_iree_hal_register_all();
   if (!iree_status_is_ok(status)) {
     iree_status_fprint(stderr, status);
     iree_status_free(status);

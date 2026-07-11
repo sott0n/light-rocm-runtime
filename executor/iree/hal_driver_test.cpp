@@ -32,8 +32,29 @@ bool read_file(const char *path, std::vector<uint8_t> *out_data) {
 }
 
 int test_lrrt_driver_registration() {
+  iree_status_t status = lrrt_iree_hal_register_all();
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    return 1;
+  }
+  status = lrrt_iree_hal_register_all();
+  if (!iree_status_is_ok(status)) {
+    iree_status_ignore(status);
+    return 1;
+  }
+
+  iree_hal_driver_t *default_registry_driver = nullptr;
+  status = iree_hal_driver_registry_try_create(
+      iree_hal_driver_registry_default(), IREE_SV("lrrt"),
+      iree_allocator_system(), &default_registry_driver);
+  if (!iree_status_is_ok(status) || !default_registry_driver) {
+    iree_status_ignore(status);
+    return 1;
+  }
+  iree_hal_driver_release(default_registry_driver);
+
   iree_hal_driver_registry_t *registry = nullptr;
-  iree_status_t status =
+  status =
       iree_hal_driver_registry_allocate(iree_allocator_system(), &registry);
   if (!iree_status_is_ok(status)) {
     iree_status_ignore(status);

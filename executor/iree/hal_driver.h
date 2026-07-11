@@ -10,6 +10,8 @@ extern "C" {
 iree_status_t
 lrrt_iree_hal_driver_module_register(iree_hal_driver_registry_t *registry);
 
+iree_status_t lrrt_iree_hal_register_all(void);
+
 #if defined(LRRT_IREE_HAL_DRIVER_TESTING)
 iree_status_t
 lrrt_iree_hal_buffer_device_pointer_for_test(iree_hal_buffer_t *buffer,

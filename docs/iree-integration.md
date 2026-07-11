@@ -183,7 +183,9 @@ The current adapter skeleton mapping is tracked in
 
 The first native HAL entry point now exists as a minimal `lrrt` driver factory.
 `lrrt_iree_hal_driver_module_register` can register the factory in an IREE HAL
-driver registry, and the registry can create the `lrrt` driver and a minimal
+driver registry, while `lrrt_iree_hal_register_all` provides an idempotent
+tooling entry point that registers the same factory with IREE's default HAL
+driver registry. The registry can create the `lrrt` driver and a minimal
 `iree_hal_device_t` by name. The device now owns a HAL allocator that can
 create device-local, non-mappable IREE HAL buffers backed by lrrt `lr_malloc`
 allocations. It also supports the first HAL queue transfer path with
@@ -199,11 +201,13 @@ explicit workgroup size metadata. Transfer and dispatch operations can now also
 be recorded into a minimal HAL command buffer and replayed through
 `queue_execute`; this path supports ordered update/fill/copy/dispatch records,
 indirect buffer slots resolved from the submission binding table, and
-lrrt-owned semaphore wait/signal lists. This is not enough for
-`iree-run-module --device=lrrt` yet: the next required steps are default
-workgroup metadata handling, connecting real VMFB executable payloads to this
-lrrt-backed HAL driver path, and eventually replacing host-side semaphore
-ordering with device-native synchronization if lrrt grows that primitive.
+lrrt-owned semaphore wait/signal lists. The local
+`lrrt_iree_run_module_smoke` binary now uses the default-registry registration
+entry point before calling IREE's run-module tooling path. The remaining work
+for a fully seamless upstream-style `iree-run-module --device=lrrt` path is to
+package or load the registration entry point outside this repo-local smoke
+binary, and eventually replace host-side semaphore ordering with device-native
+synchronization if lrrt grows that primitive.
 
 ### I2: Artifact inspection
 
