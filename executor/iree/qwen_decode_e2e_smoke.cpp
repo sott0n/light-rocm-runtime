@@ -1,114 +1,63 @@
-#include <cmath>
+#include <array>
 #include <cstdio>
-#include <string>
 #include <vector>
 
+#include "executor/iree/qwen_decode_runner.hpp"
 #include "executor/iree/vmfb_runner.hpp"
 #include "iree/base/api.h"
 #include "iree/base/tooling/flags.h"
-#include "iree/hal/api.h"
 
 namespace {
 
 using lrrt::iree_executor::BufferViewPtr;
-using lrrt::iree_executor::BufferViewReplacement;
+using lrrt::iree_executor::qwen_decode_expect_hidden;
+using lrrt::iree_executor::qwen_decode_step;
+using lrrt::iree_executor::qwen_decode_stub_step;
+using lrrt::iree_executor::QwenDecodeOutputIndex;
 using lrrt::iree_executor::VmfbRunner;
-
-bool report_status(iree_status_t status, const char *label) {
-  if (iree_status_is_ok(status)) {
-    return true;
-  }
-  std::fprintf(stderr, "%s failed\n", label);
-  iree_status_fprint(stderr, status);
-  iree_status_free(status);
-  return false;
-}
-
-std::vector<std::string> qwen_decode_step_specs(const char *new_value_spec) {
-  return {
-      "2x2xf32=1 2 3 4", "2x2xf32=1 2 3 4",     "2x3xf32=0 0 0 0 0 0",
-      "2xf32=0 0",       "3x2xf32=2 4 4 6 0 0", new_value_spec,
-      "2xf32=1 0",       "2xf32=0 1",           "2x2xf32=1 0 0 1",
-      "2x2xf32=1 0 0 1", "2x2xf32=1 0 0 1",
-  };
-}
-
-iree_status_t invoke_qwen_decode_step(VmfbRunner *runner,
-                                      const iree_vm_function_t &function,
-                                      iree_hal_buffer_view_t *key_cache,
-                                      iree_hal_buffer_view_t *value_cache,
-                                      const char *new_value_spec,
-                                      std::vector<BufferViewPtr> *outputs) {
-  std::vector<BufferViewReplacement> replacements;
-  if (key_cache) {
-    replacements.push_back({2, key_cache});
-  }
-  if (value_cache) {
-    replacements.push_back({4, value_cache});
-  }
-  return runner->invoke(function, qwen_decode_step_specs(new_value_spec),
-                        replacements, 3, outputs);
-}
-
-bool expect_matrix(iree_hal_buffer_view_t *view, const float (&expected)[4],
-                   const char *label) {
-  if (iree_hal_buffer_view_shape_rank(view) != 2 ||
-      iree_hal_buffer_view_shape_dim(view, 0) != 2 ||
-      iree_hal_buffer_view_shape_dim(view, 1) != 2) {
-    std::fprintf(stderr, "%s: unexpected shape\n", label);
-    return false;
-  }
-
-  float values[4] = {};
-  iree_hal_buffer_t *buffer = iree_hal_buffer_view_buffer(view);
-  if (!report_status(
-          iree_hal_buffer_map_read(buffer, 0, values, sizeof(values)), label)) {
-    return false;
-  }
-
-  for (int i = 0; i < 4; ++i) {
-    if (std::fabs(values[i] - expected[i]) > 1e-3f) {
-      std::fprintf(stderr, "%s[%d]: expected %.6g, got %.6g\n", label, i,
-                   expected[i], values[i]);
-      return false;
-    }
-  }
-  return true;
-}
 
 iree_status_t run_smoke(const char *module_path) {
   VmfbRunner runner;
   IREE_RETURN_IF_ERROR(runner.initialize(module_path));
 
-  iree_vm_function_t qwen_decode_step = {};
+  iree_vm_function_t decode_function = {};
   IREE_RETURN_IF_ERROR(
-      runner.lookup_function("qwen_decode_step", &qwen_decode_step));
+      runner.lookup_function("qwen_decode_step", &decode_function));
 
   std::vector<BufferViewPtr> first_outputs;
-  IREE_RETURN_IF_ERROR(invoke_qwen_decode_step(
-      &runner, qwen_decode_step, /*key_cache=*/nullptr,
-      /*value_cache=*/nullptr, "2xf32=6 8", &first_outputs));
+  IREE_RETURN_IF_ERROR(qwen_decode_step(
+      &runner, decode_function, qwen_decode_stub_step("2xf32=6 8"),
+      /*key_cache=*/nullptr, /*value_cache=*/nullptr, &first_outputs));
 
-  const float first_expected[4] = {30.0f, 72.0f, 56.0f, 110.0f};
-  if (!expect_matrix(first_outputs[2].get(), first_expected,
-                     "first qwen decode result")) {
+  const std::array<float, 4> first_expected = {30.0f, 72.0f, 56.0f, 110.0f};
+  if (!qwen_decode_expect_hidden(
+          first_outputs[static_cast<size_t>(QwenDecodeOutputIndex::kHidden)]
+              .get(),
+          first_expected, "first qwen decode result")) {
     return iree_make_status(IREE_STATUS_DATA_LOSS,
                             "first qwen decode result did not match");
   }
 
   std::vector<BufferViewPtr> second_outputs;
-  IREE_RETURN_IF_ERROR(invoke_qwen_decode_step(
-      &runner, qwen_decode_step, first_outputs[0].get(), first_outputs[1].get(),
-      "2xf32=8 10", &second_outputs));
+  IREE_RETURN_IF_ERROR(qwen_decode_step(
+      &runner, decode_function, qwen_decode_stub_step("2xf32=8 10"),
+      first_outputs[static_cast<size_t>(
+                        QwenDecodeOutputIndex::kKeyCacheTransposed)]
+          .get(),
+      first_outputs[static_cast<size_t>(QwenDecodeOutputIndex::kValueCache)]
+          .get(),
+      &second_outputs));
 
-  const float second_expected[4] = {
+  const std::array<float, 4> second_expected = {
       340.0f / 9.0f,
       754.0f / 9.0f,
       598.0f / 9.0f,
       1120.0f / 9.0f,
   };
-  if (!expect_matrix(second_outputs[2].get(), second_expected,
-                     "second qwen decode result")) {
+  if (!qwen_decode_expect_hidden(
+          second_outputs[static_cast<size_t>(QwenDecodeOutputIndex::kHidden)]
+              .get(),
+          second_expected, "second qwen decode result")) {
     return iree_make_status(IREE_STATUS_DATA_LOSS,
                             "second qwen decode result did not match");
   }

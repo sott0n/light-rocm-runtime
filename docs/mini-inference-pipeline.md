@@ -362,6 +362,36 @@ device-resident between token steps. It still uses deterministic stub tensors
 and fixed `2x2`/three-token cache shapes; connecting Qwen checkpoint weights
 and larger model dimensions remains future work.
 
+The current `qwen_decode_step` input contract is fixed as follows:
+
+| Index | Input | Static shape | Current meaning | Future Qwen source |
+| --- | --- | --- | --- | --- |
+| 0 | `input` | `2x2xf32` | Residual hidden state entering the decode step | token embedding or previous layer output |
+| 1 | `query` | `2x2xf32` | Precomputed Q-like tensor consumed by RoPE and attention | output of `q_proj(input_norm)` |
+| 2 | `old_key_cache_transposed` | `2x3xf32` | Previous K cache in `[head_dim, cache_tokens]` layout | long-lived per-layer K cache |
+| 3 | `new_key` | `2xf32` | New K vector for the current token before RoPE | output of `k_proj(input_norm)` |
+| 4 | `old_value_cache` | `3x2xf32` | Previous V cache in `[cache_tokens, head_dim]` layout | long-lived per-layer V cache |
+| 5 | `new_value` | `2xf32` | New V vector for the current token | output of `v_proj(input_norm)` |
+| 6 | `cos` | `2xf32` | RoPE cosine values for the current position | generated from Qwen RoPE config |
+| 7 | `sin` | `2xf32` | RoPE sine values for the current position | generated from Qwen RoPE config |
+| 8 | `w_gate` | `2x2xf32` | Stub gate projection weight for the FFN path | `mlp.gate_proj.weight` |
+| 9 | `w_up` | `2x2xf32` | Stub up projection weight for the FFN path | `mlp.up_proj.weight` |
+| 10 | `w_down` | `2x2xf32` | Stub down projection weight for the FFN path | `mlp.down_proj.weight` |
+
+The output contract is:
+
+| Index | Output | Static shape | Meaning |
+| --- | --- | --- | --- |
+| 0 | `key_cache_transposed` | `2x3xf32` | Updated K cache for the next token step |
+| 1 | `value_cache` | `3x2xf32` | Updated V cache for the next token step |
+| 2 | `hidden` | `2x2xf32` | Decode-step hidden result after attention and FFN |
+
+Only the FFN weights are explicit inputs in this first IREE skeleton. Q/K/V and
+attention-output projection weights are not connected yet; `query`, `new_key`,
+and `new_value` are supplied as already-projected tensors. That keeps the
+current VMFB small while leaving the input indices and cache ownership model
+stable for the next real-weight integration step.
+
 ## Executor Responsibilities
 
 An executor above `lrrt::Bundle` should own:
