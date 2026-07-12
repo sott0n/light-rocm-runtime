@@ -447,6 +447,46 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--input=2xf32=0 1"
     )
 
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_token_step_kv_cache_outputs_vmfb_probe
+      lrrt_iree_token_step_kv_cache_outputs_run_module_vmfb_smoke
+      lrrt_iree_token_step_kv_cache_outputs_vmfb
+      tools/iree_token_step_kv_cache_outputs.mlir
+      token_step_kv_cache_outputs
+      token_step_kv_cache_outputs
+      "2x2xf32=\\[4 6\\]\\[4 6\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x3xf32=0 0 0 0 0 0"
+      "--input=2xf32=0 0"
+      "--input=3x2xf32=2 4 4 6 0 0"
+      "--input=2xf32=6 8"
+      "--input=2xf32=1 0"
+      "--input=2xf32=0 1"
+      "--output=-"
+      "--output=-"
+    )
+
+    if(PYTHON_EXECUTABLE)
+      set(_token_step_outputs_vmfb
+          "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
+      )
+      add_test(
+        NAME lrrt_iree_token_step_kv_cache_two_step_smoke
+        COMMAND
+          "${PYTHON_EXECUTABLE}"
+          "${PROJECT_SOURCE_DIR}/tools/iree_token_step_kv_cache_two_step.py"
+          --runner "$<TARGET_FILE:lrrt_iree_run_module>"
+          --module "${_token_step_outputs_vmfb}"
+      )
+      set_tests_properties(
+        lrrt_iree_token_step_kv_cache_two_step_smoke
+        PROPERTIES
+          FIXTURES_REQUIRED lrrt_iree_token_step_kv_cache_outputs_vmfb
+          LABELS "iree;gpu"
+          WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+      )
+    endif()
+
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_multi_export_vmfb_probe
       lrrt_iree_multi_export_vmfb

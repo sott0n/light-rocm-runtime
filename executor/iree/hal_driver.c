@@ -2128,19 +2128,69 @@ static iree_status_t lrrt_iree_hal_device_copy_now(
                             "usage");
   }
 
-  void *source_device_ptr = NULL;
-  void *target_device_ptr = NULL;
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
-      source_buffer, source_offset, length, &source_device_ptr));
-  IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
-      target_buffer, target_offset, length, &target_device_ptr));
   lrrt_iree_hal_device_t *lrrt_device = lrrt_iree_hal_device_cast(device);
   lrrt_iree_hal_allocator_t *allocator =
       lrrt_iree_hal_allocator_cast(lrrt_device->device_allocator);
-  lr_status_t lr_status =
-      lr_memcpy(allocator->device, target_device_ptr, source_device_ptr,
-                (size_t)length, LR_MEMCPY_DEVICE_TO_DEVICE);
-  return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+  const bool source_is_lrrt =
+      iree_hal_resource_is(source_buffer, &lrrt_iree_hal_buffer_vtable);
+  const bool target_is_lrrt =
+      iree_hal_resource_is(target_buffer, &lrrt_iree_hal_buffer_vtable);
+
+  if (source_is_lrrt && target_is_lrrt) {
+    void *source_device_ptr = NULL;
+    void *target_device_ptr = NULL;
+    IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+        source_buffer, source_offset, length, &source_device_ptr));
+    IREE_RETURN_IF_ERROR(lrrt_iree_hal_buffer_device_range(
+        target_buffer, target_offset, length, &target_device_ptr));
+    lr_status_t lr_status =
+        lr_memcpy(allocator->device, target_device_ptr, source_device_ptr,
+                  (size_t)length, LR_MEMCPY_DEVICE_TO_DEVICE);
+    return lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+  }
+
+  void *staging = malloc((size_t)length);
+  if (!staging) {
+    return iree_make_status(IREE_STATUS_RESOURCE_EXHAUSTED,
+                            "lrrt HAL queue copy failed to allocate staging "
+                            "buffer");
+  }
+
+  iree_status_t status = iree_ok_status();
+  if (source_is_lrrt) {
+    void *source_device_ptr = NULL;
+    status = lrrt_iree_hal_buffer_device_range(source_buffer, source_offset,
+                                               length, &source_device_ptr);
+    if (iree_status_is_ok(status)) {
+      lr_status_t lr_status =
+          lr_memcpy(allocator->device, staging, source_device_ptr,
+                    (size_t)length, LR_MEMCPY_DEVICE_TO_HOST);
+      status = lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+    }
+  } else {
+    status =
+        iree_hal_buffer_map_read(source_buffer, source_offset, staging, length);
+  }
+
+  if (iree_status_is_ok(status)) {
+    if (target_is_lrrt) {
+      void *target_device_ptr = NULL;
+      status = lrrt_iree_hal_buffer_device_range(target_buffer, target_offset,
+                                                 length, &target_device_ptr);
+      if (iree_status_is_ok(status)) {
+        lr_status_t lr_status =
+            lr_memcpy(allocator->device, target_device_ptr, staging,
+                      (size_t)length, LR_MEMCPY_HOST_TO_DEVICE);
+        status = lrrt_iree_hal_status_from_lr(lr_status, "lr_memcpy");
+      }
+    } else {
+      status = iree_hal_buffer_map_write(target_buffer, target_offset, staging,
+                                         length);
+    }
+  }
+
+  free(staging);
+  return status;
 }
 
 static iree_status_t lrrt_iree_hal_device_queue_copy(

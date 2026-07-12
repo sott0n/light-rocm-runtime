@@ -54,7 +54,7 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Area | Current status | Current behavior | Coverage |
 | --- | --- | --- | --- |
 | Queue update | ✅ | Synchronously copies host bytes into an lrrt-backed HAL buffer. | `lrrt_iree_hal_driver_transfer_tests` |
-| Queue copy | ✅ | Synchronously copies between lrrt-backed HAL buffers. | `lrrt_iree_hal_driver_transfer_tests` |
+| Queue copy | ✅ | Synchronously copies between lrrt-backed HAL buffers and bridges lrrt buffers to/from mappable host-side HAL buffers when IREE tooling collects outputs. | `lrrt_iree_hal_driver_transfer_tests`, `lrrt_iree_token_step_kv_cache_outputs_run_module_vmfb_smoke` |
 | Queue fill | ✅/❌ | Synchronously materializes a host pattern and writes it to the target buffer. | Command-buffer transfer test |
 | File import | ✅/❌ | Wraps IREE file handles for queue read/write smoke paths. | `lrrt_iree_hal_driver_transfer_tests` |
 | Queue read | ✅/❌ | Reads host-backed file data into an lrrt-backed HAL buffer. | `lrrt_iree_hal_driver_transfer_tests` |
@@ -126,6 +126,8 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Mini decoder-layer with KV cache VMFB | ✅ | Runs the mini decoder-layer shape with cached K/V inputs instead of per-call K/V tensors. | `lrrt_iree_mini_decoder_layer_kv_cache_run_module_vmfb_smoke` |
 | Mini decoder-layer with RoPE and KV cache VMFB | ✅ | Runs RoPE on Q before cached K/V attention, then continues through the mini decoder-layer FFN path. | `lrrt_iree_mini_decoder_layer_rope_kv_cache_run_module_vmfb_smoke` |
 | Token-step KV cache VMFB | ✅ | Runs a fixed-shape one-token step that applies RoPE, updates K/V cache slots, and reads the updated cache for attention. | `lrrt_iree_token_step_kv_cache_run_module_vmfb_smoke` |
+| Token-step KV cache outputs VMFB | ✅ | Returns updated K cache, updated V cache, and attention context from one fixed-shape token step. | `lrrt_iree_token_step_kv_cache_outputs_run_module_vmfb_smoke` |
+| Two-step KV cache handoff | ✅ | Runs the token-step VMFB twice and feeds step 1 cache outputs into step 2 inputs through a small repo-local wrapper. | `lrrt_iree_token_step_kv_cache_two_step_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |
@@ -154,4 +156,7 @@ cache semantics. The current small-cache layout is `key_cache_transposed` as
 `[head_dim, cache_tokens]` and `value_cache` as `[cache_tokens, head_dim]`.
 The lrrt HAL adapter only receives these as ordinary buffer bindings; cache
 slot selection, RoPE placement, and attention semantics remain in the IREE
-program or an executor above the runtime.
+program or an executor above the runtime. The two-step handoff smoke makes this
+boundary explicit: a wrapper takes the first token-step outputs and passes them
+back as the second token-step inputs, while the lrrt HAL path continues to see
+plain HAL buffer bindings.
