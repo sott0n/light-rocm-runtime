@@ -573,6 +573,22 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     )
 
+    add_executable(
+      lrrt_iree_mini_decoder_layer_benchmark
+      mini_decoder_layer_device_resident_benchmark.cpp
+    )
+    target_link_libraries(
+      lrrt_iree_mini_decoder_layer_benchmark
+      PRIVATE
+        lrrt::iree_hal_driver
+        "-Wl,--start-group"
+        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+        "-Wl,--end-group"
+        dl
+        m
+        pthread
+    )
+
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_multi_export_vmfb_probe
       lrrt_iree_multi_export_vmfb

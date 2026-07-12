@@ -103,7 +103,7 @@ inline iree_status_t pop_front_buffer_view(iree_vm_list_t *outputs,
 
 class VmfbRunner {
 public:
-  iree_status_t initialize(const char *module_path, const char *function_name) {
+  iree_status_t initialize(const char *module_path) {
     IREE_RETURN_IF_ERROR(lrrt_iree_hal_register_all());
 
     iree_allocator_t host_allocator = iree_allocator_system();
@@ -131,19 +131,37 @@ public:
         /*out_replay_recorder=*/NULL));
     device_ = iree_hal_device_list_at(device_list_.get(), 0);
 
+    return iree_ok_status();
+  }
+
+  iree_status_t initialize(const char *module_path, const char *function_name) {
+    IREE_RETURN_IF_ERROR(initialize(module_path));
+    return lookup_function(function_name, &function_);
+  }
+
+  iree_status_t lookup_function(const char *function_name,
+                                iree_vm_function_t *out_function) {
     return iree_vm_module_lookup_function_by_name(
         module_.get(), IREE_VM_FUNCTION_LINKAGE_EXPORT,
-        iree_make_cstring_view(function_name), &function_);
+        iree_make_cstring_view(function_name), out_function);
   }
 
   iree_status_t invoke(const std::vector<std::string> &input_specs,
                        const std::vector<BufferViewReplacement> &replacements,
                        iree_host_size_t output_count,
                        std::vector<BufferViewPtr> *outputs) {
+    return invoke(function_, input_specs, replacements, output_count, outputs);
+  }
+
+  iree_status_t invoke(const iree_vm_function_t &function,
+                       const std::vector<std::string> &input_specs,
+                       const std::vector<BufferViewReplacement> &replacements,
+                       iree_host_size_t output_count,
+                       std::vector<BufferViewPtr> *outputs) {
     outputs->clear();
 
     const iree_vm_function_signature_t signature =
-        iree_vm_function_signature(&function_);
+        iree_vm_function_signature(&function);
     iree_string_view_t arguments_cconv = iree_string_view_empty();
     iree_string_view_t results_cconv = iree_string_view_empty();
     IREE_RETURN_IF_ERROR(iree_vm_function_call_get_cconv_fragments(
@@ -174,13 +192,13 @@ public:
 
     iree_hal_fence_t *finish_fence = NULL;
     iree_status_t status =
-        iree_tooling_append_async_fences(inputs.get(), function_, device_,
+        iree_tooling_append_async_fences(inputs.get(), function, device_,
                                          /*wait_fence=*/NULL, &finish_fence);
     if (iree_status_is_ok(status)) {
-      status = iree_vm_invoke(context_.get(), function_,
-                              IREE_VM_INVOCATION_FLAG_NONE,
-                              /*policy=*/NULL, inputs.get(), raw_outputs.get(),
-                              iree_allocator_system());
+      status =
+          iree_vm_invoke(context_.get(), function, IREE_VM_INVOCATION_FLAG_NONE,
+                         /*policy=*/NULL, inputs.get(), raw_outputs.get(),
+                         iree_allocator_system());
     }
     if (iree_status_is_ok(status) && finish_fence) {
       status = iree_hal_fence_wait(finish_fence, iree_infinite_timeout(),

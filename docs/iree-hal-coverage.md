@@ -132,6 +132,7 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Two-step KV cache host handoff | ✅ | Runs the token-step VMFB twice through the CLI wrapper and feeds step 1 cache outputs into step 2 inputs after text readback. | `lrrt_iree_token_step_kv_cache_two_step_smoke` |
 | Two-step KV cache device-resident handoff | ✅ | Runs the token-step VMFB twice in one process and passes step 1 K/V cache buffer views directly into step 2 without CLI text readback. | `lrrt_iree_token_step_kv_cache_device_resident_smoke` |
 | Two-step mini decoder-layer device-resident handoff | ✅ | Runs the mini decoder-layer K/V output VMFB twice in one process and passes step 1 K/V cache buffer views directly into step 2. | `lrrt_iree_mini_decoder_layer_device_resident_smoke` |
+| Mini decoder-layer handoff benchmark | ✅ | Compares host readback/reparse handoff against direct buffer-view replacement for the two-step mini decoder-layer path. | `lrrt_iree_mini_decoder_layer_benchmark` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |
