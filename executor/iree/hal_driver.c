@@ -579,10 +579,6 @@ static iree_status_t lrrt_iree_hal_buffer_device_range(
   if (!base_buffer) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT, "buffer is null");
   }
-  if (!iree_hal_resource_is(base_buffer, &lrrt_iree_hal_buffer_vtable)) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "buffer is not an lrrt HAL buffer");
-  }
   iree_device_size_t byte_length = iree_hal_buffer_byte_length(base_buffer);
   if (offset > byte_length) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
@@ -600,8 +596,19 @@ static iree_status_t lrrt_iree_hal_buffer_device_range(
                             (uint64_t)offset, (uint64_t)length,
                             (uint64_t)byte_length);
   }
-  lrrt_iree_hal_buffer_t *buffer = lrrt_iree_hal_buffer_cast(base_buffer);
-  *out_device_ptr = (uint8_t *)buffer->device_ptr + offset;
+
+  iree_hal_buffer_t *allocated_buffer =
+      iree_hal_buffer_allocated_buffer(base_buffer);
+  if (!allocated_buffer) {
+    allocated_buffer = base_buffer;
+  }
+  if (!iree_hal_resource_is(allocated_buffer, &lrrt_iree_hal_buffer_vtable)) {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "buffer is not backed by an lrrt HAL buffer");
+  }
+  lrrt_iree_hal_buffer_t *buffer = lrrt_iree_hal_buffer_cast(allocated_buffer);
+  *out_device_ptr = (uint8_t *)buffer->device_ptr +
+                    iree_hal_buffer_byte_offset(base_buffer) + offset;
   return iree_ok_status();
 }
 
@@ -2431,7 +2438,8 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
     status = lrrt_iree_hal_buffer_ref_device_range(binding, &device_ptr);
     if (!iree_status_is_ok(status)) {
       free(kernargs);
-      return status;
+      return iree_status_annotate_f(
+          status, "resolving lrrt HAL dispatch binding %" PRIhsz, i);
     }
     memcpy(kernargs + i * sizeof(device_ptr), &device_ptr, sizeof(device_ptr));
   }

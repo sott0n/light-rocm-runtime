@@ -466,10 +466,11 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--output=-"
     )
 
+    set(_token_step_outputs_vmfb
+        "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
+    )
+
     if(PYTHON_EXECUTABLE)
-      set(_token_step_outputs_vmfb
-          "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
-      )
       add_test(
         NAME lrrt_iree_token_step_kv_cache_two_step_smoke
         COMMAND
@@ -486,6 +487,35 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
           WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
       )
     endif()
+
+    add_executable(
+      lrrt_iree_token_step_kv_cache_device_resident_smoke
+      token_step_kv_cache_device_resident_smoke.cpp
+    )
+    target_link_libraries(
+      lrrt_iree_token_step_kv_cache_device_resident_smoke
+      PRIVATE
+        lrrt::iree_hal_driver
+        "-Wl,--start-group"
+        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+        "-Wl,--end-group"
+        dl
+        m
+        pthread
+    )
+    add_test(
+      NAME lrrt_iree_token_step_kv_cache_device_resident_smoke
+      COMMAND
+        lrrt_iree_token_step_kv_cache_device_resident_smoke
+        "${_token_step_outputs_vmfb}"
+    )
+    set_tests_properties(
+      lrrt_iree_token_step_kv_cache_device_resident_smoke
+      PROPERTIES
+        FIXTURES_REQUIRED lrrt_iree_token_step_kv_cache_outputs_vmfb
+        LABELS "iree;gpu"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
 
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_multi_export_vmfb_probe
