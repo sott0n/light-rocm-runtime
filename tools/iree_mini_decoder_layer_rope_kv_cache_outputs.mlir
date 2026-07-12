@@ -1,3 +1,45 @@
+func.func @qwen_decode_step(
+    %input: tensor<2x2xf32>,
+    %query: tensor<2x2xf32>,
+    %old_key_cache_transposed: tensor<2x3xf32>,
+    %new_key: tensor<2xf32>,
+    %old_value_cache: tensor<3x2xf32>,
+    %new_value: tensor<2xf32>,
+    %cos: tensor<2xf32>,
+    %sin: tensor<2xf32>,
+    %w_gate: tensor<2x2xf32>,
+    %w_up: tensor<2x2xf32>,
+    %w_down: tensor<2x2xf32>) -> (tensor<2x3xf32>, tensor<3x2xf32>, tensor<2x2xf32>) {
+  %key_cache_transposed, %value_cache, %result =
+      func.call @mini_decoder_layer_rope_kv_cache_outputs(
+        %input,
+        %query,
+        %old_key_cache_transposed,
+        %new_key,
+        %old_value_cache,
+        %new_value,
+        %cos,
+        %sin,
+        %w_gate,
+        %w_up,
+        %w_down
+      ) : (
+        tensor<2x2xf32>,
+        tensor<2x2xf32>,
+        tensor<2x3xf32>,
+        tensor<2xf32>,
+        tensor<3x2xf32>,
+        tensor<2xf32>,
+        tensor<2xf32>,
+        tensor<2xf32>,
+        tensor<2x2xf32>,
+        tensor<2x2xf32>,
+        tensor<2x2xf32>
+      ) -> (tensor<2x3xf32>, tensor<3x2xf32>, tensor<2x2xf32>)
+  return %key_cache_transposed, %value_cache, %result
+      : tensor<2x3xf32>, tensor<3x2xf32>, tensor<2x2xf32>
+}
+
 func.func @mini_decoder_layer_rope_kv_cache_outputs(
     %input: tensor<2x2xf32>,
     %query: tensor<2x2xf32>,

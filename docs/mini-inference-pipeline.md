@@ -342,6 +342,26 @@ The benchmark timing modes are intentionally simple:
 
 The benchmark still does not break timing down by individual stage or operator.
 
+The IREE adapter path exposes a matching static-shape `qwen_decode_step` VMFB
+export for the same one-token decode contract:
+
+```text
+input/query + K/V cache
+  -> RoPE
+  -> K/V cache update
+  -> attention score + softmax + value aggregation
+  -> FFN
+  -> updated K/V cache + hidden result
+```
+
+`lrrt_iree_qwen_decode_e2e_smoke` calls that export twice through
+`VmfbRunner`, passing the first step's K/V cache `buffer_view`s directly into
+the second step. This is the current IREE+lrrt E2E skeleton: it proves the
+VMFB can run through the lrrt HAL adapter and that decode-step state can stay
+device-resident between token steps. It still uses deterministic stub tensors
+and fixed `2x2`/three-token cache shapes; connecting Qwen checkpoint weights
+and larger model dimensions remains future work.
+
 ## Executor Responsibilities
 
 An executor above `lrrt::Bundle` should own:
