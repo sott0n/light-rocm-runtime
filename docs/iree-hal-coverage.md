@@ -126,10 +126,12 @@ dispatcher and predictable resource manager underneath the HAL boundary.
 | Mini decoder-layer VMFB | ✅ | Runs attention softmax/residual, FFN gate/up/down, and final residual in one IREE entry point. | `lrrt_iree_mini_decoder_layer_run_module_vmfb_smoke` |
 | Mini decoder-layer with KV cache VMFB | ✅ | Runs the mini decoder-layer shape with cached K/V inputs instead of per-call K/V tensors. | `lrrt_iree_mini_decoder_layer_kv_cache_run_module_vmfb_smoke` |
 | Mini decoder-layer with RoPE and KV cache VMFB | ✅ | Runs RoPE on Q before cached K/V attention, then continues through the mini decoder-layer FFN path. | `lrrt_iree_mini_decoder_layer_rope_kv_cache_run_module_vmfb_smoke` |
+| Mini decoder-layer K/V output VMFB | ✅ | Returns updated K cache, updated V cache, and the mini decoder-layer result from one RoPE + KV cache + FFN entry point. | `lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_run_module_vmfb_smoke` |
 | Token-step KV cache VMFB | ✅ | Runs a fixed-shape one-token step that applies RoPE, updates K/V cache slots, and reads the updated cache for attention. | `lrrt_iree_token_step_kv_cache_run_module_vmfb_smoke` |
 | Token-step KV cache outputs VMFB | ✅ | Returns updated K cache, updated V cache, and attention context from one fixed-shape token step. | `lrrt_iree_token_step_kv_cache_outputs_run_module_vmfb_smoke` |
 | Two-step KV cache host handoff | ✅ | Runs the token-step VMFB twice through the CLI wrapper and feeds step 1 cache outputs into step 2 inputs after text readback. | `lrrt_iree_token_step_kv_cache_two_step_smoke` |
 | Two-step KV cache device-resident handoff | ✅ | Runs the token-step VMFB twice in one process and passes step 1 K/V cache buffer views directly into step 2 without CLI text readback. | `lrrt_iree_token_step_kv_cache_device_resident_smoke` |
+| Two-step mini decoder-layer device-resident handoff | ✅ | Runs the mini decoder-layer K/V output VMFB twice in one process and passes step 1 K/V cache buffer views directly into step 2. | `lrrt_iree_mini_decoder_layer_device_resident_smoke` |
 | Multi-export VMFB | ✅ | Runs separate VMFB exports through the same adapter path. | `lrrt_iree_multi_export_*_run_module_vmfb_smoke` |
 | Stock external `iree-run-module --device=lrrt` | ❌ | The pinned IREE tool registers compiled-in HAL drivers; lrrt is available through the lrrt-linked launcher, not dynamic injection into an unmodified binary. | Remaining integration task |
 | Dynamic plugin packaging | ❌ | No packaged external driver plugin exists yet. | Remaining integration task |

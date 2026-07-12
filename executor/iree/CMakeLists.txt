@@ -466,8 +466,34 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--output=-"
     )
 
+    lrrt_add_iree_vmfb_smoke(
+      lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_vmfb_probe
+      lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_run_module_vmfb_smoke
+      lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_vmfb
+      tools/iree_mini_decoder_layer_rope_kv_cache_outputs.mlir
+      mini_decoder_layer_rope_kv_cache_outputs
+      mini_decoder_layer_rope_kv_cache_outputs
+      "2x2xf32=\\[30 72\\]\\[56 110\\]"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x2xf32=1 2 3 4"
+      "--input=2x3xf32=0 0 0 0 0 0"
+      "--input=2xf32=0 0"
+      "--input=3x2xf32=2 4 4 6 0 0"
+      "--input=2xf32=6 8"
+      "--input=2xf32=1 0"
+      "--input=2xf32=0 1"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+      "--input=2x2xf32=1 0 0 1"
+      "--output=-"
+      "--output=-"
+    )
+
     set(_token_step_outputs_vmfb
         "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
+    )
+    set(_mini_decoder_layer_outputs_vmfb
+        "${PROJECT_SOURCE_DIR}/build-iree-probe/mini_decoder_layer_rope_kv_cache_outputs/mini_decoder_layer_rope_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
     )
 
     if(PYTHON_EXECUTABLE)
@@ -513,6 +539,36 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       lrrt_iree_token_step_kv_cache_device_resident_smoke
       PROPERTIES
         FIXTURES_REQUIRED lrrt_iree_token_step_kv_cache_outputs_vmfb
+        LABELS "iree;gpu"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+
+    add_executable(
+      lrrt_iree_mini_decoder_layer_device_resident_smoke
+      mini_decoder_layer_device_resident_smoke.cpp
+    )
+    target_link_libraries(
+      lrrt_iree_mini_decoder_layer_device_resident_smoke
+      PRIVATE
+        lrrt::iree_hal_driver
+        "-Wl,--start-group"
+        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+        "-Wl,--end-group"
+        dl
+        m
+        pthread
+    )
+    add_test(
+      NAME lrrt_iree_mini_decoder_layer_device_resident_smoke
+      COMMAND
+        lrrt_iree_mini_decoder_layer_device_resident_smoke
+        "${_mini_decoder_layer_outputs_vmfb}"
+    )
+    set_tests_properties(
+      lrrt_iree_mini_decoder_layer_device_resident_smoke
+      PROPERTIES
+        FIXTURES_REQUIRED
+          lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_vmfb
         LABELS "iree;gpu"
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
     )

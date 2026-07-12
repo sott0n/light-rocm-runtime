@@ -29,41 +29,41 @@ iree_status_t invoke_step(VmfbRunner *runner, iree_hal_buffer_view_t *key_cache,
                           const char *new_value_spec,
                           std::vector<BufferViewPtr> *outputs) {
   const std::vector<std::string> specs = {
-      "2x2xf32=1 2 3 4",     "2x3xf32=0 0 0 0 0 0", "2xf32=0 0",
-      "3x2xf32=2 4 4 6 0 0", new_value_spec,        "2xf32=1 0",
-      "2xf32=0 1",
+      "2x2xf32=1 2 3 4", "2x2xf32=1 2 3 4",     "2x3xf32=0 0 0 0 0 0",
+      "2xf32=0 0",       "3x2xf32=2 4 4 6 0 0", new_value_spec,
+      "2xf32=1 0",       "2xf32=0 1",           "2x2xf32=1 0 0 1",
+      "2x2xf32=1 0 0 1", "2x2xf32=1 0 0 1",
   };
 
   std::vector<BufferViewReplacement> replacements;
   if (key_cache) {
-    replacements.push_back({1, key_cache});
+    replacements.push_back({2, key_cache});
   }
   if (value_cache) {
-    replacements.push_back({3, value_cache});
+    replacements.push_back({4, value_cache});
   }
   return runner->invoke(specs, replacements, 3, outputs);
 }
 
-bool expect_context(iree_hal_buffer_view_t *context,
-                    const float (&expected)[4]) {
-  if (iree_hal_buffer_view_shape_rank(context) != 2 ||
-      iree_hal_buffer_view_shape_dim(context, 0) != 2 ||
-      iree_hal_buffer_view_shape_dim(context, 1) != 2) {
-    std::fprintf(stderr, "unexpected context shape\n");
+bool expect_matrix(iree_hal_buffer_view_t *view, const float (&expected)[4],
+                   const char *label) {
+  if (iree_hal_buffer_view_shape_rank(view) != 2 ||
+      iree_hal_buffer_view_shape_dim(view, 0) != 2 ||
+      iree_hal_buffer_view_shape_dim(view, 1) != 2) {
+    std::fprintf(stderr, "%s: unexpected shape\n", label);
     return false;
   }
 
   float values[4] = {};
-  iree_hal_buffer_t *buffer = iree_hal_buffer_view_buffer(context);
+  iree_hal_buffer_t *buffer = iree_hal_buffer_view_buffer(view);
   if (!report_status(
-          iree_hal_buffer_map_read(buffer, 0, values, sizeof(values)),
-          "iree_hal_buffer_map_read(context)")) {
+          iree_hal_buffer_map_read(buffer, 0, values, sizeof(values)), label)) {
     return false;
   }
 
   for (int i = 0; i < 4; ++i) {
-    if (std::fabs(values[i] - expected[i]) > 1e-4f) {
-      std::fprintf(stderr, "context[%d]: expected %.6g, got %.6g\n", i,
+    if (std::fabs(values[i] - expected[i]) > 1e-3f) {
+      std::fprintf(stderr, "%s[%d]: expected %.6g, got %.6g\n", label, i,
                    expected[i], values[i]);
       return false;
     }
@@ -73,18 +73,19 @@ bool expect_context(iree_hal_buffer_view_t *context,
 
 iree_status_t run_smoke(const char *module_path) {
   VmfbRunner runner;
-  IREE_RETURN_IF_ERROR(
-      runner.initialize(module_path, "token_step_kv_cache_outputs"));
+  IREE_RETURN_IF_ERROR(runner.initialize(
+      module_path, "mini_decoder_layer_rope_kv_cache_outputs"));
 
   std::vector<BufferViewPtr> first_outputs;
   IREE_RETURN_IF_ERROR(invoke_step(&runner, /*key_cache=*/nullptr,
                                    /*value_cache=*/nullptr, "2xf32=6 8",
                                    &first_outputs));
 
-  const float first_expected[4] = {4.0f, 6.0f, 4.0f, 6.0f};
-  if (!expect_context(first_outputs[2].get(), first_expected)) {
+  const float first_expected[4] = {30.0f, 72.0f, 56.0f, 110.0f};
+  if (!expect_matrix(first_outputs[2].get(), first_expected,
+                     "first decoder result")) {
     return iree_make_status(IREE_STATUS_DATA_LOSS,
-                            "first context did not match expected values");
+                            "first decoder result did not match");
   }
 
   std::vector<BufferViewPtr> second_outputs;
@@ -92,11 +93,16 @@ iree_status_t run_smoke(const char *module_path) {
                                    first_outputs[1].get(), "2xf32=8 10",
                                    &second_outputs));
 
-  const float second_expected[4] = {14.0f / 3.0f, 20.0f / 3.0f, 14.0f / 3.0f,
-                                    20.0f / 3.0f};
-  if (!expect_context(second_outputs[2].get(), second_expected)) {
+  const float second_expected[4] = {
+      340.0f / 9.0f,
+      754.0f / 9.0f,
+      598.0f / 9.0f,
+      1120.0f / 9.0f,
+  };
+  if (!expect_matrix(second_outputs[2].get(), second_expected,
+                     "second decoder result")) {
     return iree_make_status(IREE_STATUS_DATA_LOSS,
-                            "second context did not match expected values");
+                            "second decoder result did not match");
   }
 
   return iree_ok_status();
@@ -105,12 +111,14 @@ iree_status_t run_smoke(const char *module_path) {
 } // namespace
 
 int main(int argc, char **argv) {
-  iree_flags_set_usage("lrrt_iree_token_step_kv_cache_device_resident_smoke",
-                       "Runs token-step KV cache twice without host handoff.");
+  iree_flags_set_usage("lrrt_iree_mini_decoder_layer_device_resident_smoke",
+                       "Runs a mini decoder layer twice with device-resident "
+                       "KV cache handoff.");
   iree_flags_parse_checked(IREE_FLAGS_PARSE_MODE_DEFAULT, &argc, &argv);
 
   if (argc != 2) {
-    std::fprintf(stderr, "usage: %s <token_step_kv_cache_outputs.vmfb>\n",
+    std::fprintf(stderr,
+                 "usage: %s <mini_decoder_layer_rope_kv_cache_outputs.vmfb>\n",
                  argv[0]);
     return 2;
   }
@@ -122,6 +130,6 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::puts("iree_token_step_kv_cache_device_resident: ok");
+  std::puts("iree_mini_decoder_layer_device_resident: ok");
   return 0;
 }
