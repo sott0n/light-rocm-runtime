@@ -89,6 +89,17 @@ int main() {
     second_queue.synchronize();
     expect_value(final_output, input.back() * alpha * alpha, "cross-queue");
 
+    const ScaleArgs same_queue_first_args = {
+        static_cast<const float *>(source.data()),
+        static_cast<float *>(first_output.data()), alpha, n - 1};
+    const ScaleArgs same_queue_second_args = {
+        static_cast<const float *>(first_output.data()),
+        static_cast<float *>(final_output.data()), alpha, 0};
+    lrrt::launch(first_queue, kernel, config, same_queue_first_args);
+    lrrt::launch(first_queue, kernel, config, same_queue_second_args);
+    first_queue.synchronize();
+    expect_value(final_output, input.back() * alpha * alpha, "same-queue");
+
     lrrt::Event input_copied(device);
     lrrt::copy_device_to_device_async(staging, source, source.size(),
                                       input_copied, {});

@@ -1745,9 +1745,12 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     queue.kernarg_pool.push_back(kernarg);
     return dependency_status;
   }
-  const bool wait_for_dependencies = use_implicit_dependencies
-                                         ? !queue.pending_barriers.empty()
-                                         : !event_dependencies.empty();
+  // Keep packets on the same lrrt queue completion-ordered. Several executor
+  // pipelines pass one kernel's output directly to the next kernel.
+  const bool wait_for_dependencies =
+      !queue.pending_dispatches.empty() ||
+      (use_implicit_dependencies ? !queue.pending_barriers.empty()
+                                 : !event_dependencies.empty());
 
   const uint64_t index = hsa_queue_add_write_index_scacq_screl(queue.queue, 1);
   auto *packets =

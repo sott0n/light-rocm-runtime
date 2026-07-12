@@ -535,6 +535,14 @@ public:
                                       copy_complete, {&source_complete});
   }
 
+  void copy_output_to_buffer(lrrt::DeviceBuffer &dst) const {
+    if (dst.size() < static_cast<size_t>(hidden_) * sizeof(float)) {
+      throw std::runtime_error("mini decoder layer output buffer is too small");
+    }
+    lrrt::copy_device_to_device(dst, 0, buffers_.get("out"), 0,
+                                static_cast<size_t>(hidden_) * sizeof(float));
+  }
+
 private:
   void pack_model_inputs(std::vector<unsigned char> &packed,
                          const std::vector<float> &hidden_states,

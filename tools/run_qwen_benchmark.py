@@ -101,6 +101,10 @@ def benchmark_command(args: argparse.Namespace, layers: int) -> list[str]:
         command.append("--no-warmup")
     if args.no_model_tail:
         command.append("--no-model-tail")
+    if args.e2e_check:
+        command.append("--e2e-check")
+    if args.sync_stack:
+        command.append("--sync-stack")
     if args.layer_sweep:
         command.append("--layer-sweep")
     if args.trace_setup:
@@ -156,6 +160,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-convert", action="store_true")
     parser.add_argument("--no-warmup", action="store_true")
     parser.add_argument("--no-model-tail", action="store_true")
+    parser.add_argument("--e2e-check", action="store_true")
+    parser.add_argument("--sync-stack", action="store_true")
     parser.add_argument("--layer-sweep", action="store_true")
     parser.add_argument("--trace-setup", action="store_true")
     parser.add_argument("--trace-run", action="store_true")

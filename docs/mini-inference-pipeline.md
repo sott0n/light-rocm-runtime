@@ -217,6 +217,38 @@ when `uv` is available, and falls back to the current Python interpreter when
 The current wrapper starts at layer 0 because the benchmark consumes
 `layer_0..layer_N` directories.
 
+`tools/run_qwen_e2e.py` is the full E2E check entry point. It wraps the same
+converter and benchmark runner, but always requires the model tail and passes
+`--e2e-check` and `--sync-stack` to make logits production, finite output
+values, and synchronized layer handoff part of the success condition:
+
+```bash
+python3 tools/run_qwen_e2e.py \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --bundle-dir /tmp/lrrt-qwen-e2e \
+  --keys 4 \
+  --token-ids 0,1,2
+```
+
+By default the E2E wrapper reads `num_hidden_layers` from the checkpoint config
+and runs every layer. The path is:
+
+```text
+local Qwen checkpoint
+  -> mini decoder layer bundles + model tail bundle
+  -> lrrt Triton decoder stack
+  -> synchronized device-to-device layer handoff
+  -> final RMSNorm
+  -> lm_head logits
+  -> finite-logit/top-logit validation
+```
+
+This is still the mini FP32 runtime path rather than a tokenizer-integrated
+chat loop. The input prompt is represented by explicit token ids whose
+embedding rows initialize the first decoder layer.
+The benchmark path can still use queued async handoff, but the E2E wrapper uses
+the synchronized path so correctness checks do not depend on cross-queue timing.
+
 The intended per-layer mapping is:
 
 | Mini decoder tensor | Qwen checkpoint tensor | Expected shape in mini bundle | Conversion note |

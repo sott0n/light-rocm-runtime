@@ -97,6 +97,8 @@ struct Options {
   bool layer_sweep;
   bool no_warmup;
   bool no_model_tail;
+  bool e2e_check;
+  bool sync_stack;
   bool trace_setup;
   bool trace_run;
 };
@@ -173,8 +175,8 @@ uint32_t parse_u32(const char *text, const char *label) {
 }
 
 Options parse_options(int argc, char **argv) {
-  Options options{20,    nullptr, nullptr, 0,     0,    false,
-                  false, false,   false,   false, false};
+  Options options{20,    nullptr, nullptr, 0,     0,     false, false,
+                  false, false,   false,   false, false, false};
   bool saw_iterations = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--weights") == 0) {
@@ -204,6 +206,10 @@ Options parse_options(int argc, char **argv) {
       options.no_warmup = true;
     } else if (strcmp(argv[i], "--no-model-tail") == 0) {
       options.no_model_tail = true;
+    } else if (strcmp(argv[i], "--e2e-check") == 0) {
+      options.e2e_check = true;
+    } else if (strcmp(argv[i], "--sync-stack") == 0) {
+      options.sync_stack = true;
     } else if (strcmp(argv[i], "--trace-setup") == 0) {
       options.trace_setup = true;
     } else if (strcmp(argv[i], "--trace-run") == 0) {
@@ -216,7 +222,8 @@ Options parse_options(int argc, char **argv) {
           "usage: lrrt_triton_mini_decoder_layer_benchmark [count] "
           "[--weights weights.json | --weights-dir dir --layers count] "
           "[--valid-keys count] [--layer-sweep] [--no-warmup] "
-          "[--no-model-tail] [--trace-setup] [--trace-run]");
+          "[--no-model-tail] [--e2e-check] [--sync-stack] "
+          "[--trace-setup] [--trace-run]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -231,6 +238,15 @@ Options parse_options(int argc, char **argv) {
   }
   if (options.layer_sweep && !options.weights_dir) {
     throw std::invalid_argument("--layer-sweep requires --weights-dir");
+  }
+  if (options.e2e_check && !options.weights_dir) {
+    throw std::invalid_argument("--e2e-check requires --weights-dir");
+  }
+  if (options.e2e_check && options.no_model_tail) {
+    throw std::invalid_argument("--e2e-check requires model tail");
+  }
+  if (options.sync_stack && !options.weights_dir) {
+    throw std::invalid_argument("--sync-stack requires --weights-dir");
   }
   return options;
 }
@@ -537,7 +553,7 @@ Measurements measure_stack_case(
     size_t layer_count,
     const lrrt::executor::triton::mini::ModelTailWeights *tail_weights,
     uint32_t iterations, uint32_t warmup_iterations, bool trace_setup,
-    bool trace_run) {
+    bool trace_run, bool sync_stack) {
   device.reset_memory_stats();
   if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
@@ -725,13 +741,50 @@ Measurements measure_stack_case(
     synchronize_stack();
   };
 
+  auto run_stack_synchronous = [&](StageBreakdown *stage_breakdown) {
+    for (size_t layer = 0; layer < layer_count; ++layer) {
+      for (uint32_t key = 1; key <= valid_keys; ++key) {
+        lrrt::executor::triton::mini::DecoderLayerStageTiming timing;
+        executors[layer]->run(key, {}, stage_breakdown ? &timing : nullptr);
+        executors[layer]->synchronize();
+        if (stage_breakdown) {
+          accumulate_stage_breakdown(*stage_breakdown, timing);
+        }
+        if (layer + 1 < layer_count) {
+          auto copy_begin = Clock::now();
+          executors[layer]->copy_output_to_hidden_state(*executors[layer + 1],
+                                                        key - 1);
+          if (stage_breakdown) {
+            auto copy_end = Clock::now();
+            stage_breakdown->handoff_copy_ns +=
+                elapsed_ns(copy_begin, copy_end);
+            ++stage_breakdown->handoff_copies;
+          }
+        }
+      }
+    }
+    if (tail) {
+      executors.back()->copy_output_to_buffer(tail->hidden_buffer());
+      lrrt::executor::triton::mini::ModelTailStageTiming timing;
+      tail->run({}, stage_breakdown ? &timing : nullptr);
+      tail->synchronize();
+      if (stage_breakdown) {
+        accumulate_stage_breakdown(*stage_breakdown, timing);
+      }
+    }
+  };
+
   auto warmup_begin = Clock::now();
   for (uint32_t i = 0; i < warmup_iterations; ++i) {
     if (trace_run) {
       fprintf(stderr, "  warmup %u/%u begin\n", i + 1, warmup_iterations);
       fflush(stderr);
     }
-    run_stack();
+    if (sync_stack) {
+      run_stack_synchronous(nullptr);
+    } else {
+      run_stack();
+    }
     if (trace_run) {
       fprintf(stderr, "  warmup %u/%u end\n", i + 1, warmup_iterations);
       fflush(stderr);
@@ -747,9 +800,13 @@ Measurements measure_stack_case(
       fflush(stderr);
     }
     auto begin = Clock::now();
-    StackSubmission submission =
-        submit_stack(nullptr, nullptr, &stage_breakdown);
-    synchronize_stack();
+    if (sync_stack) {
+      run_stack_synchronous(&stage_breakdown);
+    } else {
+      StackSubmission submission =
+          submit_stack(nullptr, nullptr, &stage_breakdown);
+      synchronize_stack();
+    }
     auto end = Clock::now();
     if (trace_run) {
       fprintf(stderr, "  cpu round %u/%u end\n", i + 1, iterations);
@@ -869,7 +926,7 @@ void print_stage_breakdown(const Measurements &measurements,
          colors.reset, colors.time,
          average_us(stages.mlp_ns, stages.decoder_runs), colors.reset);
   if (stages.handoff_copies != 0) {
-    printf("%sHandoff submit avg%s copy=%s%.3f%s us per async copy\n",
+    printf("%sHandoff submit avg%s copy=%s%.3f%s us per handoff copy\n",
            colors.label, colors.reset, colors.time,
            average_us(stages.handoff_copy_ns, stages.handoff_copies),
            colors.reset);
@@ -943,6 +1000,24 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
   print_stage_breakdown(measurements, colors);
   print_memory_stats(measurements, colors);
   fflush(stdout);
+}
+
+void validate_e2e_result(const Measurements &measurements) {
+  if (!measurements.produced_logits) {
+    throw std::runtime_error("Qwen E2E check failed: logits were not produced");
+  }
+  if (measurements.vocab == 0) {
+    throw std::runtime_error("Qwen E2E check failed: vocab size is zero");
+  }
+  if (measurements.top_logits.empty()) {
+    throw std::runtime_error("Qwen E2E check failed: no finite logits found");
+  }
+  if (measurements.non_finite_hidden != 0 ||
+      measurements.non_finite_norm_hidden != 0 ||
+      measurements.non_finite_logits != 0) {
+    throw std::runtime_error(
+        "Qwen E2E check failed: non-finite hidden/norm/logit values");
+  }
 }
 
 } // namespace
@@ -1056,8 +1131,13 @@ int main(int argc, char **argv) {
         std::vector<uint32_t> counts = layer_sweep_counts(options.layers);
         printf("Layer sweep:        %s\n", join_layer_counts(counts).c_str());
       }
-      printf("Stack handoff:      queued async device-to-device copy between "
-             "layers\n");
+      printf("Stack handoff:      %s\n",
+             options.sync_stack
+                 ? "synchronized device-to-device copy between layers"
+                 : "queued async device-to-device copy between layers");
+      if (options.sync_stack) {
+        printf("Stack sync mode:    enabled for correctness check\n");
+      }
       printf("Model tail:         %s\n",
              options.no_model_tail
                  ? "disabled"
@@ -1101,8 +1181,11 @@ int main(int argc, char **argv) {
           Measurements measurements = measure_stack_case(
               device, cases, count, tail_weights.get(), iterations,
               warmup_iterations, options.trace_setup,
-              options.trace_setup || options.trace_run);
+              options.trace_setup || options.trace_run, options.sync_stack);
           print_stack_case(cases, count, measurements, colors);
+          if (options.e2e_check && count == options.layers) {
+            validate_e2e_result(measurements);
+          }
         }
       } else {
         fprintf(stderr, "running decoder stack benchmark: layers=%zu\n",
@@ -1111,8 +1194,11 @@ int main(int argc, char **argv) {
         Measurements measurements = measure_stack_case(
             device, cases, cases.size(), tail_weights.get(), iterations,
             warmup_iterations, options.trace_setup,
-            options.trace_setup || options.trace_run);
+            options.trace_setup || options.trace_run, options.sync_stack);
         print_stack_case(cases, cases.size(), measurements, colors);
+        if (options.e2e_check) {
+          validate_e2e_result(measurements);
+        }
       }
     } else {
       for (const BenchmarkCase &benchmark_case : cases) {
@@ -1140,10 +1226,17 @@ int main(int argc, char **argv) {
              colors.label, colors.reset);
     }
     if (options.weights_dir) {
-      printf("%sdecoder stack%s records source-layer completion events, "
-             "queues async device-to-device handoff copies, and launches the "
-             "next layer after copy events without per-layer host sync.\n",
-             colors.label, colors.reset);
+      if (options.sync_stack) {
+        printf("%sdecoder stack%s runs a synchronized correctness path: each "
+               "layer/key launch completes before the device-to-device handoff "
+               "copy feeds the next layer.\n",
+               colors.label, colors.reset);
+      } else {
+        printf("%sdecoder stack%s records source-layer completion events, "
+               "queues async device-to-device handoff copies, and launches the "
+               "next layer after copy events without per-layer host sync.\n",
+               colors.label, colors.reset);
+      }
       printf("%sstage submit avg%s measures CPU time spent enqueueing each "
              "executor stage, not GPU kernel execution time.\n",
              colors.label, colors.reset);

@@ -97,11 +97,29 @@ def test_dry_run_reuses_existing_bundle() -> None:
         assert status == 0
 
 
+def test_benchmark_command_forwards_e2e_check() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--bundle-dir",
+            "/tmp/bundle",
+            "--layers",
+            "2",
+            "--e2e-check",
+            "--sync-stack",
+        ]
+    )
+    command = runner.benchmark_command(args, 2)
+    assert "--e2e-check" in command
+    assert "--sync-stack" in command
+
+
 def main() -> int:
     test_bundle_complete_requires_layers_and_tail()
     test_all_layers_reads_config()
     test_runner_rejects_nonzero_start_layer()
     test_dry_run_reuses_existing_bundle()
+    test_benchmark_command_forwards_e2e_check()
     print("qwen_benchmark_runner_test: ok")
     return 0
 
