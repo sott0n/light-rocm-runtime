@@ -509,6 +509,19 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       "--output=-"
     )
 
+    lrrt_add_iree_vmfb_probe(
+      lrrt_iree_qwen_decode1_layer_vmfb_probe
+      lrrt_iree_qwen_decode1_layer_vmfb
+      tools/iree_qwen_decode1_layer.mlir
+      qwen_decode1_layer
+    )
+    lrrt_add_iree_vmfb_probe(
+      lrrt_iree_qwen_decode1_tail_vmfb_probe
+      lrrt_iree_qwen_decode1_tail_vmfb
+      tools/iree_qwen_decode1_tail.mlir
+      qwen_decode1_tail
+    )
+
     set(_token_step_outputs_vmfb
         "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
     )
@@ -621,6 +634,22 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
           lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_vmfb
         LABELS "iree;gpu"
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
+
+    add_executable(
+      lrrt_iree_qwen_decode1_e2e
+      qwen_decode1_e2e.cpp
+    )
+    target_link_libraries(
+      lrrt_iree_qwen_decode1_e2e
+      PRIVATE
+        lrrt::iree_hal_driver
+        "-Wl,--start-group"
+        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+        "-Wl,--end-group"
+        dl
+        m
+        pthread
     )
 
     add_executable(
