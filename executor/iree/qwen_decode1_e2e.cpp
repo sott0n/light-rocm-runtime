@@ -91,6 +91,20 @@ struct LayerWeightViews {
   BufferViewPtr down_weight;
 };
 
+struct ModuleFunctions {
+  iree_vm_function_t layer = {};
+  iree_vm_function_t decode2_layer = {};
+  iree_vm_function_t decode3_layer = {};
+  iree_vm_function_t variable_layer = {};
+  iree_vm_function_t tail = {};
+};
+
+struct LoadedQwenWeights {
+  ModelTailWeights tail;
+  std::vector<DecoderLayerWeights> layers;
+  std::vector<LayerWeightViews> layer_views;
+};
+
 std::vector<float> transpose(const std::vector<float> &source, uint32_t rows,
                              uint32_t cols, const char *label) {
   if (source.size() != static_cast<size_t>(rows) * cols) {
@@ -650,8 +664,7 @@ Args parse_args(int argc, char **argv) {
   return args;
 }
 
-iree_status_t run(const Args &args) {
-  VmfbRunner runner;
+std::vector<const char *> module_paths_for_args(const Args &args) {
   std::vector<const char *> modules = {args.layer_vmfb.c_str(),
                                        args.tail_vmfb.c_str()};
   if (args.max_cache_tokens != 0) {
@@ -663,92 +676,115 @@ iree_status_t run(const Args &args) {
     modules = {args.layer_vmfb.c_str(), args.decode2_layer_vmfb.c_str(),
                args.decode3_layer_vmfb.c_str(), args.tail_vmfb.c_str()};
   }
-  IREE_RETURN_IF_ERROR(runner.initialize(modules));
+  return modules;
+}
 
-  iree_vm_function_t layer_function = {};
-  iree_vm_function_t decode2_layer_function = {};
-  iree_vm_function_t decode3_layer_function = {};
-  iree_vm_function_t variable_layer_function = {};
-  iree_vm_function_t tail_function = {};
+iree_status_t lookup_module_functions(VmfbRunner *runner, const Args &args,
+                                      ModuleFunctions *functions) {
   if (args.max_cache_tokens != 0) {
-    IREE_RETURN_IF_ERROR(runner.lookup_function(
-        args.variable_layer_export.c_str(), &variable_layer_function));
+    IREE_RETURN_IF_ERROR(runner->lookup_function(
+        args.variable_layer_export.c_str(), &functions->variable_layer));
   } else {
     IREE_RETURN_IF_ERROR(
-        runner.lookup_function(args.layer_export.c_str(), &layer_function));
+        runner->lookup_function(args.layer_export.c_str(), &functions->layer));
   }
   if (args.max_cache_tokens == 0 && args.decode_steps > 1) {
-    IREE_RETURN_IF_ERROR(runner.lookup_function(
-        args.decode2_layer_export.c_str(), &decode2_layer_function));
+    IREE_RETURN_IF_ERROR(runner->lookup_function(
+        args.decode2_layer_export.c_str(), &functions->decode2_layer));
   }
   if (args.max_cache_tokens == 0 && args.decode_steps > 2) {
-    IREE_RETURN_IF_ERROR(runner.lookup_function(
-        args.decode3_layer_export.c_str(), &decode3_layer_function));
+    IREE_RETURN_IF_ERROR(runner->lookup_function(
+        args.decode3_layer_export.c_str(), &functions->decode3_layer));
   }
   IREE_RETURN_IF_ERROR(
-      runner.lookup_function(args.tail_export.c_str(), &tail_function));
+      runner->lookup_function(args.tail_export.c_str(), &functions->tail));
+  return iree_ok_status();
+}
 
+iree_status_t load_qwen_weights(VmfbRunner *runner, const Args &args,
+                                LoadedQwenWeights *weights) {
   const std::filesystem::path tail_manifest =
       args.weights_dir / "model_tail" / "weights.json";
-  const ModelTailWeights tail_weights =
-      load_model_tail_weights(tail_manifest.c_str());
-  if (tail_weights.hidden != kHidden || tail_weights.token_embeddings.empty()) {
+  weights->tail = load_model_tail_weights(tail_manifest.c_str());
+  if (weights->tail.hidden != kHidden ||
+      weights->tail.token_embeddings.empty()) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "model tail bundle has unexpected Qwen shape");
   }
 
-  if (tail_weights.token_embeddings.size() < kHidden) {
+  if (weights->tail.token_embeddings.size() < kHidden) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "model tail bundle does not contain enough token "
                             "embedding rows");
   }
 
-  std::vector<DecoderLayerWeights> layer_weights;
-  layer_weights.reserve(args.layers);
-  std::vector<LayerWeightViews> layer_weight_views(args.layers);
-  std::vector<LayerKvCache> layer_caches(args.layers);
+  weights->layers.clear();
+  weights->layers.reserve(args.layers);
+  weights->layer_views.clear();
+  weights->layer_views.resize(args.layers);
 
   for (uint32_t layer = 0; layer < args.layers; ++layer) {
     const std::filesystem::path layer_manifest =
         args.weights_dir / ("layer_" + std::to_string(layer)) / "weights.json";
-    layer_weights.push_back(load_decoder_layer_weights(layer_manifest.c_str()));
-    if (layer_weights.back().shape.hidden != kHidden ||
-        layer_weights.back().shape.kv_dim() != kKvDim ||
-        layer_weights.back().shape.intermediate != kIntermediate) {
+    weights->layers.push_back(
+        load_decoder_layer_weights(layer_manifest.c_str()));
+    if (weights->layers.back().shape.hidden != kHidden ||
+        weights->layers.back().shape.kv_dim() != kKvDim ||
+        weights->layers.back().shape.intermediate != kIntermediate) {
       return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                               "layer_%u bundle has unexpected Qwen shape",
                               layer);
     }
-    IREE_RETURN_IF_ERROR(make_layer_weight_views(&runner, layer_weights.back(),
-                                                 &layer_weight_views[layer]));
+    IREE_RETURN_IF_ERROR(make_layer_weight_views(runner, weights->layers.back(),
+                                                 &weights->layer_views[layer]));
   }
+  return iree_ok_status();
+}
+
+iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
+                              const ModuleFunctions &functions,
+                              const LoadedQwenWeights &weights) {
+  std::vector<LayerKvCache> layer_caches(args.layers);
   if (args.max_cache_tokens != 0) {
     IREE_RETURN_IF_ERROR(initialize_variable_layer_caches(
-        &runner, args.layers, args.max_cache_tokens, &layer_caches));
+        runner, args.layers, args.max_cache_tokens, &layer_caches));
   }
 
   BufferViewPtr hidden;
-  uint32_t current_token = tail_weights.token_ids.front();
+  uint32_t current_token = weights.tail.token_ids.front();
   for (uint32_t step = 0; step < args.decode_steps; ++step) {
     BufferViewPtr token_hidden;
     IREE_RETURN_IF_ERROR(
-        make_token_hidden(&runner, tail_weights, current_token, &token_hidden));
+        make_token_hidden(runner, weights.tail, current_token, &token_hidden));
     if (args.max_cache_tokens != 0) {
       IREE_RETURN_IF_ERROR(run_decode_token_step_with_variable_cache(
-          &runner, variable_layer_function, step, args.max_cache_tokens,
-          token_hidden.get(), layer_weight_views, &layer_caches, &hidden));
+          runner, functions.variable_layer, step, args.max_cache_tokens,
+          token_hidden.get(), weights.layer_views, &layer_caches, &hidden));
     } else {
       IREE_RETURN_IF_ERROR(run_decode_token_step(
-          &runner, layer_function, decode2_layer_function,
-          decode3_layer_function, step, token_hidden.get(), layer_weight_views,
-          &layer_caches, &hidden));
+          runner, functions.layer, functions.decode2_layer,
+          functions.decode3_layer, step, token_hidden.get(),
+          weights.layer_views, &layer_caches, &hidden));
     }
     BufferViewPtr step_logits;
-    IREE_RETURN_IF_ERROR(run_tail(&runner, tail_function, hidden.get(),
-                                  tail_weights, &step_logits));
-    IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), tail_weights.vocab,
+    IREE_RETURN_IF_ERROR(run_tail(runner, functions.tail, hidden.get(),
+                                  weights.tail, &step_logits));
+    IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
                                         step + 1, &current_token));
   }
+  return iree_ok_status();
+}
+
+iree_status_t run(const Args &args) {
+  VmfbRunner runner;
+  IREE_RETURN_IF_ERROR(runner.initialize(module_paths_for_args(args)));
+
+  ModuleFunctions functions;
+  IREE_RETURN_IF_ERROR(lookup_module_functions(&runner, args, &functions));
+
+  LoadedQwenWeights weights;
+  IREE_RETURN_IF_ERROR(load_qwen_weights(&runner, args, &weights));
+  IREE_RETURN_IF_ERROR(run_decode_loop(&runner, args, functions, weights));
 
   std::printf("iree_qwen_decode%u_e2e: ok layers=%u\n", args.decode_steps,
               args.layers);
