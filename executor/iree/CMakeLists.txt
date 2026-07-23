@@ -24,6 +24,16 @@ add_test(
   COMMAND lrrt_iree_adapter_contract_tests
 )
 
+add_executable(lrrt_iree_qwen_decode_bundle_tests qwen_decode_bundle_test.cpp)
+target_link_libraries(
+  lrrt_iree_qwen_decode_bundle_tests
+  PRIVATE lrrt::iree_adapter
+)
+add_test(
+  NAME lrrt_iree_qwen_decode_bundle_tests
+  COMMAND lrrt_iree_qwen_decode_bundle_tests
+)
+
 set(LRRT_IREE_RUNTIME_BUILD_DIR
     "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
 )

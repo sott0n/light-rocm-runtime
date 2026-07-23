@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "executor/iree/qwen_decode_bundle.hpp"
 #include "executor/iree/vmfb_runner.hpp"
 #include "executor/qwen/weight_bundle.hpp"
 #include "iree/base/api.h"
@@ -17,6 +18,7 @@
 
 namespace {
 
+using lrrt::executor::iree::load_qwen_decode_bundle_manifest;
 using lrrt::executor::qwen::DecoderLayerWeights;
 using lrrt::executor::qwen::load_decoder_layer_weights;
 using lrrt::executor::qwen::load_model_tail_weights;
@@ -30,11 +32,16 @@ constexpr uint32_t kIntermediate = 4864;
 constexpr uint32_t kDefaultLayers = 24;
 
 struct Args {
-  const char *layer_vmfb = nullptr;
-  const char *decode2_layer_vmfb = nullptr;
-  const char *decode3_layer_vmfb = nullptr;
-  const char *variable_layer_vmfb = nullptr;
-  const char *tail_vmfb = nullptr;
+  std::string layer_vmfb;
+  std::string decode2_layer_vmfb;
+  std::string decode3_layer_vmfb;
+  std::string variable_layer_vmfb;
+  std::string tail_vmfb;
+  std::string layer_export = "qwen_decode1_layer";
+  std::string decode2_layer_export = "qwen_decode2_layer_kv_cache";
+  std::string decode3_layer_export = "qwen_decode3_layer_kv_cache";
+  std::string variable_layer_export = "qwen_decode_layer_kv_cache_max8";
+  std::string tail_export = "qwen_decode1_tail";
   std::filesystem::path weights_dir;
   uint32_t layers = kDefaultLayers;
   uint32_t decode_steps = 1;
@@ -490,6 +497,8 @@ Args parse_args(int argc, char **argv) {
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
           "<weights-dir> [layers]\n"
+          "   or: lrrt_iree_qwen_decode1_e2e --steps <N> --bundle "
+          "<bundle-dir> <weights-dir> [layers]\n"
           "   or: lrrt_iree_qwen_decode1_e2e --steps <N> --max-cache-tokens 8 "
           "<kv-cache-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
     }
@@ -498,6 +507,37 @@ Args parse_args(int argc, char **argv) {
       throw std::runtime_error("--steps must be positive");
     }
     args.decode_steps = static_cast<uint32_t>(parsed_steps);
+    if (argc >= 4 && std::string(argv[3]) == "--bundle") {
+      if (argc != 6 && argc != 7) {
+        throw std::runtime_error(
+            "usage: lrrt_iree_qwen_decode1_e2e --steps <N> --bundle "
+            "<bundle-dir> <weights-dir> [layers]");
+      }
+      const std::filesystem::path bundle_dir = argv[4];
+      const auto manifest = load_qwen_decode_bundle_manifest(bundle_dir);
+      args.max_cache_tokens = manifest.max_cache_tokens;
+      if (args.decode_steps > args.max_cache_tokens) {
+        throw std::runtime_error(
+            "--steps must not exceed bundle max_cache_tokens");
+      }
+      if (manifest.kv_cache_dim != kKvDim) {
+        throw std::runtime_error(
+            "bundle kv_cache_shape[1] does not match Qwen kv dim");
+      }
+      args.variable_layer_vmfb = manifest.layer_vmfb.string();
+      args.tail_vmfb = manifest.tail_vmfb.string();
+      args.variable_layer_export = manifest.layer_export;
+      args.tail_export = manifest.tail_export;
+      args.weights_dir = argv[5];
+      if (argc == 7) {
+        const int parsed = std::stoi(argv[6]);
+        if (parsed <= 0) {
+          throw std::runtime_error("layers must be positive");
+        }
+        args.layers = static_cast<uint32_t>(parsed);
+      }
+      return args;
+    }
     if (argc >= 5 && std::string(argv[3]) == "--max-cache-tokens") {
       const int parsed_max_cache_tokens = std::stoi(argv[4]);
       if (parsed_max_cache_tokens <= 0) {
@@ -612,14 +652,16 @@ Args parse_args(int argc, char **argv) {
 
 iree_status_t run(const Args &args) {
   VmfbRunner runner;
-  std::vector<const char *> modules = {args.layer_vmfb, args.tail_vmfb};
+  std::vector<const char *> modules = {args.layer_vmfb.c_str(),
+                                       args.tail_vmfb.c_str()};
   if (args.max_cache_tokens != 0) {
-    modules = {args.variable_layer_vmfb, args.tail_vmfb};
+    modules = {args.variable_layer_vmfb.c_str(), args.tail_vmfb.c_str()};
   } else if (args.decode_steps == 2) {
-    modules = {args.layer_vmfb, args.decode2_layer_vmfb, args.tail_vmfb};
+    modules = {args.layer_vmfb.c_str(), args.decode2_layer_vmfb.c_str(),
+               args.tail_vmfb.c_str()};
   } else if (args.decode_steps == 3) {
-    modules = {args.layer_vmfb, args.decode2_layer_vmfb,
-               args.decode3_layer_vmfb, args.tail_vmfb};
+    modules = {args.layer_vmfb.c_str(), args.decode2_layer_vmfb.c_str(),
+               args.decode3_layer_vmfb.c_str(), args.tail_vmfb.c_str()};
   }
   IREE_RETURN_IF_ERROR(runner.initialize(modules));
 
@@ -630,21 +672,21 @@ iree_status_t run(const Args &args) {
   iree_vm_function_t tail_function = {};
   if (args.max_cache_tokens != 0) {
     IREE_RETURN_IF_ERROR(runner.lookup_function(
-        "qwen_decode_layer_kv_cache_max8", &variable_layer_function));
+        args.variable_layer_export.c_str(), &variable_layer_function));
   } else {
     IREE_RETURN_IF_ERROR(
-        runner.lookup_function("qwen_decode1_layer", &layer_function));
+        runner.lookup_function(args.layer_export.c_str(), &layer_function));
   }
   if (args.max_cache_tokens == 0 && args.decode_steps > 1) {
-    IREE_RETURN_IF_ERROR(runner.lookup_function("qwen_decode2_layer_kv_cache",
-                                                &decode2_layer_function));
+    IREE_RETURN_IF_ERROR(runner.lookup_function(
+        args.decode2_layer_export.c_str(), &decode2_layer_function));
   }
   if (args.max_cache_tokens == 0 && args.decode_steps > 2) {
-    IREE_RETURN_IF_ERROR(runner.lookup_function("qwen_decode3_layer_kv_cache",
-                                                &decode3_layer_function));
+    IREE_RETURN_IF_ERROR(runner.lookup_function(
+        args.decode3_layer_export.c_str(), &decode3_layer_function));
   }
   IREE_RETURN_IF_ERROR(
-      runner.lookup_function("qwen_decode1_tail", &tail_function));
+      runner.lookup_function(args.tail_export.c_str(), &tail_function));
 
   const std::filesystem::path tail_manifest =
       args.weights_dir / "model_tail" / "weights.json";

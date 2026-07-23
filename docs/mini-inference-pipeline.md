@@ -455,6 +455,15 @@ for step in 0..N:
 This path is exposed as:
 
 ```text
+lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
+  <weights-dir> [layers]
+```
+
+where `<bundle-dir>/manifest.json` records the layer VMFB, tail VMFB, export
+names, and the fixed cache capacity. The direct VMFB form is still available
+for manual experiments:
+
+```text
 lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
   <qwen_decode_layer_kv_cache_max8.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```

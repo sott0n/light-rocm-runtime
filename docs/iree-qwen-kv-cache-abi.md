@@ -108,6 +108,35 @@ lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
 
 `N` must be less than or equal to `8`.
 
+The preferred path is to put that execution ABI in an IREE Qwen decode bundle
+manifest:
+
+```json
+{
+  "manifest_version": 1,
+  "target": "gfx1101",
+  "layer_vmfb": "qwen_decode_layer_kv_cache_max8_gfx1101.vmfb",
+  "tail_vmfb": "qwen_decode1_tail_gfx1101.vmfb",
+  "layer_export": "qwen_decode_layer_kv_cache_max8",
+  "tail_export": "qwen_decode1_tail",
+  "max_cache_tokens": 8,
+  "kv_cache_shape": [8, 128]
+}
+```
+
+The runner accepts this bundle form:
+
+```text
+lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
+  <weights-dir> [layers]
+```
+
+The VMFB paths are relative to `<bundle-dir>`. Absolute paths and `..` path
+components are rejected so that a bundle manifest cannot silently point outside
+the bundle directory. `max_cache_tokens` must match `kv_cache_shape[0]`; the
+runner still treats the cache as opaque f32 device tensors with shape
+`[max_cache_tokens, 128]`.
+
 ## Decode Loop Contract
 
 The runner-level decode loop is:
