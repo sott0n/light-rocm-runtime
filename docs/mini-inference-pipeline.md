@@ -397,7 +397,7 @@ device-resident between token steps. It still uses deterministic stub tensors
 and fixed `2x2`/three-token cache shapes; connecting Qwen checkpoint weights
 and larger model dimensions remains future work.
 
-The real-weight Qwen runner now also has a two-step mode:
+The real-weight Qwen runner now also has a two-step decode path:
 
 ```text
 token 0 embedding
@@ -411,7 +411,7 @@ token 1 embedding
   -> qwen_decode1_tail logits
 ```
 
-This path is exposed by `lrrt_iree_qwen_decode1_e2e --two-step` and uses
+This path is exposed by `lrrt_iree_qwen_decode1_e2e --steps 2` and uses
 `tools/iree_qwen_decode1_layer.mlir`,
 `tools/iree_qwen_decode2_layer_kv_cache.mlir`, and
 `tools/iree_qwen_decode1_tail.mlir`. It runs the full Qwen 0.5B layer count and
@@ -422,6 +422,12 @@ scaling, numerically stable softmax over the visible two-token cache, and V
 aggregation before the output projection. The current shape is still fixed to a
 single current token with one previous cache token; causal masking is implicit
 because the decode2 entry point only materializes visible cache slots.
+
+The runner accepts `--steps 1` and `--steps 2`. Internally, the decode path is
+structured as a token-step loop over all decoder layers, with one
+device-resident K/V cache pair per layer. Steps beyond two are intentionally
+rejected until the variable-length cache VMFB is added. The cache ABI and the
+next arbitrary-step direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 
