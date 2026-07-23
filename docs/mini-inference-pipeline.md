@@ -478,6 +478,26 @@ lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
   <qwen_decode_layer_kv_cache_max8.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```
 
+The higher-level E2E wrapper can prepare both sides of this path. In IREE mode,
+`tools/run_qwen_e2e.py` first reuses or converts the Qwen mini weight bundle,
+then reuses or creates the IREE decode bundle, then invokes
+`lrrt_iree_qwen_decode1_e2e` through the bundle form:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --bundle-dir /tmp/lrrt-qwen-full \
+  --iree-layer-vmfb <qwen_decode_layer_kv_cache_max8.vmfb> \
+  --iree-tail-vmfb <qwen_decode1_tail.vmfb> \
+  --iree-decode-bundle-dir /tmp/lrrt-iree-qwen-decode-bundle \
+  --steps 4
+```
+
+Use `--no-convert` to require an existing weight bundle and
+`--no-iree-bundle-write` to require an existing IREE decode bundle. Use
+`--force-convert` or `--force-iree-bundle` when those artifacts should be
+rewritten explicitly.
+
 `N` can be any positive value up to the compiled cache capacity of 8. The
 runner keeps one device-resident K/V cache pair per layer, passes the previous
 step's buffer views directly into the next step, and only uses host readback for

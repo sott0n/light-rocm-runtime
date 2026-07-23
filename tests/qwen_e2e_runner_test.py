@@ -105,10 +105,104 @@ def test_dry_run_builds_full_e2e_command() -> None:
         assert "--sync-stack" in command
 
 
+def write_complete_weight_bundle(bundle: Path, layers: int) -> None:
+    for layer in range(layers):
+        layer_dir = bundle / f"layer_{layer}"
+        layer_dir.mkdir(parents=True)
+        (layer_dir / "weights.json").write_text("{}", encoding="utf-8")
+    tail_dir = bundle / "model_tail"
+    tail_dir.mkdir()
+    (tail_dir / "weights.json").write_text("{}", encoding="utf-8")
+
+
+def test_iree_runner_command_uses_decode_bundle() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--bundle-dir",
+            "/tmp/qwen-weights",
+            "--layers",
+            "2",
+            "--steps",
+            "3",
+            "--iree-decode-bundle-dir",
+            "/tmp/iree-decode-bundle",
+            "--iree-runner",
+            "/tmp/lrrt_iree_qwen_decode1_e2e",
+        ]
+    )
+    command = runner.iree_runner_command(args, 2)
+    assert command == [
+        "/tmp/lrrt_iree_qwen_decode1_e2e",
+        "--steps",
+        "3",
+        "--bundle",
+        "/tmp/iree-decode-bundle",
+        "/tmp/qwen-weights",
+        "2",
+    ]
+
+
+def test_iree_dry_run_writes_bundle_then_runs() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        weights = root / "weights"
+        write_complete_weight_bundle(weights, 1)
+
+        status = runner.main(
+            [
+                "--iree",
+                "--bundle-dir",
+                str(weights),
+                "--layers",
+                "1",
+                "--steps",
+                "2",
+                "--iree-layer-vmfb",
+                str(root / "layer.vmfb"),
+                "--iree-tail-vmfb",
+                str(root / "tail.vmfb"),
+                "--iree-decode-bundle-dir",
+                str(root / "iree-bundle"),
+                "--iree-runner",
+                "/tmp/lrrt_iree_qwen_decode1_e2e",
+                "--dry-run",
+            ]
+        )
+        assert status == 0
+
+
+def test_iree_requires_vmfb_inputs_when_bundle_is_missing() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        weights = root / "weights"
+        write_complete_weight_bundle(weights, 1)
+
+        status = runner.main(
+            [
+                "--iree",
+                "--bundle-dir",
+                str(weights),
+                "--layers",
+                "1",
+                "--iree-decode-bundle-dir",
+                str(root / "missing-iree-bundle"),
+                "--dry-run",
+            ]
+        )
+        assert status == 1
+
+
 def main() -> int:
     test_resolve_layers_reads_checkpoint_config()
     test_runner_command_requires_keys_for_tokens()
     test_dry_run_builds_full_e2e_command()
+    test_iree_runner_command_uses_decode_bundle()
+    test_iree_dry_run_writes_bundle_then_runs()
+    test_iree_requires_vmfb_inputs_when_bundle_is_missing()
     print("qwen_e2e_runner_test: ok")
     return 0
 

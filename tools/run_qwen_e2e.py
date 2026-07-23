@@ -5,13 +5,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNNER = ROOT / "tools" / "run_qwen_benchmark.py"
+DEFAULT_CONVERTER = ROOT / "tools" / "convert_qwen_layer.py"
+DEFAULT_REQUIREMENTS = ROOT / "tools" / "requirements.txt"
+DEFAULT_IREE_BUNDLE_WRITER = ROOT / "tools" / "write_iree_qwen_decode_bundle.py"
+DEFAULT_IREE_RUNNER = ROOT / "build-iree" / "adapter" / "lrrt_iree_qwen_decode1_e2e"
 DEFAULT_BUNDLE_DIR = Path("/tmp/lrrt-qwen-e2e")
+DEFAULT_IREE_DECODE_BUNDLE_DIR = Path("/tmp/lrrt-iree-qwen-decode-bundle")
+DEFAULT_IREE_TARGET = "gfx1101"
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -53,6 +60,19 @@ def infer_bundle_layer_count(bundle_dir: Path) -> int:
     return count
 
 
+def bundle_complete(bundle_dir: Path, layers: int) -> bool:
+    if layers <= 0:
+        return False
+    for layer in range(layers):
+        if not (bundle_dir / f"layer_{layer}" / "weights.json").exists():
+            return False
+    return (bundle_dir / "model_tail" / "weights.json").exists()
+
+
+def iree_decode_bundle_complete(bundle_dir: Path) -> bool:
+    return (bundle_dir / "manifest.json").is_file()
+
+
 def resolve_layers(args: argparse.Namespace) -> int:
     if args.layers is not None:
         if args.layers <= 0:
@@ -66,13 +86,46 @@ def resolve_layers(args: argparse.Namespace) -> int:
     return inferred
 
 
+def converter_command(args: argparse.Namespace, layers: int) -> list[str]:
+    converter_args = [
+        str(args.converter),
+        "--checkpoint-dir",
+        str(args.checkpoint_dir),
+        "--layer",
+        "0",
+        "--layer-count",
+        str(layers),
+        "--keys",
+        str(args.keys),
+        "--token-ids",
+        args.token_ids,
+        "--output",
+        str(args.bundle_dir),
+    ]
+    if args.config is not None:
+        converter_args.extend(["--config", str(args.config)])
+
+    if args.python is not None:
+        return [str(args.python), *converter_args]
+    if args.no_uv or shutil.which("uv") is None:
+        return [sys.executable, *converter_args]
+    return [
+        "uv",
+        "run",
+        "--with-requirements",
+        str(args.requirements),
+        "python",
+        *converter_args,
+    ]
+
+
 def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     token_ids = parse_token_ids(args.token_ids)
     if args.keys < len(token_ids):
         raise ValueError("--keys must be at least the number of --token-ids")
 
     command = [
-        str(args.python),
+        str(args.python if args.python is not None else sys.executable),
         str(args.runner),
         "--bundle-dir",
         str(args.bundle_dir),
@@ -109,6 +162,97 @@ def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     return command
 
 
+def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
+    if args.iree_layer_vmfb is None:
+        raise ValueError(
+            "--iree-layer-vmfb is required to create an IREE decode bundle"
+        )
+    if args.iree_tail_vmfb is None:
+        raise ValueError("--iree-tail-vmfb is required to create an IREE decode bundle")
+    command = [
+        str(args.python if args.python is not None else sys.executable),
+        str(args.iree_bundle_writer),
+        "--target",
+        args.iree_target,
+        "--layer-vmfb",
+        str(args.iree_layer_vmfb),
+        "--tail-vmfb",
+        str(args.iree_tail_vmfb),
+        "--out-dir",
+        str(args.iree_decode_bundle_dir),
+        "--max-cache-tokens",
+        str(args.max_cache_tokens),
+    ]
+    if args.force_iree_bundle:
+        command.append("--force")
+    return command
+
+
+def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
+    if args.steps <= 0:
+        raise ValueError("--steps must be positive")
+    if args.steps > args.max_cache_tokens:
+        raise ValueError("--steps must not exceed --max-cache-tokens")
+    return [
+        str(args.iree_runner),
+        "--steps",
+        str(args.steps),
+        "--bundle",
+        str(args.iree_decode_bundle_dir),
+        str(args.bundle_dir),
+        str(layers),
+    ]
+
+
+def run_command(command: list[str], dry_run: bool) -> None:
+    print("+ " + " ".join(str(part) for part in command), flush=True)
+    if dry_run:
+        return
+    subprocess.run(command, check=True)
+
+
+def run_triton(args: argparse.Namespace, layers: int) -> None:
+    run_command(runner_command(args, layers), args.dry_run)
+
+
+def run_iree(args: argparse.Namespace, layers: int) -> None:
+    complete = bundle_complete(args.bundle_dir, layers)
+    should_convert = args.force_convert or not complete
+    if args.no_convert:
+        should_convert = False
+    if should_convert:
+        if args.checkpoint_dir is None:
+            raise ValueError(
+                "weight bundle is incomplete; pass --checkpoint-dir or disable "
+                "conversion with --no-convert"
+            )
+        run_command(converter_command(args, layers), args.dry_run)
+    elif complete:
+        print(f"reusing Qwen mini bundle: {args.bundle_dir}", flush=True)
+    else:
+        print(f"running with unchecked Qwen mini bundle: {args.bundle_dir}", flush=True)
+
+    should_write_bundle = args.force_iree_bundle or not iree_decode_bundle_complete(
+        args.iree_decode_bundle_dir
+    )
+    if args.no_iree_bundle_write:
+        should_write_bundle = False
+    if should_write_bundle:
+        run_command(iree_bundle_writer_command(args), args.dry_run)
+    elif iree_decode_bundle_complete(args.iree_decode_bundle_dir):
+        print(
+            f"reusing IREE Qwen decode bundle: {args.iree_decode_bundle_dir}",
+            flush=True,
+        )
+    else:
+        print(
+            f"running with unchecked IREE decode bundle: {args.iree_decode_bundle_dir}",
+            flush=True,
+        )
+
+    run_command(iree_runner_command(args, layers), args.dry_run)
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -123,6 +267,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--keys", default=4, type=int)
     parser.add_argument("--token-ids", default="0,1,2")
     parser.add_argument("--iterations", default=1, type=int)
+    parser.add_argument("--steps", default=1, type=int)
+    parser.add_argument("--backend", choices=["triton", "iree"], default="triton")
+    parser.add_argument("--iree", action="store_const", const="iree", dest="backend")
     parser.add_argument("--force-convert", action="store_true")
     parser.add_argument("--no-convert", action="store_true")
     parser.add_argument("--no-uv", action="store_true")
@@ -130,7 +277,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--trace-run", action="store_true")
     parser.add_argument("--benchmark", type=Path)
     parser.add_argument("--runner", default=DEFAULT_RUNNER, type=Path)
-    parser.add_argument("--python", default=Path(sys.executable), type=Path)
+    parser.add_argument("--converter", default=DEFAULT_CONVERTER, type=Path)
+    parser.add_argument("--requirements", default=DEFAULT_REQUIREMENTS, type=Path)
+    parser.add_argument("--python", type=Path)
+    parser.add_argument("--iree-target", default=DEFAULT_IREE_TARGET)
+    parser.add_argument("--iree-layer-vmfb", type=Path)
+    parser.add_argument("--iree-tail-vmfb", type=Path)
+    parser.add_argument(
+        "--iree-decode-bundle-dir", default=DEFAULT_IREE_DECODE_BUNDLE_DIR, type=Path
+    )
+    parser.add_argument(
+        "--iree-bundle-writer", default=DEFAULT_IREE_BUNDLE_WRITER, type=Path
+    )
+    parser.add_argument("--iree-runner", default=DEFAULT_IREE_RUNNER, type=Path)
+    parser.add_argument("--max-cache-tokens", default=8, type=int)
+    parser.add_argument("--force-iree-bundle", action="store_true")
+    parser.add_argument("--no-iree-bundle-write", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args(argv)
 
@@ -139,11 +301,10 @@ def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         layers = resolve_layers(args)
-        command = runner_command(args, layers)
-        print("+ " + " ".join(str(part) for part in command), flush=True)
-        if args.dry_run:
-            return 0
-        subprocess.run(command, check=True)
+        if args.backend == "iree":
+            run_iree(args, layers)
+        else:
+            run_triton(args, layers)
         return 0
     except subprocess.CalledProcessError as error:
         return error.returncode
