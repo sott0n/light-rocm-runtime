@@ -45,8 +45,9 @@ endwhile()
 set(
   LRRT_TRITON_EXECUTOR_TESTS
   lrrt_triton_executor_tests triton_executor.cpp
-  lrrt_triton_mini_decoder_weights_tests triton_mini_decoder_weights.cpp
 )
+
+set(LRRT_QWEN_EXECUTOR_TESTS lrrt_qwen_weight_bundle_tests qwen_weight_bundle.cpp)
 
 if(PYTHON_EXECUTABLE)
   add_test(
@@ -82,6 +83,12 @@ while(LRRT_TRITON_EXECUTOR_TESTS)
     ${target}
     PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
   )
+endwhile()
+
+while(LRRT_QWEN_EXECUTOR_TESTS)
+  list(POP_FRONT LRRT_QWEN_EXECUTOR_TESTS target source)
+  lrrt_add_test_executable(${target} ${source} lrrt::bundle)
+  target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}")
 endwhile()
 
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)

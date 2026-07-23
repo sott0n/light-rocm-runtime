@@ -1,4 +1,4 @@
-#include "mini_decoder_weights.hpp"
+#include "executor/qwen/weight_bundle.hpp"
 
 #include <math.h>
 #include <stdio.h>
@@ -11,9 +11,9 @@
 
 namespace {
 
-using lrrt::executor::triton::mini::DecoderLayerShape;
-using lrrt::executor::triton::mini::DecoderLayerWeights;
-using lrrt::executor::triton::mini::ModelTailWeights;
+using lrrt::executor::qwen::DecoderLayerShape;
+using lrrt::executor::qwen::DecoderLayerWeights;
+using lrrt::executor::qwen::ModelTailWeights;
 
 struct TensorInput {
   const char *name;
@@ -160,8 +160,7 @@ void test_load_weights(void) {
   write_file(manifest_path, manifest_for(shape, data_file));
 
   DecoderLayerWeights weights =
-      lrrt::executor::triton::mini::load_decoder_layer_weights(
-          manifest_path.c_str());
+      lrrt::executor::qwen::load_decoder_layer_weights(manifest_path.c_str());
   if (weights.shape.keys != shape.keys ||
       weights.shape.hidden != shape.hidden ||
       weights.shape.heads != shape.heads ||
@@ -189,12 +188,11 @@ void test_load_model_tail_weights(void) {
   weights.final_norm_weight = {5.0f, 6.0f, 7.0f, 8.0f};
   weights.lm_head_weight = {0.0f, 0.1f, 0.2f, 0.3f, 1.0f, 1.1f,
                             1.2f, 1.3f, 2.0f, 2.1f, 2.2f, 2.3f};
-  lrrt::executor::triton::mini::write_model_tail_weights(
-      manifest_path.c_str(), data_file.c_str(), weights);
+  lrrt::executor::qwen::write_model_tail_weights(manifest_path.c_str(),
+                                                 data_file.c_str(), weights);
 
   ModelTailWeights loaded =
-      lrrt::executor::triton::mini::load_model_tail_weights(
-          manifest_path.c_str());
+      lrrt::executor::qwen::load_model_tail_weights(manifest_path.c_str());
   if (loaded.hidden != weights.hidden || loaded.vocab != weights.vocab ||
       loaded.token_ids.size() != weights.token_ids.size()) {
     throw std::runtime_error("loaded model tail shape mismatch");
@@ -216,8 +214,7 @@ void test_validation_errors(void) {
   write_file(manifest_path, manifest_for(shape, data_file, "down_weight"));
   expect_throw(
       [&] {
-        lrrt::executor::triton::mini::load_decoder_layer_weights(
-            manifest_path.c_str());
+        lrrt::executor::qwen::load_decoder_layer_weights(manifest_path.c_str());
       },
       "missing mini decoder weight tensor: down_weight",
       "missing tensor validation");
@@ -225,16 +222,14 @@ void test_validation_errors(void) {
   write_file(manifest_path, manifest_for(shape, "../bad_weights.bin"));
   expect_throw(
       [&] {
-        lrrt::executor::triton::mini::load_decoder_layer_weights(
-            manifest_path.c_str());
+        lrrt::executor::qwen::load_decoder_layer_weights(manifest_path.c_str());
       },
       "invalid mini decoder weight data path", "data path validation");
 
   write_file(manifest_path, manifest_for(shape, data_file, nullptr, "bf16"));
   expect_throw(
       [&] {
-        lrrt::executor::triton::mini::load_decoder_layer_weights(
-            manifest_path.c_str());
+        lrrt::executor::qwen::load_decoder_layer_weights(manifest_path.c_str());
       },
       "unsupported mini decoder weight dtype", "dtype validation");
 }
@@ -246,7 +241,7 @@ int main(void) {
     test_load_weights();
     test_load_model_tail_weights();
     test_validation_errors();
-    printf("triton_mini_decoder_weights: ok\n");
+    printf("qwen_weight_bundle: ok\n");
     return 0;
   } catch (const std::exception &error) {
     fprintf(stderr, "%s\n", error.what());

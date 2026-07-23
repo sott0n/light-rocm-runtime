@@ -15,7 +15,9 @@ if(LRRT_BUILD_TRITON_BENCHMARKS)
   )
   target_include_directories(
     lrrt_triton_mini_decoder_weight_bundle
-    PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}"
+      "${PROJECT_SOURCE_DIR}/executor/triton"
   )
 endif()
 
@@ -30,7 +32,9 @@ if(LRRT_BUILD_TRITON_BENCHMARKS AND UV_EXECUTABLE)
   )
   target_include_directories(
     lrrt_triton_mini_decoder_layer_benchmark
-    PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}"
+      "${PROJECT_SOURCE_DIR}/executor/triton"
   )
 elseif(LRRT_BUILD_TRITON_BENCHMARKS)
   message(STATUS "uv not found; skipping Triton mini decoder layer benchmark")

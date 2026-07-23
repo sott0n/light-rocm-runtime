@@ -1,4 +1,5 @@
-#include "mini_decoder_weights.hpp"
+#include "executor/qwen/weight_bundle.hpp"
+#include "mini_decoder_layer.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -406,7 +407,7 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
 }
 
 BenchmarkCase
-make_case(const lrrt::executor::triton::mini::DecoderLayerWeights &weights,
+make_case(const lrrt::executor::qwen::DecoderLayerWeights &weights,
           uint32_t valid_keys) {
   BenchmarkCase benchmark_case =
       make_case(weights.shape.keys, weights.shape.hidden, weights.shape.heads,
@@ -448,15 +449,15 @@ void copy_inputs(lrrt::executor::triton::mini::DecoderLayer &executor,
                        benchmark_case.cos, benchmark_case.sin);
 }
 
-std::vector<lrrt::executor::triton::mini::DecoderLayerWeights>
+std::vector<lrrt::executor::qwen::DecoderLayerWeights>
 load_layer_weights(const char *weights_dir, uint32_t layers) {
-  std::vector<lrrt::executor::triton::mini::DecoderLayerWeights> weights;
+  std::vector<lrrt::executor::qwen::DecoderLayerWeights> weights;
   weights.reserve(layers);
   const std::filesystem::path base(weights_dir);
   for (uint32_t layer = 0; layer < layers; ++layer) {
     const std::filesystem::path manifest =
         base / ("layer_" + std::to_string(layer)) / "weights.json";
-    weights.push_back(lrrt::executor::triton::mini::load_decoder_layer_weights(
+    weights.push_back(lrrt::executor::qwen::load_decoder_layer_weights(
         manifest.string().c_str()));
   }
   return weights;
@@ -468,11 +469,11 @@ bool has_tail_weights(const char *weights_dir) {
   return std::filesystem::exists(manifest);
 }
 
-lrrt::executor::triton::mini::ModelTailWeights
+lrrt::executor::qwen::ModelTailWeights
 load_tail_weights(const char *weights_dir) {
   const std::filesystem::path manifest =
       std::filesystem::path(weights_dir) / "model_tail" / "weights.json";
-  return lrrt::executor::triton::mini::load_model_tail_weights(
+  return lrrt::executor::qwen::load_model_tail_weights(
       manifest.string().c_str());
 }
 
@@ -548,12 +549,12 @@ Measurements measure_case(lrrt::Device &device,
           0};
 }
 
-Measurements measure_stack_case(
-    lrrt::Device &device, const std::vector<BenchmarkCase> &layers,
-    size_t layer_count,
-    const lrrt::executor::triton::mini::ModelTailWeights *tail_weights,
-    uint32_t iterations, uint32_t warmup_iterations, bool trace_setup,
-    bool trace_run, bool sync_stack) {
+Measurements
+measure_stack_case(lrrt::Device &device,
+                   const std::vector<BenchmarkCase> &layers, size_t layer_count,
+                   const lrrt::executor::qwen::ModelTailWeights *tail_weights,
+                   uint32_t iterations, uint32_t warmup_iterations,
+                   bool trace_setup, bool trace_run, bool sync_stack) {
   device.reset_memory_stats();
   if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
@@ -1036,11 +1037,10 @@ int main(int argc, char **argv) {
     }
     lrrt::Device device = runtime.open_device(0);
     std::vector<BenchmarkCase> cases;
-    std::unique_ptr<lrrt::executor::triton::mini::ModelTailWeights>
-        tail_weights;
+    std::unique_ptr<lrrt::executor::qwen::ModelTailWeights> tail_weights;
     if (options.weights_path) {
-      lrrt::executor::triton::mini::DecoderLayerWeights weights =
-          lrrt::executor::triton::mini::load_decoder_layer_weights(
+      lrrt::executor::qwen::DecoderLayerWeights weights =
+          lrrt::executor::qwen::load_decoder_layer_weights(
               options.weights_path);
       uint32_t valid_keys =
           options.has_valid_keys ? options.valid_keys : weights.shape.keys;
@@ -1052,9 +1052,8 @@ int main(int argc, char **argv) {
     } else if (options.weights_dir) {
       auto weights = load_layer_weights(options.weights_dir, options.layers);
       if (!options.no_model_tail && has_tail_weights(options.weights_dir)) {
-        tail_weights =
-            std::make_unique<lrrt::executor::triton::mini::ModelTailWeights>(
-                load_tail_weights(options.weights_dir));
+        tail_weights = std::make_unique<lrrt::executor::qwen::ModelTailWeights>(
+            load_tail_weights(options.weights_dir));
       }
       for (const auto &layer_weights : weights) {
         uint32_t valid_keys =

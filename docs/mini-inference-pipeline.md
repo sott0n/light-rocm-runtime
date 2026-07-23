@@ -60,7 +60,7 @@ decoder-style path, not by every example currently present in the repository.
 | LM head logits | ✅/❌ | `matvec` can run `lm_head.weight` against the final normalized hidden state and produce vocabulary logits | This is a prototype one-vector logits path, not a tiled production GEMV |
 | KV cache update/read | ✅ | `kv_cache_update` and `kv_cache_read` cover FP32 row-major `[max_tokens, head_dim]` cache writes and indexed reads; mini decoder layer uses a `[heads, keys, head_dim]` cache layout by dispatching update/read-like operations per head | Needs a layout policy that can survive real model weight/cache integration |
 | Benchmark timing | ✅ | `lrrt_triton_mini_decoder_layer_benchmark` reports CPU round-trip, CPU burst, and HSA GPU-event burst latency with dtype, cache layout, queueing mode, QKV dimension, and estimated dispatch count metadata | Needs per-stage timing for deeper performance analysis |
-| Weight bundle loading | ✅/❌ | `executor/triton/mini_decoder_weights.hpp` can load decoder layer and model tail FP32 raw binaries plus manifests; `tools/convert_qwen_layer.py` can convert local Qwen checkpoint tensors into those bundles | This is still a prototype FP32 format and does not cover full model/runtime semantics |
+| Weight bundle loading | ✅/❌ | `executor/qwen/weight_bundle.hpp` can load decoder layer and model tail FP32 raw binaries plus manifests; `tools/convert_qwen_layer.py` can convert local Qwen checkpoint tensors into those bundles | This is still a prototype FP32 format and does not cover full model/runtime semantics |
 
 ## Decoder Layer Shape
 
@@ -84,7 +84,10 @@ input hidden
 
 `triton_mini_decoder_layer` wires this chain together using Triton-generated
 bundles and the shared `lrrt::executor::triton::mini::DecoderLayer` helper.
-The example validates the final hidden state against a CPU reference. The
+Qwen weight manifests are loaded through the framework-neutral
+`lrrt::executor::qwen` bundle helpers so Triton and IREE executors can share
+the same converted checkpoint format. The example validates the final hidden
+state against a CPU reference. The
 available `matvec` bundle stands in for small projections, but it is not yet a
 complete GEMM or batched matmul implementation.
 

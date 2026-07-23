@@ -1,7 +1,5 @@
-#ifndef LRRT_EXECUTOR_TRITON_MINI_DECODER_WEIGHTS_HPP_
-#define LRRT_EXECUTOR_TRITON_MINI_DECODER_WEIGHTS_HPP_
-
-#include "mini_decoder_layer.hpp"
+#ifndef LRRT_EXECUTOR_QWEN_WEIGHT_BUNDLE_HPP_
+#define LRRT_EXECUTOR_QWEN_WEIGHT_BUNDLE_HPP_
 
 #include <stdint.h>
 
@@ -18,7 +16,7 @@
 #include <unordered_set>
 #include <vector>
 
-namespace lrrt::executor::triton::mini {
+namespace lrrt::executor::qwen {
 
 struct DecoderLayerShape {
   uint32_t keys;
@@ -597,17 +595,6 @@ inline ModelTailWeights load_model_tail_weights(const char *manifest_path) {
   return weights;
 }
 
-inline void copy_decoder_layer_inputs(DecoderLayer &executor,
-                                      const std::vector<float> &hidden_states,
-                                      const DecoderLayerWeights &weights,
-                                      const std::vector<float> &cos,
-                                      const std::vector<float> &sin) {
-  executor.copy_inputs(
-      hidden_states, weights.attention_norm_weight, weights.mlp_norm_weight,
-      weights.q_weight, weights.k_weight, weights.v_weight, weights.out_weight,
-      weights.gate_weight, weights.up_weight, weights.down_weight, cos, sin);
-}
-
 inline void write_decoder_layer_weights(const char *manifest_path,
                                         const char *data_file_name,
                                         const DecoderLayerWeights &weights) {
@@ -754,6 +741,6 @@ inline void write_model_tail_weights(const char *manifest_path,
   }
 }
 
-} // namespace lrrt::executor::triton::mini
+} // namespace lrrt::executor::qwen
 
-#endif // LRRT_EXECUTOR_TRITON_MINI_DECODER_WEIGHTS_HPP_
+#endif // LRRT_EXECUTOR_QWEN_WEIGHT_BUNDLE_HPP_

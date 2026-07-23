@@ -10,16 +10,16 @@
 #include <vector>
 
 #include "executor/iree/vmfb_runner.hpp"
-#include "executor/triton/mini_decoder_weights.hpp"
+#include "executor/qwen/weight_bundle.hpp"
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
 
 namespace {
 
-using lrrt::executor::triton::mini::DecoderLayerWeights;
-using lrrt::executor::triton::mini::load_decoder_layer_weights;
-using lrrt::executor::triton::mini::load_model_tail_weights;
-using lrrt::executor::triton::mini::ModelTailWeights;
+using lrrt::executor::qwen::DecoderLayerWeights;
+using lrrt::executor::qwen::load_decoder_layer_weights;
+using lrrt::executor::qwen::load_model_tail_weights;
+using lrrt::executor::qwen::ModelTailWeights;
 using lrrt::iree_executor::BufferViewPtr;
 using lrrt::iree_executor::VmfbRunner;
 

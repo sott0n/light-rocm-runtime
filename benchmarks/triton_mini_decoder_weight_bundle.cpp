@@ -1,4 +1,5 @@
-#include "mini_decoder_weights.hpp"
+#include "executor/qwen/weight_bundle.hpp"
+#include "mini_decoder_layer.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -31,11 +32,11 @@ void fill_norm_weights(std::vector<float> &attention, std::vector<float> &mlp) {
   }
 }
 
-lrrt::executor::triton::mini::DecoderLayerWeights
-make_weights(const lrrt::executor::triton::mini::DecoderLayerShape &shape) {
+lrrt::executor::qwen::DecoderLayerWeights
+make_weights(const lrrt::executor::qwen::DecoderLayerShape &shape) {
   const uint32_t q_dim = shape.q_dim();
   const uint32_t kv_dim = shape.kv_dim();
-  lrrt::executor::triton::mini::DecoderLayerWeights weights{};
+  lrrt::executor::qwen::DecoderLayerWeights weights{};
   weights.shape = shape;
   weights.attention_norm_weight.resize(shape.hidden);
   weights.mlp_norm_weight.resize(shape.hidden);
@@ -86,12 +87,11 @@ int main(int argc, char **argv) {
     uint32_t head_dim = parse_u32(argc == 8 ? argv[6] : argv[5], "head_dim");
     uint32_t intermediate =
         parse_u32(argc == 8 ? argv[7] : argv[6], "intermediate");
-    lrrt::executor::triton::mini::DecoderLayerShape shape{
+    lrrt::executor::qwen::DecoderLayerShape shape{
         keys, hidden, heads, kv_heads, head_dim, intermediate};
-    lrrt::executor::triton::mini::DecoderLayerWeights weights =
-        make_weights(shape);
-    lrrt::executor::triton::mini::write_decoder_layer_weights(
-        argv[1], "weights.bin", weights);
+    lrrt::executor::qwen::DecoderLayerWeights weights = make_weights(shape);
+    lrrt::executor::qwen::write_decoder_layer_weights(argv[1], "weights.bin",
+                                                      weights);
     printf("wrote mini decoder weight bundle: %s\n", argv[1]);
     return 0;
   } catch (const std::exception &error) {
