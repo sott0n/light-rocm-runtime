@@ -487,11 +487,15 @@ then reuses or creates the IREE decode bundle, then invokes
 python3 tools/run_qwen_e2e.py --iree \
   --checkpoint-dir /path/to/qwen-checkpoint \
   --bundle-dir /tmp/lrrt-qwen-full \
-  --iree-layer-vmfb <qwen_decode_layer_kv_cache_max8.vmfb> \
-  --iree-tail-vmfb <qwen_decode1_tail.vmfb> \
   --iree-decode-bundle-dir /tmp/lrrt-iree-qwen-decode-bundle \
   --steps 4
 ```
+
+By default, the wrapper discovers the layer and tail VMFBs from the standard
+probe output paths under `build-iree-probe/` for `--iree-target`:
+`qwen_decode_layer_kv_cache_max8/qwen_decode_layer_kv_cache_max8_<target>.vmfb`
+and `qwen_decode1_tail/qwen_decode1_tail_<target>.vmfb`. Use
+`--iree-layer-vmfb` or `--iree-tail-vmfb` to override those paths explicitly.
 
 Use `--no-convert` to require an existing weight bundle and
 `--no-iree-bundle-write` to require an existing IREE decode bundle. Use

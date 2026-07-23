@@ -18,6 +18,7 @@ DEFAULT_IREE_BUNDLE_WRITER = ROOT / "tools" / "write_iree_qwen_decode_bundle.py"
 DEFAULT_IREE_RUNNER = ROOT / "build-iree" / "adapter" / "lrrt_iree_qwen_decode1_e2e"
 DEFAULT_BUNDLE_DIR = Path("/tmp/lrrt-qwen-e2e")
 DEFAULT_IREE_DECODE_BUNDLE_DIR = Path("/tmp/lrrt-iree-qwen-decode-bundle")
+DEFAULT_IREE_PROBE_DIR = ROOT / "build-iree-probe"
 DEFAULT_IREE_TARGET = "gfx1101"
 
 
@@ -71,6 +72,30 @@ def bundle_complete(bundle_dir: Path, layers: int) -> bool:
 
 def iree_decode_bundle_complete(bundle_dir: Path) -> bool:
     return (bundle_dir / "manifest.json").is_file()
+
+
+def default_iree_layer_vmfb(probe_dir: Path, target: str) -> Path:
+    return (
+        probe_dir
+        / "qwen_decode_layer_kv_cache_max8"
+        / f"qwen_decode_layer_kv_cache_max8_{target}.vmfb"
+    )
+
+
+def default_iree_tail_vmfb(probe_dir: Path, target: str) -> Path:
+    return probe_dir / "qwen_decode1_tail" / f"qwen_decode1_tail_{target}.vmfb"
+
+
+def resolve_iree_vmfb_path(
+    explicit_path: Path | None, default_path: Path, flag: str
+) -> Path:
+    if explicit_path is not None:
+        return explicit_path
+    if default_path.is_file():
+        return default_path
+    raise ValueError(
+        f"{flag} was not provided and default VMFB was not found: {default_path}"
+    )
 
 
 def resolve_layers(args: argparse.Namespace) -> int:
@@ -163,21 +188,25 @@ def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
 
 
 def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
-    if args.iree_layer_vmfb is None:
-        raise ValueError(
-            "--iree-layer-vmfb is required to create an IREE decode bundle"
-        )
-    if args.iree_tail_vmfb is None:
-        raise ValueError("--iree-tail-vmfb is required to create an IREE decode bundle")
+    layer_vmfb = resolve_iree_vmfb_path(
+        args.iree_layer_vmfb,
+        default_iree_layer_vmfb(args.iree_probe_dir, args.iree_target),
+        "--iree-layer-vmfb",
+    )
+    tail_vmfb = resolve_iree_vmfb_path(
+        args.iree_tail_vmfb,
+        default_iree_tail_vmfb(args.iree_probe_dir, args.iree_target),
+        "--iree-tail-vmfb",
+    )
     command = [
         str(args.python if args.python is not None else sys.executable),
         str(args.iree_bundle_writer),
         "--target",
         args.iree_target,
         "--layer-vmfb",
-        str(args.iree_layer_vmfb),
+        str(layer_vmfb),
         "--tail-vmfb",
-        str(args.iree_tail_vmfb),
+        str(tail_vmfb),
         "--out-dir",
         str(args.iree_decode_bundle_dir),
         "--max-cache-tokens",
@@ -281,6 +310,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--requirements", default=DEFAULT_REQUIREMENTS, type=Path)
     parser.add_argument("--python", type=Path)
     parser.add_argument("--iree-target", default=DEFAULT_IREE_TARGET)
+    parser.add_argument("--iree-probe-dir", default=DEFAULT_IREE_PROBE_DIR, type=Path)
     parser.add_argument("--iree-layer-vmfb", type=Path)
     parser.add_argument("--iree-tail-vmfb", type=Path)
     parser.add_argument(

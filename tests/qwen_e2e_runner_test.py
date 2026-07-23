@@ -174,7 +174,75 @@ def test_iree_dry_run_writes_bundle_then_runs() -> None:
         assert status == 0
 
 
-def test_iree_requires_vmfb_inputs_when_bundle_is_missing() -> None:
+def test_iree_dry_run_discovers_default_vmfb_inputs() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        weights = root / "weights"
+        write_complete_weight_bundle(weights, 1)
+        probe = root / "probe"
+        layer_vmfb = (
+            probe
+            / "qwen_decode_layer_kv_cache_max8"
+            / "qwen_decode_layer_kv_cache_max8_gfx1101.vmfb"
+        )
+        tail_vmfb = probe / "qwen_decode1_tail" / "qwen_decode1_tail_gfx1101.vmfb"
+        layer_vmfb.parent.mkdir(parents=True)
+        tail_vmfb.parent.mkdir(parents=True)
+        layer_vmfb.write_text("layer", encoding="utf-8")
+        tail_vmfb.write_text("tail", encoding="utf-8")
+
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--bundle-dir",
+                str(weights),
+                "--layers",
+                "1",
+                "--steps",
+                "2",
+                "--iree-probe-dir",
+                str(probe),
+                "--iree-decode-bundle-dir",
+                str(root / "iree-bundle"),
+                "--iree-runner",
+                "/tmp/lrrt_iree_qwen_decode1_e2e",
+                "--dry-run",
+            ]
+        )
+
+        command = runner.iree_bundle_writer_command(args)
+        assert str(layer_vmfb) in command
+        assert str(tail_vmfb) in command
+
+
+def test_iree_explicit_vmfb_inputs_override_discovery() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        probe = root / "probe"
+        explicit_layer = root / "explicit-layer.vmfb"
+        explicit_tail = root / "explicit-tail.vmfb"
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--layers",
+                "1",
+                "--iree-layer-vmfb",
+                str(explicit_layer),
+                "--iree-tail-vmfb",
+                str(explicit_tail),
+                "--iree-probe-dir",
+                str(probe),
+            ]
+        )
+
+        command = runner.iree_bundle_writer_command(args)
+        assert str(explicit_layer) in command
+        assert str(explicit_tail) in command
+
+
+def test_iree_requires_vmfb_inputs_when_bundle_and_default_vmfb_are_missing() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
@@ -190,6 +258,8 @@ def test_iree_requires_vmfb_inputs_when_bundle_is_missing() -> None:
                 "1",
                 "--iree-decode-bundle-dir",
                 str(root / "missing-iree-bundle"),
+                "--iree-probe-dir",
+                str(root / "missing-probe"),
                 "--dry-run",
             ]
         )
@@ -202,7 +272,9 @@ def main() -> int:
     test_dry_run_builds_full_e2e_command()
     test_iree_runner_command_uses_decode_bundle()
     test_iree_dry_run_writes_bundle_then_runs()
-    test_iree_requires_vmfb_inputs_when_bundle_is_missing()
+    test_iree_dry_run_discovers_default_vmfb_inputs()
+    test_iree_explicit_vmfb_inputs_override_discovery()
+    test_iree_requires_vmfb_inputs_when_bundle_and_default_vmfb_are_missing()
     print("qwen_e2e_runner_test: ok")
     return 0
 
