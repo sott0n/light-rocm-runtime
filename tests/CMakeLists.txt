@@ -69,6 +69,12 @@ if(PYTHON_EXECUTABLE)
       "${PROJECT_SOURCE_DIR}/tests/qwen_e2e_runner_test.py"
   )
   add_test(
+    NAME lrrt_write_iree_qwen_decode_bundle_tests
+    COMMAND
+      "${PYTHON_EXECUTABLE}"
+      "${PROJECT_SOURCE_DIR}/tests/write_iree_qwen_decode_bundle_test.py"
+  )
+  add_test(
     NAME lrrt_iree_metadata_summary_tests
     COMMAND
       "${PYTHON_EXECUTABLE}"

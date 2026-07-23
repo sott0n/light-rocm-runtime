@@ -460,8 +460,18 @@ lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
 ```
 
 where `<bundle-dir>/manifest.json` records the layer VMFB, tail VMFB, export
-names, and the fixed cache capacity. The direct VMFB form is still available
-for manual experiments:
+names, and the fixed cache capacity. Create that bundle from compiled VMFB
+artifacts with:
+
+```text
+tools/write_iree_qwen_decode_bundle.py \
+  --target gfx1101 \
+  --layer-vmfb <qwen_decode_layer_kv_cache_max8.vmfb> \
+  --tail-vmfb <qwen_decode1_tail.vmfb> \
+  --out-dir <bundle-dir>
+```
+
+The direct VMFB form is still available for manual experiments:
 
 ```text
 lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \

@@ -131,6 +131,16 @@ lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
   <weights-dir> [layers]
 ```
 
+The bundle can be created from compiled VMFB artifacts with:
+
+```text
+tools/write_iree_qwen_decode_bundle.py \
+  --target gfx1101 \
+  --layer-vmfb <qwen_decode_layer_kv_cache_max8.vmfb> \
+  --tail-vmfb <qwen_decode1_tail.vmfb> \
+  --out-dir <bundle-dir>
+```
+
 The VMFB paths are relative to `<bundle-dir>`. Absolute paths and `..` path
 components are rejected so that a bundle manifest cannot silently point outside
 the bundle directory. `max_cache_tokens` must match `kv_cache_shape[0]`; the
