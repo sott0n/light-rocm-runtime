@@ -510,6 +510,7 @@ def _convert_tail(
     data_file: str,
     hidden: int,
     token_ids: list[int],
+    full_token_embeddings: bool,
 ) -> None:
     embed_name, norm_name, lm_head_name = tail_tensor_names()
     try:
@@ -539,6 +540,8 @@ def _convert_tail(
             "model.embed_tokens.weight must have shape [vocab, hidden], got "
             f"{embed_tokens.shape}"
         )
+    if full_token_embeddings:
+        token_ids = list(range(int(embed_tokens.shape[0])))
     for token_id in token_ids:
         if token_id < 0 or token_id >= embed_tokens.shape[0]:
             raise ValueError(
@@ -592,7 +595,20 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     token_ids = parse_token_ids(args.token_ids)
     writes_layer_directory = args.all_layers or layer_count > 1
 
-    if not writes_layer_directory:
+    if args.tail_only:
+        if args.output.suffix:
+            raise ValueError("--output must be a directory when writing model tail")
+        tail_manifest = args.output / "model_tail" / "weights.json"
+        _convert_tail(
+            checkpoint_dir,
+            tail_manifest,
+            args.data_file,
+            shape.hidden,
+            token_ids,
+            args.full_token_embeddings,
+        )
+        print(f"wrote Qwen mini model tail: {tail_manifest}")
+    elif not writes_layer_directory:
         _convert_layer(
             checkpoint_dir,
             shape,
@@ -627,6 +643,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
             args.data_file,
             shape.hidden,
             token_ids,
+            args.full_token_embeddings,
         )
         print(f"wrote Qwen mini model tail: {tail_manifest}")
 
@@ -667,6 +684,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
             "directory."
         ),
     )
+    parser.add_argument(
+        "--tail-only",
+        action="store_true",
+        help="write only the model_tail bundle under --output.",
+    )
     parser.add_argument("--keys", required=True, type=int)
     parser.add_argument(
         "--token-ids",
@@ -674,6 +696,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help=(
             "comma-separated token ids whose embedding rows initialize the "
             "mini decoder hidden states."
+        ),
+    )
+    parser.add_argument(
+        "--full-token-embeddings",
+        action="store_true",
+        help=(
+            "store every model.embed_tokens.weight row in the tail bundle so "
+            "the E2E runner can feed logits-selected token ids back into the "
+            "next decode step."
         ),
     )
     parser.add_argument("--output", required=True, type=Path)

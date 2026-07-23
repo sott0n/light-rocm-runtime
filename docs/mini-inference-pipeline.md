@@ -397,37 +397,50 @@ device-resident between token steps. It still uses deterministic stub tensors
 and fixed `2x2`/three-token cache shapes; connecting Qwen checkpoint weights
 and larger model dimensions remains future work.
 
-The real-weight Qwen runner now also has a two-step decode path:
+The real-weight Qwen runner now also has a three-step decode path:
 
 ```text
 token 0 embedding
   -> 24x qwen_decode1_layer
   -> per-layer K/V outputs stay as IREE buffer_views
 
-token 1 embedding
+logits argmax token embedding
   -> 24x qwen_decode2_layer_kv_cache
   -> each layer consumes the matching token-0 K/V buffer_view
   -> updated 2-token K/V cache + hidden result
   -> qwen_decode1_tail logits
+
+logits argmax token embedding
+  -> 24x qwen_decode3_layer_kv_cache
+  -> each layer consumes the matching 2-token K/V buffer_view
+  -> updated 3-token K/V cache + hidden result
+  -> qwen_decode1_tail logits
 ```
 
-This path is exposed by `lrrt_iree_qwen_decode1_e2e --steps 2` and uses
+This path is exposed by `lrrt_iree_qwen_decode1_e2e --steps 3` and uses
 `tools/iree_qwen_decode1_layer.mlir`,
-`tools/iree_qwen_decode2_layer_kv_cache.mlir`, and
+`tools/iree_qwen_decode2_layer_kv_cache.mlir`,
+`tools/iree_qwen_decode3_layer_kv_cache.mlir`, and
 `tools/iree_qwen_decode1_tail.mlir`. It runs the full Qwen 0.5B layer count and
 checkpoint-derived weights through the lrrt IREE HAL adapter while preserving
 per-layer K/V cache ownership in VM buffer views. The decode2 MLIR computes the
 two-token attention path with grouped-query attention, QK scores, `1/sqrt(64)`
 scaling, numerically stable softmax over the visible two-token cache, and V
-aggregation before the output projection. The current shape is still fixed to a
-single current token with one previous cache token; causal masking is implicit
-because the decode2 entry point only materializes visible cache slots.
+aggregation before the output projection. The decode3 MLIR repeats the same
+fixed-shape pattern with a `2x128xf32` input cache and a `3x128xf32` output
+cache. The current shape is still fixed to a single current token with a
+statically visible cache length; causal masking is implicit because each entry
+point only materializes visible cache slots.
 
-The runner accepts `--steps 1` and `--steps 2`. Internally, the decode path is
-structured as a token-step loop over all decoder layers, with one
-device-resident K/V cache pair per layer. Steps beyond two are intentionally
-rejected until the variable-length cache VMFB is added. The cache ABI and the
-next arbitrary-step direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
+The runner accepts `--steps 1`, `--steps 2`, and `--steps 3`. Internally, the
+decode path is structured as a token-step loop over all decoder layers, with one
+device-resident K/V cache pair per layer. After each token step it calls the
+tail VMFB, selects `argmax(logits)`, and uses that token id's embedding as the
+next step input. Real multi-step runs require the tail bundle to include the
+selected embeddings; `tools/convert_qwen_layer.py --full-token-embeddings`
+produces that format. Steps beyond three are intentionally rejected until the
+variable-length cache VMFB is added. The cache ABI and the next arbitrary-step
+direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 

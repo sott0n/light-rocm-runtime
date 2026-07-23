@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -31,6 +32,7 @@ constexpr uint32_t kDefaultLayers = 24;
 struct Args {
   const char *layer_vmfb = nullptr;
   const char *decode2_layer_vmfb = nullptr;
+  const char *decode3_layer_vmfb = nullptr;
   const char *tail_vmfb = nullptr;
   std::filesystem::path weights_dir;
   uint32_t layers = kDefaultLayers;
@@ -60,6 +62,11 @@ constexpr QwenKvCacheAbi kDecode1CacheAbi = {
 
 constexpr QwenKvCacheAbi kDecode2CacheAbi = {
     /*visible_tokens=*/2,
+    /*kv_dim=*/kKvDim,
+};
+
+constexpr QwenKvCacheAbi kDecode3CacheAbi = {
+    /*visible_tokens=*/3,
     /*kv_dim=*/kKvDim,
 };
 
@@ -222,14 +229,15 @@ iree_status_t validate_layer_cache(iree_hal_buffer_view_t *key_cache,
 
 iree_status_t run_decode_token_step(
     VmfbRunner *runner, const iree_vm_function_t &decode1_function,
-    const iree_vm_function_t &decode2_function, uint32_t step_index,
+    const iree_vm_function_t &decode2_function,
+    const iree_vm_function_t &decode3_function, uint32_t step_index,
     iree_hal_buffer_view_t *input_hidden,
     const std::vector<LayerWeightViews> &weights,
     std::vector<LayerKvCache> *layer_caches, BufferViewPtr *out_hidden) {
-  if (step_index > 1) {
+  if (step_index > 2) {
     return iree_make_status(
         IREE_STATUS_UNIMPLEMENTED,
-        "Qwen IREE E2E currently supports decode steps 1 and 2 only; "
+        "Qwen IREE E2E currently supports decode steps 1 through 3 only; "
         "step %u needs the variable-length KV cache ABI VMFB",
         step_index + 1);
   }
@@ -246,7 +254,7 @@ iree_status_t run_decode_token_step(
       IREE_RETURN_IF_ERROR(
           validate_layer_cache(output.key_cache.get(), output.value_cache.get(),
                                kDecode1CacheAbi, "decode step 1"));
-    } else {
+    } else if (step_index == 1) {
       if (!has_layer_cache((*layer_caches)[layer])) {
         return iree_make_status(
             IREE_STATUS_FAILED_PRECONDITION,
@@ -260,6 +268,20 @@ iree_status_t run_decode_token_step(
       IREE_RETURN_IF_ERROR(
           validate_layer_cache(output.key_cache.get(), output.value_cache.get(),
                                kDecode2CacheAbi, "decode step 2"));
+    } else {
+      if (!has_layer_cache((*layer_caches)[layer])) {
+        return iree_make_status(
+            IREE_STATUS_FAILED_PRECONDITION,
+            "decode step %u requires existing layer_%u KV cache",
+            step_index + 1, layer);
+      }
+      IREE_RETURN_IF_ERROR(run_layer_with_cache(
+          runner, decode3_function, hidden.get(),
+          (*layer_caches)[layer].key_cache.get(),
+          (*layer_caches)[layer].value_cache.get(), weights[layer], &output));
+      IREE_RETURN_IF_ERROR(
+          validate_layer_cache(output.key_cache.get(), output.value_cache.get(),
+                               kDecode3CacheAbi, "decode step 3"));
     }
 
     hidden = std::move(output.hidden);
@@ -301,40 +323,58 @@ iree_status_t run_tail(VmfbRunner *runner, const iree_vm_function_t &function,
   return iree_ok_status();
 }
 
-bool inspect_logits(iree_hal_buffer_view_t *view, uint32_t vocab) {
+iree_status_t inspect_logits(iree_hal_buffer_view_t *view, uint32_t vocab,
+                             uint32_t step, uint32_t *out_top_token) {
   if (iree_hal_buffer_view_shape_rank(view) != 2 ||
       iree_hal_buffer_view_shape_dim(view, 0) != 1 ||
       iree_hal_buffer_view_shape_dim(view, 1) != vocab) {
-    std::fprintf(stderr, "unexpected logits shape\n");
-    return false;
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "unexpected logits shape");
   }
 
   std::vector<float> logits(vocab);
   iree_hal_buffer_t *buffer = iree_hal_buffer_view_buffer(view);
   iree_status_t status = iree_hal_buffer_map_read(
       buffer, 0, logits.data(), logits.size() * sizeof(float));
-  if (!iree_status_is_ok(status)) {
-    std::fprintf(stderr, "logits readback failed\n");
-    iree_status_fprint(stderr, status);
-    iree_status_free(status);
-    return false;
-  }
+  IREE_RETURN_IF_ERROR(status);
 
   uint32_t top_index = 0;
   float top_value = -std::numeric_limits<float>::infinity();
   for (uint32_t i = 0; i < vocab; ++i) {
     const float value = logits[i];
     if (!std::isfinite(value)) {
-      std::fprintf(stderr, "logits[%u] is non-finite: %f\n", i, value);
-      return false;
+      return iree_make_status(IREE_STATUS_DATA_LOSS,
+                              "logits[%u] is non-finite: %f", i, value);
     }
     if (value > top_value) {
       top_value = value;
       top_index = i;
     }
   }
-  std::printf("top_token=%u logit=%g vocab=%u\n", top_index, top_value, vocab);
-  return true;
+  std::printf("step %u top_token=%u logit=%g vocab=%u\n", step, top_index,
+              top_value, vocab);
+  *out_top_token = top_index;
+  return iree_ok_status();
+}
+
+iree_status_t make_token_hidden(VmfbRunner *runner,
+                                const ModelTailWeights &tail_weights,
+                                uint32_t token_id, BufferViewPtr *out_hidden) {
+  const auto iter = std::find(tail_weights.token_ids.begin(),
+                              tail_weights.token_ids.end(), token_id);
+  if (iter == tail_weights.token_ids.end()) {
+    return iree_make_status(
+        IREE_STATUS_NOT_FOUND,
+        "token embedding for logits-selected token %u is not available in the "
+        "model tail bundle",
+        token_id);
+  }
+  const size_t token_index =
+      static_cast<size_t>(std::distance(tail_weights.token_ids.begin(), iter));
+  const auto begin = tail_weights.token_embeddings.begin() +
+                     static_cast<ptrdiff_t>(token_index * kHidden);
+  std::vector<float> initial_hidden(begin, begin + kHidden);
+  return make_view(runner, initial_hidden, {1, kHidden}, out_hidden);
 }
 
 Args parse_args(int argc, char **argv) {
@@ -342,9 +382,10 @@ Args parse_args(int argc, char **argv) {
   if (argc >= 2 && std::string(argv[1]) == "--steps") {
     if (argc < 3) {
       throw std::runtime_error(
-          "usage: lrrt_iree_qwen_decode1_e2e --steps <1|2> "
+          "usage: lrrt_iree_qwen_decode1_e2e --steps <1|2|3> "
           "<decode1-layer.vmfb> "
-          "[decode2-layer.vmfb] <tail.vmfb> <weights-dir> [layers]");
+          "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
+          "<weights-dir> [layers]");
     }
     const int parsed_steps = std::stoi(argv[2]);
     if (parsed_steps <= 0) {
@@ -388,8 +429,29 @@ Args parse_args(int argc, char **argv) {
       }
       return args;
     }
+    if (args.decode_steps == 3) {
+      if (argc != 8 && argc != 9) {
+        throw std::runtime_error(
+            "usage: lrrt_iree_qwen_decode1_e2e --steps 3 <decode1-layer.vmfb> "
+            "<decode2-layer.vmfb> <decode3-layer.vmfb> <tail.vmfb> "
+            "<weights-dir> [layers]");
+      }
+      args.layer_vmfb = argv[3];
+      args.decode2_layer_vmfb = argv[4];
+      args.decode3_layer_vmfb = argv[5];
+      args.tail_vmfb = argv[6];
+      args.weights_dir = argv[7];
+      if (argc == 9) {
+        const int parsed = std::stoi(argv[8]);
+        if (parsed <= 0) {
+          throw std::runtime_error("layers must be positive");
+        }
+        args.layers = static_cast<uint32_t>(parsed);
+      }
+      return args;
+    }
     throw std::runtime_error(
-        "--steps greater than 2 needs a variable-length KV cache VMFB");
+        "--steps greater than 3 needs a variable-length KV cache VMFB");
   }
 
   if (argc != 4 && argc != 5) {
@@ -413,19 +475,27 @@ Args parse_args(int argc, char **argv) {
 iree_status_t run(const Args &args) {
   VmfbRunner runner;
   std::vector<const char *> modules = {args.layer_vmfb, args.tail_vmfb};
-  if (args.decode_steps > 1) {
+  if (args.decode_steps == 2) {
     modules = {args.layer_vmfb, args.decode2_layer_vmfb, args.tail_vmfb};
+  } else if (args.decode_steps == 3) {
+    modules = {args.layer_vmfb, args.decode2_layer_vmfb,
+               args.decode3_layer_vmfb, args.tail_vmfb};
   }
   IREE_RETURN_IF_ERROR(runner.initialize(modules));
 
   iree_vm_function_t layer_function = {};
   iree_vm_function_t decode2_layer_function = {};
+  iree_vm_function_t decode3_layer_function = {};
   iree_vm_function_t tail_function = {};
   IREE_RETURN_IF_ERROR(
       runner.lookup_function("qwen_decode1_layer", &layer_function));
   if (args.decode_steps > 1) {
     IREE_RETURN_IF_ERROR(runner.lookup_function("qwen_decode2_layer_kv_cache",
                                                 &decode2_layer_function));
+  }
+  if (args.decode_steps > 2) {
+    IREE_RETURN_IF_ERROR(runner.lookup_function("qwen_decode3_layer_kv_cache",
+                                                &decode3_layer_function));
   }
   IREE_RETURN_IF_ERROR(
       runner.lookup_function("qwen_decode1_tail", &tail_function));
@@ -444,18 +514,6 @@ iree_status_t run(const Args &args) {
                             "model tail bundle does not contain enough token "
                             "embedding rows");
   }
-
-  auto make_token_hidden = [&](uint32_t token_index,
-                               BufferViewPtr *out_hidden) {
-    const uint32_t available_tokens =
-        static_cast<uint32_t>(tail_weights.token_embeddings.size() / kHidden);
-    const uint32_t selected_token =
-        token_index < available_tokens ? token_index : 0;
-    const auto begin = tail_weights.token_embeddings.begin() +
-                       static_cast<ptrdiff_t>(selected_token * kHidden);
-    std::vector<float> initial_hidden(begin, begin + kHidden);
-    return make_view(&runner, initial_hidden, {1, kHidden}, out_hidden);
-  };
 
   std::vector<DecoderLayerWeights> layer_weights;
   layer_weights.reserve(args.layers);
@@ -478,21 +536,21 @@ iree_status_t run(const Args &args) {
   }
 
   BufferViewPtr hidden;
+  uint32_t current_token = tail_weights.token_ids.front();
   for (uint32_t step = 0; step < args.decode_steps; ++step) {
     BufferViewPtr token_hidden;
-    IREE_RETURN_IF_ERROR(make_token_hidden(step, &token_hidden));
+    IREE_RETURN_IF_ERROR(
+        make_token_hidden(&runner, tail_weights, current_token, &token_hidden));
     IREE_RETURN_IF_ERROR(run_decode_token_step(
-        &runner, layer_function, decode2_layer_function, step,
-        token_hidden.get(), layer_weight_views, &layer_caches, &hidden));
+        &runner, layer_function, decode2_layer_function, decode3_layer_function,
+        step, token_hidden.get(), layer_weight_views, &layer_caches, &hidden));
+    BufferViewPtr step_logits;
+    IREE_RETURN_IF_ERROR(run_tail(&runner, tail_function, hidden.get(),
+                                  tail_weights, &step_logits));
+    IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), tail_weights.vocab,
+                                        step + 1, &current_token));
   }
 
-  BufferViewPtr logits;
-  IREE_RETURN_IF_ERROR(
-      run_tail(&runner, tail_function, hidden.get(), tail_weights, &logits));
-  if (!inspect_logits(logits.get(), tail_weights.vocab)) {
-    return iree_make_status(IREE_STATUS_DATA_LOSS,
-                            "Qwen decode1 logits check failed");
-  }
   std::printf("iree_qwen_decode%u_e2e: ok layers=%u\n", args.decode_steps,
               args.layers);
   return iree_ok_status();

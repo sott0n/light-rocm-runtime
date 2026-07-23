@@ -1,7 +1,7 @@
 # IREE Qwen KV Cache ABI
 
 This document defines the current lrrt/IREE Qwen KV cache boundary and the
-direction for extending it from the fixed two-token milestone to an
+direction for extending it from the fixed three-token milestone to an
 autoregressive decode loop.
 
 ## Runtime Boundary
@@ -20,7 +20,7 @@ For IREE integration, the boundary is:
 
 ## Current Fixed ABI
 
-The real-weight Qwen E2E runner currently supports one-token and two-token
+The real-weight Qwen E2E runner currently supports one-, two-, and three-token
 decode milestones.
 
 `qwen_decode1_layer` consumes:
@@ -56,6 +56,9 @@ It returns:
 | `value_cache` | `2x128xf32` | Updated visible V cache for this layer |
 | `hidden` | `1x896xf32` | Layer output |
 
+`qwen_decode3_layer_kv_cache` follows the same contract with a `2x128xf32`
+input cache and a `3x128xf32` output cache.
+
 The `128` dimension is Qwen 0.5B's full KV width:
 
 ```text
@@ -75,7 +78,7 @@ The runner-level decode loop is:
 
 ```text
 for token_step in 0..decode_steps:
-  hidden = embedding(token_step)
+  hidden = embedding(current_token)
   for layer in 0..num_layers:
     if token_step == 0:
       key_cache[layer], value_cache[layer], hidden =
@@ -85,11 +88,19 @@ for token_step in 0..decode_steps:
         qwen_decodeN_layer(hidden, key_cache[layer], value_cache[layer],
                            weights[layer], token_step)
 logits = qwen_decode1_tail(hidden, tail_weights)
+current_token = argmax(logits)
 ```
 
-The current implementation only has VMFB exports for `token_step == 0` and
-`token_step == 1`. Requests beyond two decode steps must fail explicitly until a
-variable-length cache VMFB is introduced.
+The runner uses the first token id stored in the tail bundle as the initial
+token, then feeds the logits-selected `top_token` back through the tail bundle's
+token embedding table for the next step. Multi-step generation therefore
+requires a tail bundle that contains the selected token ids. The converter's
+`--full-token-embeddings` option stores every embedding row and is the expected
+format for real E2E generation experiments.
+
+The current implementation only has VMFB exports for `token_step == 0`,
+`token_step == 1`, and `token_step == 2`. Requests beyond three decode steps
+must fail explicitly until a variable-length cache VMFB is introduced.
 
 ## Variable-Length ABI Direction
 

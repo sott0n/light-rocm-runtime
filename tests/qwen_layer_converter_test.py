@@ -101,6 +101,25 @@ def test_resolve_layer_count_rejects_all_layers_with_layer_count() -> None:
         raise AssertionError("expected --all-layers with --layer-count to fail")
 
 
+def test_parse_args_accepts_full_token_embeddings() -> None:
+    converter = load_converter()
+    args = converter.parse_args(
+        [
+            "--checkpoint-dir",
+            "/tmp/qwen",
+            "--keys",
+            "1",
+            "--all-layers",
+            "--tail-only",
+            "--full-token-embeddings",
+            "--output",
+            "/tmp/out",
+        ]
+    )
+    assert args.full_token_embeddings is True
+    assert args.tail_only is True
+
+
 def test_tensor_mapping_and_bundle_writer() -> None:
     converter = load_converter()
     config = {
@@ -234,6 +253,7 @@ def main() -> int:
     test_resolve_layer_count_accepts_all_layers()
     test_resolve_layer_count_rejects_too_many_layers()
     test_resolve_layer_count_rejects_all_layers_with_layer_count()
+    test_parse_args_accepts_full_token_embeddings()
     test_tensor_mapping_and_bundle_writer()
     test_multi_layer_output_paths()
     test_tail_bundle_writer()
