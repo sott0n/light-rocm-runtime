@@ -1,8 +1,7 @@
 # IREE Qwen KV Cache ABI
 
-This document defines the current lrrt/IREE Qwen KV cache boundary and the
-direction for extending it from the fixed three-token milestone to an
-autoregressive decode loop.
+This document defines the current lrrt/IREE Qwen KV cache boundary for the
+real-weight Qwen decode runner.
 
 ## Runtime Boundary
 
@@ -18,10 +17,10 @@ For IREE integration, the boundary is:
 - The Qwen runner owns model-level sequencing: layer order, token steps,
   per-layer cache slots, checkpoint weight views, and final logits inspection.
 
-## Current Fixed ABI
+## Fixed Decode ABI
 
-The real-weight Qwen E2E runner currently supports one-, two-, and three-token
-decode milestones.
+The real-weight Qwen E2E runner still supports the original one-, two-, and
+three-token decode milestones.
 
 `qwen_decode1_layer` consumes:
 
@@ -72,6 +71,43 @@ The runner keeps one `key_cache`/`value_cache` pair per decoder layer as IREE
 runner passes the previous step's buffer views directly into the next VMFB
 invocation for the same layer.
 
+## Max-Cache Decode ABI
+
+The preferred path is now `qwen_decode_layer_kv_cache_max8`, which removes the
+need for a new VMFB per token count. It uses a fixed cache capacity and an
+explicit current position:
+
+| Input | Shape | Meaning |
+| --- | --- | --- |
+| `hidden` | `1x896xf32` | Current token hidden state |
+| `old_key_cache` | `8x128xf32` | Layer-local K cache storage |
+| `old_value_cache` | `8x128xf32` | Layer-local V cache storage |
+| `position` | `1xi32` | Current token index to append |
+| layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O, MLP gate/up/down weights |
+
+It returns:
+
+| Output | Shape | Meaning |
+| --- | --- | --- |
+| `key_cache` | `8x128xf32` | Updated K cache storage |
+| `value_cache` | `8x128xf32` | Updated V cache storage |
+| `hidden` | `1x896xf32` | Layer output |
+
+The VMFB inserts the current token's K/V rows at `position` and masks attention
+scores so softmax only sees columns `0..position`. Future cache rows can
+therefore be zero-initialized without changing the attention result. This is not
+fully unbounded dynamic shape support yet; it is an arbitrary-step runner ABI
+within the compiled `max_tokens = 8` capacity.
+
+The runner exposes this path as:
+
+```text
+lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
+  <qwen_decode_layer_kv_cache_max8.vmfb> <tail.vmfb> <weights-dir> [layers]
+```
+
+`N` must be less than or equal to `8`.
+
 ## Decode Loop Contract
 
 The runner-level decode loop is:
@@ -80,13 +116,12 @@ The runner-level decode loop is:
 for token_step in 0..decode_steps:
   hidden = embedding(current_token)
   for layer in 0..num_layers:
-    if token_step == 0:
-      key_cache[layer], value_cache[layer], hidden =
-        qwen_decode1_layer(hidden, weights[layer])
-    else:
-      key_cache[layer], value_cache[layer], hidden =
-        qwen_decodeN_layer(hidden, key_cache[layer], value_cache[layer],
-                           weights[layer], token_step)
+    key_cache[layer], value_cache[layer], hidden =
+      qwen_decode_layer_kv_cache_max8(hidden,
+                                      key_cache[layer],
+                                      value_cache[layer],
+                                      position=token_step,
+                                      weights[layer])
 logits = qwen_decode1_tail(hidden, tail_weights)
 current_token = argmax(logits)
 ```
@@ -98,15 +133,12 @@ requires a tail bundle that contains the selected token ids. The converter's
 `--full-token-embeddings` option stores every embedding row and is the expected
 format for real E2E generation experiments.
 
-The current implementation only has VMFB exports for `token_step == 0`,
-`token_step == 1`, and `token_step == 2`. Requests beyond three decode steps
-must fail explicitly until a variable-length cache VMFB is introduced.
+## Longer-Context ABI Direction
 
-## Variable-Length ABI Direction
-
-To support full autoregressive generation, the next VMFB-level ABI should stop
-encoding the number of visible tokens in the function name and static output
-shape. The target shape is:
+To support full autoregressive generation beyond the current fixed
+`max_tokens = 8` VMFB, the VMFB-level ABI should make the cache capacity a
+manifest-level specialization or move to dynamic cache shapes where practical.
+The target shape is:
 
 | Field | Direction | Meaning |
 | --- | --- | --- |

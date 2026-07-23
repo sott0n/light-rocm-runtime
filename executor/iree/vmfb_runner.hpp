@@ -249,6 +249,24 @@ public:
         buffer_params, initial_data, out_view->out());
   }
 
+  iree_status_t make_i32_buffer_view(const std::vector<int32_t> &data,
+                                     const std::vector<iree_hal_dim_t> &shape,
+                                     BufferViewPtr *out_view) {
+    const iree_hal_buffer_params_t buffer_params = {
+        .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
+        .access = IREE_HAL_MEMORY_ACCESS_ALL,
+        .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
+    };
+    const iree_const_byte_span_t initial_data = {
+        reinterpret_cast<const uint8_t *>(data.data()),
+        data.size() * sizeof(int32_t),
+    };
+    return iree_hal_buffer_view_allocate_buffer_copy(
+        device_, allocator_.get(), shape.size(), shape.data(),
+        IREE_HAL_ELEMENT_TYPE_SINT_32, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
+        buffer_params, initial_data, out_view->out());
+  }
+
   iree_status_t invoke_views(const iree_vm_function_t &function,
                              const std::vector<iree_hal_buffer_view_t *> &views,
                              iree_host_size_t output_count,

@@ -397,7 +397,8 @@ device-resident between token steps. It still uses deterministic stub tensors
 and fixed `2x2`/three-token cache shapes; connecting Qwen checkpoint weights
 and larger model dimensions remains future work.
 
-The real-weight Qwen runner now also has a three-step decode path:
+The real-weight Qwen runner now has two decode paths. The fixed milestone path
+uses separate one-, two-, and three-token VMFB exports:
 
 ```text
 token 0 embedding
@@ -432,15 +433,40 @@ cache. The current shape is still fixed to a single current token with a
 statically visible cache length; causal masking is implicit because each entry
 point only materializes visible cache slots.
 
-The runner accepts `--steps 1`, `--steps 2`, and `--steps 3`. Internally, the
-decode path is structured as a token-step loop over all decoder layers, with one
-device-resident K/V cache pair per layer. After each token step it calls the
-tail VMFB, selects `argmax(logits)`, and uses that token id's embedding as the
-next step input. Real multi-step runs require the tail bundle to include the
-selected embeddings; `tools/convert_qwen_layer.py --full-token-embeddings`
-produces that format. Steps beyond three are intentionally rejected until the
-variable-length cache VMFB is added. The cache ABI and the next arbitrary-step
-direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
+The preferred path uses `tools/iree_qwen_decode_layer_kv_cache_max8.mlir` and
+one VMFB export for every token step:
+
+```text
+token embedding
+  -> initialize per-layer 8x128 K/V cache buffer_views once
+
+for step in 0..N:
+  for each of 24 decoder layers:
+    qwen_decode_layer_kv_cache_max8(hidden,
+                                    key_cache[layer],
+                                    value_cache[layer],
+                                    position=step,
+                                    weights[layer])
+    -> updated 8-token K/V cache + hidden result
+  -> qwen_decode1_tail logits
+  -> host argmax token embedding for the next step
+```
+
+This path is exposed as:
+
+```text
+lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
+  <qwen_decode_layer_kv_cache_max8.vmfb> <tail.vmfb> <weights-dir> [layers]
+```
+
+`N` can be any positive value up to the compiled cache capacity of 8. The
+runner keeps one device-resident K/V cache pair per layer, passes the previous
+step's buffer views directly into the next step, and only uses host readback for
+the current `argmax(logits)` feedback. Real multi-step runs require the tail
+bundle to include the selected embeddings;
+`tools/convert_qwen_layer.py --full-token-embeddings` produces that format. The
+cache ABI and the next longer-context direction are tracked in
+`docs/iree-qwen-kv-cache-abi.md`.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 

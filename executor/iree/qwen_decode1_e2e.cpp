@@ -33,10 +33,12 @@ struct Args {
   const char *layer_vmfb = nullptr;
   const char *decode2_layer_vmfb = nullptr;
   const char *decode3_layer_vmfb = nullptr;
+  const char *variable_layer_vmfb = nullptr;
   const char *tail_vmfb = nullptr;
   std::filesystem::path weights_dir;
   uint32_t layers = kDefaultLayers;
   uint32_t decode_steps = 1;
+  uint32_t max_cache_tokens = 0;
 };
 
 struct LayerOutput {
@@ -101,6 +103,13 @@ iree_status_t make_view(VmfbRunner *runner, const std::vector<float> &data,
                         std::vector<iree_hal_dim_t> shape,
                         BufferViewPtr *out_view) {
   return runner->make_f32_buffer_view(data, shape, out_view);
+}
+
+iree_status_t make_i32_view(VmfbRunner *runner,
+                            const std::vector<int32_t> &data,
+                            std::vector<iree_hal_dim_t> shape,
+                            BufferViewPtr *out_view) {
+  return runner->make_i32_buffer_view(data, shape, out_view);
 }
 
 iree_status_t make_layer_weight_views(VmfbRunner *runner,
@@ -178,6 +187,35 @@ iree_status_t run_layer_with_cache(VmfbRunner *runner,
       hidden,
       old_key_cache,
       old_value_cache,
+      weight_views.attention_norm_weight.get(),
+      weight_views.q_weight.get(),
+      weight_views.k_weight.get(),
+      weight_views.v_weight.get(),
+      weight_views.out_weight.get(),
+      weight_views.mlp_norm_weight.get(),
+      weight_views.gate_weight.get(),
+      weight_views.up_weight.get(),
+      weight_views.down_weight.get(),
+  };
+
+  std::vector<BufferViewPtr> outputs;
+  IREE_RETURN_IF_ERROR(runner->invoke_views(function, inputs, 3, &outputs));
+  out->key_cache.reset(outputs[0].release());
+  out->value_cache.reset(outputs[1].release());
+  out->hidden.reset(outputs[2].release());
+  return iree_ok_status();
+}
+
+iree_status_t run_layer_with_position_cache(
+    VmfbRunner *runner, const iree_vm_function_t &function,
+    iree_hal_buffer_view_t *hidden, iree_hal_buffer_view_t *old_key_cache,
+    iree_hal_buffer_view_t *old_value_cache, iree_hal_buffer_view_t *position,
+    const LayerWeightViews &weight_views, LayerOutput *out) {
+  std::vector<iree_hal_buffer_view_t *> inputs = {
+      hidden,
+      old_key_cache,
+      old_value_cache,
+      position,
       weight_views.attention_norm_weight.get(),
       weight_views.q_weight.get(),
       weight_views.k_weight.get(),
@@ -296,6 +334,72 @@ iree_status_t run_decode_token_step(
   return iree_ok_status();
 }
 
+iree_status_t
+initialize_variable_layer_caches(VmfbRunner *runner, uint32_t layers,
+                                 uint32_t max_cache_tokens,
+                                 std::vector<LayerKvCache> *layer_caches) {
+  const std::vector<float> zero_cache(static_cast<size_t>(max_cache_tokens) *
+                                      kKvDim);
+  for (uint32_t layer = 0; layer < layers; ++layer) {
+    IREE_RETURN_IF_ERROR(make_view(runner, zero_cache,
+                                   {max_cache_tokens, kKvDim},
+                                   &(*layer_caches)[layer].key_cache));
+    IREE_RETURN_IF_ERROR(make_view(runner, zero_cache,
+                                   {max_cache_tokens, kKvDim},
+                                   &(*layer_caches)[layer].value_cache));
+  }
+  return iree_ok_status();
+}
+
+iree_status_t run_decode_token_step_with_variable_cache(
+    VmfbRunner *runner, const iree_vm_function_t &function, uint32_t step_index,
+    uint32_t max_cache_tokens, iree_hal_buffer_view_t *input_hidden,
+    const std::vector<LayerWeightViews> &weights,
+    std::vector<LayerKvCache> *layer_caches, BufferViewPtr *out_hidden) {
+  if (step_index >= max_cache_tokens) {
+    return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
+                            "decode step %u exceeds KV cache capacity %u",
+                            step_index + 1, max_cache_tokens);
+  }
+
+  BufferViewPtr position;
+  IREE_RETURN_IF_ERROR(make_i32_view(runner, {static_cast<int32_t>(step_index)},
+                                     {1}, &position));
+
+  BufferViewPtr hidden;
+  iree_hal_buffer_view_retain(input_hidden);
+  hidden.reset(input_hidden);
+
+  for (uint32_t layer = 0; layer < weights.size(); ++layer) {
+    if (!has_layer_cache((*layer_caches)[layer])) {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "decode step %u requires initialized layer_%u KV cache",
+          step_index + 1, layer);
+    }
+
+    LayerOutput output;
+    IREE_RETURN_IF_ERROR(run_layer_with_position_cache(
+        runner, function, hidden.get(), (*layer_caches)[layer].key_cache.get(),
+        (*layer_caches)[layer].value_cache.get(), position.get(),
+        weights[layer], &output));
+    IREE_RETURN_IF_ERROR(validate_layer_cache(
+        output.key_cache.get(), output.value_cache.get(),
+        QwenKvCacheAbi{/*visible_tokens=*/max_cache_tokens, /*kv_dim=*/kKvDim},
+        "variable KV cache decode step"));
+
+    hidden = std::move(output.hidden);
+    (*layer_caches)[layer].key_cache = std::move(output.key_cache);
+    (*layer_caches)[layer].value_cache = std::move(output.value_cache);
+    std::printf("step %u layer %u/%zu complete\n", step_index + 1, layer + 1,
+                weights.size());
+    std::fflush(stdout);
+  }
+
+  *out_hidden = std::move(hidden);
+  return iree_ok_status();
+}
+
 iree_status_t run_tail(VmfbRunner *runner, const iree_vm_function_t &function,
                        iree_hal_buffer_view_t *hidden,
                        const ModelTailWeights &weights,
@@ -382,16 +486,49 @@ Args parse_args(int argc, char **argv) {
   if (argc >= 2 && std::string(argv[1]) == "--steps") {
     if (argc < 3) {
       throw std::runtime_error(
-          "usage: lrrt_iree_qwen_decode1_e2e --steps <1|2|3> "
+          "usage: lrrt_iree_qwen_decode1_e2e --steps <N> "
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
-          "<weights-dir> [layers]");
+          "<weights-dir> [layers]\n"
+          "   or: lrrt_iree_qwen_decode1_e2e --steps <N> --max-cache-tokens 8 "
+          "<kv-cache-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
     }
     const int parsed_steps = std::stoi(argv[2]);
     if (parsed_steps <= 0) {
       throw std::runtime_error("--steps must be positive");
     }
     args.decode_steps = static_cast<uint32_t>(parsed_steps);
+    if (argc >= 5 && std::string(argv[3]) == "--max-cache-tokens") {
+      const int parsed_max_cache_tokens = std::stoi(argv[4]);
+      if (parsed_max_cache_tokens <= 0) {
+        throw std::runtime_error("--max-cache-tokens must be positive");
+      }
+      args.max_cache_tokens = static_cast<uint32_t>(parsed_max_cache_tokens);
+      if (args.decode_steps > args.max_cache_tokens) {
+        throw std::runtime_error("--steps must not exceed --max-cache-tokens");
+      }
+      if (args.max_cache_tokens != 8) {
+        throw std::runtime_error(
+            "only --max-cache-tokens 8 is currently built");
+      }
+      if (argc != 8 && argc != 9) {
+        throw std::runtime_error(
+            "usage: lrrt_iree_qwen_decode1_e2e --steps <N> "
+            "--max-cache-tokens 8 <kv-cache-layer.vmfb> <tail.vmfb> "
+            "<weights-dir> [layers]");
+      }
+      args.variable_layer_vmfb = argv[5];
+      args.tail_vmfb = argv[6];
+      args.weights_dir = argv[7];
+      if (argc == 9) {
+        const int parsed = std::stoi(argv[8]);
+        if (parsed <= 0) {
+          throw std::runtime_error("layers must be positive");
+        }
+        args.layers = static_cast<uint32_t>(parsed);
+      }
+      return args;
+    }
     if (args.decode_steps == 1) {
       if (argc != 6 && argc != 7) {
         throw std::runtime_error(
@@ -451,7 +588,8 @@ Args parse_args(int argc, char **argv) {
       return args;
     }
     throw std::runtime_error(
-        "--steps greater than 3 needs a variable-length KV cache VMFB");
+        "--steps greater than 3 requires --max-cache-tokens 8 "
+        "<kv-cache-layer.vmfb>");
   }
 
   if (argc != 4 && argc != 5) {
@@ -475,7 +613,9 @@ Args parse_args(int argc, char **argv) {
 iree_status_t run(const Args &args) {
   VmfbRunner runner;
   std::vector<const char *> modules = {args.layer_vmfb, args.tail_vmfb};
-  if (args.decode_steps == 2) {
+  if (args.max_cache_tokens != 0) {
+    modules = {args.variable_layer_vmfb, args.tail_vmfb};
+  } else if (args.decode_steps == 2) {
     modules = {args.layer_vmfb, args.decode2_layer_vmfb, args.tail_vmfb};
   } else if (args.decode_steps == 3) {
     modules = {args.layer_vmfb, args.decode2_layer_vmfb,
@@ -486,14 +626,20 @@ iree_status_t run(const Args &args) {
   iree_vm_function_t layer_function = {};
   iree_vm_function_t decode2_layer_function = {};
   iree_vm_function_t decode3_layer_function = {};
+  iree_vm_function_t variable_layer_function = {};
   iree_vm_function_t tail_function = {};
-  IREE_RETURN_IF_ERROR(
-      runner.lookup_function("qwen_decode1_layer", &layer_function));
-  if (args.decode_steps > 1) {
+  if (args.max_cache_tokens != 0) {
+    IREE_RETURN_IF_ERROR(runner.lookup_function(
+        "qwen_decode_layer_kv_cache_max8", &variable_layer_function));
+  } else {
+    IREE_RETURN_IF_ERROR(
+        runner.lookup_function("qwen_decode1_layer", &layer_function));
+  }
+  if (args.max_cache_tokens == 0 && args.decode_steps > 1) {
     IREE_RETURN_IF_ERROR(runner.lookup_function("qwen_decode2_layer_kv_cache",
                                                 &decode2_layer_function));
   }
-  if (args.decode_steps > 2) {
+  if (args.max_cache_tokens == 0 && args.decode_steps > 2) {
     IREE_RETURN_IF_ERROR(runner.lookup_function("qwen_decode3_layer_kv_cache",
                                                 &decode3_layer_function));
   }
@@ -534,6 +680,10 @@ iree_status_t run(const Args &args) {
     IREE_RETURN_IF_ERROR(make_layer_weight_views(&runner, layer_weights.back(),
                                                  &layer_weight_views[layer]));
   }
+  if (args.max_cache_tokens != 0) {
+    IREE_RETURN_IF_ERROR(initialize_variable_layer_caches(
+        &runner, args.layers, args.max_cache_tokens, &layer_caches));
+  }
 
   BufferViewPtr hidden;
   uint32_t current_token = tail_weights.token_ids.front();
@@ -541,9 +691,16 @@ iree_status_t run(const Args &args) {
     BufferViewPtr token_hidden;
     IREE_RETURN_IF_ERROR(
         make_token_hidden(&runner, tail_weights, current_token, &token_hidden));
-    IREE_RETURN_IF_ERROR(run_decode_token_step(
-        &runner, layer_function, decode2_layer_function, decode3_layer_function,
-        step, token_hidden.get(), layer_weight_views, &layer_caches, &hidden));
+    if (args.max_cache_tokens != 0) {
+      IREE_RETURN_IF_ERROR(run_decode_token_step_with_variable_cache(
+          &runner, variable_layer_function, step, args.max_cache_tokens,
+          token_hidden.get(), layer_weight_views, &layer_caches, &hidden));
+    } else {
+      IREE_RETURN_IF_ERROR(run_decode_token_step(
+          &runner, layer_function, decode2_layer_function,
+          decode3_layer_function, step, token_hidden.get(), layer_weight_views,
+          &layer_caches, &hidden));
+    }
     BufferViewPtr step_logits;
     IREE_RETURN_IF_ERROR(run_tail(&runner, tail_function, hidden.get(),
                                   tail_weights, &step_logits));

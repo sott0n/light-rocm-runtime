@@ -528,6 +528,12 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       qwen_decode3_layer_kv_cache
     )
     lrrt_add_iree_vmfb_probe(
+      lrrt_iree_qwen_decode_layer_kv_cache_max8_vmfb_probe
+      lrrt_iree_qwen_decode_layer_kv_cache_max8_vmfb
+      tools/iree_qwen_decode_layer_kv_cache_max8.mlir
+      qwen_decode_layer_kv_cache_max8
+    )
+    lrrt_add_iree_vmfb_probe(
       lrrt_iree_qwen_decode1_tail_vmfb_probe
       lrrt_iree_qwen_decode1_tail_vmfb
       tools/iree_qwen_decode1_tail.mlir
