@@ -117,10 +117,8 @@ iree_status_t make_layer_weight_views(VmfbRunner *runner,
 
 iree_status_t run_layer(VmfbRunner *runner, const iree_vm_function_t &function,
                         iree_hal_buffer_view_t *hidden,
-                        const DecoderLayerWeights &weights, LayerOutput *out) {
-  LayerWeightViews weight_views;
-  IREE_RETURN_IF_ERROR(make_layer_weight_views(runner, weights, &weight_views));
-
+                        const LayerWeightViews &weight_views,
+                        LayerOutput *out) {
   std::vector<iree_hal_buffer_view_t *> inputs = {
       hidden,
       weight_views.attention_norm_weight.get(),
@@ -147,11 +145,8 @@ iree_status_t run_layer_with_cache(VmfbRunner *runner,
                                    iree_hal_buffer_view_t *hidden,
                                    iree_hal_buffer_view_t *old_key_cache,
                                    iree_hal_buffer_view_t *old_value_cache,
-                                   const DecoderLayerWeights &weights,
+                                   const LayerWeightViews &weight_views,
                                    LayerOutput *out) {
-  LayerWeightViews weight_views;
-  IREE_RETURN_IF_ERROR(make_layer_weight_views(runner, weights, &weight_views));
-
   std::vector<iree_hal_buffer_view_t *> inputs = {
       hidden,
       old_key_cache,
@@ -332,6 +327,7 @@ iree_status_t run(const Args &args) {
   std::vector<LayerOutput> first_step_cache(args.layers);
   std::vector<DecoderLayerWeights> layer_weights;
   layer_weights.reserve(args.layers);
+  std::vector<LayerWeightViews> layer_weight_views(args.layers);
 
   for (uint32_t layer = 0; layer < args.layers; ++layer) {
     const std::filesystem::path layer_manifest =
@@ -344,16 +340,19 @@ iree_status_t run(const Args &args) {
                               "layer_%u bundle has unexpected Qwen shape",
                               layer);
     }
+    IREE_RETURN_IF_ERROR(make_layer_weight_views(&runner, layer_weights.back(),
+                                                 &layer_weight_views[layer]));
   }
 
   for (uint32_t layer = 0; layer < args.layers; ++layer) {
     LayerOutput output;
     IREE_RETURN_IF_ERROR(run_layer(&runner, layer_function, hidden.get(),
-                                   layer_weights[layer], &output));
+                                   layer_weight_views[layer], &output));
     hidden = std::move(output.hidden);
     first_step_cache[layer].key_cache = std::move(output.key_cache);
     first_step_cache[layer].value_cache = std::move(output.value_cache);
     std::printf("step 1 layer %u/%u complete\n", layer + 1, args.layers);
+    std::fflush(stdout);
   }
 
   if (args.two_step) {
@@ -364,11 +363,12 @@ iree_status_t run(const Args &args) {
           run_layer_with_cache(&runner, decode2_layer_function, hidden.get(),
                                first_step_cache[layer].key_cache.get(),
                                first_step_cache[layer].value_cache.get(),
-                               layer_weights[layer], &output));
+                               layer_weight_views[layer], &output));
       hidden = std::move(output.hidden);
       first_step_cache[layer].key_cache = std::move(output.key_cache);
       first_step_cache[layer].value_cache = std::move(output.value_cache);
       std::printf("step 2 layer %u/%u complete\n", layer + 1, args.layers);
+      std::fflush(stdout);
     }
   }
 

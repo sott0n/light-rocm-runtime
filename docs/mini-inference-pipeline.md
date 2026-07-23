@@ -416,10 +416,12 @@ This path is exposed by `lrrt_iree_qwen_decode1_e2e --two-step` and uses
 `tools/iree_qwen_decode2_layer_kv_cache.mlir`, and
 `tools/iree_qwen_decode1_tail.mlir`. It runs the full Qwen 0.5B layer count and
 checkpoint-derived weights through the lrrt IREE HAL adapter while preserving
-per-layer K/V cache ownership in VM buffer views. The current decode2 MLIR is
-still a cache-handoff milestone: it updates and consumes the K/V cache, but the
-two-token attention weighting is simplified instead of implementing the full
-QK score, scale, causal mask, and softmax path.
+per-layer K/V cache ownership in VM buffer views. The decode2 MLIR computes the
+two-token attention path with grouped-query attention, QK scores, `1/sqrt(64)`
+scaling, numerically stable softmax over the visible two-token cache, and V
+aggregation before the output projection. The current shape is still fixed to a
+single current token with one previous cache token; causal masking is implicit
+because the decode2 entry point only materializes visible cache slots.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 

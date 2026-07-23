@@ -2469,6 +2469,20 @@ static iree_status_t lrrt_iree_hal_device_dispatch_now(
   return status;
 }
 
+static iree_status_t
+lrrt_iree_hal_device_synchronize(iree_hal_device_t *base_device,
+                                 const char *operation) {
+  lrrt_iree_hal_device_t *device = lrrt_iree_hal_device_cast(base_device);
+  if (!device->device_allocator) {
+    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                            "lrrt HAL %s has no device allocator", operation);
+  }
+  lrrt_iree_hal_allocator_t *allocator =
+      lrrt_iree_hal_allocator_cast(device->device_allocator);
+  return lrrt_iree_hal_status_from_lr(lr_synchronize(allocator->device),
+                                      "lr_synchronize");
+}
+
 static iree_status_t lrrt_iree_hal_device_queue_dispatch(
     iree_hal_device_t *device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
@@ -2485,6 +2499,9 @@ static iree_status_t lrrt_iree_hal_device_queue_dispatch(
   iree_status_t status = lrrt_iree_hal_device_dispatch_now(
       executable, function, config, constants, bindings,
       iree_hal_buffer_binding_table_empty(), flags);
+  if (iree_status_is_ok(status)) {
+    status = lrrt_iree_hal_device_synchronize(device, "queue dispatch");
+  }
   return lrrt_iree_hal_device_end_synchronous_submission(
       "queue dispatch", signal_semaphore_list, status);
 }
@@ -2969,6 +2986,12 @@ static iree_status_t lrrt_iree_hal_device_replay_command_buffer(
   for (iree_host_size_t i = 0; i < command_buffer->command_count; ++i) {
     IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_replay_command(
         device, &command_buffer->commands[i], i, binding_table));
+    lrrt_iree_hal_tracef("queue execute command[%" PRIhsz "] synchronize begin",
+                         i);
+    IREE_RETURN_IF_ERROR(
+        lrrt_iree_hal_device_synchronize(device, "queue execute command"));
+    lrrt_iree_hal_tracef("queue execute command[%" PRIhsz "] synchronize end",
+                         i);
   }
   return iree_ok_status();
 }
@@ -2980,7 +3003,6 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
     iree_hal_command_buffer_t *command_buffer,
     iree_hal_buffer_binding_table_t binding_table,
     iree_hal_execute_flags_t flags) {
-  (void)device;
   (void)queue_affinity;
   (void)flags;
   IREE_RETURN_IF_ERROR(lrrt_iree_hal_device_begin_synchronous_submission(
@@ -3004,6 +3026,9 @@ static iree_status_t lrrt_iree_hal_device_queue_execute(
         lrrt_iree_hal_command_buffer_cast(command_buffer);
     status = lrrt_iree_hal_device_replay_command_buffer(
         device, lrrt_command_buffer, binding_table);
+  }
+  if (iree_status_is_ok(status)) {
+    status = lrrt_iree_hal_device_synchronize(device, "queue execute");
   }
   return lrrt_iree_hal_device_end_synchronous_submission(
       "queue execute", signal_semaphore_list, status);

@@ -179,11 +179,15 @@ func.func @qwen_decode1_layer(
       ins(%gate, %up : tensor<1x4864xf32>, tensor<1x4864xf32>)
       outs(%ffn_hidden_empty : tensor<1x4864xf32>) {
     ^bb0(%gate_value: f32, %up_value: f32, %out: f32):
-      %neg = arith.negf %gate_value : f32
-      %exp = math.exp %neg : f32
+      %is_nonnegative = arith.cmpf oge, %gate_value, %zero : f32
       %one = arith.constant 1.0 : f32
+      %abs = math.absf %gate_value : f32
+      %neg_abs = arith.negf %abs : f32
+      %exp = math.exp %neg_abs : f32
       %denom = arith.addf %one, %exp : f32
-      %sigmoid = arith.divf %one, %denom : f32
+      %sigmoid_pos = arith.divf %one, %denom : f32
+      %sigmoid_neg = arith.divf %exp, %denom : f32
+      %sigmoid = arith.select %is_nonnegative, %sigmoid_pos, %sigmoid_neg : f32
       %silu = arith.mulf %gate_value, %sigmoid : f32
       %gated = arith.mulf %silu, %up_value : f32
       linalg.yield %gated : f32
