@@ -137,15 +137,19 @@ lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-seq-len S \
 ```
 
 The higher-level `tools/run_qwen_e2e.py` wrapper exposes the inference-side
-limit as `--max-seq-len`. The wrapper chooses the smallest supported VMFB cache
-capacity that can hold that sequence length. For example, `--max-seq-len 10`
-selects the `qwen_decode_layer_kv_cache_max16` specialization and writes
+limit as `--max-seq-len`. The wrapper discovers available VMFB cache capacities
+from the IREE probe output directory and chooses the smallest VMFB that can hold
+that sequence length. For example, if a `max16` VMFB exists,
+`--max-seq-len 10` selects the `qwen_decode_layer_kv_cache_max16` VMFB and writes
 `sequence_capacity: 10` and `max_cache_tokens: 16` to the decode bundle
 manifest.
 The wrapper exposes output length separately as `--max-new-tokens`; that value
 must be positive and must not exceed `--max-seq-len`. The runner validates
 `max_new_tokens <= max_seq_len <= sequence_capacity`; `max_cache_tokens` is the
 current physical static tensor extent of the VMFB.
+When an existing decode bundle is reused, the wrapper reads its manifest and
+rejects `--max-seq-len` values larger than the recorded `sequence_capacity`
+before launching the runner.
 The full 24-layer Qwen E2E path has been validated through
 `--max-new-tokens 32 --max-seq-len 32` using the `max32` cache specialization.
 
@@ -158,7 +162,7 @@ tools/write_iree_qwen_decode_bundle.py \
   --tail-vmfb <qwen_decode1_tail.vmfb> \
   --out-dir <bundle-dir> \
   --sequence-capacity <max_seq_len> \
-  --max-cache-tokens <8|16|32>
+  --max-cache-tokens <vmfb_cache_capacity>
 ```
 
 The VMFB paths are relative to `<bundle-dir>`. Absolute paths and `..` path

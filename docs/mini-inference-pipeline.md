@@ -501,18 +501,21 @@ python3 tools/run_qwen_e2e.py --iree \
   --max-new-tokens 4
 ```
 
-By default, the wrapper discovers the layer and tail VMFBs from the standard
-probe output paths under `build-iree-probe/` for `--iree-target`:
+By default, the wrapper discovers available layer VMFB capacities and the tail
+VMFB from the standard probe output paths under `build-iree-probe/` for
+`--iree-target`:
 `qwen_decode_layer_kv_cache_max<N>/qwen_decode_layer_kv_cache_max<N>_<target>.vmfb`
 and `qwen_decode1_tail/qwen_decode1_tail_<target>.vmfb`. Use
 `--iree-layer-vmfb` or `--iree-tail-vmfb` to override those paths explicitly.
 The wrapper treats `--max-seq-len` as the user-facing inference limit and picks
-the smallest supported cache-capacity specialization that can hold it; for
-example, `--max-seq-len 10` selects the `max16` VMFB and writes
+the smallest discovered cache-capacity VMFB that can hold it; for example, if a
+`max16` VMFB exists, `--max-seq-len 10` selects that VMFB and writes
 `sequence_capacity: 10` and `max_cache_tokens: 16` to the bundle manifest. The
 runner then validates `max_new_tokens <= max_seq_len <= sequence_capacity`.
 `max_cache_tokens` remains the current static VMFB tensor extent and should not
-be treated as the user-facing decode length.
+be treated as the user-facing decode length. When an existing IREE decode bundle
+is reused, the wrapper reads its manifest and rejects `--max-seq-len` values
+larger than the recorded `sequence_capacity` before launching the runner.
 
 Use `--no-convert` to require an existing weight bundle and
 `--no-iree-bundle-write` to require an existing IREE decode bundle. Use
@@ -532,7 +535,7 @@ include the selected embeddings; direct converter calls should pass
 longer-context direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
 The current IREE E2E path has been validated with the full 24-layer Qwen stack
 through `--max-new-tokens 32 --max-seq-len 32`, which is the largest cache
-specialization currently built by default.
+VMFB capacity currently built by default.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 

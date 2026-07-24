@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,7 @@ DEFAULT_BUNDLE_DIR = Path("/tmp/lrrt-qwen-e2e")
 DEFAULT_IREE_DECODE_BUNDLE_DIR = Path("/tmp/lrrt-iree-qwen-decode-bundle")
 DEFAULT_IREE_PROBE_DIR = ROOT / "build-iree-probe"
 DEFAULT_IREE_TARGET = "gfx1101"
-SUPPORTED_IREE_CACHE_CAPACITIES = (8, 16, 32)
+IREE_LAYER_MODULE_RE = re.compile(r"^qwen_decode_layer_kv_cache_max([1-9][0-9]*)$")
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -75,20 +76,89 @@ def iree_decode_bundle_complete(bundle_dir: Path) -> bool:
     return (bundle_dir / "manifest.json").is_file()
 
 
+def iree_decode_bundle_manifest(bundle_dir: Path) -> dict[str, object] | None:
+    manifest = bundle_dir / "manifest.json"
+    if not manifest.is_file():
+        return None
+    return read_json(manifest)
+
+
+def iree_decode_bundle_sequence_capacity(bundle_dir: Path) -> int | None:
+    manifest = iree_decode_bundle_manifest(bundle_dir)
+    if manifest is None:
+        return None
+    value = manifest.get("sequence_capacity")
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(
+            f"{bundle_dir / 'manifest.json'} field 'sequence_capacity' must be "
+            "a positive integer"
+        )
+    return value
+
+
 def iree_layer_module_name(max_cache_tokens: int) -> str:
     return f"qwen_decode_layer_kv_cache_max{max_cache_tokens}"
 
 
-def select_iree_cache_capacity(max_seq_len: int) -> int:
+def parse_iree_layer_capacity(path: Path) -> int | None:
+    for part in [path.stem, path.parent.name]:
+        match = IREE_LAYER_MODULE_RE.match(part)
+        if match is not None:
+            return int(match.group(1))
+    return None
+
+
+def discover_iree_cache_capacities(probe_dir: Path, target: str) -> list[int]:
+    capacities: list[int] = []
+    if not probe_dir.is_dir():
+        return capacities
+    for child in probe_dir.iterdir():
+        if not child.is_dir():
+            continue
+        capacity = parse_iree_layer_capacity(child)
+        if capacity is None:
+            continue
+        module_name = iree_layer_module_name(capacity)
+        vmfb = child / f"{module_name}_{target}.vmfb"
+        if vmfb.is_file():
+            capacities.append(capacity)
+    return sorted(set(capacities))
+
+
+def select_iree_cache_capacity(max_seq_len: int, capacities: list[int]) -> int:
     if max_seq_len <= 0:
         raise ValueError("--max-seq-len must be positive")
-    for capacity in SUPPORTED_IREE_CACHE_CAPACITIES:
+    for capacity in sorted(capacities):
         if max_seq_len <= capacity:
             return capacity
-    supported = ", ".join(str(value) for value in SUPPORTED_IREE_CACHE_CAPACITIES)
+    if not capacities:
+        raise ValueError(
+            "no IREE Qwen decode layer VMFBs were found; build probe modules or "
+            "pass --iree-layer-vmfb"
+        )
+    supported = ", ".join(str(value) for value in sorted(capacities))
     raise ValueError(
-        f"--max-seq-len {max_seq_len} exceeds supported IREE cache capacities "
+        f"--max-seq-len {max_seq_len} exceeds discovered IREE cache capacities "
         f"({supported})"
+    )
+
+
+def resolve_iree_cache_capacity(args: argparse.Namespace) -> int:
+    if args.iree_layer_vmfb is not None:
+        capacity = parse_iree_layer_capacity(args.iree_layer_vmfb)
+        if capacity is not None:
+            if args.max_seq_len > capacity:
+                raise ValueError(
+                    f"--max-seq-len {args.max_seq_len} exceeds explicit IREE "
+                    f"layer VMFB cache capacity ({capacity})"
+                )
+            return capacity
+        if args.max_seq_len <= 0:
+            raise ValueError("--max-seq-len must be positive")
+        return args.max_seq_len
+    return select_iree_cache_capacity(
+        args.max_seq_len,
+        discover_iree_cache_capacities(args.iree_probe_dir, args.iree_target),
     )
 
 
@@ -207,7 +277,7 @@ def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
 
 
 def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
-    cache_capacity = select_iree_cache_capacity(args.max_seq_len)
+    cache_capacity = resolve_iree_cache_capacity(args)
     layer_vmfb = resolve_iree_vmfb_path(
         args.iree_layer_vmfb,
         default_iree_layer_vmfb(args.iree_probe_dir, args.iree_target, cache_capacity),
@@ -246,6 +316,12 @@ def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
         raise ValueError("--max-new-tokens must be positive")
     if args.max_new_tokens > args.max_seq_len:
         raise ValueError("--max-new-tokens must not exceed --max-seq-len")
+    capacity = iree_decode_bundle_sequence_capacity(args.iree_decode_bundle_dir)
+    if capacity is not None and args.max_seq_len > capacity:
+        raise ValueError(
+            f"--max-seq-len {args.max_seq_len} exceeds IREE decode bundle "
+            f"sequence_capacity ({capacity})"
+        )
     return [
         str(args.iree_runner),
         "--max-new-tokens",
