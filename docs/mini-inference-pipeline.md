@@ -536,26 +536,47 @@ value through unchanged. The native runner always prints
 `stop_reason=eos_token` or `stop_reason=max_new_tokens` after
 `generated_token_ids=[...]`.
 
-To check the first generated token and its top logit against the local Hugging
-Face Qwen implementation, add `--reference-check`:
+To check every generated token and its top logit against the local Hugging Face
+Qwen implementation, add `--reference-check`:
 
 ```text
 python3 tools/run_qwen_e2e.py --iree \
   --checkpoint-dir /path/to/qwen-checkpoint \
   --prompt "Hello" \
   --max-seq-len 8 \
-  --max-new-tokens 1 \
+  --max-new-tokens 2 \
   --reference-check
 ```
 
 This optional check loads the checkpoint with `transformers` in FP32 eager
 mode. Before inference it verifies representative prompt-embedding and layer-0
 weights against the converted bundle so a different Qwen variant cannot produce
-a misleading comparison. It then requires the top token to match exactly and
-checks the top logit with `--reference-logit-atol` (default `0.05`). It prints
-`reference_checkpoint_match=passed`, the reference top token, and
-`reference_check=passed` on success. `numpy`, `torch`, and `transformers` are
-only required when this check is requested.
+a misleading comparison. For each decode step it appends the IREE-generated
+token to the Hugging Face input, requires the next top token to match exactly,
+and checks the top logit with `--reference-logit-atol` (default `0.05`). It
+prints one `reference_step=...` line per generated token and
+`reference_check=passed steps=...` on success. `numpy`, `torch`, and
+`transformers` are only required when this check is requested.
+
+For a tokenizer-backed text generation regression, pin both the token IDs and
+decoded text. For the official Qwen2.5-0.5B-Instruct checkpoint, the two-token
+greedy result for the raw prompt `Hello` is:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --prompt "Hello" \
+  --max-seq-len 8 \
+  --max-new-tokens 2 \
+  --expect-generated-token-ids 271,40 \
+  --expect-generated-text $'\n\nI'
+```
+
+The command fails if either result changes and prints
+`text_generation_regression=passed` when both match. Pinning token IDs makes the
+regression independent of ambiguity in how adjacent tokenizer pieces are
+rendered; pinning text also covers the complete tokenize, IREE generation, and
+decode path.
 
 By default, the wrapper discovers available layer VMFB capacities and the tail
 VMFB from the standard probe output paths under `build-iree-probe/` for

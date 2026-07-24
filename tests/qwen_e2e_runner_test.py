@@ -121,6 +121,17 @@ def test_reference_check_requires_iree() -> None:
         raise AssertionError("expected reference-backed Triton run to fail")
 
 
+def test_generation_regression_requires_iree() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--layers", "1", "--expect-generated-token-ids", "7,8"])
+    try:
+        runner.prepare_text_inputs(args)
+    except ValueError as error:
+        assert "--expect-generated-* requires --iree" in str(error)
+    else:
+        raise AssertionError("expected regression-backed Triton run to fail")
+
+
 def test_resolve_eos_token_id_prefers_explicit_value() -> None:
     runner = load_runner()
     args = runner.parse_args(["--iree", "--layers", "1", "--eos-token-id", "151645"])
@@ -168,12 +179,26 @@ def test_resolve_eos_token_id_reads_tokenizer_config() -> None:
         assert runner.resolve_eos_token_id(args, tokenizer) == 151645
 
 
-def test_print_generated_text_decodes_runner_summary() -> None:
+def test_check_generation_regression_decodes_runner_summary() -> None:
     runner = load_runner()
     tokenizer = FakeTokenizer()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--layers",
+            "1",
+            "--tokenizer-dir",
+            "/tmp",
+            "--expect-generated-token-ids",
+            "120952,67330",
+            "--expect-generated-text",
+            "decoded text",
+        ]
+    )
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
-        runner.print_generated_text(
+        runner.check_generation_regression(
+            args,
             tokenizer,
             "step 1 top_token=120952\n"
             "generated_token_ids=[120952,67330]\n"
@@ -182,7 +207,30 @@ def test_print_generated_text_decodes_runner_summary() -> None:
 
     assert tokenizer.decoded_ids == [120952, 67330]
     assert tokenizer.skip_special_tokens is True
-    assert output.getvalue() == 'generated_text="decoded text"\n'
+    assert output.getvalue() == (
+        'generated_text="decoded text"\ntext_generation_regression=passed\n'
+    )
+
+
+def test_check_generation_regression_rejects_token_mismatch() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--layers",
+            "1",
+            "--expect-generated-token-ids",
+            "7,9",
+        ]
+    )
+    try:
+        runner.check_generation_regression(
+            args, tokenizer=None, runner_output="generated_token_ids=[7,8]\n"
+        )
+    except ValueError as error:
+        assert "generated token regression mismatch" in str(error)
+    else:
+        raise AssertionError("expected generated token mismatch to fail")
 
 
 def test_parse_generated_token_ids_requires_one_summary() -> None:
@@ -204,6 +252,41 @@ def test_parse_iree_top_logit_reads_requested_step() -> None:
     )
     assert runner.parse_iree_top_logit(output) == (120952, 3.25)
     assert runner.parse_iree_top_logit(output, step=2) == (67330, -0.015)
+
+
+def test_verify_reference_outputs_checks_every_generated_step() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        ["--iree", "--layers", "1", "--reference-logit-atol", "0.05"]
+    )
+    runner_output = (
+        "step 1 top_token=7 logit=3.25 vocab=10\n"
+        "step 2 top_token=8 logit=4.5 vocab=10\n"
+        "generated_token_ids=[7,8]\n"
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        runner.verify_reference_outputs(args, runner_output, [(7, 3.24), (8, 4.48)])
+
+    assert "reference_step=1 top_token=7" in output.getvalue()
+    assert "reference_step=2 top_token=8" in output.getvalue()
+    assert "reference_check=passed steps=2" in output.getvalue()
+
+
+def test_verify_reference_outputs_rejects_later_step_mismatch() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--iree", "--layers", "1"])
+    runner_output = (
+        "step 1 top_token=7 logit=3.25 vocab=10\n"
+        "step 2 top_token=8 logit=4.5 vocab=10\n"
+        "generated_token_ids=[7,8]\n"
+    )
+    try:
+        runner.verify_reference_outputs(args, runner_output, [(7, 3.25), (9, 4.5)])
+    except ValueError as error:
+        assert "step 2 top token mismatch" in str(error)
+    else:
+        raise AssertionError("expected later reference token mismatch to fail")
 
 
 def test_bundle_tensor_reads_named_tensor() -> None:
@@ -804,13 +887,17 @@ def main() -> int:
     test_prepare_text_prompt_requires_tokenizer_location()
     test_text_options_require_iree()
     test_reference_check_requires_iree()
+    test_generation_regression_requires_iree()
     test_resolve_eos_token_id_prefers_explicit_value()
     test_resolve_eos_token_id_reads_checkpoint_config()
     test_resolve_eos_token_id_uses_first_generation_config_value()
     test_resolve_eos_token_id_reads_tokenizer_config()
-    test_print_generated_text_decodes_runner_summary()
+    test_check_generation_regression_decodes_runner_summary()
+    test_check_generation_regression_rejects_token_mismatch()
     test_parse_generated_token_ids_requires_one_summary()
     test_parse_iree_top_logit_reads_requested_step()
+    test_verify_reference_outputs_checks_every_generated_step()
+    test_verify_reference_outputs_rejects_later_step_mismatch()
     test_bundle_tensor_reads_named_tensor()
     test_run_command_can_tee_and_capture_stdout()
     test_resolve_layers_reads_checkpoint_config()

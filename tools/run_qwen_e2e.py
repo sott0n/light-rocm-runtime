@@ -77,6 +77,11 @@ def load_tokenizer(tokenizer_dir: Path) -> Any:
 def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
     if args.reference_check and args.backend != "iree":
         raise ValueError("--reference-check requires --iree")
+    if (
+        args.expect_generated_token_ids is not None
+        or args.expect_generated_text is not None
+    ) and args.backend != "iree":
+        raise ValueError("--expect-generated-* requires --iree")
     if args.backend != "iree" and (
         args.prompt is not None or args.tokenizer_dir is not None
     ):
@@ -172,6 +177,55 @@ def parse_iree_top_logit(output: str, step: int = 1) -> tuple[int, float]:
             f"IREE runner output must contain exactly one step {step} logit"
         )
     return matches[0][1], matches[0][2]
+
+
+def verify_reference_outputs(
+    args: argparse.Namespace,
+    runner_output: str,
+    reference_steps: list[tuple[int, float]],
+) -> None:
+    generated_token_ids = parse_generated_token_ids(runner_output)
+    if len(reference_steps) != len(generated_token_ids):
+        raise ValueError(
+            "IREE/reference generated step count mismatch: "
+            f"IREE={len(generated_token_ids)}, reference={len(reference_steps)}"
+        )
+
+    max_logit_abs_diff = 0.0
+    for step, (
+        (reference_token_id, reference_top_logit),
+        generated_token_id,
+    ) in enumerate(zip(reference_steps, generated_token_ids), start=1):
+        iree_token_id, iree_top_logit = parse_iree_top_logit(runner_output, step)
+        if iree_token_id != generated_token_id:
+            raise ValueError(
+                f"IREE step {step} top token does not match generated summary: "
+                f"top_token={iree_token_id}, generated={generated_token_id}"
+            )
+        logit_abs_diff = abs(iree_top_logit - reference_top_logit)
+        max_logit_abs_diff = max(max_logit_abs_diff, logit_abs_diff)
+        print(
+            f"reference_step={step} top_token={reference_token_id} "
+            f"logit={reference_top_logit:.9g} "
+            f"logit_abs_diff={logit_abs_diff:.9g}",
+            flush=True,
+        )
+        if iree_token_id != reference_token_id:
+            raise ValueError(
+                f"IREE/reference step {step} top token mismatch: "
+                f"IREE={iree_token_id}, reference={reference_token_id}"
+            )
+        if logit_abs_diff > args.reference_logit_atol:
+            raise ValueError(
+                f"IREE/reference step {step} top logit mismatch: "
+                f"abs_diff={logit_abs_diff:.9g}, "
+                f"atol={args.reference_logit_atol:.9g}"
+            )
+    print(
+        f"reference_check=passed steps={len(reference_steps)} "
+        f"max_logit_abs_diff={max_logit_abs_diff:.9g}",
+        flush=True,
+    )
 
 
 def bundle_tensor(manifest_path: Path, tensor_name: str, shape: tuple[int, ...]) -> Any:
@@ -280,40 +334,50 @@ def run_reference_check(args: argparse.Namespace, runner_output: str) -> None:
     )
     model.eval()
     verify_reference_checkpoint(args, model)
-    with torch.inference_mode():
-        input_ids = torch.tensor([prompt_ids], dtype=torch.long)
-        reference_logits = model(input_ids=input_ids).logits[0, -1].float()
-        reference_logit, reference_token = torch.max(reference_logits, dim=0)
-
-    reference_token_id = int(reference_token.item())
-    reference_top_logit = float(reference_logit.item())
-    iree_token_id, iree_top_logit = parse_iree_top_logit(runner_output)
-    logit_abs_diff = abs(iree_top_logit - reference_top_logit)
-    print(
-        f"reference_top_token={reference_token_id} logit={reference_top_logit:.9g}",
-        flush=True,
-    )
-    if iree_token_id != reference_token_id:
-        raise ValueError(
-            "IREE/reference top token mismatch: "
-            f"IREE={iree_token_id}, reference={reference_token_id}"
-        )
-    if logit_abs_diff > args.reference_logit_atol:
-        raise ValueError(
-            "IREE/reference top logit mismatch: "
-            f"abs_diff={logit_abs_diff:.9g}, atol={args.reference_logit_atol:.9g}"
-        )
-    print(f"reference_check=passed logit_abs_diff={logit_abs_diff:.9g}", flush=True)
-
-
-def print_generated_text(tokenizer: Any, runner_output: str) -> None:
     generated_token_ids = parse_generated_token_ids(runner_output)
-    generated_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
-    print(
-        "generated_text="
-        + json.dumps(generated_text, ensure_ascii=False, separators=(",", ":")),
-        flush=True,
-    )
+    reference_steps: list[tuple[int, float]] = []
+    with torch.inference_mode():
+        for step in range(len(generated_token_ids)):
+            reference_input_ids = prompt_ids + generated_token_ids[:step]
+            input_ids = torch.tensor([reference_input_ids], dtype=torch.long)
+            reference_logits = model(input_ids=input_ids).logits[0, -1].float()
+            reference_logit, reference_token = torch.max(reference_logits, dim=0)
+            reference_steps.append(
+                (int(reference_token.item()), float(reference_logit.item()))
+            )
+    verify_reference_outputs(args, runner_output, reference_steps)
+
+
+def check_generation_regression(
+    args: argparse.Namespace, tokenizer: Any | None, runner_output: str
+) -> None:
+    generated_token_ids = parse_generated_token_ids(runner_output)
+    generated_text: str | None = None
+    if tokenizer is not None:
+        generated_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+        print(
+            "generated_text="
+            + json.dumps(generated_text, ensure_ascii=False, separators=(",", ":")),
+            flush=True,
+        )
+    if args.expect_generated_token_ids is not None:
+        expected_token_ids = parse_token_ids(args.expect_generated_token_ids)
+        if generated_token_ids != expected_token_ids:
+            raise ValueError(
+                "generated token regression mismatch: "
+                f"actual={generated_token_ids}, expected={expected_token_ids}"
+            )
+    if args.expect_generated_text is not None:
+        if generated_text != args.expect_generated_text:
+            raise ValueError(
+                "generated text regression mismatch: "
+                f"actual={generated_text!r}, expected={args.expect_generated_text!r}"
+            )
+    if (
+        args.expect_generated_token_ids is not None
+        or args.expect_generated_text is not None
+    ):
+        print("text_generation_regression=passed", flush=True)
 
 
 def prompt_sequence_length(args: argparse.Namespace) -> int:
@@ -697,11 +761,17 @@ def run_iree(args: argparse.Namespace, layers: int, tokenizer: Any | None) -> No
     runner_output = run_command(
         iree_runner_command(args, layers),
         args.dry_run,
-        capture_stdout=tokenizer is not None or args.reference_check,
+        capture_stdout=(
+            tokenizer is not None
+            or args.reference_check
+            or args.expect_generated_token_ids is not None
+        ),
     )
-    if tokenizer is not None and not args.dry_run:
+    if (
+        tokenizer is not None or args.expect_generated_token_ids is not None
+    ) and not args.dry_run:
         assert runner_output is not None
-        print_generated_text(tokenizer, runner_output)
+        check_generation_regression(args, tokenizer, runner_output)
     if args.reference_check and not args.dry_run:
         assert runner_output is not None
         run_reference_check(args, runner_output)
@@ -751,13 +821,21 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--reference-check",
         action="store_true",
-        help="compare the first IREE top token/logit with local Hugging Face Qwen",
+        help="compare every IREE top token/logit with local Hugging Face Qwen",
     )
     parser.add_argument(
         "--reference-logit-atol",
         default=0.05,
         type=float,
         help="absolute tolerance for --reference-check top-logit comparison",
+    )
+    parser.add_argument(
+        "--expect-generated-token-ids",
+        help="require the generated token IDs to match this comma-separated list",
+    )
+    parser.add_argument(
+        "--expect-generated-text",
+        help="require tokenizer-decoded generated text to match exactly",
     )
     parser.add_argument("--backend", choices=["triton", "iree"], default="triton")
     parser.add_argument("--iree", action="store_const", const="iree", dest="backend")
@@ -789,6 +867,15 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if args.reference_logit_atol < 0:
         parser.error("--reference-logit-atol must be non-negative")
+    if args.expect_generated_token_ids is not None:
+        try:
+            parse_token_ids(args.expect_generated_token_ids)
+        except (ValueError, TypeError) as error:
+            parser.error(f"invalid --expect-generated-token-ids: {error}")
+    if args.expect_generated_text is not None and (
+        args.prompt is None and args.tokenizer_dir is None
+    ):
+        parser.error("--expect-generated-text requires --prompt or --tokenizer-dir")
     if args.token_ids is None and args.prompt is None:
         args.token_ids = "0,1,2"
     args.resolved_eos_token_id = None
