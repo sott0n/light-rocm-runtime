@@ -137,11 +137,41 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
         "/tmp/lrrt_iree_qwen_decode1_e2e",
         "--max-new-tokens",
         "3",
+        "--max-seq-len",
+        "8",
         "--bundle",
         "/tmp/iree-decode-bundle",
         "/tmp/qwen-weights",
         "2",
     ]
+
+
+def test_iree_runner_command_accepts_max_supported_generation_capacity() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--bundle-dir",
+            "/tmp/qwen-weights",
+            "--layers",
+            "24",
+            "--max-new-tokens",
+            "32",
+            "--max-seq-len",
+            "32",
+            "--iree-decode-bundle-dir",
+            "/tmp/iree-decode-bundle",
+            "--iree-runner",
+            "/tmp/lrrt_iree_qwen_decode1_e2e",
+        ]
+    )
+
+    command = runner.iree_runner_command(args, 24)
+
+    assert "--max-new-tokens" in command
+    assert "32" in command
+    assert "--max-seq-len" in command
+    assert command[-2:] == ["/tmp/qwen-weights", "24"]
 
 
 def test_iree_converter_command_writes_e2e_directory_bundle() -> None:
@@ -256,6 +286,8 @@ def test_iree_dry_run_discovers_default_vmfb_inputs() -> None:
         command = runner.iree_bundle_writer_command(args)
         assert str(layer_vmfb) in command
         assert str(tail_vmfb) in command
+        assert "--sequence-capacity" in command
+        assert "8" in command
 
 
 def test_iree_dry_run_discovers_capacity_specific_vmfb_inputs() -> None:
@@ -302,6 +334,8 @@ def test_iree_dry_run_discovers_capacity_specific_vmfb_inputs() -> None:
         assert str(tail_vmfb) in command
         assert "--max-cache-tokens" in command
         assert "16" in command
+        assert "--sequence-capacity" in command
+        assert "10" in command
         assert "--layer-export" in command
         assert "qwen_decode_layer_kv_cache_max16" in command
 
@@ -426,6 +460,7 @@ def main() -> int:
     test_runner_command_requires_keys_for_tokens()
     test_dry_run_builds_full_e2e_command()
     test_iree_runner_command_uses_decode_bundle()
+    test_iree_runner_command_accepts_max_supported_generation_capacity()
     test_iree_converter_command_writes_e2e_directory_bundle()
     test_iree_dry_run_writes_bundle_then_runs()
     test_iree_dry_run_discovers_default_vmfb_inputs()

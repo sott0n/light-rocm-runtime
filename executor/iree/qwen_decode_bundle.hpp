@@ -21,6 +21,7 @@ struct QwenDecodeBundleManifest {
   std::filesystem::path tail_vmfb;
   std::string layer_export;
   std::string tail_export;
+  uint32_t sequence_capacity = 0;
   uint32_t max_cache_tokens = 0;
   uint32_t kv_cache_tokens = 0;
   uint32_t kv_cache_dim = 0;
@@ -82,6 +83,7 @@ parse_qwen_decode_bundle_manifest(const std::filesystem::path &bundle_dir,
     throw std::runtime_error("IREE Qwen bundle exports must not be empty");
   }
 
+  manifest.sequence_capacity = detail::require_u32(root, "sequence_capacity");
   manifest.max_cache_tokens = detail::require_u32(root, "max_cache_tokens");
   const detail::JsonValue &shape =
       detail::require_field(root, "kv_cache_shape");
@@ -103,6 +105,11 @@ parse_qwen_decode_bundle_manifest(const std::filesystem::path &bundle_dir,
       manifest.kv_cache_tokens != manifest.max_cache_tokens) {
     throw std::runtime_error(
         "IREE Qwen bundle max_cache_tokens must match kv_cache_shape[0]");
+  }
+  if (manifest.sequence_capacity == 0 ||
+      manifest.sequence_capacity > manifest.max_cache_tokens) {
+    throw std::runtime_error("IREE Qwen bundle sequence_capacity must be in "
+                             "(0, max_cache_tokens]");
   }
   if (manifest.kv_cache_dim == 0) {
     throw std::runtime_error("IREE Qwen bundle kv_cache_shape[1] is zero");

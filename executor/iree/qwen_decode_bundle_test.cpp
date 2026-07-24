@@ -29,7 +29,11 @@ void write_file(const std::filesystem::path &path, const std::string &text) {
 std::string manifest_text(const char *layer_vmfb = "layer.vmfb",
                           const char *tail_vmfb = "tail.vmfb",
                           uint32_t max_cache_tokens = 8,
-                          uint32_t shape_tokens = 8, uint32_t shape_dim = 128) {
+                          uint32_t shape_tokens = 8, uint32_t shape_dim = 128,
+                          uint32_t sequence_capacity = 0) {
+  if (sequence_capacity == 0) {
+    sequence_capacity = max_cache_tokens;
+  }
   return std::string("{\n") +
          "  \"manifest_version\": 1,\n"
          "  \"target\": \"gfx1101\",\n"
@@ -41,6 +45,9 @@ std::string manifest_text(const char *layer_vmfb = "layer.vmfb",
          "\",\n"
          "  \"layer_export\": \"qwen_decode_layer_kv_cache_max8\",\n"
          "  \"tail_export\": \"qwen_decode1_tail\",\n"
+         "  \"sequence_capacity\": " +
+         std::to_string(sequence_capacity) +
+         ",\n"
          "  \"max_cache_tokens\": " +
          std::to_string(max_cache_tokens) +
          ",\n"
@@ -83,6 +90,7 @@ void test_parse_manifest() {
   expect(manifest.layer_export == "qwen_decode_layer_kv_cache_max8",
          "layer export");
   expect(manifest.tail_export == "qwen_decode1_tail", "tail export");
+  expect(manifest.sequence_capacity == 8, "sequence capacity");
   expect(manifest.max_cache_tokens == 8, "max cache tokens");
   expect(manifest.kv_cache_tokens == 8, "kv cache tokens");
   expect(manifest.kv_cache_dim == 128, "kv cache dim");
@@ -115,6 +123,15 @@ void test_invalid_manifest() {
       },
       "must match kv_cache_shape[0]",
       "max_cache_tokens and shape mismatch must fail");
+
+  write_file(dir / "capacity" / "manifest.json",
+             manifest_text("layer.vmfb", "tail.vmfb", 16, 16, 128, 17));
+  expect_throw_contains(
+      [&] {
+        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir /
+                                                               "capacity");
+      },
+      "sequence_capacity", "sequence capacity over cache capacity must fail");
 }
 
 } // namespace

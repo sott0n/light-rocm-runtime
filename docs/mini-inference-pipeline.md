@@ -438,21 +438,23 @@ statically visible cache length; causal masking is implicit because each entry
 point only materializes visible cache slots.
 
 The preferred path uses the `tools/iree_qwen_decode_layer_kv_cache_max<N>.mlir`
-specializations and one VMFB export for every token step. The current supported
-cache capacities are `8`, `16`, and `32`.
+specializations as temporary static-shape bundle implementations. The current
+supported cache capacities are `8`, `16`, and `32`, but the runner-facing
+contract is a capacity-bearing bundle rather than an open-ended list of
+sequence-length-specific entry points.
 
 ```text
 token embedding
-  -> initialize per-layer Nx128 K/V cache buffer_views once
+  -> initialize per-layer max_cache_tokens x 128 K/V cache buffer_views once
 
-for step in 0..N:
+for step in 0..max_new_tokens:
   for each of 24 decoder layers:
     qwen_decode_layer_kv_cache_maxN(hidden,
                                     key_cache[layer],
                                     value_cache[layer],
                                     position=step,
                                     weights[layer])
-    -> updated N-token K/V cache + hidden result
+    -> updated max_cache_tokens-token K/V cache + hidden result
   -> qwen_decode1_tail logits
   -> host argmax token embedding for the next step
 ```
@@ -460,13 +462,13 @@ for step in 0..N:
 This path is exposed as:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --max-new-tokens N --bundle <bundle-dir> \
-  <weights-dir> [layers]
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-seq-len S \
+  --bundle <bundle-dir> <weights-dir> [layers]
 ```
 
 where `<bundle-dir>/manifest.json` records the layer VMFB, tail VMFB, export
-names, and the fixed cache capacity. Create that bundle from compiled VMFB
-artifacts with:
+names, the user-facing sequence capacity, and the physical cache tensor shape.
+Create that bundle from compiled VMFB artifacts with:
 
 ```text
 tools/write_iree_qwen_decode_bundle.py \
@@ -474,6 +476,7 @@ tools/write_iree_qwen_decode_bundle.py \
   --layer-vmfb <qwen_decode_layer_kv_cache_max*.vmfb> \
   --tail-vmfb <qwen_decode1_tail.vmfb> \
   --out-dir <bundle-dir> \
+  --sequence-capacity <max_seq_len> \
   --max-cache-tokens <8|16|32>
 ```
 
@@ -506,7 +509,10 @@ and `qwen_decode1_tail/qwen_decode1_tail_<target>.vmfb`. Use
 The wrapper treats `--max-seq-len` as the user-facing inference limit and picks
 the smallest supported cache-capacity specialization that can hold it; for
 example, `--max-seq-len 10` selects the `max16` VMFB and writes
-`max_cache_tokens: 16` to the bundle manifest.
+`sequence_capacity: 10` and `max_cache_tokens: 16` to the bundle manifest. The
+runner then validates `max_new_tokens <= max_seq_len <= sequence_capacity`.
+`max_cache_tokens` remains the current static VMFB tensor extent and should not
+be treated as the user-facing decode length.
 
 Use `--no-convert` to require an existing weight bundle and
 `--no-iree-bundle-write` to require an existing IREE decode bundle. Use
@@ -524,6 +530,9 @@ views directly into the next step, and only uses host readback for the current
 include the selected embeddings; direct converter calls should pass
 `--full-token-embeddings` to produce that format. The cache ABI and the next
 longer-context direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
+The current IREE E2E path has been validated with the full 24-layer Qwen stack
+through `--max-new-tokens 32 --max-seq-len 32`, which is the largest cache
+specialization currently built by default.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 

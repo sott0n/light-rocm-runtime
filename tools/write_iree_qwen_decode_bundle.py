@@ -48,6 +48,7 @@ def manifest_data(args: argparse.Namespace) -> dict[str, object]:
         "tail_vmfb": args.tail_name.as_posix(),
         "layer_export": args.layer_export,
         "tail_export": args.tail_export,
+        "sequence_capacity": args.sequence_capacity,
         "max_cache_tokens": args.max_cache_tokens,
         "kv_cache_shape": [args.max_cache_tokens, args.kv_cache_dim],
     }
@@ -76,6 +77,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--max-cache-tokens", default=DEFAULT_MAX_CACHE_TOKENS, type=int
     )
+    parser.add_argument(
+        "--sequence-capacity",
+        type=int,
+        help=(
+            "Maximum sequence length this bundle supports. Defaults to "
+            "--max-cache-tokens for the current static-shape VMFBs."
+        ),
+    )
     parser.add_argument("--kv-cache-dim", default=DEFAULT_KV_CACHE_DIM, type=int)
     parser.add_argument(
         "--layer-name",
@@ -98,6 +107,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         raise ValueError("--tail-export must not be empty")
     if args.max_cache_tokens <= 0:
         raise ValueError("--max-cache-tokens must be positive")
+    if args.sequence_capacity is None:
+        args.sequence_capacity = args.max_cache_tokens
+    if args.sequence_capacity <= 0:
+        raise ValueError("--sequence-capacity must be positive")
+    if args.sequence_capacity > args.max_cache_tokens:
+        raise ValueError("--sequence-capacity must not exceed --max-cache-tokens")
     if args.kv_cache_dim <= 0:
         raise ValueError("--kv-cache-dim must be positive")
 

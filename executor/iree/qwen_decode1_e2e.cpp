@@ -46,6 +46,7 @@ struct Args {
   std::filesystem::path weights_dir;
   uint32_t layers = kDefaultLayers;
   uint32_t decode_steps = 1;
+  uint32_t max_seq_len = 1;
   uint32_t max_cache_tokens = 0;
 };
 
@@ -518,6 +519,7 @@ Args parse_args(int argc, char **argv) {
     if (argc < 3) {
       throw std::runtime_error(
           "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
+          "[--max-seq-len <N>] "
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
           "<weights-dir> [layers]\n"
@@ -532,18 +534,39 @@ Args parse_args(int argc, char **argv) {
       throw std::runtime_error("--max-new-tokens must be positive");
     }
     args.decode_steps = static_cast<uint32_t>(parsed_max_new_tokens);
-    if (argc >= 4 && std::string(argv[3]) == "--bundle") {
-      if (argc != 6 && argc != 7) {
+    args.max_seq_len = args.decode_steps;
+
+    int option_index = 3;
+    if (argc >= 5 && std::string(argv[option_index]) == "--max-seq-len") {
+      const int parsed_max_seq_len = std::stoi(argv[option_index + 1]);
+      if (parsed_max_seq_len <= 0) {
+        throw std::runtime_error("--max-seq-len must be positive");
+      }
+      args.max_seq_len = static_cast<uint32_t>(parsed_max_seq_len);
+      if (args.decode_steps > args.max_seq_len) {
         throw std::runtime_error(
-            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> --bundle "
+            "--max-new-tokens must not exceed --max-seq-len");
+      }
+      option_index += 2;
+    }
+
+    if (argc > option_index && std::string(argv[option_index]) == "--bundle") {
+      if (argc != option_index + 3 && argc != option_index + 4) {
+        throw std::runtime_error(
+            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
+            "[--max-seq-len <N>] --bundle "
             "<bundle-dir> <weights-dir> [layers]");
       }
-      const std::filesystem::path bundle_dir = argv[4];
+      const std::filesystem::path bundle_dir = argv[option_index + 1];
       const auto manifest = load_qwen_decode_bundle_manifest(bundle_dir);
       args.max_cache_tokens = manifest.max_cache_tokens;
-      if (args.decode_steps > args.max_cache_tokens) {
+      if (args.max_seq_len > manifest.sequence_capacity) {
         throw std::runtime_error(
-            "--max-new-tokens must not exceed bundle max_cache_tokens");
+            "--max-seq-len must not exceed bundle sequence_capacity");
+      }
+      if (args.decode_steps > args.max_seq_len) {
+        throw std::runtime_error(
+            "--max-new-tokens must not exceed --max-seq-len");
       }
       if (manifest.kv_cache_dim != kKvDim) {
         throw std::runtime_error(
@@ -553,9 +576,9 @@ Args parse_args(int argc, char **argv) {
       args.tail_vmfb = manifest.tail_vmfb.string();
       args.variable_layer_export = manifest.layer_export;
       args.tail_export = manifest.tail_export;
-      args.weights_dir = argv[5];
-      if (argc == 7) {
-        const int parsed = std::stoi(argv[6]);
+      args.weights_dir = argv[option_index + 2];
+      if (argc == option_index + 4) {
+        const int parsed = std::stoi(argv[option_index + 3]);
         if (parsed <= 0) {
           throw std::runtime_error("layers must be positive");
         }
@@ -563,31 +586,33 @@ Args parse_args(int argc, char **argv) {
       }
       return args;
     }
-    if (argc >= 5 && std::string(argv[3]) == "--max-cache-tokens") {
-      const int parsed_max_cache_tokens = std::stoi(argv[4]);
+    if (argc > option_index &&
+        std::string(argv[option_index]) == "--max-cache-tokens") {
+      const int parsed_max_cache_tokens = std::stoi(argv[option_index + 1]);
       if (parsed_max_cache_tokens <= 0) {
         throw std::runtime_error("--max-cache-tokens must be positive");
       }
       args.max_cache_tokens = static_cast<uint32_t>(parsed_max_cache_tokens);
-      if (args.decode_steps > args.max_cache_tokens) {
+      if (args.max_seq_len > args.max_cache_tokens) {
         throw std::runtime_error(
-            "--max-new-tokens must not exceed --max-cache-tokens");
+            "--max-seq-len must not exceed --max-cache-tokens");
       }
       if (!is_supported_max_cache_tokens(args.max_cache_tokens)) {
         throw std::runtime_error(
             "only --max-cache-tokens 8, 16, or 32 are currently built");
       }
-      if (argc != 8 && argc != 9) {
+      if (argc != option_index + 5 && argc != option_index + 6) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
-            "--max-cache-tokens <8|16|32> <kv-cache-layer.vmfb> "
+            "[--max-seq-len <N>] --max-cache-tokens <8|16|32> "
+            "<kv-cache-layer.vmfb> "
             "<tail.vmfb> <weights-dir> [layers]");
       }
-      args.variable_layer_vmfb = argv[5];
-      args.tail_vmfb = argv[6];
-      args.weights_dir = argv[7];
-      if (argc == 9) {
-        const int parsed = std::stoi(argv[8]);
+      args.variable_layer_vmfb = argv[option_index + 2];
+      args.tail_vmfb = argv[option_index + 3];
+      args.weights_dir = argv[option_index + 4];
+      if (argc == option_index + 6) {
+        const int parsed = std::stoi(argv[option_index + 5]);
         if (parsed <= 0) {
           throw std::runtime_error("layers must be positive");
         }
@@ -596,16 +621,17 @@ Args parse_args(int argc, char **argv) {
       return args;
     }
     if (args.decode_steps == 1) {
-      if (argc != 6 && argc != 7) {
+      if (argc != option_index + 3 && argc != option_index + 4) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens 1 "
+            "[--max-seq-len <N>] "
             "<decode1-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
       }
-      args.layer_vmfb = argv[3];
-      args.tail_vmfb = argv[4];
-      args.weights_dir = argv[5];
-      if (argc == 7) {
-        const int parsed = std::stoi(argv[6]);
+      args.layer_vmfb = argv[option_index];
+      args.tail_vmfb = argv[option_index + 1];
+      args.weights_dir = argv[option_index + 2];
+      if (argc == option_index + 4) {
+        const int parsed = std::stoi(argv[option_index + 3]);
         if (parsed <= 0) {
           throw std::runtime_error("layers must be positive");
         }
@@ -614,18 +640,19 @@ Args parse_args(int argc, char **argv) {
       return args;
     }
     if (args.decode_steps == 2) {
-      if (argc != 7 && argc != 8) {
+      if (argc != option_index + 4 && argc != option_index + 5) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens 2 "
+            "[--max-seq-len <N>] "
             "<decode1-layer.vmfb> <decode2-layer.vmfb> <tail.vmfb> "
             "<weights-dir> [layers]");
       }
-      args.layer_vmfb = argv[3];
-      args.decode2_layer_vmfb = argv[4];
-      args.tail_vmfb = argv[5];
-      args.weights_dir = argv[6];
-      if (argc == 8) {
-        const int parsed = std::stoi(argv[7]);
+      args.layer_vmfb = argv[option_index];
+      args.decode2_layer_vmfb = argv[option_index + 1];
+      args.tail_vmfb = argv[option_index + 2];
+      args.weights_dir = argv[option_index + 3];
+      if (argc == option_index + 5) {
+        const int parsed = std::stoi(argv[option_index + 4]);
         if (parsed <= 0) {
           throw std::runtime_error("layers must be positive");
         }
@@ -634,19 +661,20 @@ Args parse_args(int argc, char **argv) {
       return args;
     }
     if (args.decode_steps == 3) {
-      if (argc != 8 && argc != 9) {
+      if (argc != option_index + 5 && argc != option_index + 6) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens 3 "
+            "[--max-seq-len <N>] "
             "<decode1-layer.vmfb> <decode2-layer.vmfb> "
             "<decode3-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
       }
-      args.layer_vmfb = argv[3];
-      args.decode2_layer_vmfb = argv[4];
-      args.decode3_layer_vmfb = argv[5];
-      args.tail_vmfb = argv[6];
-      args.weights_dir = argv[7];
-      if (argc == 9) {
-        const int parsed = std::stoi(argv[8]);
+      args.layer_vmfb = argv[option_index];
+      args.decode2_layer_vmfb = argv[option_index + 1];
+      args.decode3_layer_vmfb = argv[option_index + 2];
+      args.tail_vmfb = argv[option_index + 3];
+      args.weights_dir = argv[option_index + 4];
+      if (argc == option_index + 6) {
+        const int parsed = std::stoi(argv[option_index + 5]);
         if (parsed <= 0) {
           throw std::runtime_error("layers must be positive");
         }

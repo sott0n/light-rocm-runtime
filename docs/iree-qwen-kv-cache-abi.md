@@ -123,6 +123,7 @@ manifest:
   "tail_vmfb": "qwen_decode1_tail_gfx1101.vmfb",
   "layer_export": "qwen_decode_layer_kv_cache_max8",
   "tail_export": "qwen_decode1_tail",
+  "sequence_capacity": 8,
   "max_cache_tokens": 8,
   "kv_cache_shape": [8, 128]
 }
@@ -131,17 +132,22 @@ manifest:
 The runner accepts this bundle form:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --max-new-tokens N --bundle <bundle-dir> \
-  <weights-dir> [layers]
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-seq-len S \
+  --bundle <bundle-dir> <weights-dir> [layers]
 ```
 
 The higher-level `tools/run_qwen_e2e.py` wrapper exposes the inference-side
 limit as `--max-seq-len`. The wrapper chooses the smallest supported VMFB cache
 capacity that can hold that sequence length. For example, `--max-seq-len 10`
 selects the `qwen_decode_layer_kv_cache_max16` specialization and writes
-`max_cache_tokens: 16` to the decode bundle manifest.
+`sequence_capacity: 10` and `max_cache_tokens: 16` to the decode bundle
+manifest.
 The wrapper exposes output length separately as `--max-new-tokens`; that value
-must be positive and must not exceed `--max-seq-len`.
+must be positive and must not exceed `--max-seq-len`. The runner validates
+`max_new_tokens <= max_seq_len <= sequence_capacity`; `max_cache_tokens` is the
+current physical static tensor extent of the VMFB.
+The full 24-layer Qwen E2E path has been validated through
+`--max-new-tokens 32 --max-seq-len 32` using the `max32` cache specialization.
 
 The bundle can be created from compiled VMFB artifacts with:
 
@@ -151,6 +157,7 @@ tools/write_iree_qwen_decode_bundle.py \
   --layer-vmfb <qwen_decode_layer_kv_cache_max*.vmfb> \
   --tail-vmfb <qwen_decode1_tail.vmfb> \
   --out-dir <bundle-dir> \
+  --sequence-capacity <max_seq_len> \
   --max-cache-tokens <8|16|32>
 ```
 
@@ -159,7 +166,10 @@ components are rejected so that a bundle manifest cannot silently point outside
 the bundle directory. `max_cache_tokens` is a bundle ABI field rather than a
 user-facing inference setting. It must match `kv_cache_shape[0]`; the runner
 still treats the cache as opaque f32 device tensors with shape
-`[max_cache_tokens, 128]`.
+`[max_cache_tokens, 128]`. `sequence_capacity` must be positive and cannot
+exceed `max_cache_tokens`; this keeps the current static-shape implementation
+compatible with a future single-capacity bundle where runtime `max_seq_len`
+selects the usable prefix.
 
 ## Decode Loop Contract
 
