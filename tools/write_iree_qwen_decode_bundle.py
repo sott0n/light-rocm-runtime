@@ -15,6 +15,10 @@ DEFAULT_MAX_CACHE_TOKENS = 8
 DEFAULT_KV_CACHE_DIM = 128
 
 
+def default_layer_export(max_cache_tokens: int) -> str:
+    return f"qwen_decode_layer_kv_cache_max{max_cache_tokens}"
+
+
 def require_relative_bundle_path(value: str, field: str) -> Path:
     path = Path(value)
     if not value or path.is_absolute():
@@ -67,7 +71,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--layer-vmfb", required=True, type=Path)
     parser.add_argument("--tail-vmfb", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
-    parser.add_argument("--layer-export", default=DEFAULT_LAYER_EXPORT)
+    parser.add_argument("--layer-export")
     parser.add_argument("--tail-export", default=DEFAULT_TAIL_EXPORT)
     parser.add_argument(
         "--max-cache-tokens", default=DEFAULT_MAX_CACHE_TOKENS, type=int
@@ -86,6 +90,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
     if not args.target:
         raise ValueError("--target must not be empty")
+    if args.layer_export is None:
+        args.layer_export = default_layer_export(args.max_cache_tokens)
     if not args.layer_export:
         raise ValueError("--layer-export must not be empty")
     if not args.tail_export:

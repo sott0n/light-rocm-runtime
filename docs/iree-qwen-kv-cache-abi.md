@@ -73,15 +73,16 @@ invocation for the same layer.
 
 ## Max-Cache Decode ABI
 
-The preferred path is now `qwen_decode_layer_kv_cache_max8`, which removes the
-need for a new VMFB per token count. It uses a fixed cache capacity and an
-explicit current position:
+The preferred path is now the `qwen_decode_layer_kv_cache_max<N>` family, which
+removes the need for a new VMFB per token step. Each VMFB uses a fixed cache
+capacity specialization and an explicit current position. The current supported
+specializations are `max8`, `max16`, and `max32`.
 
 | Input | Shape | Meaning |
 | --- | --- | --- |
 | `hidden` | `1x896xf32` | Current token hidden state |
-| `old_key_cache` | `8x128xf32` | Layer-local K cache storage |
-| `old_value_cache` | `8x128xf32` | Layer-local V cache storage |
+| `old_key_cache` | `Nx128xf32` | Layer-local K cache storage |
+| `old_value_cache` | `Nx128xf32` | Layer-local V cache storage |
 | `position` | `1xi32` | Current token index to append |
 | layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O, MLP gate/up/down weights |
 
@@ -89,24 +90,27 @@ It returns:
 
 | Output | Shape | Meaning |
 | --- | --- | --- |
-| `key_cache` | `8x128xf32` | Updated K cache storage |
-| `value_cache` | `8x128xf32` | Updated V cache storage |
+| `key_cache` | `Nx128xf32` | Updated K cache storage |
+| `value_cache` | `Nx128xf32` | Updated V cache storage |
 | `hidden` | `1x896xf32` | Layer output |
 
 The VMFB inserts the current token's K/V rows at `position` and masks attention
 scores so softmax only sees columns `0..position`. Future cache rows can
 therefore be zero-initialized without changing the attention result. This is not
 fully unbounded dynamic shape support yet; it is an arbitrary-step runner ABI
-within the compiled `max_tokens = 8` capacity.
+within the compiled `max_tokens = N` capacity.
 
 The runner exposes this path as:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
-  <qwen_decode_layer_kv_cache_max8.vmfb> <tail.vmfb> <weights-dir> [layers]
+lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens <8|16|32> \
+  <qwen_decode_layer_kv_cache_max*.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```
 
-`N` must be less than or equal to `8`.
+`N` must be less than or equal to the selected cache capacity. This direct
+runner form is a low-level VMFB ABI/debug interface; user-facing inference
+wrappers should generally expose `max_seq_len` instead and derive the cache
+capacity from it.
 
 The preferred path is to put that execution ABI in an IREE Qwen decode bundle
 manifest:
@@ -131,20 +135,28 @@ lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
   <weights-dir> [layers]
 ```
 
+The higher-level `tools/run_qwen_e2e.py` wrapper exposes the inference-side
+limit as `--max-seq-len`. The wrapper chooses the smallest supported VMFB cache
+capacity that can hold that sequence length. For example, `--max-seq-len 10`
+selects the `qwen_decode_layer_kv_cache_max16` specialization and writes
+`max_cache_tokens: 16` to the decode bundle manifest.
+
 The bundle can be created from compiled VMFB artifacts with:
 
 ```text
 tools/write_iree_qwen_decode_bundle.py \
   --target gfx1101 \
-  --layer-vmfb <qwen_decode_layer_kv_cache_max8.vmfb> \
+  --layer-vmfb <qwen_decode_layer_kv_cache_max*.vmfb> \
   --tail-vmfb <qwen_decode1_tail.vmfb> \
-  --out-dir <bundle-dir>
+  --out-dir <bundle-dir> \
+  --max-cache-tokens <8|16|32>
 ```
 
 The VMFB paths are relative to `<bundle-dir>`. Absolute paths and `..` path
 components are rejected so that a bundle manifest cannot silently point outside
-the bundle directory. `max_cache_tokens` must match `kv_cache_shape[0]`; the
-runner still treats the cache as opaque f32 device tensors with shape
+the bundle directory. `max_cache_tokens` is a bundle ABI field rather than a
+user-facing inference setting. It must match `kv_cache_shape[0]`; the runner
+still treats the cache as opaque f32 device tensors with shape
 `[max_cache_tokens, 128]`.
 
 ## Decode Loop Contract
@@ -156,7 +168,7 @@ for token_step in 0..decode_steps:
   hidden = embedding(current_token)
   for layer in 0..num_layers:
     key_cache[layer], value_cache[layer], hidden =
-      qwen_decode_layer_kv_cache_max8(hidden,
+      qwen_decode_layer_kv_cache_maxN(hidden,
                                       key_cache[layer],
                                       value_cache[layer],
                                       position=token_step,
@@ -175,9 +187,9 @@ format for real E2E generation experiments.
 ## Longer-Context ABI Direction
 
 To support full autoregressive generation beyond the current fixed
-`max_tokens = 8` VMFB, the VMFB-level ABI should make the cache capacity a
-manifest-level specialization or move to dynamic cache shapes where practical.
-The target shape is:
+specializations, the VMFB-level ABI should eventually move to larger
+manifest-level specializations or dynamic cache shapes where practical. The
+target shape is:
 
 | Field | Direction | Meaning |
 | --- | --- | --- |

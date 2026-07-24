@@ -216,6 +216,91 @@ def test_iree_dry_run_discovers_default_vmfb_inputs() -> None:
         assert str(tail_vmfb) in command
 
 
+def test_iree_dry_run_discovers_capacity_specific_vmfb_inputs() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        weights = root / "weights"
+        write_complete_weight_bundle(weights, 1)
+        probe = root / "probe"
+        layer_vmfb = (
+            probe
+            / "qwen_decode_layer_kv_cache_max16"
+            / "qwen_decode_layer_kv_cache_max16_gfx1101.vmfb"
+        )
+        tail_vmfb = probe / "qwen_decode1_tail" / "qwen_decode1_tail_gfx1101.vmfb"
+        layer_vmfb.parent.mkdir(parents=True)
+        tail_vmfb.parent.mkdir(parents=True)
+        layer_vmfb.write_text("layer", encoding="utf-8")
+        tail_vmfb.write_text("tail", encoding="utf-8")
+
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--bundle-dir",
+                str(weights),
+                "--layers",
+                "1",
+                "--steps",
+                "9",
+                "--max-seq-len",
+                "10",
+                "--iree-probe-dir",
+                str(probe),
+                "--iree-decode-bundle-dir",
+                str(root / "iree-bundle"),
+                "--iree-runner",
+                "/tmp/lrrt_iree_qwen_decode1_e2e",
+                "--dry-run",
+            ]
+        )
+
+        command = runner.iree_bundle_writer_command(args)
+        assert str(layer_vmfb) in command
+        assert str(tail_vmfb) in command
+        assert "--max-cache-tokens" in command
+        assert "16" in command
+        assert "--layer-export" in command
+        assert "qwen_decode_layer_kv_cache_max16" in command
+
+
+def test_iree_rejects_sequence_length_without_cache_specialization() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        weights = root / "weights"
+        write_complete_weight_bundle(weights, 1)
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--bundle-dir",
+                str(weights),
+                "--layers",
+                "1",
+                "--steps",
+                "33",
+                "--max-seq-len",
+                "33",
+                "--iree-probe-dir",
+                str(root / "probe"),
+                "--iree-decode-bundle-dir",
+                str(root / "iree-bundle"),
+                "--iree-runner",
+                "/tmp/lrrt_iree_qwen_decode1_e2e",
+                "--dry-run",
+            ]
+        )
+
+        try:
+            runner.iree_bundle_writer_command(args)
+        except ValueError as error:
+            assert "--max-seq-len 33 exceeds supported IREE cache capacities" in str(
+                error
+            )
+        else:
+            raise AssertionError("expected unsupported max sequence length to fail")
+
+
 def test_iree_explicit_vmfb_inputs_override_discovery() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory() as tmpdir:

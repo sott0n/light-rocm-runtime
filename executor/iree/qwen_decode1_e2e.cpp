@@ -30,6 +30,7 @@ constexpr uint32_t kHidden = 896;
 constexpr uint32_t kKvDim = 128;
 constexpr uint32_t kIntermediate = 4864;
 constexpr uint32_t kDefaultLayers = 24;
+constexpr uint32_t kSupportedMaxCacheTokens[] = {8, 16, 32};
 
 struct Args {
   std::string layer_vmfb;
@@ -78,6 +79,15 @@ constexpr QwenKvCacheAbi kDecode3CacheAbi = {
     /*visible_tokens=*/3,
     /*kv_dim=*/kKvDim,
 };
+
+bool is_supported_max_cache_tokens(uint32_t max_cache_tokens) {
+  for (const uint32_t supported : kSupportedMaxCacheTokens) {
+    if (max_cache_tokens == supported) {
+      return true;
+    }
+  }
+  return false;
+}
 
 struct LayerWeightViews {
   BufferViewPtr attention_norm_weight;
@@ -513,7 +523,8 @@ Args parse_args(int argc, char **argv) {
           "<weights-dir> [layers]\n"
           "   or: lrrt_iree_qwen_decode1_e2e --steps <N> --bundle "
           "<bundle-dir> <weights-dir> [layers]\n"
-          "   or: lrrt_iree_qwen_decode1_e2e --steps <N> --max-cache-tokens 8 "
+          "   or: lrrt_iree_qwen_decode1_e2e --steps <N> "
+          "--max-cache-tokens <8|16|32> "
           "<kv-cache-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
     }
     const int parsed_steps = std::stoi(argv[2]);
@@ -561,15 +572,15 @@ Args parse_args(int argc, char **argv) {
       if (args.decode_steps > args.max_cache_tokens) {
         throw std::runtime_error("--steps must not exceed --max-cache-tokens");
       }
-      if (args.max_cache_tokens != 8) {
+      if (!is_supported_max_cache_tokens(args.max_cache_tokens)) {
         throw std::runtime_error(
-            "only --max-cache-tokens 8 is currently built");
+            "only --max-cache-tokens 8, 16, or 32 are currently built");
       }
       if (argc != 8 && argc != 9) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --steps <N> "
-            "--max-cache-tokens 8 <kv-cache-layer.vmfb> <tail.vmfb> "
-            "<weights-dir> [layers]");
+            "--max-cache-tokens <8|16|32> <kv-cache-layer.vmfb> "
+            "<tail.vmfb> <weights-dir> [layers]");
       }
       args.variable_layer_vmfb = argv[5];
       args.tail_vmfb = argv[6];
@@ -642,7 +653,7 @@ Args parse_args(int argc, char **argv) {
       return args;
     }
     throw std::runtime_error(
-        "--steps greater than 3 requires --max-cache-tokens 8 "
+        "--steps greater than 3 requires --max-cache-tokens <8|16|32> "
         "<kv-cache-layer.vmfb>");
   }
 

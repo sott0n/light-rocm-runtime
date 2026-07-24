@@ -67,6 +67,38 @@ def test_writes_bundle_manifest_and_copies_vmfb() -> None:
         }
 
 
+def test_default_layer_export_follows_cache_capacity() -> None:
+    tool = load_tool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        layer = root / "layer.vmfb"
+        tail = root / "tail.vmfb"
+        out = root / "bundle"
+        write_vmfb(layer, b"layer")
+        write_vmfb(tail, b"tail")
+
+        status = tool.main(
+            [
+                "--target",
+                "gfx1101",
+                "--layer-vmfb",
+                str(layer),
+                "--tail-vmfb",
+                str(tail),
+                "--out-dir",
+                str(out),
+                "--max-cache-tokens",
+                "16",
+            ]
+        )
+
+        assert status == 0
+        manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["layer_export"] == "qwen_decode_layer_kv_cache_max16"
+        assert manifest["max_cache_tokens"] == 16
+        assert manifest["kv_cache_shape"] == [16, 128]
+
+
 def test_rejects_parent_bundle_path() -> None:
     tool = load_tool()
     with tempfile.TemporaryDirectory() as tmpdir:

@@ -433,21 +433,22 @@ cache. The current shape is still fixed to a single current token with a
 statically visible cache length; causal masking is implicit because each entry
 point only materializes visible cache slots.
 
-The preferred path uses `tools/iree_qwen_decode_layer_kv_cache_max8.mlir` and
-one VMFB export for every token step:
+The preferred path uses the `tools/iree_qwen_decode_layer_kv_cache_max<N>.mlir`
+specializations and one VMFB export for every token step. The current supported
+cache capacities are `8`, `16`, and `32`.
 
 ```text
 token embedding
-  -> initialize per-layer 8x128 K/V cache buffer_views once
+  -> initialize per-layer Nx128 K/V cache buffer_views once
 
 for step in 0..N:
   for each of 24 decoder layers:
-    qwen_decode_layer_kv_cache_max8(hidden,
+    qwen_decode_layer_kv_cache_maxN(hidden,
                                     key_cache[layer],
                                     value_cache[layer],
                                     position=step,
                                     weights[layer])
-    -> updated 8-token K/V cache + hidden result
+    -> updated N-token K/V cache + hidden result
   -> qwen_decode1_tail logits
   -> host argmax token embedding for the next step
 ```
@@ -466,16 +467,17 @@ artifacts with:
 ```text
 tools/write_iree_qwen_decode_bundle.py \
   --target gfx1101 \
-  --layer-vmfb <qwen_decode_layer_kv_cache_max8.vmfb> \
+  --layer-vmfb <qwen_decode_layer_kv_cache_max*.vmfb> \
   --tail-vmfb <qwen_decode1_tail.vmfb> \
-  --out-dir <bundle-dir>
+  --out-dir <bundle-dir> \
+  --max-cache-tokens <8|16|32>
 ```
 
 The direct VMFB form is still available for manual experiments:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens 8 \
-  <qwen_decode_layer_kv_cache_max8.vmfb> <tail.vmfb> <weights-dir> [layers]
+lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens <8|16|32> \
+  <qwen_decode_layer_kv_cache_max*.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```
 
 The higher-level E2E wrapper can prepare both sides of this path. In IREE mode,
@@ -488,21 +490,26 @@ python3 tools/run_qwen_e2e.py --iree \
   --checkpoint-dir /path/to/qwen-checkpoint \
   --bundle-dir /tmp/lrrt-qwen-full \
   --iree-decode-bundle-dir /tmp/lrrt-iree-qwen-decode-bundle \
+  --max-seq-len 16 \
   --steps 4
 ```
 
 By default, the wrapper discovers the layer and tail VMFBs from the standard
 probe output paths under `build-iree-probe/` for `--iree-target`:
-`qwen_decode_layer_kv_cache_max8/qwen_decode_layer_kv_cache_max8_<target>.vmfb`
+`qwen_decode_layer_kv_cache_max<N>/qwen_decode_layer_kv_cache_max<N>_<target>.vmfb`
 and `qwen_decode1_tail/qwen_decode1_tail_<target>.vmfb`. Use
 `--iree-layer-vmfb` or `--iree-tail-vmfb` to override those paths explicitly.
+The wrapper treats `--max-seq-len` as the user-facing inference limit and picks
+the smallest supported cache-capacity specialization that can hold it; for
+example, `--max-seq-len 10` selects the `max16` VMFB and writes
+`max_cache_tokens: 16` to the bundle manifest.
 
 Use `--no-convert` to require an existing weight bundle and
 `--no-iree-bundle-write` to require an existing IREE decode bundle. Use
 `--force-convert` or `--force-iree-bundle` when those artifacts should be
 rewritten explicitly.
 
-`N` can be any positive value up to the compiled cache capacity of 8. The
+`N` can be any positive value up to `--max-seq-len`. The
 runner keeps one device-resident K/V cache pair per layer, passes the previous
 step's buffer views directly into the next step, and only uses host readback for
 the current `argmax(logits)` feedback. Real multi-step runs require the tail

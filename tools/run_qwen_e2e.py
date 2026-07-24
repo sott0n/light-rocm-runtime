@@ -20,6 +20,7 @@ DEFAULT_BUNDLE_DIR = Path("/tmp/lrrt-qwen-e2e")
 DEFAULT_IREE_DECODE_BUNDLE_DIR = Path("/tmp/lrrt-iree-qwen-decode-bundle")
 DEFAULT_IREE_PROBE_DIR = ROOT / "build-iree-probe"
 DEFAULT_IREE_TARGET = "gfx1101"
+SUPPORTED_IREE_CACHE_CAPACITIES = (8, 16, 32)
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -74,12 +75,28 @@ def iree_decode_bundle_complete(bundle_dir: Path) -> bool:
     return (bundle_dir / "manifest.json").is_file()
 
 
-def default_iree_layer_vmfb(probe_dir: Path, target: str) -> Path:
-    return (
-        probe_dir
-        / "qwen_decode_layer_kv_cache_max8"
-        / f"qwen_decode_layer_kv_cache_max8_{target}.vmfb"
+def iree_layer_module_name(max_cache_tokens: int) -> str:
+    return f"qwen_decode_layer_kv_cache_max{max_cache_tokens}"
+
+
+def select_iree_cache_capacity(max_seq_len: int) -> int:
+    if max_seq_len <= 0:
+        raise ValueError("--max-seq-len must be positive")
+    for capacity in SUPPORTED_IREE_CACHE_CAPACITIES:
+        if max_seq_len <= capacity:
+            return capacity
+    supported = ", ".join(str(value) for value in SUPPORTED_IREE_CACHE_CAPACITIES)
+    raise ValueError(
+        f"--max-seq-len {max_seq_len} exceeds supported IREE cache capacities "
+        f"({supported})"
     )
+
+
+def default_iree_layer_vmfb(
+    probe_dir: Path, target: str, max_cache_tokens: int
+) -> Path:
+    module_name = iree_layer_module_name(max_cache_tokens)
+    return probe_dir / module_name / f"{module_name}_{target}.vmfb"
 
 
 def default_iree_tail_vmfb(probe_dir: Path, target: str) -> Path:
@@ -188,9 +205,10 @@ def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
 
 
 def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
+    cache_capacity = select_iree_cache_capacity(args.max_seq_len)
     layer_vmfb = resolve_iree_vmfb_path(
         args.iree_layer_vmfb,
-        default_iree_layer_vmfb(args.iree_probe_dir, args.iree_target),
+        default_iree_layer_vmfb(args.iree_probe_dir, args.iree_target, cache_capacity),
         "--iree-layer-vmfb",
     )
     tail_vmfb = resolve_iree_vmfb_path(
@@ -210,7 +228,9 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
         "--out-dir",
         str(args.iree_decode_bundle_dir),
         "--max-cache-tokens",
-        str(args.max_cache_tokens),
+        str(cache_capacity),
+        "--layer-export",
+        iree_layer_module_name(cache_capacity),
     ]
     if args.force_iree_bundle:
         command.append("--force")
@@ -220,8 +240,8 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
 def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     if args.steps <= 0:
         raise ValueError("--steps must be positive")
-    if args.steps > args.max_cache_tokens:
-        raise ValueError("--steps must not exceed --max-cache-tokens")
+    if args.steps > args.max_seq_len:
+        raise ValueError("--steps must not exceed --max-seq-len")
     return [
         str(args.iree_runner),
         "--steps",
@@ -320,7 +340,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--iree-bundle-writer", default=DEFAULT_IREE_BUNDLE_WRITER, type=Path
     )
     parser.add_argument("--iree-runner", default=DEFAULT_IREE_RUNNER, type=Path)
-    parser.add_argument("--max-cache-tokens", default=8, type=int)
+    parser.add_argument("--max-seq-len", default=8, type=int)
     parser.add_argument("--force-iree-bundle", action="store_true")
     parser.add_argument("--no-iree-bundle-write", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
