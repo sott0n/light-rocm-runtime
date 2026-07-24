@@ -529,10 +529,12 @@ positive value up to `--max-seq-len`; values beyond the selected sequence
 capacity are rejected before launching the runner. The runner keeps one
 device-resident K/V cache pair per layer, passes the previous step's buffer
 views directly into the next step, and only uses host readback for the current
-`argmax(logits)` feedback. Real multi-step runs require the tail bundle to
-include the selected embeddings; direct converter calls should pass
-`--full-token-embeddings` to produce that format. The cache ABI and the next
-longer-context direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
+`argmax(logits)` feedback. After generation it prints the generated ids,
+excluding the prompt, as `generated_token_ids=[...]`. Real multi-step runs
+require the tail bundle to include the selected embeddings; direct converter
+calls should pass `--full-token-embeddings` to produce that format. The cache
+ABI and the next longer-context direction are tracked in
+`docs/iree-qwen-kv-cache-abi.md`.
 The current IREE E2E path has been validated with the full 24-layer Qwen stack
 through `--max-new-tokens 32 --max-seq-len 32`, which is the largest cache
 VMFB capacity currently built by default.

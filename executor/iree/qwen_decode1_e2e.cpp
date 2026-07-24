@@ -865,6 +865,8 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
           : args.prompt_token_ids;
   const uint32_t prompt_len = static_cast<uint32_t>(prompt_token_ids.size());
   const uint32_t total_decode_steps = prompt_len + args.decode_steps - 1;
+  std::vector<uint32_t> generated_token_ids;
+  generated_token_ids.reserve(args.decode_steps);
   uint32_t current_token = prompt_token_ids.front();
   for (uint32_t step = 0; step < total_decode_steps; ++step) {
     const uint32_t input_token =
@@ -889,8 +891,14 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
                                     weights.tail, &step_logits));
       IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
                                           generation_step, &current_token));
+      generated_token_ids.push_back(current_token);
     }
   }
+  std::printf("generated_token_ids=[");
+  for (size_t i = 0; i < generated_token_ids.size(); ++i) {
+    std::printf("%s%u", i == 0 ? "" : ",", generated_token_ids[i]);
+  }
+  std::printf("]\n");
   return iree_ok_status();
 }
 
