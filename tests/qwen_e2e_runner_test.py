@@ -144,6 +144,48 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
     ]
 
 
+def test_iree_converter_command_writes_e2e_directory_bundle() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--checkpoint-dir",
+            "/tmp/qwen-checkpoint",
+            "--bundle-dir",
+            "/tmp/qwen-weights",
+            "--layers",
+            "1",
+            "--keys",
+            "4",
+            "--token-ids",
+            "0,1,2",
+            "--python",
+            "/tmp/python",
+            "--no-uv",
+        ]
+    )
+
+    command = runner.converter_command(args, 1)
+    assert command == [
+        "/tmp/python",
+        str(runner.DEFAULT_CONVERTER),
+        "--checkpoint-dir",
+        "/tmp/qwen-checkpoint",
+        "--layer",
+        "0",
+        "--layer-count",
+        "1",
+        "--keys",
+        "4",
+        "--token-ids",
+        "0,1,2",
+        "--output",
+        "/tmp/qwen-weights",
+        "--bundle-directory",
+        "--full-token-embeddings",
+    ]
+
+
 def test_iree_dry_run_writes_bundle_then_runs() -> None:
     runner = load_runner()
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -356,8 +398,11 @@ def main() -> int:
     test_runner_command_requires_keys_for_tokens()
     test_dry_run_builds_full_e2e_command()
     test_iree_runner_command_uses_decode_bundle()
+    test_iree_converter_command_writes_e2e_directory_bundle()
     test_iree_dry_run_writes_bundle_then_runs()
     test_iree_dry_run_discovers_default_vmfb_inputs()
+    test_iree_dry_run_discovers_capacity_specific_vmfb_inputs()
+    test_iree_rejects_sequence_length_without_cache_specialization()
     test_iree_explicit_vmfb_inputs_override_discovery()
     test_iree_requires_vmfb_inputs_when_bundle_and_default_vmfb_are_missing()
     print("qwen_e2e_runner_test: ok")

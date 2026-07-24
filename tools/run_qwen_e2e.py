@@ -144,6 +144,8 @@ def converter_command(args: argparse.Namespace, layers: int) -> list[str]:
         "--output",
         str(args.bundle_dir),
     ]
+    if args.backend == "iree":
+        converter_args.extend(["--bundle-directory", "--full-token-embeddings"])
     if args.config is not None:
         converter_args.extend(["--config", str(args.config)])
 

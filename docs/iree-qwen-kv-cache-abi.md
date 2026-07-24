@@ -182,7 +182,9 @@ token, then feeds the logits-selected `top_token` back through the tail bundle's
 token embedding table for the next step. Multi-step generation therefore
 requires a tail bundle that contains the selected token ids. The converter's
 `--full-token-embeddings` option stores every embedding row and is the expected
-format for real E2E generation experiments.
+format for real E2E generation experiments. The high-level IREE E2E wrapper
+passes that converter option automatically and also requests a directory bundle,
+so even a one-layer run produces both `layer_0` and `model_tail`.
 
 ## Longer-Context ABI Direction
 

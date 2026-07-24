@@ -190,6 +190,10 @@ That writes one independent bundle per layer:
   ...
 ```
 
+Pass `--bundle-directory` when a single selected layer should still be written
+as an E2E-capable directory bundle with `layer_<index>/weights.json` plus
+`model_tail/weights.json`.
+
 The converter does not download model weights. The caller must provide a local
 checkpoint directory containing `config.json` and `.safetensors` files. This is
 still a narrow bridge into the mini decoder benchmark format, not a general
@@ -507,14 +511,16 @@ example, `--max-seq-len 10` selects the `max16` VMFB and writes
 Use `--no-convert` to require an existing weight bundle and
 `--no-iree-bundle-write` to require an existing IREE decode bundle. Use
 `--force-convert` or `--force-iree-bundle` when those artifacts should be
-rewritten explicitly.
+rewritten explicitly. When conversion is enabled, the IREE wrapper asks the
+converter for a directory bundle and full token embeddings so a one-layer
+decode run still has both `layer_0` and `model_tail` artifacts.
 
 `N` can be any positive value up to `--max-seq-len`. The
 runner keeps one device-resident K/V cache pair per layer, passes the previous
 step's buffer views directly into the next step, and only uses host readback for
 the current `argmax(logits)` feedback. Real multi-step runs require the tail
-bundle to include the selected embeddings;
-`tools/convert_qwen_layer.py --full-token-embeddings` produces that format. The
+bundle to include the selected embeddings; direct converter calls should pass
+`--full-token-embeddings` to produce that format. The
 cache ABI and the next longer-context direction are tracked in
 `docs/iree-qwen-kv-cache-abi.md`.
 

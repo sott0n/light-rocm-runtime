@@ -593,7 +593,7 @@ def convert_checkpoint(args: argparse.Namespace) -> None:
     available_names = set(weight_map) if weight_map is not None else None
     layer_count = resolve_layer_count(config, args)
     token_ids = parse_token_ids(args.token_ids)
-    writes_layer_directory = args.all_layers or layer_count > 1
+    writes_layer_directory = args.all_layers or args.bundle_directory or layer_count > 1
 
     if args.tail_only:
         if args.output.suffix:
@@ -688,6 +688,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--tail-only",
         action="store_true",
         help="write only the model_tail bundle under --output.",
+    )
+    parser.add_argument(
+        "--bundle-directory",
+        action="store_true",
+        help=(
+            "treat --output as a directory bundle even when converting one "
+            "decoder layer, writing layer_<index>/weights.json plus model_tail."
+        ),
     )
     parser.add_argument("--keys", required=True, type=int)
     parser.add_argument(

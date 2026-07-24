@@ -111,12 +111,14 @@ def test_parse_args_accepts_full_token_embeddings() -> None:
             "1",
             "--all-layers",
             "--tail-only",
+            "--bundle-directory",
             "--full-token-embeddings",
             "--output",
             "/tmp/out",
         ]
     )
     assert args.full_token_embeddings is True
+    assert args.bundle_directory is True
     assert args.tail_only is True
 
 
@@ -194,6 +196,80 @@ def test_multi_layer_output_paths() -> None:
         assert (output / "layer_1" / "weights.bin").exists()
 
 
+def test_bundle_directory_writes_single_layer_and_tail_paths() -> None:
+    converter = load_converter()
+    written_layers = []
+    written_tails = []
+    original_convert_layer = converter._convert_layer
+    original_convert_tail = converter._convert_tail
+    original_checkpoint_weight_map = converter.checkpoint_weight_map
+
+    def fake_convert_layer(
+        checkpoint_dir,
+        shape,
+        rope_theta,
+        layer,
+        output,
+        data_file,
+        available_names,
+    ):
+        written_layers.append((layer, output))
+
+    def fake_convert_tail(
+        checkpoint_dir,
+        output,
+        data_file,
+        hidden,
+        token_ids,
+        full_token_embeddings,
+    ):
+        written_tails.append((output, full_token_embeddings))
+
+    try:
+        converter._convert_layer = fake_convert_layer
+        converter._convert_tail = fake_convert_tail
+        converter.checkpoint_weight_map = lambda checkpoint_dir: None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            checkpoint = Path(tmpdir) / "checkpoint"
+            checkpoint.mkdir()
+            (checkpoint / "config.json").write_text(
+                json.dumps(
+                    {
+                        "hidden_size": 8,
+                        "num_attention_heads": 2,
+                        "intermediate_size": 12,
+                        "num_hidden_layers": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output = Path(tmpdir) / "bundle"
+            args = SimpleNamespace(
+                checkpoint_dir=checkpoint,
+                config=None,
+                keys=4,
+                layer=0,
+                layer_count=1,
+                all_layers=False,
+                tail_only=False,
+                bundle_directory=True,
+                output=output,
+                data_file="weights.bin",
+                token_ids="0,1",
+                full_token_embeddings=True,
+            )
+
+            converter.convert_checkpoint(args)
+
+        assert written_layers == [(0, output / "layer_0" / "weights.json")]
+        assert written_tails == [(output / "model_tail" / "weights.json", True)]
+    finally:
+        converter._convert_layer = original_convert_layer
+        converter._convert_tail = original_convert_tail
+        converter.checkpoint_weight_map = original_checkpoint_weight_map
+
+
 def test_tail_bundle_writer() -> None:
     converter = load_converter()
     np = converter._import_numpy()
@@ -256,6 +332,7 @@ def main() -> int:
     test_parse_args_accepts_full_token_embeddings()
     test_tensor_mapping_and_bundle_writer()
     test_multi_layer_output_paths()
+    test_bundle_directory_writes_single_layer_and_tail_paths()
     test_tail_bundle_writer()
     test_read_safetensors_bf16()
     print("qwen_layer_converter_test: ok")
