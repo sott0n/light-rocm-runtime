@@ -143,6 +143,10 @@ struct LayerWeightViews {
   BufferViewPtr q_weight;
   BufferViewPtr k_weight;
   BufferViewPtr v_weight;
+  BufferViewPtr q_bias;
+  BufferViewPtr k_bias;
+  BufferViewPtr v_bias;
+  BufferViewPtr rope_theta;
   BufferViewPtr out_weight;
   BufferViewPtr mlp_norm_weight;
   BufferViewPtr gate_weight;
@@ -218,6 +222,14 @@ iree_status_t make_layer_weight_views(VmfbRunner *runner,
       make_view(runner, k_weight_t, {kHidden, kKvDim}, &views->k_weight));
   IREE_RETURN_IF_ERROR(
       make_view(runner, v_weight_t, {kHidden, kKvDim}, &views->v_weight));
+  IREE_RETURN_IF_ERROR(
+      make_view(runner, weights.q_bias, {kHidden}, &views->q_bias));
+  IREE_RETURN_IF_ERROR(
+      make_view(runner, weights.k_bias, {kKvDim}, &views->k_bias));
+  IREE_RETURN_IF_ERROR(
+      make_view(runner, weights.v_bias, {kKvDim}, &views->v_bias));
+  IREE_RETURN_IF_ERROR(
+      make_view(runner, {weights.rope_theta}, {1}, &views->rope_theta));
   IREE_RETURN_IF_ERROR(
       make_view(runner, out_weight_t, {kHidden, kHidden}, &views->out_weight));
   IREE_RETURN_IF_ERROR(make_view(runner, weights.mlp_norm_weight, {kHidden},
@@ -300,6 +312,10 @@ iree_status_t run_layer_with_position_cache(
       weight_views.q_weight.get(),
       weight_views.k_weight.get(),
       weight_views.v_weight.get(),
+      weight_views.q_bias.get(),
+      weight_views.k_bias.get(),
+      weight_views.v_bias.get(),
+      weight_views.rope_theta.get(),
       weight_views.out_weight.get(),
       weight_views.mlp_norm_weight.get(),
       weight_views.gate_weight.get(),

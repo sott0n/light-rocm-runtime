@@ -39,6 +39,9 @@ struct DecoderLayerWeights {
   std::vector<float> q_weight;
   std::vector<float> k_weight;
   std::vector<float> v_weight;
+  std::vector<float> q_bias;
+  std::vector<float> k_bias;
+  std::vector<float> v_bias;
   std::vector<float> out_weight;
   std::vector<float> gate_weight;
   std::vector<float> up_weight;
@@ -382,6 +385,9 @@ inline std::vector<TensorSpec> tensor_specs(const DecoderLayerShape &shape) {
        &DecoderLayerWeights::k_weight},
       {"v_weight", checked_multiply(kv_dim, hidden, "v_weight"),
        &DecoderLayerWeights::v_weight},
+      {"q_bias", q_dim, &DecoderLayerWeights::q_bias},
+      {"k_bias", kv_dim, &DecoderLayerWeights::k_bias},
+      {"v_bias", kv_dim, &DecoderLayerWeights::v_bias},
       {"out_weight", checked_multiply(hidden, q_dim, "out_weight"),
        &DecoderLayerWeights::out_weight},
       {"gate_weight", checked_multiply(intermediate, hidden, "gate_weight"),
@@ -458,7 +464,7 @@ load_decoder_layer_weights(const char *manifest_path) {
   }
 
   std::string manifest = detail::read_text_file(manifest_path);
-  if (detail::read_u32_field(manifest, "version") != 1) {
+  if (detail::read_u32_field(manifest, "version") != 2) {
     throw std::runtime_error(
         "unsupported mini decoder weight manifest version");
   }
@@ -612,6 +618,9 @@ inline void write_decoder_layer_weights(const char *manifest_path,
           static_cast<size_t>(weights.shape.kv_dim()) * weights.shape.hidden ||
       weights.v_weight.size() !=
           static_cast<size_t>(weights.shape.kv_dim()) * weights.shape.hidden ||
+      weights.q_bias.size() != weights.shape.q_dim() ||
+      weights.k_bias.size() != weights.shape.kv_dim() ||
+      weights.v_bias.size() != weights.shape.kv_dim() ||
       weights.out_weight.size() !=
           static_cast<size_t>(weights.shape.hidden) * weights.shape.q_dim() ||
       weights.gate_weight.size() !=
@@ -640,7 +649,7 @@ inline void write_decoder_layer_weights(const char *manifest_path,
 
   manifest << "{\n"
            << "  \"format\": \"lrrt.mini_decoder_weights\",\n"
-           << "  \"version\": 1,\n"
+           << "  \"version\": 2,\n"
            << "  \"dtype\": \"f32\",\n"
            << "  \"data\": \"" << data_file_name << "\",\n"
            << "  \"keys\": " << weights.shape.keys << ",\n"
@@ -662,6 +671,12 @@ inline void write_decoder_layer_weights(const char *manifest_path,
   detail::append_tensor(data, manifest, "k_weight", weights.k_weight, &offset,
                         &first);
   detail::append_tensor(data, manifest, "v_weight", weights.v_weight, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "q_bias", weights.q_bias, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "k_bias", weights.k_bias, &offset,
+                        &first);
+  detail::append_tensor(data, manifest, "v_bias", weights.v_bias, &offset,
                         &first);
   detail::append_tensor(data, manifest, "out_weight", weights.out_weight,
                         &offset, &first);

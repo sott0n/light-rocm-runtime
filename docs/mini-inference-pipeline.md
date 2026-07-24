@@ -110,7 +110,7 @@ the shape and tensor offsets:
 ```json
 {
   "format": "lrrt.mini_decoder_weights",
-  "version": 1,
+  "version": 2,
   "dtype": "f32",
   "data": "weights.bin",
   "keys": 16,
@@ -128,7 +128,9 @@ the shape and tensor offsets:
 
 The actual manifest must include all mini decoder layer weight tensors:
 `attention_norm_weight`, `mlp_norm_weight`, `q_weight`, `k_weight`, `v_weight`,
-`out_weight`, `gate_weight`, `up_weight`, and `down_weight`.
+`q_bias`, `k_bias`, `v_bias`, `out_weight`, `gate_weight`, `up_weight`, and
+`down_weight`. Version 2 added the Q/K/V projection biases; the converter
+writes zero vectors when a checkpoint omits them.
 
 The Triton benchmark build also provides
 `lrrt_triton_mini_decoder_weight_bundle`, which emits the deterministic
@@ -265,6 +267,9 @@ The intended per-layer mapping is:
 | `q_weight` | `model.layers.{layer}.self_attn.q_proj.weight` | `[heads * head_dim, hidden]` | Direct copy when `q_proj` is stored as PyTorch linear `[out, in]` |
 | `k_weight` | `model.layers.{layer}.self_attn.k_proj.weight` | `[kv_heads * head_dim, hidden]` | Direct copy for grouped-query attention |
 | `v_weight` | `model.layers.{layer}.self_attn.v_proj.weight` | `[kv_heads * head_dim, hidden]` | Direct copy for grouped-query attention |
+| `q_bias` | `model.layers.{layer}.self_attn.q_proj.bias` | `[heads * head_dim]` | Direct copy, or zeros when absent |
+| `k_bias` | `model.layers.{layer}.self_attn.k_proj.bias` | `[kv_heads * head_dim]` | Direct copy, or zeros when absent |
+| `v_bias` | `model.layers.{layer}.self_attn.v_proj.bias` | `[kv_heads * head_dim]` | Direct copy, or zeros when absent |
 | `out_weight` | `model.layers.{layer}.self_attn.o_proj.weight` | `[hidden, heads * head_dim]` | Direct copy for the current matvec layout |
 | `gate_weight` | `model.layers.{layer}.mlp.gate_proj.weight` | `[intermediate, hidden]` | Direct copy |
 | `up_weight` | `model.layers.{layer}.mlp.up_proj.weight` | `[intermediate, hidden]` | Direct copy |
@@ -279,7 +284,7 @@ checkpoint-level tensors yet:
 | `model.norm.weight` | The converter stores it in `model_tail/weights.json` and the benchmark runs final RMSNorm |
 | `lm_head.weight` | The converter stores it in `model_tail/weights.json` and the benchmark runs an FP32 matvec to produce logits |
 | RoPE parameters such as `rope_theta` | The converter stores `rope_theta` in each layer bundle and the benchmark uses it to generate `cos` and `sin` tables |
-| Attention biases | Not supported; Qwen projection layers are expected to be bias-free for the initial path |
+| Output projection bias | Not supported; `o_proj.bias` is rejected when present |
 
 The converter should derive bundle shape fields from model config and tensor
 shapes:
@@ -453,7 +458,9 @@ for step in 0..max_new_tokens:
                                     key_cache[layer],
                                     value_cache[layer],
                                     position=step,
-                                    weights[layer])
+                                    Q/K/V/O and MLP weights,
+                                    Q/K/V biases,
+                                    rope_theta)
     -> updated max_cache_tokens-token K/V cache + hidden result
   -> qwen_decode1_tail logits
   -> host argmax token embedding for the next step
@@ -584,6 +591,9 @@ require the tail bundle to include the selected embeddings; direct converter
 calls should pass `--full-token-embeddings` to produce that format. The cache
 ABI and the next longer-context direction are tracked in
 `docs/iree-qwen-kv-cache-abi.md`.
+The max-cache MLIR adds the checkpoint Q/K/V projection biases, then applies
+Qwen's split-half `rotate_half` RoPE convention to Q and K using the current
+position and each layer bundle's `rope_theta`.
 The current IREE E2E path has been validated with the full 24-layer Qwen stack
 through `--max-new-tokens 32 --max-seq-len 32`, which is the largest cache
 VMFB capacity currently built by default.

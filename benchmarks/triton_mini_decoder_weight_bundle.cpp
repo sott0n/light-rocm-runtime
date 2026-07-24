@@ -43,6 +43,9 @@ make_weights(const lrrt::executor::qwen::DecoderLayerShape &shape) {
   weights.q_weight.resize(q_dim * shape.hidden);
   weights.k_weight.resize(kv_dim * shape.hidden);
   weights.v_weight.resize(kv_dim * shape.hidden);
+  weights.q_bias.resize(q_dim);
+  weights.k_bias.resize(kv_dim);
+  weights.v_bias.resize(kv_dim);
   weights.out_weight.resize(shape.hidden * q_dim);
   weights.gate_weight.resize(shape.intermediate * shape.hidden);
   weights.up_weight.resize(shape.intermediate * shape.hidden);

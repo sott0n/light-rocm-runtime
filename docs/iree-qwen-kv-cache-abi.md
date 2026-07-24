@@ -27,7 +27,7 @@ three-token decode milestones.
 | Input | Shape | Meaning |
 | --- | --- | --- |
 | `hidden` | `1x896xf32` | Current token hidden state entering one layer |
-| layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O, MLP gate/up/down weights |
+| layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O and MLP gate/up/down weights |
 
 It returns:
 
@@ -84,7 +84,7 @@ specializations are `max8`, `max16`, and `max32`.
 | `old_key_cache` | `Nx128xf32` | Layer-local K cache storage |
 | `old_value_cache` | `Nx128xf32` | Layer-local V cache storage |
 | `position` | `1xi32` | Current token index to append |
-| layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O, MLP gate/up/down weights |
+| layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O, MLP gate/up/down weights, Q/K/V biases, and `rope_theta` |
 
 It returns:
 
@@ -94,11 +94,13 @@ It returns:
 | `value_cache` | `Nx128xf32` | Updated V cache storage |
 | `hidden` | `1x896xf32` | Layer output |
 
-The VMFB inserts the current token's K/V rows at `position` and masks attention
+The VMFB adds Q/K/V projection biases, applies Qwen's split-half
+`rotate_half` RoPE convention to Q and K using `position` and `rope_theta`,
+inserts the rotated K and unrotated V rows at `position`, and masks attention
 scores so softmax only sees columns `0..position`. Future cache rows can
-therefore be zero-initialized without changing the attention result. This is not
-fully unbounded dynamic shape support yet; it is an arbitrary-step runner ABI
-within the compiled `max_tokens = N` capacity.
+therefore be zero-initialized without changing the attention result. This is
+not fully unbounded dynamic shape support yet; it is an arbitrary-step runner
+ABI within the compiled `max_tokens = N` capacity.
 
 The runner exposes this path as:
 

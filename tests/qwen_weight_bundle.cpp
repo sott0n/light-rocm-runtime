@@ -57,10 +57,13 @@ std::vector<TensorInput> tensors(const DecoderLayerShape &shape) {
       {"q_weight", q_dim * shape.hidden, 3.0f},
       {"k_weight", kv_dim * shape.hidden, 4.0f},
       {"v_weight", kv_dim * shape.hidden, 5.0f},
-      {"out_weight", shape.hidden * q_dim, 6.0f},
-      {"gate_weight", shape.intermediate * shape.hidden, 7.0f},
-      {"up_weight", shape.intermediate * shape.hidden, 8.0f},
-      {"down_weight", shape.hidden * shape.intermediate, 9.0f},
+      {"q_bias", q_dim, 6.0f},
+      {"k_bias", kv_dim, 7.0f},
+      {"v_bias", kv_dim, 8.0f},
+      {"out_weight", shape.hidden * q_dim, 9.0f},
+      {"gate_weight", shape.intermediate * shape.hidden, 10.0f},
+      {"up_weight", shape.intermediate * shape.hidden, 11.0f},
+      {"down_weight", shape.hidden * shape.intermediate, 12.0f},
   };
 }
 
@@ -71,7 +74,7 @@ std::string manifest_for(const DecoderLayerShape &shape,
                          const char *rope_theta = "1000000.0") {
   std::string manifest = "{\n"
                          "  \"format\": \"lrrt.mini_decoder_weights\",\n"
-                         "  \"version\": 1,\n"
+                         "  \"version\": 2,\n"
                          "  \"dtype\": \"" +
                          std::string(dtype) +
                          "\",\n"
@@ -174,7 +177,10 @@ void test_load_weights(void) {
   expect_close(weights.rope_theta, 1000000.0f, "rope_theta");
   expect_close(weights.mlp_norm_weight.back(), 2.007f, "mlp_norm_weight");
   expect_close(weights.q_weight.front(), 3.0f, "q_weight");
-  expect_close(weights.down_weight.back(), 9.095f, "down_weight");
+  expect_close(weights.q_bias.front(), 6.0f, "q_bias");
+  expect_close(weights.k_bias.back(), 7.003f, "k_bias");
+  expect_close(weights.v_bias.back(), 8.003f, "v_bias");
+  expect_close(weights.down_weight.back(), 12.095f, "down_weight");
 }
 
 void test_load_model_tail_weights(void) {

@@ -14,6 +14,7 @@ from typing import Any
 FORMAT = "lrrt.mini_decoder_weights"
 TAIL_FORMAT = "lrrt.mini_model_tail_weights"
 VERSION = 1
+DECODER_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -157,6 +158,21 @@ def tensor_mappings(layer: int, shape: DecoderLayerShape) -> list[TensorMapping]
             "v_weight",
             f"{prefix}.self_attn.v_proj.weight",
             (kv_dim, shape.hidden),
+        ),
+        TensorMapping(
+            "q_bias",
+            f"{prefix}.self_attn.q_proj.bias",
+            (q_dim,),
+        ),
+        TensorMapping(
+            "k_bias",
+            f"{prefix}.self_attn.k_proj.bias",
+            (kv_dim,),
+        ),
+        TensorMapping(
+            "v_bias",
+            f"{prefix}.self_attn.v_proj.bias",
+            (kv_dim,),
         ),
         TensorMapping(
             "out_weight",
@@ -307,6 +323,31 @@ def read_safetensors(path: Path, wanted: set[str]) -> dict[str, Any]:
     return tensors
 
 
+def read_safetensors_names(path: Path) -> set[str]:
+    with path.open("rb") as file:
+        header_size_data = file.read(8)
+        if len(header_size_data) != 8:
+            raise ValueError(f"{path} is not a valid safetensors file")
+        header_size = struct.unpack("<Q", header_size_data)[0]
+        header_data = file.read(header_size)
+        if len(header_data) != header_size:
+            raise ValueError(f"{path} has a truncated safetensors header")
+    header = json.loads(header_data.decode("utf-8"))
+    if not isinstance(header, dict):
+        raise ValueError(f"{path} safetensors header must be an object")
+    return {name for name in header if name != "__metadata__"}
+
+
+def checkpoint_tensor_names(checkpoint_dir: Path) -> set[str]:
+    weight_map = checkpoint_weight_map(checkpoint_dir)
+    if weight_map is not None:
+        return set(weight_map)
+    names: set[str] = set()
+    for shard_path in _safetensor_files(checkpoint_dir):
+        names.update(read_safetensors_names(shard_path))
+    return names
+
+
 def load_tensors(checkpoint_dir: Path, mappings: list[TensorMapping]) -> dict[str, Any]:
     wanted = {mapping.checkpoint_name for mapping in mappings}
     weight_map = checkpoint_weight_map(checkpoint_dir)
@@ -335,23 +376,17 @@ def load_tensors(checkpoint_dir: Path, mappings: list[TensorMapping]) -> dict[st
     return tensors
 
 
-def validate_no_attention_biases(
+def validate_no_unsupported_attention_biases(
     checkpoint_dir: Path, layer: int, available_names: set[str] | None = None
 ) -> None:
     prefix = f"model.layers.{layer}.self_attn"
-    bias_names = {
-        f"{prefix}.q_proj.bias",
-        f"{prefix}.k_proj.bias",
-        f"{prefix}.v_proj.bias",
-        f"{prefix}.o_proj.bias",
-    }
+    bias_names = {f"{prefix}.o_proj.bias"}
     if available_names is None:
-        weight_map = checkpoint_weight_map(checkpoint_dir)
-        available_names = set(weight_map) if weight_map is not None else set()
+        available_names = checkpoint_tensor_names(checkpoint_dir)
     present = sorted(bias_names.intersection(available_names))
     if present:
         raise ValueError(
-            "attention projection biases are not supported by the mini decoder "
+            "output projection biases are not supported by the mini decoder "
             "converter: " + ", ".join(present)
         )
 
@@ -418,7 +453,7 @@ def write_bundle(
 
     manifest = {
         "format": FORMAT,
-        "version": VERSION,
+        "version": DECODER_VERSION,
         "dtype": "f32",
         "data": data_file_name,
         "keys": shape.keys,
@@ -568,14 +603,30 @@ def _convert_layer(
     available_names: set[str] | None,
 ) -> None:
     mappings = tensor_mappings(layer, shape)
-    validate_no_attention_biases(checkpoint_dir, layer, available_names)
-    checkpoint_tensors = load_tensors(checkpoint_dir, mappings)
+    if available_names is None:
+        available_names = checkpoint_tensor_names(checkpoint_dir)
+    validate_no_unsupported_attention_biases(checkpoint_dir, layer, available_names)
+    required_mappings = [
+        mapping for mapping in mappings if not mapping.bundle_name.endswith("_bias")
+    ]
+    checkpoint_tensors = load_tensors(checkpoint_dir, required_mappings)
+    bias_mappings = [
+        mapping
+        for mapping in mappings
+        if mapping.bundle_name.endswith("_bias")
+        and mapping.checkpoint_name in available_names
+    ]
+    if bias_mappings:
+        checkpoint_tensors.update(load_tensors(checkpoint_dir, bias_mappings))
+    np = _import_numpy()
     converted = {
         mapping.bundle_name: convert_tensor(
             checkpoint_tensors[mapping.checkpoint_name],
             mapping.shape,
             mapping.checkpoint_name,
         )
+        if mapping.checkpoint_name in checkpoint_tensors
+        else np.zeros(mapping.shape, dtype=np.float32)
         for mapping in mappings
     }
     write_bundle(output, data_file, shape, converted, rope_theta)

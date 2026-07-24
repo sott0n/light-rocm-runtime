@@ -42,6 +42,9 @@ def test_derive_shape_accepts_gqa() -> None:
     assert mappings[2].shape == (16, 16)
     assert mappings[3].shape == (8, 16)
     assert mappings[4].shape == (8, 16)
+    assert mappings[5].shape == (16,)
+    assert mappings[6].shape == (8,)
+    assert mappings[7].shape == (8,)
 
 
 def test_resolve_layer_count_accepts_all_layers() -> None:
@@ -150,6 +153,7 @@ def test_tensor_mapping_and_bundle_writer() -> None:
         data = (Path(tmpdir) / "weights.bin").read_bytes()
 
     assert manifest["format"] == "lrrt.mini_decoder_weights"
+    assert manifest["version"] == 2
     assert manifest["dtype"] == "f32"
     assert manifest["hidden"] == 8
     assert manifest["heads"] == 2
@@ -161,6 +165,11 @@ def test_tensor_mapping_and_bundle_writer() -> None:
         "offset": 0,
         "count": 8,
     }
+    assert [tensor["name"] for tensor in manifest["tensors"]][5:8] == [
+        "q_bias",
+        "k_bias",
+        "v_bias",
+    ]
     assert len(data) == sum(tensor["count"] for tensor in manifest["tensors"]) * 4
     assert struct.unpack_from("<f", data, 0)[0] == 0.0
 
@@ -320,8 +329,88 @@ def test_read_safetensors_bf16() -> None:
         path = Path(tmpdir) / "model.safetensors"
         path.write_bytes(struct.pack("<Q", len(header_data)) + header_data + values)
         tensors = converter.read_safetensors(path, {"tensor"})
+        assert converter.read_safetensors_names(path) == {"tensor"}
+        assert converter.checkpoint_tensor_names(Path(tmpdir)) == {"tensor"}
 
     assert list(tensors["tensor"]) == [1.0, 2.0]
+
+
+def test_single_file_attention_bias_detection() -> None:
+    converter = load_converter()
+    bias_name = "model.layers.0.self_attn.o_proj.bias"
+    header = {
+        bias_name: {
+            "dtype": "F32",
+            "shape": [1],
+            "data_offsets": [0, 4],
+        }
+    }
+    header_data = json.dumps(header).encode("utf-8")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "model.safetensors"
+        path.write_bytes(
+            struct.pack("<Q", len(header_data)) + header_data + struct.pack("<f", 0.0)
+        )
+        try:
+            converter.validate_no_unsupported_attention_biases(Path(tmpdir), 0)
+        except ValueError as error:
+            assert bias_name in str(error)
+        else:
+            raise AssertionError("expected o_proj bias to be rejected")
+
+
+def test_single_file_qkv_bias_conversion() -> None:
+    converter = load_converter()
+    np = converter._import_numpy()
+    shape = converter.derive_shape(
+        {
+            "hidden_size": 8,
+            "num_attention_heads": 2,
+            "num_key_value_heads": 1,
+            "intermediate_size": 12,
+        },
+        keys=4,
+    )
+    header = {}
+    payloads = []
+    offset = 0
+    for tensor_index, mapping in enumerate(converter.tensor_mappings(0, shape)):
+        array = np.full(mapping.shape, tensor_index + 1, dtype=np.float32)
+        payload = array.tobytes(order="C")
+        header[mapping.checkpoint_name] = {
+            "dtype": "F32",
+            "shape": list(mapping.shape),
+            "data_offsets": [offset, offset + len(payload)],
+        }
+        payloads.append(payload)
+        offset += len(payload)
+    header_data = json.dumps(header).encode("utf-8")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint_dir = Path(tmpdir) / "checkpoint"
+        checkpoint_dir.mkdir()
+        (checkpoint_dir / "model.safetensors").write_bytes(
+            struct.pack("<Q", len(header_data)) + header_data + b"".join(payloads)
+        )
+        manifest_path = Path(tmpdir) / "layer_0" / "weights.json"
+        converter._convert_layer(
+            checkpoint_dir,
+            shape,
+            1000000.0,
+            0,
+            manifest_path,
+            "weights.bin",
+            None,
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        bundle_data = (manifest_path.parent / "weights.bin").read_bytes()
+
+    tensors = {tensor["name"]: tensor for tensor in manifest["tensors"]}
+    for name, expected in (("q_bias", 6.0), ("k_bias", 7.0), ("v_bias", 8.0)):
+        assert (
+            struct.unpack_from("<f", bundle_data, tensors[name]["offset"])[0]
+            == expected
+        )
 
 
 def main() -> int:
@@ -335,6 +424,8 @@ def main() -> int:
     test_bundle_directory_writes_single_layer_and_tail_paths()
     test_tail_bundle_writer()
     test_read_safetensors_bf16()
+    test_single_file_attention_bias_detection()
+    test_single_file_qkv_bias_conversion()
     print("qwen_layer_converter_test: ok")
     return 0
 

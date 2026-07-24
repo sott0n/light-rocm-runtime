@@ -236,6 +236,23 @@ def verify_reference_checkpoint(args: argparse.Namespace, model: Any) -> None:
     reference_q_weight = (
         model.model.layers[0].self_attn.q_proj.weight.detach().cpu().float().numpy()
     )
+    attention = model.model.layers[0].self_attn
+    for bundle_name, projection in (
+        ("q_bias", attention.q_proj),
+        ("k_bias", attention.k_proj),
+        ("v_bias", attention.v_proj),
+    ):
+        output_size = int(projection.weight.shape[0])
+        bundle_bias = bundle_tensor(layer_manifest_path, bundle_name, (output_size,))
+        reference_bias = (
+            projection.bias.detach().cpu().float().numpy()
+            if projection.bias is not None
+            else np.zeros(output_size, dtype=np.float32)
+        )
+        if not np.array_equal(bundle_bias, reference_bias):
+            raise ValueError(
+                f"--checkpoint-dir layer_0 {bundle_name} does not match --bundle-dir"
+            )
     if not np.array_equal(bundle_prompt_embeddings, reference_prompt_embeddings):
         raise ValueError("--checkpoint-dir token embeddings do not match --bundle-dir")
     if not np.array_equal(q_weight, reference_q_weight):
@@ -277,16 +294,9 @@ def run_reference_check(args: argparse.Namespace, runner_output: str) -> None:
         flush=True,
     )
     if iree_token_id != reference_token_id:
-        attention_bias_note = ""
-        if model.model.layers[0].self_attn.q_proj.bias is not None:
-            attention_bias_note = (
-                "; reference checkpoint has Q/K/V projection biases that the "
-                "current IREE weight bundle ABI does not carry"
-            )
         raise ValueError(
             "IREE/reference top token mismatch: "
             f"IREE={iree_token_id}, reference={reference_token_id}"
-            + attention_bias_note
         )
     if logit_abs_diff > args.reference_logit_atol:
         raise ValueError(
