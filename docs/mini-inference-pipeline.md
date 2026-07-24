@@ -422,7 +422,7 @@ logits argmax token embedding
   -> qwen_decode1_tail logits
 ```
 
-This path is exposed by `lrrt_iree_qwen_decode1_e2e --steps 3` and uses
+This path is exposed by `lrrt_iree_qwen_decode1_e2e --max-new-tokens 3` and uses
 `tools/iree_qwen_decode1_layer.mlir`,
 `tools/iree_qwen_decode2_layer_kv_cache.mlir`,
 `tools/iree_qwen_decode3_layer_kv_cache.mlir`, and
@@ -460,7 +460,7 @@ for step in 0..N:
 This path is exposed as:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --bundle <bundle-dir> \
   <weights-dir> [layers]
 ```
 
@@ -480,7 +480,7 @@ tools/write_iree_qwen_decode_bundle.py \
 The direct VMFB form is still available for manual experiments:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens <8|16|32> \
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-cache-tokens <8|16|32> \
   <qwen_decode_layer_kv_cache_max*.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```
 
@@ -495,7 +495,7 @@ python3 tools/run_qwen_e2e.py --iree \
   --bundle-dir /tmp/lrrt-qwen-full \
   --iree-decode-bundle-dir /tmp/lrrt-iree-qwen-decode-bundle \
   --max-seq-len 16 \
-  --steps 4
+  --max-new-tokens 4
 ```
 
 By default, the wrapper discovers the layer and tail VMFBs from the standard
@@ -515,14 +515,15 @@ rewritten explicitly. When conversion is enabled, the IREE wrapper asks the
 converter for a directory bundle and full token embeddings so a one-layer
 decode run still has both `layer_0` and `model_tail` artifacts.
 
-`N` can be any positive value up to `--max-seq-len`. The
-runner keeps one device-resident K/V cache pair per layer, passes the previous
-step's buffer views directly into the next step, and only uses host readback for
-the current `argmax(logits)` feedback. Real multi-step runs require the tail
-bundle to include the selected embeddings; direct converter calls should pass
-`--full-token-embeddings` to produce that format. The
-cache ABI and the next longer-context direction are tracked in
-`docs/iree-qwen-kv-cache-abi.md`.
+`--max-new-tokens` is the output length for this E2E check. It can be any
+positive value up to `--max-seq-len`; values beyond the selected sequence
+capacity are rejected before launching the runner. The runner keeps one
+device-resident K/V cache pair per layer, passes the previous step's buffer
+views directly into the next step, and only uses host readback for the current
+`argmax(logits)` feedback. Real multi-step runs require the tail bundle to
+include the selected embeddings; direct converter calls should pass
+`--full-token-embeddings` to produce that format. The cache ABI and the next
+longer-context direction are tracked in `docs/iree-qwen-kv-cache-abi.md`.
 
 The current `qwen_decode_step` input contract is fixed as follows:
 

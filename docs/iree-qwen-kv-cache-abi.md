@@ -103,7 +103,7 @@ within the compiled `max_tokens = N` capacity.
 The runner exposes this path as:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --steps N --max-cache-tokens <8|16|32> \
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-cache-tokens <8|16|32> \
   <qwen_decode_layer_kv_cache_max*.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```
 
@@ -131,7 +131,7 @@ manifest:
 The runner accepts this bundle form:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --steps N --bundle <bundle-dir> \
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --bundle <bundle-dir> \
   <weights-dir> [layers]
 ```
 
@@ -140,6 +140,8 @@ limit as `--max-seq-len`. The wrapper chooses the smallest supported VMFB cache
 capacity that can hold that sequence length. For example, `--max-seq-len 10`
 selects the `qwen_decode_layer_kv_cache_max16` specialization and writes
 `max_cache_tokens: 16` to the decode bundle manifest.
+The wrapper exposes output length separately as `--max-new-tokens`; that value
+must be positive and must not exceed `--max-seq-len`.
 
 The bundle can be created from compiled VMFB artifacts with:
 

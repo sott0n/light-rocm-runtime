@@ -124,7 +124,7 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
             "/tmp/qwen-weights",
             "--layers",
             "2",
-            "--steps",
+            "--max-new-tokens",
             "3",
             "--iree-decode-bundle-dir",
             "/tmp/iree-decode-bundle",
@@ -135,7 +135,7 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
     command = runner.iree_runner_command(args, 2)
     assert command == [
         "/tmp/lrrt_iree_qwen_decode1_e2e",
-        "--steps",
+        "--max-new-tokens",
         "3",
         "--bundle",
         "/tmp/iree-decode-bundle",
@@ -200,7 +200,7 @@ def test_iree_dry_run_writes_bundle_then_runs() -> None:
                 str(weights),
                 "--layers",
                 "1",
-                "--steps",
+                "--max-new-tokens",
                 "2",
                 "--iree-layer-vmfb",
                 str(root / "layer.vmfb"),
@@ -241,7 +241,7 @@ def test_iree_dry_run_discovers_default_vmfb_inputs() -> None:
                 str(weights),
                 "--layers",
                 "1",
-                "--steps",
+                "--max-new-tokens",
                 "2",
                 "--iree-probe-dir",
                 str(probe),
@@ -283,7 +283,7 @@ def test_iree_dry_run_discovers_capacity_specific_vmfb_inputs() -> None:
                 str(weights),
                 "--layers",
                 "1",
-                "--steps",
+                "--max-new-tokens",
                 "9",
                 "--max-seq-len",
                 "10",
@@ -319,7 +319,7 @@ def test_iree_rejects_sequence_length_without_cache_specialization() -> None:
                 str(weights),
                 "--layers",
                 "1",
-                "--steps",
+                "--max-new-tokens",
                 "33",
                 "--max-seq-len",
                 "33",
@@ -341,6 +341,34 @@ def test_iree_rejects_sequence_length_without_cache_specialization() -> None:
             )
         else:
             raise AssertionError("expected unsupported max sequence length to fail")
+
+
+def test_iree_rejects_output_length_over_sequence_capacity() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--bundle-dir",
+            "/tmp/qwen-weights",
+            "--layers",
+            "1",
+            "--max-new-tokens",
+            "9",
+            "--max-seq-len",
+            "8",
+            "--iree-decode-bundle-dir",
+            "/tmp/iree-decode-bundle",
+            "--iree-runner",
+            "/tmp/lrrt_iree_qwen_decode1_e2e",
+        ]
+    )
+
+    try:
+        runner.iree_runner_command(args, 1)
+    except ValueError as error:
+        assert "--max-new-tokens must not exceed --max-seq-len" in str(error)
+    else:
+        raise AssertionError("expected output length over sequence capacity to fail")
 
 
 def test_iree_explicit_vmfb_inputs_override_discovery() -> None:
@@ -403,6 +431,7 @@ def main() -> int:
     test_iree_dry_run_discovers_default_vmfb_inputs()
     test_iree_dry_run_discovers_capacity_specific_vmfb_inputs()
     test_iree_rejects_sequence_length_without_cache_specialization()
+    test_iree_rejects_output_length_over_sequence_capacity()
     test_iree_explicit_vmfb_inputs_override_discovery()
     test_iree_requires_vmfb_inputs_when_bundle_and_default_vmfb_are_missing()
     print("qwen_e2e_runner_test: ok")

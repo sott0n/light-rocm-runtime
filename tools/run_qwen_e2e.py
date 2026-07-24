@@ -240,14 +240,14 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
 
 
 def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
-    if args.steps <= 0:
-        raise ValueError("--steps must be positive")
-    if args.steps > args.max_seq_len:
-        raise ValueError("--steps must not exceed --max-seq-len")
+    if args.max_new_tokens <= 0:
+        raise ValueError("--max-new-tokens must be positive")
+    if args.max_new_tokens > args.max_seq_len:
+        raise ValueError("--max-new-tokens must not exceed --max-seq-len")
     return [
         str(args.iree_runner),
-        "--steps",
-        str(args.steps),
+        "--max-new-tokens",
+        str(args.max_new_tokens),
         "--bundle",
         str(args.iree_decode_bundle_dir),
         str(args.bundle_dir),
@@ -318,7 +318,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--keys", default=4, type=int)
     parser.add_argument("--token-ids", default="0,1,2")
     parser.add_argument("--iterations", default=1, type=int)
-    parser.add_argument("--steps", default=1, type=int)
+    parser.add_argument(
+        "--max-new-tokens",
+        default=1,
+        type=int,
+        help="maximum number of output tokens to decode",
+    )
     parser.add_argument("--backend", choices=["triton", "iree"], default="triton")
     parser.add_argument("--iree", action="store_const", const="iree", dest="backend")
     parser.add_argument("--force-convert", action="store_true")

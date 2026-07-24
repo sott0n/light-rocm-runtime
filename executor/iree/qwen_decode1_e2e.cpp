@@ -306,7 +306,7 @@ iree_status_t run_decode_token_step(
   if (step_index > 2) {
     return iree_make_status(
         IREE_STATUS_UNIMPLEMENTED,
-        "Qwen IREE E2E currently supports decode steps 1 through 3 only; "
+        "Qwen IREE E2E currently supports decode tokens 1 through 3 only; "
         "step %u needs the variable-length KV cache ABI VMFB",
         step_index + 1);
   }
@@ -514,28 +514,28 @@ iree_status_t make_token_hidden(VmfbRunner *runner,
 
 Args parse_args(int argc, char **argv) {
   Args args;
-  if (argc >= 2 && std::string(argv[1]) == "--steps") {
+  if (argc >= 2 && std::string(argv[1]) == "--max-new-tokens") {
     if (argc < 3) {
       throw std::runtime_error(
-          "usage: lrrt_iree_qwen_decode1_e2e --steps <N> "
+          "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
           "<weights-dir> [layers]\n"
-          "   or: lrrt_iree_qwen_decode1_e2e --steps <N> --bundle "
+          "   or: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> --bundle "
           "<bundle-dir> <weights-dir> [layers]\n"
-          "   or: lrrt_iree_qwen_decode1_e2e --steps <N> "
+          "   or: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
           "--max-cache-tokens <8|16|32> "
           "<kv-cache-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
     }
-    const int parsed_steps = std::stoi(argv[2]);
-    if (parsed_steps <= 0) {
-      throw std::runtime_error("--steps must be positive");
+    const int parsed_max_new_tokens = std::stoi(argv[2]);
+    if (parsed_max_new_tokens <= 0) {
+      throw std::runtime_error("--max-new-tokens must be positive");
     }
-    args.decode_steps = static_cast<uint32_t>(parsed_steps);
+    args.decode_steps = static_cast<uint32_t>(parsed_max_new_tokens);
     if (argc >= 4 && std::string(argv[3]) == "--bundle") {
       if (argc != 6 && argc != 7) {
         throw std::runtime_error(
-            "usage: lrrt_iree_qwen_decode1_e2e --steps <N> --bundle "
+            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> --bundle "
             "<bundle-dir> <weights-dir> [layers]");
       }
       const std::filesystem::path bundle_dir = argv[4];
@@ -543,7 +543,7 @@ Args parse_args(int argc, char **argv) {
       args.max_cache_tokens = manifest.max_cache_tokens;
       if (args.decode_steps > args.max_cache_tokens) {
         throw std::runtime_error(
-            "--steps must not exceed bundle max_cache_tokens");
+            "--max-new-tokens must not exceed bundle max_cache_tokens");
       }
       if (manifest.kv_cache_dim != kKvDim) {
         throw std::runtime_error(
@@ -570,7 +570,8 @@ Args parse_args(int argc, char **argv) {
       }
       args.max_cache_tokens = static_cast<uint32_t>(parsed_max_cache_tokens);
       if (args.decode_steps > args.max_cache_tokens) {
-        throw std::runtime_error("--steps must not exceed --max-cache-tokens");
+        throw std::runtime_error(
+            "--max-new-tokens must not exceed --max-cache-tokens");
       }
       if (!is_supported_max_cache_tokens(args.max_cache_tokens)) {
         throw std::runtime_error(
@@ -578,7 +579,7 @@ Args parse_args(int argc, char **argv) {
       }
       if (argc != 8 && argc != 9) {
         throw std::runtime_error(
-            "usage: lrrt_iree_qwen_decode1_e2e --steps <N> "
+            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
             "--max-cache-tokens <8|16|32> <kv-cache-layer.vmfb> "
             "<tail.vmfb> <weights-dir> [layers]");
       }
@@ -597,8 +598,8 @@ Args parse_args(int argc, char **argv) {
     if (args.decode_steps == 1) {
       if (argc != 6 && argc != 7) {
         throw std::runtime_error(
-            "usage: lrrt_iree_qwen_decode1_e2e --steps 1 <decode1-layer.vmfb> "
-            "<tail.vmfb> <weights-dir> [layers]");
+            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens 1 "
+            "<decode1-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
       }
       args.layer_vmfb = argv[3];
       args.tail_vmfb = argv[4];
@@ -615,8 +616,9 @@ Args parse_args(int argc, char **argv) {
     if (args.decode_steps == 2) {
       if (argc != 7 && argc != 8) {
         throw std::runtime_error(
-            "usage: lrrt_iree_qwen_decode1_e2e --steps 2 <decode1-layer.vmfb> "
-            "<decode2-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
+            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens 2 "
+            "<decode1-layer.vmfb> <decode2-layer.vmfb> <tail.vmfb> "
+            "<weights-dir> [layers]");
       }
       args.layer_vmfb = argv[3];
       args.decode2_layer_vmfb = argv[4];
@@ -634,9 +636,9 @@ Args parse_args(int argc, char **argv) {
     if (args.decode_steps == 3) {
       if (argc != 8 && argc != 9) {
         throw std::runtime_error(
-            "usage: lrrt_iree_qwen_decode1_e2e --steps 3 <decode1-layer.vmfb> "
-            "<decode2-layer.vmfb> <decode3-layer.vmfb> <tail.vmfb> "
-            "<weights-dir> [layers]");
+            "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens 3 "
+            "<decode1-layer.vmfb> <decode2-layer.vmfb> "
+            "<decode3-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
       }
       args.layer_vmfb = argv[3];
       args.decode2_layer_vmfb = argv[4];
@@ -653,7 +655,7 @@ Args parse_args(int argc, char **argv) {
       return args;
     }
     throw std::runtime_error(
-        "--steps greater than 3 requires --max-cache-tokens <8|16|32> "
+        "--max-new-tokens greater than 3 requires --max-cache-tokens <8|16|32> "
         "<kv-cache-layer.vmfb>");
   }
 
