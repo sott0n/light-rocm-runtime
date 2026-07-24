@@ -47,6 +47,23 @@ def parse_token_ids(text: str) -> list[int]:
     return result
 
 
+def prompt_sequence_length(args: argparse.Namespace) -> int:
+    return len(parse_token_ids(args.token_ids))
+
+
+def validate_generation_length(args: argparse.Namespace) -> None:
+    if args.max_new_tokens <= 0:
+        raise ValueError("--max-new-tokens must be positive")
+    if args.max_seq_len <= 0:
+        raise ValueError("--max-seq-len must be positive")
+    prompt_len = prompt_sequence_length(args)
+    if prompt_len + args.max_new_tokens > args.max_seq_len:
+        raise ValueError(
+            "--token-ids prompt length plus --max-new-tokens must not exceed "
+            "--max-seq-len"
+        )
+
+
 def model_layer_count(checkpoint_dir: Path, config: Path | None) -> int:
     config_path = config if config is not None else checkpoint_dir / "config.json"
     data = read_json(config_path)
@@ -144,6 +161,7 @@ def select_iree_cache_capacity(max_seq_len: int, capacities: list[int]) -> int:
 
 
 def resolve_iree_cache_capacity(args: argparse.Namespace) -> int:
+    validate_generation_length(args)
     if args.iree_layer_vmfb is not None:
         capacity = parse_iree_layer_capacity(args.iree_layer_vmfb)
         if capacity is not None:
@@ -277,6 +295,7 @@ def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
 
 
 def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
+    validate_generation_length(args)
     cache_capacity = resolve_iree_cache_capacity(args)
     layer_vmfb = resolve_iree_vmfb_path(
         args.iree_layer_vmfb,
@@ -312,10 +331,7 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
 
 
 def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
-    if args.max_new_tokens <= 0:
-        raise ValueError("--max-new-tokens must be positive")
-    if args.max_new_tokens > args.max_seq_len:
-        raise ValueError("--max-new-tokens must not exceed --max-seq-len")
+    validate_generation_length(args)
     capacity = iree_decode_bundle_sequence_capacity(args.iree_decode_bundle_dir)
     if capacity is not None and args.max_seq_len > capacity:
         raise ValueError(
@@ -328,6 +344,8 @@ def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
         str(args.max_new_tokens),
         "--max-seq-len",
         str(args.max_seq_len),
+        "--prompt-token-ids",
+        args.token_ids,
         "--bundle",
         str(args.iree_decode_bundle_dir),
         str(args.bundle_dir),

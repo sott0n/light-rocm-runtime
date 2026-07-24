@@ -48,6 +48,7 @@ struct Args {
   uint32_t decode_steps = 1;
   uint32_t max_seq_len = 1;
   uint32_t max_cache_tokens = 0;
+  std::vector<uint32_t> prompt_token_ids;
 };
 
 struct LayerOutput {
@@ -88,6 +89,51 @@ bool is_supported_max_cache_tokens(uint32_t max_cache_tokens) {
     }
   }
   return false;
+}
+
+std::vector<uint32_t> parse_token_ids(const std::string &text,
+                                      const char *flag) {
+  if (text.empty()) {
+    throw std::runtime_error(std::string(flag) + " must not be empty");
+  }
+  std::vector<uint32_t> values;
+  size_t begin = 0;
+  while (begin <= text.size()) {
+    const size_t end = text.find(',', begin);
+    const std::string item = text.substr(
+        begin, end == std::string::npos ? std::string::npos : end - begin);
+    if (item.empty()) {
+      throw std::runtime_error(std::string(flag) + " contains an empty entry");
+    }
+    size_t parsed = 0;
+    const int value = std::stoi(item, &parsed);
+    if (parsed != item.size()) {
+      throw std::runtime_error(std::string(flag) +
+                               " contains a non-integer entry");
+    }
+    if (value < 0) {
+      throw std::runtime_error(std::string(flag) +
+                               " must contain non-negative integers");
+    }
+    values.push_back(static_cast<uint32_t>(value));
+    if (end == std::string::npos) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return values;
+}
+
+void validate_generation_window(const Args &args) {
+  const uint32_t prompt_len =
+      args.prompt_token_ids.empty()
+          ? 1
+          : static_cast<uint32_t>(args.prompt_token_ids.size());
+  if (prompt_len + args.decode_steps > args.max_seq_len) {
+    throw std::runtime_error(
+        "--prompt-token-ids length plus --max-new-tokens must not exceed "
+        "--max-seq-len");
+  }
 }
 
 struct LayerWeightViews {
@@ -519,7 +565,7 @@ Args parse_args(int argc, char **argv) {
     if (argc < 3) {
       throw std::runtime_error(
           "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
-          "[--max-seq-len <N>] "
+          "[--max-seq-len <N>] [--prompt-token-ids <ids>] "
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
           "<weights-dir> [layers]\n"
@@ -537,24 +583,40 @@ Args parse_args(int argc, char **argv) {
     args.max_seq_len = args.decode_steps;
 
     int option_index = 3;
+    bool max_seq_len_explicit = false;
     if (argc >= 5 && std::string(argv[option_index]) == "--max-seq-len") {
       const int parsed_max_seq_len = std::stoi(argv[option_index + 1]);
       if (parsed_max_seq_len <= 0) {
         throw std::runtime_error("--max-seq-len must be positive");
       }
       args.max_seq_len = static_cast<uint32_t>(parsed_max_seq_len);
+      max_seq_len_explicit = true;
       if (args.decode_steps > args.max_seq_len) {
         throw std::runtime_error(
             "--max-new-tokens must not exceed --max-seq-len");
       }
       option_index += 2;
     }
+    if (argc >= option_index + 2 &&
+        std::string(argv[option_index]) == "--prompt-token-ids") {
+      args.prompt_token_ids =
+          parse_token_ids(argv[option_index + 1], "--prompt-token-ids");
+      option_index += 2;
+    }
+    if (!max_seq_len_explicit) {
+      const uint32_t prompt_len =
+          args.prompt_token_ids.empty()
+              ? 1
+              : static_cast<uint32_t>(args.prompt_token_ids.size());
+      args.max_seq_len = prompt_len + args.decode_steps;
+    }
+    validate_generation_window(args);
 
     if (argc > option_index && std::string(argv[option_index]) == "--bundle") {
       if (argc != option_index + 3 && argc != option_index + 4) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
-            "[--max-seq-len <N>] --bundle "
+            "[--max-seq-len <N>] [--prompt-token-ids <ids>] --bundle "
             "<bundle-dir> <weights-dir> [layers]");
       }
       const std::filesystem::path bundle_dir = argv[option_index + 1];
@@ -568,6 +630,7 @@ Args parse_args(int argc, char **argv) {
         throw std::runtime_error(
             "--max-new-tokens must not exceed --max-seq-len");
       }
+      validate_generation_window(args);
       if (manifest.kv_cache_dim != kKvDim) {
         throw std::runtime_error(
             "bundle kv_cache_shape[1] does not match Qwen kv dim");
@@ -619,6 +682,10 @@ Args parse_args(int argc, char **argv) {
         args.layers = static_cast<uint32_t>(parsed);
       }
       return args;
+    }
+    if (!args.prompt_token_ids.empty()) {
+      throw std::runtime_error(
+          "--prompt-token-ids requires --bundle or --max-cache-tokens");
     }
     if (args.decode_steps == 1) {
       if (argc != option_index + 3 && argc != option_index + 4) {
@@ -792,11 +859,19 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
   }
 
   BufferViewPtr hidden;
-  uint32_t current_token = weights.tail.token_ids.front();
-  for (uint32_t step = 0; step < args.decode_steps; ++step) {
+  const std::vector<uint32_t> prompt_token_ids =
+      args.prompt_token_ids.empty()
+          ? std::vector<uint32_t>{weights.tail.token_ids.front()}
+          : args.prompt_token_ids;
+  const uint32_t prompt_len = static_cast<uint32_t>(prompt_token_ids.size());
+  const uint32_t total_decode_steps = prompt_len + args.decode_steps - 1;
+  uint32_t current_token = prompt_token_ids.front();
+  for (uint32_t step = 0; step < total_decode_steps; ++step) {
+    const uint32_t input_token =
+        step < prompt_len ? prompt_token_ids[step] : current_token;
     BufferViewPtr token_hidden;
     IREE_RETURN_IF_ERROR(
-        make_token_hidden(runner, weights.tail, current_token, &token_hidden));
+        make_token_hidden(runner, weights.tail, input_token, &token_hidden));
     if (args.max_cache_tokens != 0) {
       IREE_RETURN_IF_ERROR(run_decode_token_step_with_variable_cache(
           runner, functions.variable_layer, step, args.max_cache_tokens,
@@ -807,11 +882,14 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
           functions.decode3_layer, step, token_hidden.get(),
           weights.layer_views, &layer_caches, &hidden));
     }
-    BufferViewPtr step_logits;
-    IREE_RETURN_IF_ERROR(run_tail(runner, functions.tail, hidden.get(),
-                                  weights.tail, &step_logits));
-    IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
-                                        step + 1, &current_token));
+    if (step + 1 >= prompt_len) {
+      const uint32_t generation_step = step + 2 - prompt_len;
+      BufferViewPtr step_logits;
+      IREE_RETURN_IF_ERROR(run_tail(runner, functions.tail, hidden.get(),
+                                    weights.tail, &step_logits));
+      IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
+                                          generation_step, &current_token));
+    }
   }
   return iree_ok_status();
 }

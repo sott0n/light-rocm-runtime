@@ -155,6 +155,8 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
             "2",
             "--max-new-tokens",
             "3",
+            "--token-ids",
+            "5,6",
             "--iree-decode-bundle-dir",
             "/tmp/iree-decode-bundle",
             "--iree-runner",
@@ -168,6 +170,8 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
         "3",
         "--max-seq-len",
         "8",
+        "--prompt-token-ids",
+        "5,6",
         "--bundle",
         "/tmp/iree-decode-bundle",
         "/tmp/qwen-weights",
@@ -187,7 +191,9 @@ def test_iree_runner_command_accepts_max_supported_generation_capacity() -> None
             "--max-new-tokens",
             "32",
             "--max-seq-len",
-            "32",
+            "33",
+            "--token-ids",
+            "0",
             "--iree-decode-bundle-dir",
             "/tmp/iree-decode-bundle",
             "--iree-runner",
@@ -296,7 +302,9 @@ def test_iree_dry_run_discovers_smallest_sufficient_vmfb_capacity() -> None:
                 "--max-new-tokens",
                 "40",
                 "--max-seq-len",
-                "40",
+                "41",
+                "--token-ids",
+                "0",
                 "--iree-probe-dir",
                 str(probe),
                 "--iree-decode-bundle-dir",
@@ -313,7 +321,7 @@ def test_iree_dry_run_discovers_smallest_sufficient_vmfb_capacity() -> None:
         assert "--max-cache-tokens" in command
         assert "64" in command
         assert "--sequence-capacity" in command
-        assert "40" in command
+        assert "41" in command
         assert "--layer-export" in command
         assert "qwen_decode_layer_kv_cache_max64" in command
 
@@ -334,7 +342,9 @@ def test_iree_rejects_sequence_length_without_discovered_cache_capacity() -> Non
                 "--max-new-tokens",
                 "33",
                 "--max-seq-len",
-                "33",
+                "34",
+                "--token-ids",
+                "0",
                 "--iree-probe-dir",
                 str(root / "probe"),
                 "--iree-decode-bundle-dir",
@@ -371,7 +381,9 @@ def test_iree_rejects_sequence_length_over_discovered_cache_capacity() -> None:
                 "--max-new-tokens",
                 "40",
                 "--max-seq-len",
-                "40",
+                "41",
+                "--token-ids",
+                "0",
                 "--iree-probe-dir",
                 str(probe),
                 "--iree-decode-bundle-dir",
@@ -385,7 +397,7 @@ def test_iree_rejects_sequence_length_over_discovered_cache_capacity() -> None:
         try:
             runner.iree_bundle_writer_command(args)
         except ValueError as error:
-            assert "--max-seq-len 40 exceeds discovered IREE cache capacities" in str(
+            assert "--max-seq-len 41 exceeds discovered IREE cache capacities" in str(
                 error
             )
             assert "(32)" in str(error)
@@ -406,6 +418,8 @@ def test_iree_rejects_output_length_over_sequence_capacity() -> None:
             "9",
             "--max-seq-len",
             "8",
+            "--token-ids",
+            "0",
             "--iree-decode-bundle-dir",
             "/tmp/iree-decode-bundle",
             "--iree-runner",
@@ -416,7 +430,10 @@ def test_iree_rejects_output_length_over_sequence_capacity() -> None:
     try:
         runner.iree_runner_command(args, 1)
     except ValueError as error:
-        assert "--max-new-tokens must not exceed --max-seq-len" in str(error)
+        assert (
+            "--token-ids prompt length plus --max-new-tokens must not exceed "
+            "--max-seq-len"
+        ) in str(error)
     else:
         raise AssertionError("expected output length over sequence capacity to fail")
 
@@ -437,7 +454,9 @@ def test_iree_runner_rejects_sequence_length_over_bundle_manifest_capacity() -> 
                 "--max-new-tokens",
                 "9",
                 "--max-seq-len",
-                "9",
+                "10",
+                "--token-ids",
+                "0",
                 "--iree-decode-bundle-dir",
                 str(bundle),
                 "--iree-runner",
@@ -451,6 +470,39 @@ def test_iree_runner_rejects_sequence_length_over_bundle_manifest_capacity() -> 
             assert "exceeds IREE decode bundle sequence_capacity (8)" in str(error)
         else:
             raise AssertionError("expected bundle sequence capacity validation failure")
+
+
+def test_iree_runner_rejects_prompt_and_generation_over_max_seq_len() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--bundle-dir",
+            "/tmp/qwen-weights",
+            "--layers",
+            "1",
+            "--token-ids",
+            "3,4,5",
+            "--max-new-tokens",
+            "2",
+            "--max-seq-len",
+            "4",
+            "--iree-decode-bundle-dir",
+            "/tmp/iree-decode-bundle",
+            "--iree-runner",
+            "/tmp/lrrt_iree_qwen_decode1_e2e",
+        ]
+    )
+
+    try:
+        runner.iree_runner_command(args, 1)
+    except ValueError as error:
+        assert (
+            "--token-ids prompt length plus --max-new-tokens must not exceed "
+            "--max-seq-len"
+        ) in str(error)
+    else:
+        raise AssertionError("expected prompt length validation failure")
 
 
 def test_iree_explicit_vmfb_inputs_override_discovery() -> None:
@@ -516,6 +568,7 @@ def main() -> int:
     test_iree_rejects_sequence_length_over_discovered_cache_capacity()
     test_iree_rejects_output_length_over_sequence_capacity()
     test_iree_runner_rejects_sequence_length_over_bundle_manifest_capacity()
+    test_iree_runner_rejects_prompt_and_generation_over_max_seq_len()
     test_iree_explicit_vmfb_inputs_override_discovery()
     test_iree_requires_vmfb_inputs_when_bundle_and_default_vmfb_are_missing()
     print("qwen_e2e_runner_test: ok")
