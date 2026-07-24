@@ -26,6 +26,10 @@ IREE_LAYER_MODULE_RE = re.compile(r"^qwen_decode_layer_kv_cache_max([1-9][0-9]*)
 GENERATED_TOKEN_IDS_RE = re.compile(
     r"^generated_token_ids=\[([0-9]+(?:,[0-9]+)*)\]$", re.MULTILINE
 )
+TOP_LOGIT_RE = re.compile(
+    r"^step ([1-9][0-9]*) top_token=([0-9]+) logit=([-+0-9.eE]+) vocab=([0-9]+)$",
+    re.MULTILINE,
+)
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -71,6 +75,8 @@ def load_tokenizer(tokenizer_dir: Path) -> Any:
 
 
 def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
+    if args.reference_check and args.backend != "iree":
+        raise ValueError("--reference-check requires --iree")
     if args.backend != "iree" and (
         args.prompt is not None or args.tokenizer_dir is not None
     ):
@@ -93,6 +99,58 @@ def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
     return tokenizer
 
 
+def config_eos_token_id(path: Path) -> int | None:
+    if not path.is_file():
+        return None
+    value = read_json(path).get("eos_token_id")
+    if isinstance(value, list):
+        value = value[0] if value else None
+    if value is None:
+        return None
+    if not isinstance(value, int) or value < 0:
+        raise ValueError(f"{path} field 'eos_token_id' must be non-negative")
+    return value
+
+
+def tokenizer_config_eos_token_id(tokenizer_dir: Path, tokenizer: Any) -> int | None:
+    path = tokenizer_dir / "tokenizer_config.json"
+    if not path.is_file():
+        return None
+    value = read_json(path).get("eos_token")
+    if isinstance(value, dict):
+        value = value.get("content")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{path} field 'eos_token' must be a string")
+    token_id = tokenizer.token_to_id(value)
+    if token_id is None:
+        raise ValueError(f"{path} eos token {value!r} is missing from tokenizer")
+    return int(token_id)
+
+
+def resolve_eos_token_id(args: argparse.Namespace, tokenizer: Any | None) -> int | None:
+    if args.eos_token_id is not None:
+        if args.eos_token_id < 0:
+            raise ValueError("--eos-token-id must be non-negative")
+        return args.eos_token_id
+
+    search_dirs: list[Path] = []
+    for directory in [args.checkpoint_dir, args.tokenizer_dir]:
+        if directory is not None and directory not in search_dirs:
+            search_dirs.append(directory)
+    for directory in search_dirs:
+        for name in ["generation_config.json", "config.json"]:
+            token_id = config_eos_token_id(directory / name)
+            if token_id is not None:
+                return token_id
+        if tokenizer is not None:
+            token_id = tokenizer_config_eos_token_id(directory, tokenizer)
+            if token_id is not None:
+                return token_id
+    return None
+
+
 def parse_generated_token_ids(output: str) -> list[int]:
     matches = GENERATED_TOKEN_IDS_RE.findall(output)
     if len(matches) != 1:
@@ -101,6 +159,141 @@ def parse_generated_token_ids(output: str) -> list[int]:
             "generated_token_ids=[...] summary"
         )
     return [int(value, 10) for value in matches[0].split(",")]
+
+
+def parse_iree_top_logit(output: str, step: int = 1) -> tuple[int, float]:
+    matches = [
+        (int(match_step), int(token_id), float(logit))
+        for match_step, token_id, logit, _ in TOP_LOGIT_RE.findall(output)
+        if int(match_step) == step
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"IREE runner output must contain exactly one step {step} logit"
+        )
+    return matches[0][1], matches[0][2]
+
+
+def bundle_tensor(manifest_path: Path, tensor_name: str, shape: tuple[int, ...]) -> Any:
+    try:
+        import numpy as np
+    except ImportError as error:
+        raise RuntimeError("--reference-check requires numpy") from error
+
+    manifest = read_json(manifest_path)
+    data_name = manifest.get("data")
+    tensors = manifest.get("tensors")
+    if not isinstance(data_name, str) or not isinstance(tensors, list):
+        raise ValueError(f"{manifest_path} has invalid tensor metadata")
+    data_path = manifest_path.parent / data_name
+    for tensor in tensors:
+        if not isinstance(tensor, dict) or tensor.get("name") != tensor_name:
+            continue
+        offset = tensor.get("offset")
+        count = tensor.get("count")
+        if not isinstance(offset, int) or not isinstance(count, int):
+            raise ValueError(f"{manifest_path} tensor {tensor_name!r} is invalid")
+        expected_count = 1
+        for dim in shape:
+            expected_count *= dim
+        if count != expected_count:
+            raise ValueError(
+                f"{manifest_path} tensor {tensor_name!r} has unexpected size"
+            )
+        return np.memmap(data_path, dtype="<f4", mode="r", offset=offset, shape=shape)
+    raise ValueError(f"{manifest_path} is missing tensor {tensor_name!r}")
+
+
+def verify_reference_checkpoint(args: argparse.Namespace, model: Any) -> None:
+    try:
+        import numpy as np
+    except ImportError as error:
+        raise RuntimeError("--reference-check requires numpy") from error
+
+    tail_manifest_path = args.bundle_dir / "model_tail" / "weights.json"
+    tail_manifest = read_json(tail_manifest_path)
+    hidden = tail_manifest.get("hidden")
+    token_ids = tail_manifest.get("token_ids")
+    if not isinstance(hidden, int) or not isinstance(token_ids, list):
+        raise ValueError(f"{tail_manifest_path} has invalid model-tail metadata")
+    token_index = {token_id: index for index, token_id in enumerate(token_ids)}
+    prompt_ids = parse_token_ids(args.token_ids)
+    if any(token_id not in token_index for token_id in prompt_ids):
+        raise ValueError("prompt token embedding is missing from model-tail bundle")
+
+    token_embeddings = bundle_tensor(
+        tail_manifest_path, "token_embeddings", (len(token_ids), hidden)
+    )
+    bundle_prompt_embeddings = np.asarray(
+        [token_embeddings[token_index[token_id]] for token_id in prompt_ids]
+    )
+    reference_prompt_embeddings = (
+        model.get_input_embeddings().weight[prompt_ids].detach().cpu().float().numpy()
+    )
+
+    layer_manifest_path = args.bundle_dir / "layer_0" / "weights.json"
+    q_weight = bundle_tensor(layer_manifest_path, "q_weight", (hidden, hidden))
+    reference_q_weight = (
+        model.model.layers[0].self_attn.q_proj.weight.detach().cpu().float().numpy()
+    )
+    if not np.array_equal(bundle_prompt_embeddings, reference_prompt_embeddings):
+        raise ValueError("--checkpoint-dir token embeddings do not match --bundle-dir")
+    if not np.array_equal(q_weight, reference_q_weight):
+        raise ValueError("--checkpoint-dir layer_0 weights do not match --bundle-dir")
+    print("reference_checkpoint_match=passed", flush=True)
+
+
+def run_reference_check(args: argparse.Namespace, runner_output: str) -> None:
+    if args.checkpoint_dir is None:
+        raise ValueError("--reference-check requires --checkpoint-dir")
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM
+    except ImportError as error:
+        raise RuntimeError(
+            "--reference-check requires torch and transformers"
+        ) from error
+
+    prompt_ids = parse_token_ids(args.token_ids)
+    model = AutoModelForCausalLM.from_pretrained(
+        str(args.checkpoint_dir),
+        dtype=torch.float32,
+        local_files_only=True,
+        attn_implementation="eager",
+    )
+    model.eval()
+    verify_reference_checkpoint(args, model)
+    with torch.inference_mode():
+        input_ids = torch.tensor([prompt_ids], dtype=torch.long)
+        reference_logits = model(input_ids=input_ids).logits[0, -1].float()
+        reference_logit, reference_token = torch.max(reference_logits, dim=0)
+
+    reference_token_id = int(reference_token.item())
+    reference_top_logit = float(reference_logit.item())
+    iree_token_id, iree_top_logit = parse_iree_top_logit(runner_output)
+    logit_abs_diff = abs(iree_top_logit - reference_top_logit)
+    print(
+        f"reference_top_token={reference_token_id} logit={reference_top_logit:.9g}",
+        flush=True,
+    )
+    if iree_token_id != reference_token_id:
+        attention_bias_note = ""
+        if model.model.layers[0].self_attn.q_proj.bias is not None:
+            attention_bias_note = (
+                "; reference checkpoint has Q/K/V projection biases that the "
+                "current IREE weight bundle ABI does not carry"
+            )
+        raise ValueError(
+            "IREE/reference top token mismatch: "
+            f"IREE={iree_token_id}, reference={reference_token_id}"
+            + attention_bias_note
+        )
+    if logit_abs_diff > args.reference_logit_atol:
+        raise ValueError(
+            "IREE/reference top logit mismatch: "
+            f"abs_diff={logit_abs_diff:.9g}, atol={args.reference_logit_atol:.9g}"
+        )
+    print(f"reference_check=passed logit_abs_diff={logit_abs_diff:.9g}", flush=True)
 
 
 def print_generated_text(tokenizer: Any, runner_output: str) -> None:
@@ -404,7 +597,7 @@ def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
             f"--max-seq-len {args.max_seq_len} exceeds IREE decode bundle "
             f"sequence_capacity ({capacity})"
         )
-    return [
+    command = [
         str(args.iree_runner),
         "--max-new-tokens",
         str(args.max_new_tokens),
@@ -412,11 +605,18 @@ def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
         str(args.max_seq_len),
         "--prompt-token-ids",
         args.token_ids,
-        "--bundle",
-        str(args.iree_decode_bundle_dir),
-        str(args.bundle_dir),
-        str(layers),
     ]
+    if args.resolved_eos_token_id is not None:
+        command.extend(["--eos-token-id", str(args.resolved_eos_token_id)])
+    command.extend(
+        [
+            "--bundle",
+            str(args.iree_decode_bundle_dir),
+            str(args.bundle_dir),
+            str(layers),
+        ]
+    )
+    return command
 
 
 def run_command(
@@ -487,11 +687,14 @@ def run_iree(args: argparse.Namespace, layers: int, tokenizer: Any | None) -> No
     runner_output = run_command(
         iree_runner_command(args, layers),
         args.dry_run,
-        capture_stdout=tokenizer is not None,
+        capture_stdout=tokenizer is not None or args.reference_check,
     )
     if tokenizer is not None and not args.dry_run:
         assert runner_output is not None
         print_generated_text(tokenizer, runner_output)
+    if args.reference_check and not args.dry_run:
+        assert runner_output is not None
+        run_reference_check(args, runner_output)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -527,6 +730,25 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         help="maximum number of output tokens to decode",
     )
+    parser.add_argument(
+        "--eos-token-id",
+        type=int,
+        help=(
+            "stop after this token; inferred from checkpoint/tokenizer config "
+            "when available"
+        ),
+    )
+    parser.add_argument(
+        "--reference-check",
+        action="store_true",
+        help="compare the first IREE top token/logit with local Hugging Face Qwen",
+    )
+    parser.add_argument(
+        "--reference-logit-atol",
+        default=0.05,
+        type=float,
+        help="absolute tolerance for --reference-check top-logit comparison",
+    )
     parser.add_argument("--backend", choices=["triton", "iree"], default="triton")
     parser.add_argument("--iree", action="store_const", const="iree", dest="backend")
     parser.add_argument("--force-convert", action="store_true")
@@ -555,8 +777,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--no-iree-bundle-write", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.reference_logit_atol < 0:
+        parser.error("--reference-logit-atol must be non-negative")
     if args.token_ids is None and args.prompt is None:
         args.token_ids = "0,1,2"
+    args.resolved_eos_token_id = None
     return args
 
 
@@ -564,6 +789,7 @@ def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
         tokenizer = prepare_text_inputs(args)
+        args.resolved_eos_token_id = resolve_eos_token_id(args, tokenizer)
         layers = resolve_layers(args)
         if args.backend == "iree":
             run_iree(args, layers, tokenizer)

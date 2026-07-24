@@ -49,6 +49,8 @@ struct Args {
   uint32_t max_seq_len = 1;
   uint32_t max_cache_tokens = 0;
   std::vector<uint32_t> prompt_token_ids;
+  bool eos_token_id_set = false;
+  uint32_t eos_token_id = 0;
 };
 
 struct LayerOutput {
@@ -566,6 +568,7 @@ Args parse_args(int argc, char **argv) {
       throw std::runtime_error(
           "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
           "[--max-seq-len <N>] [--prompt-token-ids <ids>] "
+          "[--eos-token-id <id>] "
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
           "<weights-dir> [layers]\n"
@@ -603,6 +606,16 @@ Args parse_args(int argc, char **argv) {
           parse_token_ids(argv[option_index + 1], "--prompt-token-ids");
       option_index += 2;
     }
+    if (argc >= option_index + 2 &&
+        std::string(argv[option_index]) == "--eos-token-id") {
+      const int parsed_eos_token_id = std::stoi(argv[option_index + 1]);
+      if (parsed_eos_token_id < 0) {
+        throw std::runtime_error("--eos-token-id must be non-negative");
+      }
+      args.eos_token_id_set = true;
+      args.eos_token_id = static_cast<uint32_t>(parsed_eos_token_id);
+      option_index += 2;
+    }
     if (!max_seq_len_explicit) {
       const uint32_t prompt_len =
           args.prompt_token_ids.empty()
@@ -616,7 +629,8 @@ Args parse_args(int argc, char **argv) {
       if (argc != option_index + 3 && argc != option_index + 4) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
-            "[--max-seq-len <N>] [--prompt-token-ids <ids>] --bundle "
+            "[--max-seq-len <N>] [--prompt-token-ids <ids>] "
+            "[--eos-token-id <id>] --bundle "
             "<bundle-dir> <weights-dir> [layers]");
       }
       const std::filesystem::path bundle_dir = argv[option_index + 1];
@@ -867,6 +881,7 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
   const uint32_t total_decode_steps = prompt_len + args.decode_steps - 1;
   std::vector<uint32_t> generated_token_ids;
   generated_token_ids.reserve(args.decode_steps);
+  bool stopped_on_eos = false;
   uint32_t current_token = prompt_token_ids.front();
   for (uint32_t step = 0; step < total_decode_steps; ++step) {
     const uint32_t input_token =
@@ -892,6 +907,10 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
       IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
                                           generation_step, &current_token));
       generated_token_ids.push_back(current_token);
+      if (args.eos_token_id_set && current_token == args.eos_token_id) {
+        stopped_on_eos = true;
+        break;
+      }
     }
   }
   std::printf("generated_token_ids=[");
@@ -899,6 +918,8 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
     std::printf("%s%u", i == 0 ? "" : ",", generated_token_ids[i]);
   }
   std::printf("]\n");
+  std::printf("stop_reason=%s\n",
+              stopped_on_eos ? "eos_token" : "max_new_tokens");
   return iree_ok_status();
 }
 

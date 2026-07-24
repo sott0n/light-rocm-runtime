@@ -522,6 +522,34 @@ mutually exclusive. Tokenization requires the `tokenizers` package from
 `tools/requirements.txt`; tokenizer and text semantics remain in the Python
 wrapper rather than the runtime or IREE HAL adapter.
 
+Generation stops early when the selected token matches `--eos-token-id`.
+The wrapper infers that id from `generation_config.json`, `config.json`, or
+`tokenizer_config.json` when those files are available, and passes an explicit
+value through unchanged. The native runner always prints
+`stop_reason=eos_token` or `stop_reason=max_new_tokens` after
+`generated_token_ids=[...]`.
+
+To check the first generated token and its top logit against the local Hugging
+Face Qwen implementation, add `--reference-check`:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --prompt "Hello" \
+  --max-seq-len 8 \
+  --max-new-tokens 1 \
+  --reference-check
+```
+
+This optional check loads the checkpoint with `transformers` in FP32 eager
+mode. Before inference it verifies representative prompt-embedding and layer-0
+weights against the converted bundle so a different Qwen variant cannot produce
+a misleading comparison. It then requires the top token to match exactly and
+checks the top logit with `--reference-logit-atol` (default `0.05`). It prints
+`reference_checkpoint_match=passed`, the reference top token, and
+`reference_check=passed` on success. `numpy`, `torch`, and `transformers` are
+only required when this check is requested.
+
 By default, the wrapper discovers available layer VMFB capacities and the tail
 VMFB from the standard probe output paths under `build-iree-probe/` for
 `--iree-target`:

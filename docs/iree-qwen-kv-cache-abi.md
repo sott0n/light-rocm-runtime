@@ -133,7 +133,7 @@ The runner accepts this bundle form:
 
 ```text
 lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-seq-len S \
-  --bundle <bundle-dir> <weights-dir> [layers]
+  [--eos-token-id <id>] --bundle <bundle-dir> <weights-dir> [layers]
 ```
 
 The higher-level `tools/run_qwen_e2e.py` wrapper exposes the inference-side
@@ -152,6 +152,11 @@ rejects `--max-seq-len` values larger than the recorded `sequence_capacity`
 before launching the runner.
 The full 24-layer Qwen E2E path has been validated through
 `--max-new-tokens 32 --max-seq-len 32` using the `max32` cache specialization.
+
+When `--eos-token-id` is present, the runner includes the selected EOS token in
+`generated_token_ids=[...]` and stops before the next decode step. It reports
+`stop_reason=eos_token` for that path and
+`stop_reason=max_new_tokens` when the requested output limit is reached.
 
 The bundle can be created from compiled VMFB artifacts with:
 

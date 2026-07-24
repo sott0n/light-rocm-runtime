@@ -35,6 +35,7 @@ class FakeTokenizer:
         self.encoded_text: str | None = None
         self.decoded_ids: list[int] | None = None
         self.skip_special_tokens: bool | None = None
+        self.token_ids: dict[str, int] = {}
 
     def encode(self, text: str) -> FakeEncoding:
         self.encoded_text = text
@@ -44,6 +45,9 @@ class FakeTokenizer:
         self.decoded_ids = token_ids
         self.skip_special_tokens = skip_special_tokens
         return "decoded text"
+
+    def token_to_id(self, token: str) -> int | None:
+        return self.token_ids.get(token)
 
 
 def test_parse_args_preserves_default_token_ids() -> None:
@@ -106,6 +110,64 @@ def test_text_options_require_iree() -> None:
         raise AssertionError("expected tokenizer-backed Triton run to fail")
 
 
+def test_reference_check_requires_iree() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--layers", "1", "--reference-check"])
+    try:
+        runner.prepare_text_inputs(args)
+    except ValueError as error:
+        assert "--reference-check requires --iree" in str(error)
+    else:
+        raise AssertionError("expected reference-backed Triton run to fail")
+
+
+def test_resolve_eos_token_id_prefers_explicit_value() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--iree", "--layers", "1", "--eos-token-id", "151645"])
+    assert runner.resolve_eos_token_id(args, tokenizer=None) == 151645
+
+
+def test_resolve_eos_token_id_reads_checkpoint_config() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint = Path(tmpdir)
+        (checkpoint / "config.json").write_text(
+            json.dumps({"eos_token_id": 151643}), encoding="utf-8"
+        )
+        args = runner.parse_args(
+            ["--iree", "--layers", "1", "--checkpoint-dir", str(checkpoint)]
+        )
+        assert runner.resolve_eos_token_id(args, tokenizer=None) == 151643
+
+
+def test_resolve_eos_token_id_uses_first_generation_config_value() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint = Path(tmpdir)
+        (checkpoint / "generation_config.json").write_text(
+            json.dumps({"eos_token_id": [151645, 151643]}), encoding="utf-8"
+        )
+        args = runner.parse_args(
+            ["--iree", "--layers", "1", "--checkpoint-dir", str(checkpoint)]
+        )
+        assert runner.resolve_eos_token_id(args, tokenizer=None) == 151645
+
+
+def test_resolve_eos_token_id_reads_tokenizer_config() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tokenizer_dir = Path(tmpdir)
+        (tokenizer_dir / "tokenizer_config.json").write_text(
+            json.dumps({"eos_token": "<|im_end|>"}), encoding="utf-8"
+        )
+        tokenizer = FakeTokenizer()
+        tokenizer.token_ids["<|im_end|>"] = 151645
+        args = runner.parse_args(
+            ["--iree", "--layers", "1", "--tokenizer-dir", str(tokenizer_dir)]
+        )
+        assert runner.resolve_eos_token_id(args, tokenizer) == 151645
+
+
 def test_print_generated_text_decodes_runner_summary() -> None:
     runner = load_runner()
     tokenizer = FakeTokenizer()
@@ -132,6 +194,37 @@ def test_parse_generated_token_ids_requires_one_summary() -> None:
             assert "exactly one" in str(error)
         else:
             raise AssertionError("expected invalid generated token output to fail")
+
+
+def test_parse_iree_top_logit_reads_requested_step() -> None:
+    runner = load_runner()
+    output = (
+        "step 1 top_token=120952 logit=3.25 vocab=151936\n"
+        "step 2 top_token=67330 logit=-1.5e-2 vocab=151936\n"
+    )
+    assert runner.parse_iree_top_logit(output) == (120952, 3.25)
+    assert runner.parse_iree_top_logit(output, step=2) == (67330, -0.015)
+
+
+def test_bundle_tensor_reads_named_tensor() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        (root / "weights.bin").write_bytes(b"\x00\x00\x80\x3f\x00\x00\x00\x40")
+        manifest = root / "weights.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "data": "weights.bin",
+                    "tensors": [
+                        {"name": "values", "offset": 0, "count": 2},
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        values = runner.bundle_tensor(manifest, "values", (1, 2))
+        assert values.tolist() == [[1.0, 2.0]]
 
 
 def test_run_command_can_tee_and_capture_stdout() -> None:
@@ -303,6 +396,30 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
         "/tmp/qwen-weights",
         "2",
     ]
+
+
+def test_iree_runner_command_passes_resolved_eos_token_id() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--bundle-dir",
+            "/tmp/qwen-weights",
+            "--layers",
+            "2",
+            "--token-ids",
+            "5,6",
+            "--iree-decode-bundle-dir",
+            "/tmp/iree-decode-bundle",
+        ]
+    )
+    args.resolved_eos_token_id = 151643
+
+    command = runner.iree_runner_command(args, 2)
+
+    eos_index = command.index("--eos-token-id")
+    assert command[eos_index + 1] == "151643"
+    assert eos_index < command.index("--bundle")
 
 
 def test_iree_runner_command_accepts_max_supported_generation_capacity() -> None:
@@ -686,13 +803,21 @@ def main() -> int:
     test_prepare_text_prompt_uses_checkpoint_tokenizer()
     test_prepare_text_prompt_requires_tokenizer_location()
     test_text_options_require_iree()
+    test_reference_check_requires_iree()
+    test_resolve_eos_token_id_prefers_explicit_value()
+    test_resolve_eos_token_id_reads_checkpoint_config()
+    test_resolve_eos_token_id_uses_first_generation_config_value()
+    test_resolve_eos_token_id_reads_tokenizer_config()
     test_print_generated_text_decodes_runner_summary()
     test_parse_generated_token_ids_requires_one_summary()
+    test_parse_iree_top_logit_reads_requested_step()
+    test_bundle_tensor_reads_named_tensor()
     test_run_command_can_tee_and_capture_stdout()
     test_resolve_layers_reads_checkpoint_config()
     test_runner_command_requires_keys_for_tokens()
     test_dry_run_builds_full_e2e_command()
     test_iree_runner_command_uses_decode_bundle()
+    test_iree_runner_command_passes_resolved_eos_token_id()
     test_iree_runner_command_accepts_max_supported_generation_capacity()
     test_iree_converter_command_writes_e2e_directory_bundle()
     test_iree_dry_run_writes_bundle_then_runs()
