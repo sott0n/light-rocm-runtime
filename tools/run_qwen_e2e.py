@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNNER = ROOT / "tools" / "run_qwen_benchmark.py"
@@ -22,6 +23,9 @@ DEFAULT_IREE_DECODE_BUNDLE_DIR = Path("/tmp/lrrt-iree-qwen-decode-bundle")
 DEFAULT_IREE_PROBE_DIR = ROOT / "build-iree-probe"
 DEFAULT_IREE_TARGET = "gfx1101"
 IREE_LAYER_MODULE_RE = re.compile(r"^qwen_decode_layer_kv_cache_max([1-9][0-9]*)$")
+GENERATED_TOKEN_IDS_RE = re.compile(
+    r"^generated_token_ids=\[([0-9]+(?:,[0-9]+)*)\]$", re.MULTILINE
+)
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -45,6 +49,68 @@ def parse_token_ids(text: str) -> list[int]:
             raise ValueError("--token-ids must be non-negative")
         result.append(value)
     return result
+
+
+def tokenizer_json_path(tokenizer_dir: Path) -> Path:
+    path = tokenizer_dir / "tokenizer.json"
+    if not path.is_file():
+        raise ValueError(f"tokenizer file was not found: {path}")
+    return path
+
+
+def load_tokenizer(tokenizer_dir: Path) -> Any:
+    path = tokenizer_json_path(tokenizer_dir)
+    try:
+        from tokenizers import Tokenizer
+    except ImportError as error:
+        raise RuntimeError(
+            "tokenizers is required for --prompt or --tokenizer-dir; install "
+            "tools/requirements.txt"
+        ) from error
+    return Tokenizer.from_file(str(path))
+
+
+def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
+    if args.backend != "iree" and (
+        args.prompt is not None or args.tokenizer_dir is not None
+    ):
+        raise ValueError("--prompt and --tokenizer-dir currently require --iree")
+    if args.prompt is None and args.tokenizer_dir is None:
+        return None
+
+    tokenizer_dir = args.tokenizer_dir
+    if tokenizer_dir is None:
+        if args.checkpoint_dir is None:
+            raise ValueError("--prompt requires --tokenizer-dir or --checkpoint-dir")
+        tokenizer_dir = args.checkpoint_dir
+    tokenizer = load_tokenizer(tokenizer_dir)
+    if args.prompt is not None:
+        prompt_token_ids = tokenizer.encode(args.prompt).ids
+        if not prompt_token_ids:
+            raise ValueError("--prompt encoded to an empty token sequence")
+        args.token_ids = ",".join(str(value) for value in prompt_token_ids)
+        print(f"prompt_token_ids=[{args.token_ids}]", flush=True)
+    return tokenizer
+
+
+def parse_generated_token_ids(output: str) -> list[int]:
+    matches = GENERATED_TOKEN_IDS_RE.findall(output)
+    if len(matches) != 1:
+        raise ValueError(
+            "IREE runner output must contain exactly one "
+            "generated_token_ids=[...] summary"
+        )
+    return [int(value, 10) for value in matches[0].split(",")]
+
+
+def print_generated_text(tokenizer: Any, runner_output: str) -> None:
+    generated_token_ids = parse_generated_token_ids(runner_output)
+    generated_text = tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+    print(
+        "generated_text="
+        + json.dumps(generated_text, ensure_ascii=False, separators=(",", ":")),
+        flush=True,
+    )
 
 
 def prompt_sequence_length(args: argparse.Namespace) -> int:
@@ -353,18 +419,37 @@ def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     ]
 
 
-def run_command(command: list[str], dry_run: bool) -> None:
+def run_command(
+    command: list[str], dry_run: bool, capture_stdout: bool = False
+) -> str | None:
     print("+ " + " ".join(str(part) for part in command), flush=True)
     if dry_run:
-        return
-    subprocess.run(command, check=True)
+        return None
+    if not capture_stdout:
+        subprocess.run(command, check=True)
+        return None
+
+    output: list[str] = []
+    with subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as process:
+        assert process.stdout is not None
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output.append(line)
+        returncode = process.wait()
+    if returncode != 0:
+        raise subprocess.CalledProcessError(returncode, command)
+    return "".join(output)
 
 
 def run_triton(args: argparse.Namespace, layers: int) -> None:
     run_command(runner_command(args, layers), args.dry_run)
 
 
-def run_iree(args: argparse.Namespace, layers: int) -> None:
+def run_iree(args: argparse.Namespace, layers: int, tokenizer: Any | None) -> None:
     complete = bundle_complete(args.bundle_dir, layers)
     should_convert = args.force_convert or not complete
     if args.no_convert:
@@ -399,7 +484,14 @@ def run_iree(args: argparse.Namespace, layers: int) -> None:
             flush=True,
         )
 
-    run_command(iree_runner_command(args, layers), args.dry_run)
+    runner_output = run_command(
+        iree_runner_command(args, layers),
+        args.dry_run,
+        capture_stdout=tokenizer is not None,
+    )
+    if tokenizer is not None and not args.dry_run:
+        assert runner_output is not None
+        print_generated_text(tokenizer, runner_output)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -414,7 +506,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--bundle-dir", default=DEFAULT_BUNDLE_DIR, type=Path)
     parser.add_argument("--layers", type=int)
     parser.add_argument("--keys", default=4, type=int)
-    parser.add_argument("--token-ids", default="0,1,2")
+    prompt_group = parser.add_mutually_exclusive_group()
+    prompt_group.add_argument("--token-ids")
+    prompt_group.add_argument(
+        "--prompt",
+        help="text prompt to tokenize for IREE execution",
+    )
+    parser.add_argument(
+        "--tokenizer-dir",
+        type=Path,
+        help=(
+            "directory containing tokenizer.json; defaults to --checkpoint-dir "
+            "with --prompt"
+        ),
+    )
     parser.add_argument("--iterations", default=1, type=int)
     parser.add_argument(
         "--max-new-tokens",
@@ -449,15 +554,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--force-iree-bundle", action="store_true")
     parser.add_argument("--no-iree-bundle-write", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.token_ids is None and args.prompt is None:
+        args.token_ids = "0,1,2"
+    return args
 
 
 def main(argv: list[str]) -> int:
     try:
         args = parse_args(argv)
+        tokenizer = prepare_text_inputs(args)
         layers = resolve_layers(args)
         if args.backend == "iree":
-            run_iree(args, layers)
+            run_iree(args, layers, tokenizer)
         else:
             run_triton(args, layers)
         return 0

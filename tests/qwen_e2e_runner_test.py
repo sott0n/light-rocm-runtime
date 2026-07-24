@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -20,6 +22,130 @@ def load_runner():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+class FakeEncoding:
+    def __init__(self, ids: list[int]):
+        self.ids = ids
+
+
+class FakeTokenizer:
+    def __init__(self, encoded_ids: list[int] | None = None):
+        self.encoded_ids = encoded_ids or []
+        self.encoded_text: str | None = None
+        self.decoded_ids: list[int] | None = None
+        self.skip_special_tokens: bool | None = None
+
+    def encode(self, text: str) -> FakeEncoding:
+        self.encoded_text = text
+        return FakeEncoding(self.encoded_ids)
+
+    def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
+        self.decoded_ids = token_ids
+        self.skip_special_tokens = skip_special_tokens
+        return "decoded text"
+
+
+def test_parse_args_preserves_default_token_ids() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--layers", "1"])
+    assert args.token_ids == "0,1,2"
+
+
+def test_prepare_text_prompt_uses_checkpoint_tokenizer() -> None:
+    runner = load_runner()
+    tokenizer = FakeTokenizer([10, 20, 30])
+    loaded_paths: list[Path] = []
+
+    def fake_load_tokenizer(path: Path) -> FakeTokenizer:
+        loaded_paths.append(path)
+        return tokenizer
+
+    runner.load_tokenizer = fake_load_tokenizer
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--checkpoint-dir",
+            "/tmp/qwen-checkpoint",
+            "--prompt",
+            "hello",
+        ]
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        loaded = runner.prepare_text_inputs(args)
+
+    assert loaded is tokenizer
+    assert loaded_paths == [Path("/tmp/qwen-checkpoint")]
+    assert tokenizer.encoded_text == "hello"
+    assert args.token_ids == "10,20,30"
+    assert output.getvalue() == "prompt_token_ids=[10,20,30]\n"
+
+
+def test_prepare_text_prompt_requires_tokenizer_location() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--iree", "--layers", "1", "--prompt", "hello"])
+    try:
+        runner.prepare_text_inputs(args)
+    except ValueError as error:
+        assert "--tokenizer-dir or --checkpoint-dir" in str(error)
+    else:
+        raise AssertionError("expected missing tokenizer location to fail")
+
+
+def test_text_options_require_iree() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        ["--layers", "1", "--token-ids", "1,2", "--tokenizer-dir", "/tmp"]
+    )
+    try:
+        runner.prepare_text_inputs(args)
+    except ValueError as error:
+        assert "currently require --iree" in str(error)
+    else:
+        raise AssertionError("expected tokenizer-backed Triton run to fail")
+
+
+def test_print_generated_text_decodes_runner_summary() -> None:
+    runner = load_runner()
+    tokenizer = FakeTokenizer()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        runner.print_generated_text(
+            tokenizer,
+            "step 1 top_token=120952\n"
+            "generated_token_ids=[120952,67330]\n"
+            "iree_qwen_decode2_e2e: ok layers=24\n",
+        )
+
+    assert tokenizer.decoded_ids == [120952, 67330]
+    assert tokenizer.skip_special_tokens is True
+    assert output.getvalue() == 'generated_text="decoded text"\n'
+
+
+def test_parse_generated_token_ids_requires_one_summary() -> None:
+    runner = load_runner()
+    for output in ["", "generated_token_ids=[1]\ngenerated_token_ids=[2]\n"]:
+        try:
+            runner.parse_generated_token_ids(output)
+        except ValueError as error:
+            assert "exactly one" in str(error)
+        else:
+            raise AssertionError("expected invalid generated token output to fail")
+
+
+def test_run_command_can_tee_and_capture_stdout() -> None:
+    runner = load_runner()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        captured = runner.run_command(
+            [sys.executable, "-c", "print('generated_token_ids=[7,8]')"],
+            dry_run=False,
+            capture_stdout=True,
+        )
+
+    assert captured == "generated_token_ids=[7,8]\n"
+    assert output.getvalue().endswith("generated_token_ids=[7,8]\n")
 
 
 def test_resolve_layers_reads_checkpoint_config() -> None:
@@ -556,6 +682,13 @@ def test_iree_requires_vmfb_inputs_when_bundle_and_default_vmfb_are_missing() ->
 
 
 def main() -> int:
+    test_parse_args_preserves_default_token_ids()
+    test_prepare_text_prompt_uses_checkpoint_tokenizer()
+    test_prepare_text_prompt_requires_tokenizer_location()
+    test_text_options_require_iree()
+    test_print_generated_text_decodes_runner_summary()
+    test_parse_generated_token_ids_requires_one_summary()
+    test_run_command_can_tee_and_capture_stdout()
     test_resolve_layers_reads_checkpoint_config()
     test_runner_command_requires_keys_for_tokens()
     test_dry_run_builds_full_e2e_command()

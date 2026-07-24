@@ -501,6 +501,27 @@ python3 tools/run_qwen_e2e.py --iree \
   --max-new-tokens 4
 ```
 
+For tokenizer-backed input and output, pass a text prompt and a directory
+containing a Hugging Face `tokenizer.json`:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/qwen-checkpoint \
+  --prompt "Hello" \
+  --max-seq-len 16 \
+  --max-new-tokens 4
+```
+
+With `--prompt`, `--checkpoint-dir` is also the default `--tokenizer-dir`.
+Pass `--tokenizer-dir` explicitly when the tokenizer and checkpoint are in
+different directories, or with `--token-ids` to decode only the generated
+output. The wrapper prints the encoded input as `prompt_token_ids=[...]` and,
+after the native runner's `generated_token_ids=[...]` summary, prints the
+decoded output as `generated_text="..."`. `--prompt` and `--token-ids` are
+mutually exclusive. Tokenization requires the `tokenizers` package from
+`tools/requirements.txt`; tokenizer and text semantics remain in the Python
+wrapper rather than the runtime or IREE HAL adapter.
+
 By default, the wrapper discovers available layer VMFB capacities and the tail
 VMFB from the standard probe output paths under `build-iree-probe/` for
 `--iree-target`:
