@@ -32,6 +32,13 @@ The C/HSA runtime remains available as `lrrt::lrrt`. Compiler integrations can
 use the separate `lrrt::bundle` C++ target, which parses the kernel manifest,
 loads its HSACO, validates the kernarg layout, and derives the launch config.
 
+## Qwen Execution
+
+Qwen2/Qwen2.5 checkpoints can be exercised through the IREE and Triton
+executor paths. See the [Qwen IREE and Triton execution
+guide](examples/qwen/README.md) for prerequisites, build commands, checkpoint
+conversion, text generation, correctness checks, and benchmarks.
+
 ## Build
 
 ```sh
