@@ -164,6 +164,17 @@ When `--eos-token-id` is present, the runner includes the selected EOS token in
 `stop_reason=eos_token` for that path and
 `stop_reason=max_new_tokens` when the requested output limit is reached.
 
+The native runner flushes concise progress records as work begins and
+completes. These identify module initialization, weight loading, every prompt
+token entering prefill, every generated decode step, host submission time for
+asynchronous prefill, and elapsed time for synchronized decode and completed
+startup phases. This makes an interrupted or slow run distinguishable from a
+silent startup stall without producing one line per decoder layer. Pass
+`--verbose-layers` to the native runner, or `--iree-verbose-layers` through
+`tools/run_qwen_e2e.py`, to additionally print
+per-layer weight loading and `step <N> layer <M>/<layers> complete` after every
+decoder layer.
+
 The bundle can be created from compiled VMFB artifacts with:
 
 ```text

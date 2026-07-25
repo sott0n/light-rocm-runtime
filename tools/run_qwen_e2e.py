@@ -742,6 +742,8 @@ def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     ]
     if args.resolved_eos_token_id is not None:
         command.extend(["--eos-token-id", str(args.resolved_eos_token_id)])
+    if args.iree_verbose_layers:
+        command.append("--verbose-layers")
     command.extend(
         [
             "--bundle",
@@ -936,6 +938,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--iree-bundle-writer", default=DEFAULT_IREE_BUNDLE_WRITER, type=Path
     )
     parser.add_argument("--iree-runner", default=DEFAULT_IREE_RUNNER, type=Path)
+    parser.add_argument(
+        "--iree-verbose-layers",
+        action="store_true",
+        help="print completion of every decoder layer in the native IREE runner",
+    )
     parser.add_argument("--max-seq-len", default=8, type=int)
     parser.add_argument("--force-iree-bundle", action="store_true")
     parser.add_argument("--no-iree-bundle-write", action="store_true")

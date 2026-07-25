@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
@@ -31,6 +32,12 @@ constexpr uint32_t kKvDim = 128;
 constexpr uint32_t kIntermediate = 4864;
 constexpr uint32_t kDefaultLayers = 24;
 constexpr uint32_t kSupportedMaxCacheTokens[] = {8, 16, 32, 64};
+using SteadyClock = std::chrono::steady_clock;
+
+double elapsed_ms(SteadyClock::time_point start) {
+  return std::chrono::duration<double, std::milli>(SteadyClock::now() - start)
+      .count();
+}
 
 struct Args {
   std::string layer_vmfb;
@@ -51,6 +58,7 @@ struct Args {
   std::vector<uint32_t> prompt_token_ids;
   bool eos_token_id_set = false;
   uint32_t eos_token_id = 0;
+  bool verbose_layers = false;
 };
 
 struct LayerOutput {
@@ -361,13 +369,15 @@ iree_status_t validate_layer_cache(iree_hal_buffer_view_t *key_cache,
   return iree_ok_status();
 }
 
-iree_status_t run_decode_token_step(
-    VmfbRunner *runner, const iree_vm_function_t &decode1_function,
-    const iree_vm_function_t &decode2_function,
-    const iree_vm_function_t &decode3_function, uint32_t step_index,
-    iree_hal_buffer_view_t *input_hidden,
-    const std::vector<LayerWeightViews> &weights,
-    std::vector<LayerKvCache> *layer_caches, BufferViewPtr *out_hidden) {
+iree_status_t
+run_decode_token_step(VmfbRunner *runner,
+                      const iree_vm_function_t &decode1_function,
+                      const iree_vm_function_t &decode2_function,
+                      const iree_vm_function_t &decode3_function,
+                      uint32_t step_index, iree_hal_buffer_view_t *input_hidden,
+                      const std::vector<LayerWeightViews> &weights,
+                      std::vector<LayerKvCache> *layer_caches,
+                      bool verbose_layers, BufferViewPtr *out_hidden) {
   if (step_index > 2) {
     return iree_make_status(
         IREE_STATUS_UNIMPLEMENTED,
@@ -421,9 +431,11 @@ iree_status_t run_decode_token_step(
     hidden = std::move(output.hidden);
     (*layer_caches)[layer].key_cache = std::move(output.key_cache);
     (*layer_caches)[layer].value_cache = std::move(output.value_cache);
-    std::printf("step %u layer %u/%zu complete\n", step_index + 1, layer + 1,
-                weights.size());
-    std::fflush(stdout);
+    if (verbose_layers) {
+      std::printf("step %u layer %u/%zu complete\n", step_index + 1, layer + 1,
+                  weights.size());
+      std::fflush(stdout);
+    }
   }
 
   *out_hidden = std::move(hidden);
@@ -451,7 +463,8 @@ iree_status_t run_decode_token_step_with_variable_cache(
     VmfbRunner *runner, const iree_vm_function_t &function, uint32_t step_index,
     uint32_t max_cache_tokens, iree_hal_buffer_view_t *input_hidden,
     const std::vector<LayerWeightViews> &weights,
-    std::vector<LayerKvCache> *layer_caches, BufferViewPtr *out_hidden) {
+    std::vector<LayerKvCache> *layer_caches, bool verbose_layers,
+    BufferViewPtr *out_hidden) {
   if (step_index >= max_cache_tokens) {
     return iree_make_status(IREE_STATUS_OUT_OF_RANGE,
                             "decode step %u exceeds KV cache capacity %u",
@@ -487,9 +500,11 @@ iree_status_t run_decode_token_step_with_variable_cache(
     hidden = std::move(output.hidden);
     (*layer_caches)[layer].key_cache = std::move(output.key_cache);
     (*layer_caches)[layer].value_cache = std::move(output.value_cache);
-    std::printf("step %u layer %u/%zu complete\n", step_index + 1, layer + 1,
-                weights.size());
-    std::fflush(stdout);
+    if (verbose_layers) {
+      std::printf("step %u layer %u/%zu complete\n", step_index + 1, layer + 1,
+                  weights.size());
+      std::fflush(stdout);
+    }
   }
 
   *out_hidden = std::move(hidden);
@@ -584,7 +599,7 @@ Args parse_args(int argc, char **argv) {
       throw std::runtime_error(
           "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
           "[--max-seq-len <N>] [--prompt-token-ids <ids>] "
-          "[--eos-token-id <id>] "
+          "[--eos-token-id <id>] [--verbose-layers] "
           "<decode1-layer.vmfb> "
           "[decode2-layer.vmfb] [decode3-layer.vmfb] <tail.vmfb> "
           "<weights-dir> [layers]\n"
@@ -632,6 +647,11 @@ Args parse_args(int argc, char **argv) {
       args.eos_token_id = static_cast<uint32_t>(parsed_eos_token_id);
       option_index += 2;
     }
+    if (argc > option_index &&
+        std::string(argv[option_index]) == "--verbose-layers") {
+      args.verbose_layers = true;
+      option_index += 1;
+    }
     if (!max_seq_len_explicit) {
       const uint32_t prompt_len =
           args.prompt_token_ids.empty()
@@ -646,7 +666,7 @@ Args parse_args(int argc, char **argv) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
             "[--max-seq-len <N>] [--prompt-token-ids <ids>] "
-            "[--eos-token-id <id>] --bundle "
+            "[--eos-token-id <id>] [--verbose-layers] --bundle "
             "<bundle-dir> <weights-dir> [layers]");
       }
       const std::filesystem::path bundle_dir = argv[option_index + 1];
@@ -875,6 +895,12 @@ iree_status_t load_qwen_weights(VmfbRunner *runner, const Args &args,
     }
     IREE_RETURN_IF_ERROR(make_layer_weight_views(runner, weights->layers.back(),
                                                  &weights->layer_views[layer]));
+    if (args.verbose_layers) {
+      std::printf(
+          "iree_qwen startup phase=weights layer=%u/%u status=complete\n",
+          layer + 1, args.layers);
+      std::fflush(stdout);
+    }
   }
   return iree_ok_status();
 }
@@ -882,6 +908,7 @@ iree_status_t load_qwen_weights(VmfbRunner *runner, const Args &args,
 iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
                               const ModuleFunctions &functions,
                               const LoadedQwenWeights &weights) {
+  const auto decode_start = SteadyClock::now();
   std::vector<LayerKvCache> layer_caches(args.layers);
   if (args.max_cache_tokens != 0) {
     IREE_RETURN_IF_ERROR(initialize_variable_layer_caches(
@@ -900,20 +927,38 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
   bool stopped_on_eos = false;
   uint32_t current_token = prompt_token_ids.front();
   for (uint32_t step = 0; step < total_decode_steps; ++step) {
+    const auto step_start = SteadyClock::now();
     const uint32_t input_token =
         step < prompt_len ? prompt_token_ids[step] : current_token;
+    if (step < prompt_len) {
+      std::printf(
+          "iree_qwen progress phase=prefill token=%u/%u input_token=%u\n",
+          step + 1, prompt_len, input_token);
+    } else {
+      const uint32_t generation_step = step + 2 - prompt_len;
+      std::printf("iree_qwen progress phase=decode step=%u/%u input_token=%u\n",
+                  generation_step, args.decode_steps, input_token);
+    }
+    std::fflush(stdout);
     BufferViewPtr token_hidden;
     IREE_RETURN_IF_ERROR(
         make_token_hidden(runner, weights.tail, input_token, &token_hidden));
     if (args.max_cache_tokens != 0) {
       IREE_RETURN_IF_ERROR(run_decode_token_step_with_variable_cache(
           runner, functions.variable_layer, step, args.max_cache_tokens,
-          token_hidden.get(), weights.layer_views, &layer_caches, &hidden));
+          token_hidden.get(), weights.layer_views, &layer_caches,
+          args.verbose_layers, &hidden));
     } else {
       IREE_RETURN_IF_ERROR(run_decode_token_step(
           runner, functions.layer, functions.decode2_layer,
           functions.decode3_layer, step, token_hidden.get(),
-          weights.layer_views, &layer_caches, &hidden));
+          weights.layer_views, &layer_caches, args.verbose_layers, &hidden));
+    }
+    if (step + 1 == prompt_len) {
+      std::printf("iree_qwen progress phase=prefill status=submitted tokens=%u "
+                  "host_submit_ms=%.3f\n",
+                  prompt_len, elapsed_ms(decode_start));
+      std::fflush(stdout);
     }
     if (step + 1 >= prompt_len) {
       const uint32_t generation_step = step + 2 - prompt_len;
@@ -922,6 +967,10 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
                                     weights.tail, &step_logits));
       IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
                                           generation_step, &current_token));
+      std::printf("iree_qwen progress phase=decode step=%u/%u status=complete "
+                  "elapsed_ms=%.3f\n",
+                  generation_step, args.decode_steps, elapsed_ms(step_start));
+      std::fflush(stdout);
       generated_token_ids.push_back(current_token);
       if (args.eos_token_id_set && current_token == args.eos_token_id) {
         stopped_on_eos = true;
@@ -936,18 +985,43 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
   std::printf("]\n");
   std::printf("stop_reason=%s\n",
               stopped_on_eos ? "eos_token" : "max_new_tokens");
+  std::printf("iree_qwen summary generated_tokens=%zu elapsed_ms=%.3f\n",
+              generated_token_ids.size(), elapsed_ms(decode_start));
+  std::fflush(stdout);
   return iree_ok_status();
 }
 
 iree_status_t run(const Args &args) {
+  const uint32_t prompt_len =
+      args.prompt_token_ids.empty()
+          ? 1
+          : static_cast<uint32_t>(args.prompt_token_ids.size());
+  std::printf("iree_qwen config layers=%u prompt_tokens=%u max_new_tokens=%u "
+              "max_seq_len=%u cache_capacity=%u\n",
+              args.layers, prompt_len, args.decode_steps, args.max_seq_len,
+              args.max_cache_tokens);
+  std::printf("iree_qwen startup phase=modules status=start\n");
+  std::fflush(stdout);
+  const auto modules_start = SteadyClock::now();
   VmfbRunner runner;
   IREE_RETURN_IF_ERROR(runner.initialize(module_paths_for_args(args)));
 
   ModuleFunctions functions;
   IREE_RETURN_IF_ERROR(lookup_module_functions(&runner, args, &functions));
+  std::printf(
+      "iree_qwen startup phase=modules status=complete elapsed_ms=%.3f\n",
+      elapsed_ms(modules_start));
+  std::printf("iree_qwen startup phase=weights status=start layers=%u\n",
+              args.layers);
+  std::fflush(stdout);
 
+  const auto weights_start = SteadyClock::now();
   LoadedQwenWeights weights;
   IREE_RETURN_IF_ERROR(load_qwen_weights(&runner, args, &weights));
+  std::printf("iree_qwen startup phase=weights status=complete layers=%u "
+              "elapsed_ms=%.3f\n",
+              args.layers, elapsed_ms(weights_start));
+  std::fflush(stdout);
   IREE_RETURN_IF_ERROR(run_decode_loop(&runner, args, functions, weights));
 
   std::printf("iree_qwen_decode%u_e2e: ok layers=%u\n", args.decode_steps,

@@ -611,6 +611,26 @@ def test_iree_runner_command_passes_resolved_eos_token_id() -> None:
     assert eos_index < command.index("--bundle")
 
 
+def test_iree_runner_command_enables_verbose_layer_progress() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--layers",
+            "1",
+            "--iree-verbose-layers",
+            "--iree-decode-bundle-dir",
+            "/tmp/iree-decode-bundle",
+            "--iree-runner",
+            "/tmp/lrrt_iree_qwen_decode1_e2e",
+        ]
+    )
+    args.resolved_eos_token_id = None
+    command = runner.iree_runner_command(args, layers=1)
+    assert "--verbose-layers" in command
+    assert command.index("--verbose-layers") < command.index("--bundle")
+
+
 def test_iree_runner_command_accepts_max_supported_generation_capacity() -> None:
     runner = load_runner()
     args = runner.parse_args(
@@ -1015,6 +1035,7 @@ def main() -> int:
     test_dry_run_builds_full_e2e_command()
     test_iree_runner_command_uses_decode_bundle()
     test_iree_runner_command_passes_resolved_eos_token_id()
+    test_iree_runner_command_enables_verbose_layer_progress()
     test_iree_runner_command_accepts_max_supported_generation_capacity()
     test_iree_converter_command_writes_e2e_directory_bundle()
     test_iree_dry_run_writes_bundle_then_runs()
