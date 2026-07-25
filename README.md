@@ -32,6 +32,40 @@ The C/HSA runtime remains available as `lrrt::lrrt`. Compiler integrations can
 use the separate `lrrt::bundle` C++ target, which parses the kernel manifest,
 loads its HSACO, validates the kernarg layout, and derives the launch config.
 
+## Design Summary
+
+`light-rocm-runtime` is an execution substrate, not a compiler, tensor runtime,
+or full HIP replacement. The core is intentionally limited to:
+
+- device discovery and low-level resource ownership
+- device memory allocation and copies
+- pre-built HSACO loading and kernel symbol resolution
+- asynchronous kernel dispatch through HSA queues
+- event dependencies, synchronization, and lightweight timing
+
+Compiler layers own kernel generation, target selection, and static launch
+metadata. Executor layers own tensor and weight lifetimes, memory arenas,
+workspaces, KV caches, queue selection, and graph or model scheduling. The
+runtime keeps these policies outside the core so the same dispatch path can be
+used by Triton, IREE, and other compiler integrations.
+
+The default execution path favors predictable lifetimes: launches are
+asynchronous, but synchronous copies and resource destruction may drain pending
+device work. Multiple queues can overlap independent work, while cross-queue
+ordering must be expressed with explicit event dependencies.
+
+The current implementation has deliberate limitations. It requires
+Linux/AMDGPU and ROCr/HSA, loads pre-built HSACO only, is not HIP API
+compatible, and does not provide peer-to-peer multi-GPU scheduling, pinned or
+managed memory APIs, stream-ordered allocation, graph capture, dynamic launch
+inference, or a general tensor/kernel ABI. Initialization and runtime state are
+process-global, and several safety-oriented operations introduce broad
+synchronization.
+
+See [Runtime Design](docs/design.md) for the complete responsibility boundaries,
+execution model, limitations, intentional non-goals, and criteria for extending
+the runtime core.
+
 ## Qwen Execution
 
 Qwen2/Qwen2.5 checkpoints can be exercised through the IREE and Triton
@@ -112,22 +146,6 @@ dependencies in both copy-to-launch and launch-to-copy directions. It reports
 submission time and the complete operation round trip. Pass an optional
 iteration count; the default is `100` with a 4 MiB D2D copy in the
 copy-to-launch direction.
-
-## Development
-
-Install the pre-commit runner and enable the repository hooks:
-
-```sh
-uv tool install pre-commit
-pre-commit install
-```
-
-The hooks run Ruff linting and formatting for Python, clang-format for C/C++,
-and basic file checks. Run the complete set manually with:
-
-```sh
-pre-commit run --all-files
-```
 
 ## Execution Semantics
 
