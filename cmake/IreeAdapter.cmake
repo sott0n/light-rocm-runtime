@@ -83,12 +83,17 @@ endfunction()
 
 function(lrrt_add_iree_vmfb_probe probe_test fixture input_mlir artifact_stem)
   set(_probe_dir "${PROJECT_SOURCE_DIR}/build-iree-probe/${artifact_stem}")
+  if(IS_ABSOLUTE "${input_mlir}")
+    set(_input_mlir "${input_mlir}")
+  else()
+    set(_input_mlir "${PROJECT_SOURCE_DIR}/${input_mlir}")
+  endif()
   add_test(
     NAME ${probe_test}
     COMMAND
       "${PROJECT_SOURCE_DIR}/tools/iree_compile_probe.sh"
       --iree-compile "${LRRT_IREE_COMPILE_EXECUTABLE}"
-      --input "${PROJECT_SOURCE_DIR}/${input_mlir}"
+      --input "${_input_mlir}"
       --target "${LRRT_AMDGPU_TARGET}"
       --artifact-stem "${artifact_stem}"
       --out-dir "${_probe_dir}"

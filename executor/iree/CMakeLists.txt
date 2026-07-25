@@ -537,24 +537,32 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       tools/iree_qwen_decode3_layer_kv_cache.mlir
       qwen_decode3_layer_kv_cache
     )
-    lrrt_add_iree_vmfb_probe(
-      lrrt_iree_qwen_decode_layer_kv_cache_max8_vmfb_probe
-      lrrt_iree_qwen_decode_layer_kv_cache_max8_vmfb
-      tools/iree_qwen_decode_layer_kv_cache_max8.mlir
-      qwen_decode_layer_kv_cache_max8
+    set(_qwen_decode_mlir_dir
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/qwen_decode"
     )
-    lrrt_add_iree_vmfb_probe(
-      lrrt_iree_qwen_decode_layer_kv_cache_max16_vmfb_probe
-      lrrt_iree_qwen_decode_layer_kv_cache_max16_vmfb
-      tools/iree_qwen_decode_layer_kv_cache_max16.mlir
-      qwen_decode_layer_kv_cache_max16
-    )
-    lrrt_add_iree_vmfb_probe(
-      lrrt_iree_qwen_decode_layer_kv_cache_max32_vmfb_probe
-      lrrt_iree_qwen_decode_layer_kv_cache_max32_vmfb
-      tools/iree_qwen_decode_layer_kv_cache_max32.mlir
-      qwen_decode_layer_kv_cache_max32
-    )
+    file(MAKE_DIRECTORY "${_qwen_decode_mlir_dir}")
+    foreach(CACHE_CAPACITY IN ITEMS 8 16 32 64)
+      set(_qwen_decode_module
+          "qwen_decode_layer_kv_cache_max${CACHE_CAPACITY}"
+      )
+      set(_qwen_decode_mlir
+          "${_qwen_decode_mlir_dir}/${_qwen_decode_module}.mlir"
+      )
+      set(DECODE_FUNCTION "@${_qwen_decode_module}")
+      configure_file(
+        "${PROJECT_SOURCE_DIR}/tools/iree_qwen_decode_layer_kv_cache.mlir.in"
+        "${_qwen_decode_mlir}"
+        @ONLY
+      )
+      lrrt_add_iree_vmfb_probe(
+        "lrrt_iree_${_qwen_decode_module}_vmfb_probe"
+        "lrrt_iree_${_qwen_decode_module}_vmfb"
+        "${_qwen_decode_mlir}"
+        "${_qwen_decode_module}"
+      )
+    endforeach()
+    unset(CACHE_CAPACITY)
+    unset(DECODE_FUNCTION)
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_qwen_decode1_tail_vmfb_probe
       lrrt_iree_qwen_decode1_tail_vmfb

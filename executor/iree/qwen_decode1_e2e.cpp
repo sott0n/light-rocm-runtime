@@ -30,7 +30,7 @@ constexpr uint32_t kHidden = 896;
 constexpr uint32_t kKvDim = 128;
 constexpr uint32_t kIntermediate = 4864;
 constexpr uint32_t kDefaultLayers = 24;
-constexpr uint32_t kSupportedMaxCacheTokens[] = {8, 16, 32};
+constexpr uint32_t kSupportedMaxCacheTokens[] = {8, 16, 32, 64};
 
 struct Args {
   std::string layer_vmfb;
@@ -591,7 +591,7 @@ Args parse_args(int argc, char **argv) {
           "   or: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> --bundle "
           "<bundle-dir> <weights-dir> [layers]\n"
           "   or: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
-          "--max-cache-tokens <8|16|32> "
+          "--max-cache-tokens <8|16|32|64> "
           "<kv-cache-layer.vmfb> <tail.vmfb> <weights-dir> [layers]");
     }
     const int parsed_max_new_tokens = std::stoi(argv[2]);
@@ -692,12 +692,12 @@ Args parse_args(int argc, char **argv) {
       }
       if (!is_supported_max_cache_tokens(args.max_cache_tokens)) {
         throw std::runtime_error(
-            "only --max-cache-tokens 8, 16, or 32 are currently built");
+            "only --max-cache-tokens 8, 16, 32, or 64 are currently built");
       }
       if (argc != option_index + 5 && argc != option_index + 6) {
         throw std::runtime_error(
             "usage: lrrt_iree_qwen_decode1_e2e --max-new-tokens <N> "
-            "[--max-seq-len <N>] --max-cache-tokens <8|16|32> "
+            "[--max-seq-len <N>] --max-cache-tokens <8|16|32|64> "
             "<kv-cache-layer.vmfb> "
             "<tail.vmfb> <weights-dir> [layers]");
       }
@@ -779,9 +779,9 @@ Args parse_args(int argc, char **argv) {
       }
       return args;
     }
-    throw std::runtime_error(
-        "--max-new-tokens greater than 3 requires --max-cache-tokens <8|16|32> "
-        "<kv-cache-layer.vmfb>");
+    throw std::runtime_error("--max-new-tokens greater than 3 requires "
+                             "--max-cache-tokens <8|16|32|64> "
+                             "<kv-cache-layer.vmfb>");
   }
 
   if (argc != 4 && argc != 5) {

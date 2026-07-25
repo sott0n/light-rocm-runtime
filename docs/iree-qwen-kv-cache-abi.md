@@ -76,7 +76,9 @@ invocation for the same layer.
 The preferred path is now the `qwen_decode_layer_kv_cache_max<N>` family, which
 removes the need for a new VMFB per token step. Each VMFB uses a fixed cache
 capacity specialization and an explicit current position. The current supported
-specializations are `max8`, `max16`, and `max32`.
+specializations are `max8`, `max16`, `max32`, and `max64`. CMake generates
+all four from `tools/iree_qwen_decode_layer_kv_cache.mlir.in`, so extending the
+capacity list does not duplicate the Qwen layer implementation.
 
 | Input | Shape | Meaning |
 | --- | --- | --- |
@@ -105,7 +107,7 @@ ABI within the compiled `max_tokens = N` capacity.
 The runner exposes this path as:
 
 ```text
-lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-cache-tokens <8|16|32> \
+lrrt_iree_qwen_decode1_e2e --max-new-tokens N --max-cache-tokens <8|16|32|64> \
   <qwen_decode_layer_kv_cache_max*.vmfb> <tail.vmfb> <weights-dir> [layers]
 ```
 
@@ -152,8 +154,10 @@ current physical static tensor extent of the VMFB.
 When an existing decode bundle is reused, the wrapper reads its manifest and
 rejects `--max-seq-len` values larger than the recorded `sequence_capacity`
 before launching the runner.
-The full 24-layer Qwen E2E path has been validated through
-`--max-new-tokens 32 --max-seq-len 32` using the `max32` cache specialization.
+The full 24-layer Qwen E2E path has been validated with an 11-token prompt and
+40 generated tokens using `--max-new-tokens 40 --max-seq-len 64`. All 40
+greedy decode steps matched the Hugging Face FP32 reference with a maximum
+top-logit absolute difference of `5.9552002e-05`.
 
 When `--eos-token-id` is present, the runner includes the selected EOS token in
 `generated_token_ids=[...]` and stops before the next decode step. It reports

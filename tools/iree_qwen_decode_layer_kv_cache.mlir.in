@@ -1,7 +1,7 @@
-func.func @qwen_decode_layer_kv_cache_max8(
+func.func @DECODE_FUNCTION@(
     %input: tensor<1x896xf32>,
-    %old_key_cache: tensor<8x128xf32>,
-    %old_value_cache: tensor<8x128xf32>,
+    %old_key_cache: tensor<@CACHE_CAPACITY@x128xf32>,
+    %old_value_cache: tensor<@CACHE_CAPACITY@x128xf32>,
     %position: tensor<1xi32>,
     %attention_norm_weight: tensor<896xf32>,
     %q_weight: tensor<896x896xf32>,
@@ -15,7 +15,7 @@ func.func @qwen_decode_layer_kv_cache_max8(
     %mlp_norm_weight: tensor<896xf32>,
     %gate_weight: tensor<896x4864xf32>,
     %up_weight: tensor<896x4864xf32>,
-    %down_weight: tensor<4864x896xf32>) -> (tensor<8x128xf32>, tensor<8x128xf32>, tensor<1x896xf32>) {
+    %down_weight: tensor<4864x896xf32>) -> (tensor<@CACHE_CAPACITY@x128xf32>, tensor<@CACHE_CAPACITY@x128xf32>, tensor<1x896xf32>) {
   %zero = arith.constant 0.0 : f32
   %neg_inf = arith.constant -3.40282347E+38 : f32
   %head_scale = arith.constant 0.125 : f32
@@ -250,23 +250,23 @@ func.func @qwen_decode_layer_kv_cache_max8(
     } -> tensor<1x128xf32>
 
   %key_cache = tensor.insert_slice %k into %old_key_cache[%position_index, 0] [1, 128] [1, 1]
-      : tensor<1x128xf32> into tensor<8x128xf32>
+      : tensor<1x128xf32> into tensor<@CACHE_CAPACITY@x128xf32>
 
   %value_cache = tensor.insert_slice %v into %old_value_cache[%position_index, 0] [1, 128] [1, 1]
-      : tensor<1x128xf32> into tensor<8x128xf32>
+      : tensor<1x128xf32> into tensor<@CACHE_CAPACITY@x128xf32>
 
   %q0 = tensor.extract_slice %q[0, 0] [1, 448] [1, 1]
       : tensor<1x896xf32> to tensor<1x448xf32>
   %q1 = tensor.extract_slice %q[0, 448] [1, 448] [1, 1]
       : tensor<1x896xf32> to tensor<1x448xf32>
-  %key_cache0 = tensor.extract_slice %key_cache[0, 0] [8, 64] [1, 1]
-      : tensor<8x128xf32> to tensor<8x64xf32>
-  %key_cache1 = tensor.extract_slice %key_cache[0, 64] [8, 64] [1, 1]
-      : tensor<8x128xf32> to tensor<8x64xf32>
-  %value_cache0 = tensor.extract_slice %value_cache[0, 0] [8, 64] [1, 1]
-      : tensor<8x128xf32> to tensor<8x64xf32>
-  %value_cache1 = tensor.extract_slice %value_cache[0, 64] [8, 64] [1, 1]
-      : tensor<8x128xf32> to tensor<8x64xf32>
+  %key_cache0 = tensor.extract_slice %key_cache[0, 0] [@CACHE_CAPACITY@, 64] [1, 1]
+      : tensor<@CACHE_CAPACITY@x128xf32> to tensor<@CACHE_CAPACITY@x64xf32>
+  %key_cache1 = tensor.extract_slice %key_cache[0, 64] [@CACHE_CAPACITY@, 64] [1, 1]
+      : tensor<@CACHE_CAPACITY@x128xf32> to tensor<@CACHE_CAPACITY@x64xf32>
+  %value_cache0 = tensor.extract_slice %value_cache[0, 0] [@CACHE_CAPACITY@, 64] [1, 1]
+      : tensor<@CACHE_CAPACITY@x128xf32> to tensor<@CACHE_CAPACITY@x64xf32>
+  %value_cache1 = tensor.extract_slice %value_cache[0, 64] [@CACHE_CAPACITY@, 64] [1, 1]
+      : tensor<@CACHE_CAPACITY@x128xf32> to tensor<@CACHE_CAPACITY@x64xf32>
 
   %q_heads0_empty = tensor.empty() : tensor<7x64xf32>
   %q_heads0 = linalg.generic {
@@ -296,7 +296,7 @@ func.func @qwen_decode_layer_kv_cache_max8(
       linalg.yield %value : f32
     } -> tensor<7x64xf32>
 
-  %key_head0_empty = tensor.empty() : tensor<64x8xf32>
+  %key_head0_empty = tensor.empty() : tensor<64x@CACHE_CAPACITY@xf32>
   %key_head0 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d1, d0)>,
@@ -304,13 +304,13 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%key_cache0 : tensor<8x64xf32>)
-      outs(%key_head0_empty : tensor<64x8xf32>) {
+      ins(%key_cache0 : tensor<@CACHE_CAPACITY@x64xf32>)
+      outs(%key_head0_empty : tensor<64x@CACHE_CAPACITY@xf32>) {
     ^bb0(%value: f32, %out: f32):
       linalg.yield %value : f32
-    } -> tensor<64x8xf32>
+    } -> tensor<64x@CACHE_CAPACITY@xf32>
 
-  %key_head1_empty = tensor.empty() : tensor<64x8xf32>
+  %key_head1_empty = tensor.empty() : tensor<64x@CACHE_CAPACITY@xf32>
   %key_head1 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d1, d0)>,
@@ -318,27 +318,27 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%key_cache1 : tensor<8x64xf32>)
-      outs(%key_head1_empty : tensor<64x8xf32>) {
+      ins(%key_cache1 : tensor<@CACHE_CAPACITY@x64xf32>)
+      outs(%key_head1_empty : tensor<64x@CACHE_CAPACITY@xf32>) {
     ^bb0(%value: f32, %out: f32):
       linalg.yield %value : f32
-    } -> tensor<64x8xf32>
+    } -> tensor<64x@CACHE_CAPACITY@xf32>
 
-  %score0_empty = tensor.empty() : tensor<7x8xf32>
+  %score0_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %score0_init = linalg.fill ins(%zero : f32)
-      outs(%score0_empty : tensor<7x8xf32>) -> tensor<7x8xf32>
+      outs(%score0_empty : tensor<7x@CACHE_CAPACITY@xf32>) -> tensor<7x@CACHE_CAPACITY@xf32>
   %scores0_unscaled = linalg.matmul
-      ins(%q_heads0, %key_head0 : tensor<7x64xf32>, tensor<64x8xf32>)
-      outs(%score0_init : tensor<7x8xf32>) -> tensor<7x8xf32>
+      ins(%q_heads0, %key_head0 : tensor<7x64xf32>, tensor<64x@CACHE_CAPACITY@xf32>)
+      outs(%score0_init : tensor<7x@CACHE_CAPACITY@xf32>) -> tensor<7x@CACHE_CAPACITY@xf32>
 
-  %score1_empty = tensor.empty() : tensor<7x8xf32>
+  %score1_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %score1_init = linalg.fill ins(%zero : f32)
-      outs(%score1_empty : tensor<7x8xf32>) -> tensor<7x8xf32>
+      outs(%score1_empty : tensor<7x@CACHE_CAPACITY@xf32>) -> tensor<7x@CACHE_CAPACITY@xf32>
   %scores1_unscaled = linalg.matmul
-      ins(%q_heads1, %key_head1 : tensor<7x64xf32>, tensor<64x8xf32>)
-      outs(%score1_init : tensor<7x8xf32>) -> tensor<7x8xf32>
+      ins(%q_heads1, %key_head1 : tensor<7x64xf32>, tensor<64x@CACHE_CAPACITY@xf32>)
+      outs(%score1_init : tensor<7x@CACHE_CAPACITY@xf32>) -> tensor<7x@CACHE_CAPACITY@xf32>
 
-  %scaled_scores0_empty = tensor.empty() : tensor<7x8xf32>
+  %scaled_scores0_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %scaled_scores0 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -347,8 +347,8 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%scores0_unscaled, %position : tensor<7x8xf32>, tensor<1xi32>)
-      outs(%scaled_scores0_empty : tensor<7x8xf32>) {
+      ins(%scores0_unscaled, %position : tensor<7x@CACHE_CAPACITY@xf32>, tensor<1xi32>)
+      outs(%scaled_scores0_empty : tensor<7x@CACHE_CAPACITY@xf32>) {
     ^bb0(%score: f32, %position_value: i32, %out: f32):
       %scaled = arith.mulf %score, %head_scale : f32
       %column = linalg.index 1 : index
@@ -356,9 +356,9 @@ func.func @qwen_decode_layer_kv_cache_max8(
       %is_visible = arith.cmpi ule, %column, %visible_position : index
       %masked = arith.select %is_visible, %scaled, %neg_inf : f32
       linalg.yield %masked : f32
-    } -> tensor<7x8xf32>
+    } -> tensor<7x@CACHE_CAPACITY@xf32>
 
-  %scaled_scores1_empty = tensor.empty() : tensor<7x8xf32>
+  %scaled_scores1_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %scaled_scores1 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -367,8 +367,8 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%scores1_unscaled, %position : tensor<7x8xf32>, tensor<1xi32>)
-      outs(%scaled_scores1_empty : tensor<7x8xf32>) {
+      ins(%scores1_unscaled, %position : tensor<7x@CACHE_CAPACITY@xf32>, tensor<1xi32>)
+      outs(%scaled_scores1_empty : tensor<7x@CACHE_CAPACITY@xf32>) {
     ^bb0(%score: f32, %position_value: i32, %out: f32):
       %scaled = arith.mulf %score, %head_scale : f32
       %column = linalg.index 1 : index
@@ -376,7 +376,7 @@ func.func @qwen_decode_layer_kv_cache_max8(
       %is_visible = arith.cmpi ule, %column, %visible_position : index
       %masked = arith.select %is_visible, %scaled, %neg_inf : f32
       linalg.yield %masked : f32
-    } -> tensor<7x8xf32>
+    } -> tensor<7x@CACHE_CAPACITY@xf32>
 
   %score_max0_empty = tensor.empty() : tensor<7xf32>
   %score_max0_init = linalg.fill ins(%neg_inf : f32)
@@ -388,7 +388,7 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "reduction"]
     }
-      ins(%scaled_scores0 : tensor<7x8xf32>)
+      ins(%scaled_scores0 : tensor<7x@CACHE_CAPACITY@xf32>)
       outs(%score_max0_init : tensor<7xf32>) {
     ^bb0(%score: f32, %acc: f32):
       %max = arith.maximumf %score, %acc : f32
@@ -405,14 +405,14 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "reduction"]
     }
-      ins(%scaled_scores1 : tensor<7x8xf32>)
+      ins(%scaled_scores1 : tensor<7x@CACHE_CAPACITY@xf32>)
       outs(%score_max1_init : tensor<7xf32>) {
     ^bb0(%score: f32, %acc: f32):
       %max = arith.maximumf %score, %acc : f32
       linalg.yield %max : f32
     } -> tensor<7xf32>
 
-  %exp0_empty = tensor.empty() : tensor<7x8xf32>
+  %exp0_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %exp_scores0 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -421,15 +421,15 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%scaled_scores0, %score_max0 : tensor<7x8xf32>, tensor<7xf32>)
-      outs(%exp0_empty : tensor<7x8xf32>) {
+      ins(%scaled_scores0, %score_max0 : tensor<7x@CACHE_CAPACITY@xf32>, tensor<7xf32>)
+      outs(%exp0_empty : tensor<7x@CACHE_CAPACITY@xf32>) {
     ^bb0(%score: f32, %max: f32, %out: f32):
       %shifted = arith.subf %score, %max : f32
       %exp = math.exp %shifted : f32
       linalg.yield %exp : f32
-    } -> tensor<7x8xf32>
+    } -> tensor<7x@CACHE_CAPACITY@xf32>
 
-  %exp1_empty = tensor.empty() : tensor<7x8xf32>
+  %exp1_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %exp_scores1 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -438,13 +438,13 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%scaled_scores1, %score_max1 : tensor<7x8xf32>, tensor<7xf32>)
-      outs(%exp1_empty : tensor<7x8xf32>) {
+      ins(%scaled_scores1, %score_max1 : tensor<7x@CACHE_CAPACITY@xf32>, tensor<7xf32>)
+      outs(%exp1_empty : tensor<7x@CACHE_CAPACITY@xf32>) {
     ^bb0(%score: f32, %max: f32, %out: f32):
       %shifted = arith.subf %score, %max : f32
       %exp = math.exp %shifted : f32
       linalg.yield %exp : f32
-    } -> tensor<7x8xf32>
+    } -> tensor<7x@CACHE_CAPACITY@xf32>
 
   %sum0_empty = tensor.empty() : tensor<7xf32>
   %sum0_init = linalg.fill ins(%zero : f32)
@@ -456,7 +456,7 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "reduction"]
     }
-      ins(%exp_scores0 : tensor<7x8xf32>)
+      ins(%exp_scores0 : tensor<7x@CACHE_CAPACITY@xf32>)
       outs(%sum0_init : tensor<7xf32>) {
     ^bb0(%exp_value: f32, %acc: f32):
       %sum = arith.addf %acc, %exp_value : f32
@@ -473,14 +473,14 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "reduction"]
     }
-      ins(%exp_scores1 : tensor<7x8xf32>)
+      ins(%exp_scores1 : tensor<7x@CACHE_CAPACITY@xf32>)
       outs(%sum1_init : tensor<7xf32>) {
     ^bb0(%exp_value: f32, %acc: f32):
       %sum = arith.addf %acc, %exp_value : f32
       linalg.yield %sum : f32
     } -> tensor<7xf32>
 
-  %prob0_empty = tensor.empty() : tensor<7x8xf32>
+  %prob0_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %probabilities0 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -489,14 +489,14 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%exp_scores0, %row_sums0 : tensor<7x8xf32>, tensor<7xf32>)
-      outs(%prob0_empty : tensor<7x8xf32>) {
+      ins(%exp_scores0, %row_sums0 : tensor<7x@CACHE_CAPACITY@xf32>, tensor<7xf32>)
+      outs(%prob0_empty : tensor<7x@CACHE_CAPACITY@xf32>) {
     ^bb0(%exp_score: f32, %row_sum: f32, %out: f32):
       %probability = arith.divf %exp_score, %row_sum : f32
       linalg.yield %probability : f32
-    } -> tensor<7x8xf32>
+    } -> tensor<7x@CACHE_CAPACITY@xf32>
 
-  %prob1_empty = tensor.empty() : tensor<7x8xf32>
+  %prob1_empty = tensor.empty() : tensor<7x@CACHE_CAPACITY@xf32>
   %probabilities1 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -505,14 +505,14 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%exp_scores1, %row_sums1 : tensor<7x8xf32>, tensor<7xf32>)
-      outs(%prob1_empty : tensor<7x8xf32>) {
+      ins(%exp_scores1, %row_sums1 : tensor<7x@CACHE_CAPACITY@xf32>, tensor<7xf32>)
+      outs(%prob1_empty : tensor<7x@CACHE_CAPACITY@xf32>) {
     ^bb0(%exp_score: f32, %row_sum: f32, %out: f32):
       %probability = arith.divf %exp_score, %row_sum : f32
       linalg.yield %probability : f32
-    } -> tensor<7x8xf32>
+    } -> tensor<7x@CACHE_CAPACITY@xf32>
 
-  %value_head0_empty = tensor.empty() : tensor<8x64xf32>
+  %value_head0_empty = tensor.empty() : tensor<@CACHE_CAPACITY@x64xf32>
   %value_head0 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -520,13 +520,13 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%value_cache0 : tensor<8x64xf32>)
-      outs(%value_head0_empty : tensor<8x64xf32>) {
+      ins(%value_cache0 : tensor<@CACHE_CAPACITY@x64xf32>)
+      outs(%value_head0_empty : tensor<@CACHE_CAPACITY@x64xf32>) {
     ^bb0(%value: f32, %out: f32):
       linalg.yield %value : f32
-    } -> tensor<8x64xf32>
+    } -> tensor<@CACHE_CAPACITY@x64xf32>
 
-  %value_head1_empty = tensor.empty() : tensor<8x64xf32>
+  %value_head1_empty = tensor.empty() : tensor<@CACHE_CAPACITY@x64xf32>
   %value_head1 = linalg.generic {
       indexing_maps = [
         affine_map<(d0, d1) -> (d0, d1)>,
@@ -534,24 +534,24 @@ func.func @qwen_decode_layer_kv_cache_max8(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%value_cache1 : tensor<8x64xf32>)
-      outs(%value_head1_empty : tensor<8x64xf32>) {
+      ins(%value_cache1 : tensor<@CACHE_CAPACITY@x64xf32>)
+      outs(%value_head1_empty : tensor<@CACHE_CAPACITY@x64xf32>) {
     ^bb0(%value: f32, %out: f32):
       linalg.yield %value : f32
-    } -> tensor<8x64xf32>
+    } -> tensor<@CACHE_CAPACITY@x64xf32>
 
   %context_heads0_empty = tensor.empty() : tensor<7x64xf32>
   %context_heads0_init = linalg.fill ins(%zero : f32)
       outs(%context_heads0_empty : tensor<7x64xf32>) -> tensor<7x64xf32>
   %context_heads0 = linalg.matmul
-      ins(%probabilities0, %value_head0 : tensor<7x8xf32>, tensor<8x64xf32>)
+      ins(%probabilities0, %value_head0 : tensor<7x@CACHE_CAPACITY@xf32>, tensor<@CACHE_CAPACITY@x64xf32>)
       outs(%context_heads0_init : tensor<7x64xf32>) -> tensor<7x64xf32>
 
   %context_heads1_empty = tensor.empty() : tensor<7x64xf32>
   %context_heads1_init = linalg.fill ins(%zero : f32)
       outs(%context_heads1_empty : tensor<7x64xf32>) -> tensor<7x64xf32>
   %context_heads1 = linalg.matmul
-      ins(%probabilities1, %value_head1 : tensor<7x8xf32>, tensor<8x64xf32>)
+      ins(%probabilities1, %value_head1 : tensor<7x@CACHE_CAPACITY@xf32>, tensor<@CACHE_CAPACITY@x64xf32>)
       outs(%context_heads1_init : tensor<7x64xf32>) -> tensor<7x64xf32>
 
   %context_empty = tensor.empty() : tensor<1x896xf32>
@@ -702,5 +702,5 @@ func.func @qwen_decode_layer_kv_cache_max8(
     } -> tensor<1x896xf32>
 
   return %key_cache, %value_cache, %result
-      : tensor<8x128xf32>, tensor<8x128xf32>, tensor<1x896xf32>
+      : tensor<@CACHE_CAPACITY@x128xf32>, tensor<@CACHE_CAPACITY@x128xf32>, tensor<1x896xf32>
 }
