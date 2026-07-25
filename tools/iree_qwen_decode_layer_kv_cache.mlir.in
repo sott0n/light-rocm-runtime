@@ -16,7 +16,11 @@ func.func @DECODE_FUNCTION@(
     %gate_weight: tensor<896x4864x@FLOAT_TYPE@>,
     %up_weight: tensor<896x4864x@FLOAT_TYPE@>,
     %down_weight: tensor<4864x896x@FLOAT_TYPE@>) -> (tensor<@CACHE_CAPACITY@x128x@FLOAT_TYPE@>, tensor<@CACHE_CAPACITY@x128x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>) {
+  // Batch-one f16 projections use explicit vecmat operations. BF16 uses the
+  // mixed sections: dominant projections lower through WMMA with f32
+  // accumulation, while K/V use short bf16 partial reductions and an f32 sum.
   %zero = arith.constant 0.0 : @FLOAT_TYPE@
+  %zero_f32 = arith.constant 0.0 : f32
   %neg_inf = arith.constant @NEG_INF@ : @FLOAT_TYPE@
   %head_scale = arith.constant 0.125 : @FLOAT_TYPE@
   %rope_exponent_scale = arith.constant -0.03125 : @FLOAT_TYPE@
@@ -70,12 +74,74 @@ func.func @DECODE_FUNCTION@(
       linalg.yield %scaled : @FLOAT_TYPE@
     } -> tensor<1x896x@FLOAT_TYPE@>
 
+  // QWEN_MATMUL_BEGIN
   %q_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
   %q_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
       outs(%q_empty : tensor<1x896x@FLOAT_TYPE@>) -> tensor<1x896x@FLOAT_TYPE@>
   %q_linear = linalg.matmul
       ins(%attn_norm, %q_weight : tensor<1x896x@FLOAT_TYPE@>, tensor<896x896x@FLOAT_TYPE@>)
       outs(%q_init : tensor<1x896x@FLOAT_TYPE@>) -> tensor<1x896x@FLOAT_TYPE@>
+  %q_biased_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
+  %q_biased = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%q_linear, %q_bias : tensor<1x896x@FLOAT_TYPE@>, tensor<896x@FLOAT_TYPE@>)
+      outs(%q_biased_empty : tensor<1x896x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+      linalg.yield %biased : @FLOAT_TYPE@
+    } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_MATMUL_END
+  // QWEN_REDUCED_BEGIN
+  %attn_norm_vec = tensor.collapse_shape %attn_norm [[0, 1]]
+      : tensor<1x896x@FLOAT_TYPE@> into tensor<896x@FLOAT_TYPE@>
+  %q_empty = tensor.empty() : tensor<896x@FLOAT_TYPE@>
+  %q_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%q_empty : tensor<896x@FLOAT_TYPE@>) -> tensor<896x@FLOAT_TYPE@>
+  %q_linear_vec = linalg.vecmat
+      ins(%attn_norm_vec, %q_weight : tensor<896x@FLOAT_TYPE@>, tensor<896x896x@FLOAT_TYPE@>)
+      outs(%q_init : tensor<896x@FLOAT_TYPE@>) -> tensor<896x@FLOAT_TYPE@>
+  %q_linear = tensor.expand_shape %q_linear_vec [[0, 1]]
+      output_shape [1, 896]
+      : tensor<896x@FLOAT_TYPE@> into tensor<1x896x@FLOAT_TYPE@>
+  %q_biased_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
+  %q_biased = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%q_linear, %q_bias : tensor<1x896x@FLOAT_TYPE@>, tensor<896x@FLOAT_TYPE@>)
+      outs(%q_biased_empty : tensor<1x896x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+      linalg.yield %biased : @FLOAT_TYPE@
+    } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_REDUCED_END
+  // QWEN_MIXED_BEGIN
+  %attn_norm_batch_empty = tensor.empty() : tensor<16x896x@FLOAT_TYPE@>
+  %attn_norm_batch = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%attn_norm : tensor<1x896x@FLOAT_TYPE@>)
+      outs(%attn_norm_batch_empty : tensor<16x896x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      linalg.yield %value : @FLOAT_TYPE@
+    } -> tensor<16x896x@FLOAT_TYPE@>
+  %attn_norm_vec = tensor.collapse_shape %attn_norm [[0, 1]]
+      : tensor<1x896x@FLOAT_TYPE@> into tensor<896x@FLOAT_TYPE@>
+  %q_accum_empty = tensor.empty() : tensor<16x896xf32>
+  %q_accum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%q_accum_empty : tensor<16x896xf32>) -> tensor<16x896xf32>
+  %q_accum_batch = linalg.matmul
+      ins(%attn_norm_batch, %q_weight : tensor<16x896x@FLOAT_TYPE@>, tensor<896x896x@FLOAT_TYPE@>)
+      outs(%q_accum_init : tensor<16x896xf32>) -> tensor<16x896xf32>
+  %q_accum = tensor.extract_slice %q_accum_batch[0, 0] [1, 896] [1, 1]
+      : tensor<16x896xf32> to tensor<1x896xf32>
   %q_biased_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
   %q_biased = linalg.generic {
       indexing_maps = [
@@ -85,19 +151,106 @@ func.func @DECODE_FUNCTION@(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%q_linear, %q_bias : tensor<1x896x@FLOAT_TYPE@>, tensor<896x@FLOAT_TYPE@>)
+      ins(%q_accum, %q_bias : tensor<1x896xf32>, tensor<896x@FLOAT_TYPE@>)
       outs(%q_biased_empty : tensor<1x896x@FLOAT_TYPE@>) {
-    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
-      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+    ^bb0(%value: f32, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %truncated = arith.truncf %value : f32 to @FLOAT_TYPE@
+      %biased = arith.addf %truncated, %bias : @FLOAT_TYPE@
       linalg.yield %biased : @FLOAT_TYPE@
     } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_MIXED_END
 
+  // QWEN_MATMUL_BEGIN
   %k_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
   %k_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
       outs(%k_empty : tensor<1x128x@FLOAT_TYPE@>) -> tensor<1x128x@FLOAT_TYPE@>
   %k_linear = linalg.matmul
       ins(%attn_norm, %k_weight : tensor<1x896x@FLOAT_TYPE@>, tensor<896x128x@FLOAT_TYPE@>)
       outs(%k_init : tensor<1x128x@FLOAT_TYPE@>) -> tensor<1x128x@FLOAT_TYPE@>
+  %k_biased_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
+  %k_biased = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%k_linear, %k_bias : tensor<1x128x@FLOAT_TYPE@>, tensor<128x@FLOAT_TYPE@>)
+      outs(%k_biased_empty : tensor<1x128x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+      linalg.yield %biased : @FLOAT_TYPE@
+    } -> tensor<1x128x@FLOAT_TYPE@>
+  // QWEN_MATMUL_END
+  // QWEN_REDUCED_BEGIN
+  %k_empty = tensor.empty() : tensor<128x@FLOAT_TYPE@>
+  %k_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%k_empty : tensor<128x@FLOAT_TYPE@>) -> tensor<128x@FLOAT_TYPE@>
+  %k_linear_vec = linalg.vecmat
+      ins(%attn_norm_vec, %k_weight : tensor<896x@FLOAT_TYPE@>, tensor<896x128x@FLOAT_TYPE@>)
+      outs(%k_init : tensor<128x@FLOAT_TYPE@>) -> tensor<128x@FLOAT_TYPE@>
+  %k_linear = tensor.expand_shape %k_linear_vec [[0, 1]]
+      output_shape [1, 128]
+      : tensor<128x@FLOAT_TYPE@> into tensor<1x128x@FLOAT_TYPE@>
+  %k_biased_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
+  %k_biased = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%k_linear, %k_bias : tensor<1x128x@FLOAT_TYPE@>, tensor<128x@FLOAT_TYPE@>)
+      outs(%k_biased_empty : tensor<1x128x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+      linalg.yield %biased : @FLOAT_TYPE@
+    } -> tensor<1x128x@FLOAT_TYPE@>
+  // QWEN_REDUCED_END
+  // QWEN_MIXED_BEGIN
+  %attn_norm_chunks_empty = tensor.empty() : tensor<14x16x64x@FLOAT_TYPE@>
+  %attn_norm_chunks = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1, d2) -> (0, d0 * 64 + d2)>,
+        affine_map<(d0, d1, d2) -> (d0, d1, d2)>
+      ],
+      iterator_types = ["parallel", "parallel", "parallel"]
+    } ins(%attn_norm : tensor<1x896x@FLOAT_TYPE@>)
+      outs(%attn_norm_chunks_empty : tensor<14x16x64x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      linalg.yield %value : @FLOAT_TYPE@
+    } -> tensor<14x16x64x@FLOAT_TYPE@>
+  %k_weight_chunks = tensor.expand_shape %k_weight [[0, 1], [2]]
+      output_shape [14, 64, 128]
+      : tensor<896x128x@FLOAT_TYPE@> into tensor<14x64x128x@FLOAT_TYPE@>
+  %k_accum_empty = tensor.empty() : tensor<14x16x128x@FLOAT_TYPE@>
+  %k_accum_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%k_accum_empty : tensor<14x16x128x@FLOAT_TYPE@>) -> tensor<14x16x128x@FLOAT_TYPE@>
+  %k_partials = linalg.batch_matmul
+      ins(%attn_norm_chunks, %k_weight_chunks :
+          tensor<14x16x64x@FLOAT_TYPE@>, tensor<14x64x128x@FLOAT_TYPE@>)
+      outs(%k_accum_init : tensor<14x16x128x@FLOAT_TYPE@>) -> tensor<14x16x128x@FLOAT_TYPE@>
+  %k_sum_empty = tensor.empty() : tensor<1x128xf32>
+  %k_sum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%k_sum_empty : tensor<1x128xf32>) -> tensor<1x128xf32>
+  %k_sum = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2) -> (d2, 0, d1)>,
+                       affine_map<(d0, d1, d2) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel", "reduction"]
+    } ins(%k_partials : tensor<14x16x128x@FLOAT_TYPE@>)
+      outs(%k_sum_init : tensor<1x128xf32>) {
+    ^bb0(%value: @FLOAT_TYPE@, %acc: f32):
+      %value_f32 = arith.extf %value : @FLOAT_TYPE@ to f32
+      %sum = arith.addf %acc, %value_f32 : f32
+      linalg.yield %sum : f32
+    } -> tensor<1x128xf32>
+  %k_linear_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
+  %k_linear = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%k_sum : tensor<1x128xf32>)
+      outs(%k_linear_empty : tensor<1x128x@FLOAT_TYPE@>) {
+    ^bb0(%value: f32, %out: @FLOAT_TYPE@):
+      %truncated = arith.truncf %value : f32 to @FLOAT_TYPE@
+      linalg.yield %truncated : @FLOAT_TYPE@
+    } -> tensor<1x128x@FLOAT_TYPE@>
   %k_biased_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
   %k_biased = linalg.generic {
       indexing_maps = [
@@ -113,13 +266,87 @@ func.func @DECODE_FUNCTION@(
       %biased = arith.addf %value, %bias : @FLOAT_TYPE@
       linalg.yield %biased : @FLOAT_TYPE@
     } -> tensor<1x128x@FLOAT_TYPE@>
+  // QWEN_MIXED_END
 
+  // QWEN_MATMUL_BEGIN
   %v_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
   %v_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
       outs(%v_empty : tensor<1x128x@FLOAT_TYPE@>) -> tensor<1x128x@FLOAT_TYPE@>
   %v_linear = linalg.matmul
       ins(%attn_norm, %v_weight : tensor<1x896x@FLOAT_TYPE@>, tensor<896x128x@FLOAT_TYPE@>)
       outs(%v_init : tensor<1x128x@FLOAT_TYPE@>) -> tensor<1x128x@FLOAT_TYPE@>
+  %v_biased_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
+  %v = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%v_linear, %v_bias : tensor<1x128x@FLOAT_TYPE@>, tensor<128x@FLOAT_TYPE@>)
+      outs(%v_biased_empty : tensor<1x128x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+      linalg.yield %biased : @FLOAT_TYPE@
+    } -> tensor<1x128x@FLOAT_TYPE@>
+  // QWEN_MATMUL_END
+  // QWEN_REDUCED_BEGIN
+  %v_empty = tensor.empty() : tensor<128x@FLOAT_TYPE@>
+  %v_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%v_empty : tensor<128x@FLOAT_TYPE@>) -> tensor<128x@FLOAT_TYPE@>
+  %v_linear_vec = linalg.vecmat
+      ins(%attn_norm_vec, %v_weight : tensor<896x@FLOAT_TYPE@>, tensor<896x128x@FLOAT_TYPE@>)
+      outs(%v_init : tensor<128x@FLOAT_TYPE@>) -> tensor<128x@FLOAT_TYPE@>
+  %v_linear = tensor.expand_shape %v_linear_vec [[0, 1]]
+      output_shape [1, 128]
+      : tensor<128x@FLOAT_TYPE@> into tensor<1x128x@FLOAT_TYPE@>
+  %v_biased_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
+  %v = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%v_linear, %v_bias : tensor<1x128x@FLOAT_TYPE@>, tensor<128x@FLOAT_TYPE@>)
+      outs(%v_biased_empty : tensor<1x128x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %bias: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %biased = arith.addf %value, %bias : @FLOAT_TYPE@
+      linalg.yield %biased : @FLOAT_TYPE@
+    } -> tensor<1x128x@FLOAT_TYPE@>
+  // QWEN_REDUCED_END
+  // QWEN_MIXED_BEGIN
+  %v_weight_chunks = tensor.expand_shape %v_weight [[0, 1], [2]]
+      output_shape [14, 64, 128]
+      : tensor<896x128x@FLOAT_TYPE@> into tensor<14x64x128x@FLOAT_TYPE@>
+  %v_accum_empty = tensor.empty() : tensor<14x16x128x@FLOAT_TYPE@>
+  %v_accum_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%v_accum_empty : tensor<14x16x128x@FLOAT_TYPE@>) -> tensor<14x16x128x@FLOAT_TYPE@>
+  %v_partials = linalg.batch_matmul
+      ins(%attn_norm_chunks, %v_weight_chunks :
+          tensor<14x16x64x@FLOAT_TYPE@>, tensor<14x64x128x@FLOAT_TYPE@>)
+      outs(%v_accum_init : tensor<14x16x128x@FLOAT_TYPE@>) -> tensor<14x16x128x@FLOAT_TYPE@>
+  %v_sum_empty = tensor.empty() : tensor<1x128xf32>
+  %v_sum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%v_sum_empty : tensor<1x128xf32>) -> tensor<1x128xf32>
+  %v_sum = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1, d2) -> (d2, 0, d1)>,
+                       affine_map<(d0, d1, d2) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel", "reduction"]
+    } ins(%v_partials : tensor<14x16x128x@FLOAT_TYPE@>)
+      outs(%v_sum_init : tensor<1x128xf32>) {
+    ^bb0(%value: @FLOAT_TYPE@, %acc: f32):
+      %value_f32 = arith.extf %value : @FLOAT_TYPE@ to f32
+      %sum = arith.addf %acc, %value_f32 : f32
+      linalg.yield %sum : f32
+    } -> tensor<1x128xf32>
+  %v_linear_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
+  %v_linear = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%v_sum : tensor<1x128xf32>)
+      outs(%v_linear_empty : tensor<1x128x@FLOAT_TYPE@>) {
+    ^bb0(%value: f32, %out: @FLOAT_TYPE@):
+      %truncated = arith.truncf %value : f32 to @FLOAT_TYPE@
+      linalg.yield %truncated : @FLOAT_TYPE@
+    } -> tensor<1x128x@FLOAT_TYPE@>
   %v_biased_empty = tensor.empty() : tensor<1x128x@FLOAT_TYPE@>
   %v = linalg.generic {
       indexing_maps = [
@@ -135,6 +362,7 @@ func.func @DECODE_FUNCTION@(
       %biased = arith.addf %value, %bias : @FLOAT_TYPE@
       linalg.yield %biased : @FLOAT_TYPE@
     } -> tensor<1x128x@FLOAT_TYPE@>
+  // QWEN_MIXED_END
 
   %rope_cos_empty = tensor.empty() : tensor<64x@FLOAT_TYPE@>
   %rope_sin_empty = tensor.empty() : tensor<64x@FLOAT_TYPE@>
@@ -574,13 +802,72 @@ func.func @DECODE_FUNCTION@(
       linalg.yield %value : @FLOAT_TYPE@
     } -> tensor<1x896x@FLOAT_TYPE@>
 
+  // QWEN_MATMUL_BEGIN
   %attn_out_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
   %attn_out_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
       outs(%attn_out_empty : tensor<1x896x@FLOAT_TYPE@>) -> tensor<1x896x@FLOAT_TYPE@>
   %attn_projected = linalg.matmul
       ins(%context, %out_weight : tensor<1x896x@FLOAT_TYPE@>, tensor<896x896x@FLOAT_TYPE@>)
       outs(%attn_out_init : tensor<1x896x@FLOAT_TYPE@>) -> tensor<1x896x@FLOAT_TYPE@>
-
+  %attn_residual_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
+  %attn_residual = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%input, %attn_projected : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>)
+      outs(%attn_residual_empty : tensor<1x896x@FLOAT_TYPE@>) {
+    ^bb0(%residual: @FLOAT_TYPE@, %value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %sum = arith.addf %residual, %value : @FLOAT_TYPE@
+      linalg.yield %sum : @FLOAT_TYPE@
+    } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_MATMUL_END
+  // QWEN_REDUCED_BEGIN
+  %context_vec = tensor.collapse_shape %context [[0, 1]]
+      : tensor<1x896x@FLOAT_TYPE@> into tensor<896x@FLOAT_TYPE@>
+  %attn_out_empty = tensor.empty() : tensor<896x@FLOAT_TYPE@>
+  %attn_out_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%attn_out_empty : tensor<896x@FLOAT_TYPE@>) -> tensor<896x@FLOAT_TYPE@>
+  %attn_projected_vec = linalg.vecmat
+      ins(%context_vec, %out_weight : tensor<896x@FLOAT_TYPE@>, tensor<896x896x@FLOAT_TYPE@>)
+      outs(%attn_out_init : tensor<896x@FLOAT_TYPE@>) -> tensor<896x@FLOAT_TYPE@>
+  %attn_projected = tensor.expand_shape %attn_projected_vec [[0, 1]]
+      output_shape [1, 896]
+      : tensor<896x@FLOAT_TYPE@> into tensor<1x896x@FLOAT_TYPE@>
+  %attn_residual_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
+  %attn_residual = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%input, %attn_projected : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>)
+      outs(%attn_residual_empty : tensor<1x896x@FLOAT_TYPE@>) {
+    ^bb0(%residual: @FLOAT_TYPE@, %value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %sum = arith.addf %residual, %value : @FLOAT_TYPE@
+      linalg.yield %sum : @FLOAT_TYPE@
+    } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_REDUCED_END
+  // QWEN_MIXED_BEGIN
+  %context_batch_empty = tensor.empty() : tensor<16x896x@FLOAT_TYPE@>
+  %context_batch = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%context : tensor<1x896x@FLOAT_TYPE@>)
+      outs(%context_batch_empty : tensor<16x896x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      linalg.yield %value : @FLOAT_TYPE@
+    } -> tensor<16x896x@FLOAT_TYPE@>
+  %attn_projected_accum_empty = tensor.empty() : tensor<16x896xf32>
+  %attn_projected_accum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%attn_projected_accum_empty : tensor<16x896xf32>) -> tensor<16x896xf32>
+  %attn_projected_accum_batch = linalg.matmul
+      ins(%context_batch, %out_weight : tensor<16x896x@FLOAT_TYPE@>, tensor<896x896x@FLOAT_TYPE@>)
+      outs(%attn_projected_accum_init : tensor<16x896xf32>) -> tensor<16x896xf32>
+  %attn_projected_accum = tensor.extract_slice %attn_projected_accum_batch[0, 0] [1, 896] [1, 1]
+      : tensor<16x896xf32> to tensor<1x896xf32>
   %attn_residual_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
   %attn_residual = linalg.generic {
       indexing_maps = [
@@ -590,12 +877,15 @@ func.func @DECODE_FUNCTION@(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%input, %attn_projected : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>)
+      ins(%input, %attn_projected_accum : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896xf32>)
       outs(%attn_residual_empty : tensor<1x896x@FLOAT_TYPE@>) {
-    ^bb0(%residual: @FLOAT_TYPE@, %value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
-      %sum = arith.addf %residual, %value : @FLOAT_TYPE@
-      linalg.yield %sum : @FLOAT_TYPE@
+    ^bb0(%residual: @FLOAT_TYPE@, %value: f32, %out: @FLOAT_TYPE@):
+      %residual_f32 = arith.extf %residual : @FLOAT_TYPE@ to f32
+      %sum = arith.addf %residual_f32, %value : f32
+      %truncated = arith.truncf %sum : f32 to @FLOAT_TYPE@
+      linalg.yield %truncated : @FLOAT_TYPE@
     } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_MIXED_END
 
   %mlp_norm_sum_empty = tensor.empty() : tensor<1x@FLOAT_TYPE@>
   %mlp_norm_sum_init = linalg.fill
@@ -638,6 +928,7 @@ func.func @DECODE_FUNCTION@(
       linalg.yield %scaled : @FLOAT_TYPE@
     } -> tensor<1x896x@FLOAT_TYPE@>
 
+  // QWEN_MATMUL_BEGIN
   %gate_empty = tensor.empty() : tensor<1x4864x@FLOAT_TYPE@>
   %gate_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
       outs(%gate_empty : tensor<1x4864x@FLOAT_TYPE@>) -> tensor<1x4864x@FLOAT_TYPE@>
@@ -651,17 +942,13 @@ func.func @DECODE_FUNCTION@(
   %up = linalg.matmul
       ins(%mlp_norm, %up_weight : tensor<1x896x@FLOAT_TYPE@>, tensor<896x4864x@FLOAT_TYPE@>)
       outs(%up_init : tensor<1x4864x@FLOAT_TYPE@>) -> tensor<1x4864x@FLOAT_TYPE@>
-
   %ffn_hidden_empty = tensor.empty() : tensor<1x4864x@FLOAT_TYPE@>
   %ffn_hidden = linalg.generic {
-      indexing_maps = [
-        affine_map<(d0, d1) -> (d0, d1)>,
-        affine_map<(d0, d1) -> (d0, d1)>,
-        affine_map<(d0, d1) -> (d0, d1)>
-      ],
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
       iterator_types = ["parallel", "parallel"]
-    }
-      ins(%gate, %up : tensor<1x4864x@FLOAT_TYPE@>, tensor<1x4864x@FLOAT_TYPE@>)
+    } ins(%gate, %up : tensor<1x4864x@FLOAT_TYPE@>, tensor<1x4864x@FLOAT_TYPE@>)
       outs(%ffn_hidden_empty : tensor<1x4864x@FLOAT_TYPE@>) {
     ^bb0(%gate_value: @FLOAT_TYPE@, %up_value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
       %is_nonnegative = arith.cmpf oge, %gate_value, %zero : @FLOAT_TYPE@
@@ -677,14 +964,176 @@ func.func @DECODE_FUNCTION@(
       %gated = arith.mulf %silu, %up_value : @FLOAT_TYPE@
       linalg.yield %gated : @FLOAT_TYPE@
     } -> tensor<1x4864x@FLOAT_TYPE@>
+  // QWEN_MATMUL_END
+  // QWEN_REDUCED_BEGIN
+  %mlp_norm_vec = tensor.collapse_shape %mlp_norm [[0, 1]]
+      : tensor<1x896x@FLOAT_TYPE@> into tensor<896x@FLOAT_TYPE@>
+  %gate_empty = tensor.empty() : tensor<4864x@FLOAT_TYPE@>
+  %gate_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%gate_empty : tensor<4864x@FLOAT_TYPE@>) -> tensor<4864x@FLOAT_TYPE@>
+  %gate_vec = linalg.vecmat
+      ins(%mlp_norm_vec, %gate_weight : tensor<896x@FLOAT_TYPE@>, tensor<896x4864x@FLOAT_TYPE@>)
+      outs(%gate_init : tensor<4864x@FLOAT_TYPE@>) -> tensor<4864x@FLOAT_TYPE@>
+  %gate = tensor.expand_shape %gate_vec [[0, 1]]
+      output_shape [1, 4864]
+      : tensor<4864x@FLOAT_TYPE@> into tensor<1x4864x@FLOAT_TYPE@>
 
+  %up_empty = tensor.empty() : tensor<4864x@FLOAT_TYPE@>
+  %up_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%up_empty : tensor<4864x@FLOAT_TYPE@>) -> tensor<4864x@FLOAT_TYPE@>
+  %up_vec = linalg.vecmat
+      ins(%mlp_norm_vec, %up_weight : tensor<896x@FLOAT_TYPE@>, tensor<896x4864x@FLOAT_TYPE@>)
+      outs(%up_init : tensor<4864x@FLOAT_TYPE@>) -> tensor<4864x@FLOAT_TYPE@>
+  %up = tensor.expand_shape %up_vec [[0, 1]]
+      output_shape [1, 4864]
+      : tensor<4864x@FLOAT_TYPE@> into tensor<1x4864x@FLOAT_TYPE@>
+  %ffn_hidden_empty = tensor.empty() : tensor<1x4864x@FLOAT_TYPE@>
+  %ffn_hidden = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%gate, %up : tensor<1x4864x@FLOAT_TYPE@>, tensor<1x4864x@FLOAT_TYPE@>)
+      outs(%ffn_hidden_empty : tensor<1x4864x@FLOAT_TYPE@>) {
+    ^bb0(%gate_value: @FLOAT_TYPE@, %up_value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %is_nonnegative = arith.cmpf oge, %gate_value, %zero : @FLOAT_TYPE@
+      %one = arith.constant 1.0 : @FLOAT_TYPE@
+      %abs = math.absf %gate_value : @FLOAT_TYPE@
+      %neg_abs = arith.negf %abs : @FLOAT_TYPE@
+      %exp = math.exp %neg_abs : @FLOAT_TYPE@
+      %denom = arith.addf %one, %exp : @FLOAT_TYPE@
+      %sigmoid_pos = arith.divf %one, %denom : @FLOAT_TYPE@
+      %sigmoid_neg = arith.divf %exp, %denom : @FLOAT_TYPE@
+      %sigmoid = arith.select %is_nonnegative, %sigmoid_pos, %sigmoid_neg : @FLOAT_TYPE@
+      %silu = arith.mulf %gate_value, %sigmoid : @FLOAT_TYPE@
+      %gated = arith.mulf %silu, %up_value : @FLOAT_TYPE@
+      linalg.yield %gated : @FLOAT_TYPE@
+    } -> tensor<1x4864x@FLOAT_TYPE@>
+  // QWEN_REDUCED_END
+  // QWEN_MIXED_BEGIN
+  %mlp_norm_batch_empty = tensor.empty() : tensor<16x896x@FLOAT_TYPE@>
+  %mlp_norm_batch = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%mlp_norm : tensor<1x896x@FLOAT_TYPE@>)
+      outs(%mlp_norm_batch_empty : tensor<16x896x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      linalg.yield %value : @FLOAT_TYPE@
+    } -> tensor<16x896x@FLOAT_TYPE@>
+  %gate_accum_empty = tensor.empty() : tensor<16x4864xf32>
+  %gate_accum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%gate_accum_empty : tensor<16x4864xf32>) -> tensor<16x4864xf32>
+  %gate_accum_batch = linalg.matmul
+      ins(%mlp_norm_batch, %gate_weight : tensor<16x896x@FLOAT_TYPE@>, tensor<896x4864x@FLOAT_TYPE@>)
+      outs(%gate_accum_init : tensor<16x4864xf32>) -> tensor<16x4864xf32>
+  %gate_accum = tensor.extract_slice %gate_accum_batch[0, 0] [1, 4864] [1, 1]
+      : tensor<16x4864xf32> to tensor<1x4864xf32>
+  %up_accum_empty = tensor.empty() : tensor<16x4864xf32>
+  %up_accum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%up_accum_empty : tensor<16x4864xf32>) -> tensor<16x4864xf32>
+  %up_accum_batch = linalg.matmul
+      ins(%mlp_norm_batch, %up_weight : tensor<16x896x@FLOAT_TYPE@>, tensor<896x4864x@FLOAT_TYPE@>)
+      outs(%up_accum_init : tensor<16x4864xf32>) -> tensor<16x4864xf32>
+  %up_accum = tensor.extract_slice %up_accum_batch[0, 0] [1, 4864] [1, 1]
+      : tensor<16x4864xf32> to tensor<1x4864xf32>
+  %ffn_hidden_empty = tensor.empty() : tensor<1x4864x@FLOAT_TYPE@>
+  %ffn_hidden = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (d0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    }
+      ins(%gate_accum, %up_accum : tensor<1x4864xf32>, tensor<1x4864xf32>)
+      outs(%ffn_hidden_empty : tensor<1x4864x@FLOAT_TYPE@>) {
+    ^bb0(%gate_value: f32, %up_value: f32, %out: @FLOAT_TYPE@):
+      %zero_local = arith.constant 0.0 : f32
+      %is_nonnegative = arith.cmpf oge, %gate_value, %zero_local : f32
+      %one = arith.constant 1.0 : f32
+      %abs = math.absf %gate_value : f32
+      %neg_abs = arith.negf %abs : f32
+      %exp = math.exp %neg_abs : f32
+      %denom = arith.addf %one, %exp : f32
+      %sigmoid_pos = arith.divf %one, %denom : f32
+      %sigmoid_neg = arith.divf %exp, %denom : f32
+      %sigmoid = arith.select %is_nonnegative, %sigmoid_pos, %sigmoid_neg : f32
+      %silu = arith.mulf %gate_value, %sigmoid : f32
+      %gated = arith.mulf %silu, %up_value : f32
+      %truncated = arith.truncf %gated : f32 to @FLOAT_TYPE@
+      linalg.yield %truncated : @FLOAT_TYPE@
+    } -> tensor<1x4864x@FLOAT_TYPE@>
+  // QWEN_MIXED_END
+
+  // QWEN_MATMUL_BEGIN
   %ffn_out_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
   %ffn_out_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
       outs(%ffn_out_empty : tensor<1x896x@FLOAT_TYPE@>) -> tensor<1x896x@FLOAT_TYPE@>
   %ffn_out = linalg.matmul
       ins(%ffn_hidden, %down_weight : tensor<1x4864x@FLOAT_TYPE@>, tensor<4864x896x@FLOAT_TYPE@>)
       outs(%ffn_out_init : tensor<1x896x@FLOAT_TYPE@>) -> tensor<1x896x@FLOAT_TYPE@>
-
+  %result_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
+  %result = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%attn_residual, %ffn_out : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>)
+      outs(%result_empty : tensor<1x896x@FLOAT_TYPE@>) {
+    ^bb0(%residual: @FLOAT_TYPE@, %value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %sum = arith.addf %residual, %value : @FLOAT_TYPE@
+      linalg.yield %sum : @FLOAT_TYPE@
+    } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_MATMUL_END
+  // QWEN_REDUCED_BEGIN
+  %ffn_hidden_vec = tensor.collapse_shape %ffn_hidden [[0, 1]]
+      : tensor<1x4864x@FLOAT_TYPE@> into tensor<4864x@FLOAT_TYPE@>
+  %ffn_out_empty = tensor.empty() : tensor<896x@FLOAT_TYPE@>
+  %ffn_out_init = linalg.fill ins(%zero : @FLOAT_TYPE@)
+      outs(%ffn_out_empty : tensor<896x@FLOAT_TYPE@>) -> tensor<896x@FLOAT_TYPE@>
+  %ffn_out_vec = linalg.vecmat
+      ins(%ffn_hidden_vec, %down_weight : tensor<4864x@FLOAT_TYPE@>, tensor<4864x896x@FLOAT_TYPE@>)
+      outs(%ffn_out_init : tensor<896x@FLOAT_TYPE@>) -> tensor<896x@FLOAT_TYPE@>
+  %ffn_out = tensor.expand_shape %ffn_out_vec [[0, 1]]
+      output_shape [1, 896]
+      : tensor<896x@FLOAT_TYPE@> into tensor<1x896x@FLOAT_TYPE@>
+  %result_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
+  %result = linalg.generic {
+      indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>,
+                       affine_map<(d0, d1) -> (d0, d1)>],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%attn_residual, %ffn_out : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>)
+      outs(%result_empty : tensor<1x896x@FLOAT_TYPE@>) {
+    ^bb0(%residual: @FLOAT_TYPE@, %value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      %sum = arith.addf %residual, %value : @FLOAT_TYPE@
+      linalg.yield %sum : @FLOAT_TYPE@
+    } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_REDUCED_END
+  // QWEN_MIXED_BEGIN
+  %ffn_hidden_batch_empty = tensor.empty() : tensor<16x4864x@FLOAT_TYPE@>
+  %ffn_hidden_batch = linalg.generic {
+      indexing_maps = [
+        affine_map<(d0, d1) -> (0, d1)>,
+        affine_map<(d0, d1) -> (d0, d1)>
+      ],
+      iterator_types = ["parallel", "parallel"]
+    } ins(%ffn_hidden : tensor<1x4864x@FLOAT_TYPE@>)
+      outs(%ffn_hidden_batch_empty : tensor<16x4864x@FLOAT_TYPE@>) {
+    ^bb0(%value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
+      linalg.yield %value : @FLOAT_TYPE@
+    } -> tensor<16x4864x@FLOAT_TYPE@>
+  %ffn_out_accum_empty = tensor.empty() : tensor<16x896xf32>
+  %ffn_out_accum_init = linalg.fill ins(%zero_f32 : f32)
+      outs(%ffn_out_accum_empty : tensor<16x896xf32>) -> tensor<16x896xf32>
+  %ffn_out_accum_batch = linalg.matmul
+      ins(%ffn_hidden_batch, %down_weight : tensor<16x4864x@FLOAT_TYPE@>, tensor<4864x896x@FLOAT_TYPE@>)
+      outs(%ffn_out_accum_init : tensor<16x896xf32>) -> tensor<16x896xf32>
+  %ffn_out_accum = tensor.extract_slice %ffn_out_accum_batch[0, 0] [1, 896] [1, 1]
+      : tensor<16x896xf32> to tensor<1x896xf32>
   %result_empty = tensor.empty() : tensor<1x896x@FLOAT_TYPE@>
   %result = linalg.generic {
       indexing_maps = [
@@ -694,12 +1143,15 @@ func.func @DECODE_FUNCTION@(
       ],
       iterator_types = ["parallel", "parallel"]
     }
-      ins(%attn_residual, %ffn_out : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>)
+      ins(%attn_residual, %ffn_out_accum : tensor<1x896x@FLOAT_TYPE@>, tensor<1x896xf32>)
       outs(%result_empty : tensor<1x896x@FLOAT_TYPE@>) {
-    ^bb0(%residual: @FLOAT_TYPE@, %value: @FLOAT_TYPE@, %out: @FLOAT_TYPE@):
-      %sum = arith.addf %residual, %value : @FLOAT_TYPE@
-      linalg.yield %sum : @FLOAT_TYPE@
+    ^bb0(%residual: @FLOAT_TYPE@, %value: f32, %out: @FLOAT_TYPE@):
+      %residual_f32 = arith.extf %residual : @FLOAT_TYPE@ to f32
+      %sum = arith.addf %residual_f32, %value : f32
+      %truncated = arith.truncf %sum : f32 to @FLOAT_TYPE@
+      linalg.yield %truncated : @FLOAT_TYPE@
     } -> tensor<1x896x@FLOAT_TYPE@>
+  // QWEN_MIXED_END
 
   return %key_cache, %value_cache, %result
       : tensor<@CACHE_CAPACITY@x128x@FLOAT_TYPE@>, tensor<@CACHE_CAPACITY@x128x@FLOAT_TYPE@>, tensor<1x896x@FLOAT_TYPE@>

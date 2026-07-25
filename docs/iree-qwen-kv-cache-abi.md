@@ -214,6 +214,17 @@ precision-specific tail accepts the final `f16` or `bf16` hidden state, extends
 it to `f32`, and runs final RMSNorm and the language-model head with FP32
 weights and FP32 logits.
 
+For batch-one decode, generated FP16 modules select explicit `linalg.vecmat`
+operations for the seven dominant decoder projections. Generated BF16 modules
+use 16-row WMMA contractions with BF16 inputs and weights and FP32
+accumulation for the dominant projections. Conversion back to BF16 is combined
+with the following bias, residual, or SiLU operation. K/V use fourteen
+64-element BF16 WMMA partial reductions followed by an FP32 sum; accumulating
+the complete 896-element reduction in BF16 was faster but changed the tested
+greedy sequence. FP32 decoder modules retain `linalg.matmul` because vecmat
+regressed FP32 latency. The FP16/BF16 tail modules use vecmat for their FP32
+language-model head.
+
 ## Decode Loop Contract
 
 The runner-level decode loop is:

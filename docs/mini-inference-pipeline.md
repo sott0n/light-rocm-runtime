@@ -793,9 +793,16 @@ Qwen-like path can be meaningful:
   the host no longer synchronizes between per-token layer steps.
 - **FP16/BF16 optimization**: the IREE Qwen path can now run decoder layers,
   hidden states, and KV caches in FP16 or BF16 with an FP32 model tail. The
-  current batch-1 lowering does not materially outperform FP32, and the Triton
-  mini decoder path remains FP32-only. Lower-precision accumulation policy,
-  native 16-bit weight storage, and tuned/fused kernels remain future work.
+  dominant FP16 batch-one projections and the reduced-precision language-model
+  heads use explicit vecmat lowering. On `gfx1101`, BF16 uses WMMA with FP32
+  accumulation for the dominant projections, fuses the following conversion
+  into bias/residual/SiLU operations, and computes K/V as short BF16 partial
+  reductions with an FP32 final sum. In the representative five-token run this
+  BF16 path averages 31.5 tokens/s versus 29.2 for FP16 and 25.0 for FP32,
+  while matching the tested FP16 greedy sequence. Automatic GPU clocks make
+  close rankings variable between processes. The Triton mini decoder path
+  remains FP32-only. Native 16-bit weight storage and a tuned batch-one BF16
+  GEMV remain future work.
 - **Shape metadata**: the current manifest describes launch ABI, not tensor
   shape semantics. The executor must provide shape policy outside the runtime
   core.

@@ -62,13 +62,18 @@ func.func @TAIL_FUNCTION@(
       linalg.yield %scaled : f32
     } -> tensor<1x896xf32>
 
-  %logits_empty = tensor.empty() : tensor<1x151936xf32>
+  %norm_vec = tensor.collapse_shape %norm [[0, 1]]
+      : tensor<1x896xf32> into tensor<896xf32>
+  %logits_empty = tensor.empty() : tensor<151936xf32>
   %logits_init = linalg.fill
       ins(%zero : f32)
-      outs(%logits_empty : tensor<1x151936xf32>) -> tensor<1x151936xf32>
-  %logits = linalg.matmul
-      ins(%norm, %lm_head_weight : tensor<1x896xf32>, tensor<896x151936xf32>)
-      outs(%logits_init : tensor<1x151936xf32>) -> tensor<1x151936xf32>
+      outs(%logits_empty : tensor<151936xf32>) -> tensor<151936xf32>
+  %logits_vec = linalg.vecmat
+      ins(%norm_vec, %lm_head_weight : tensor<896xf32>, tensor<896x151936xf32>)
+      outs(%logits_init : tensor<151936xf32>) -> tensor<151936xf32>
+  %logits = tensor.expand_shape %logits_vec [[0, 1]]
+      output_shape [1, 151936]
+      : tensor<151936xf32> into tensor<1x151936xf32>
 
   return %logits : tensor<1x151936xf32>
 }

@@ -268,52 +268,65 @@ build-iree/adapter/lrrt_iree_qwen_decode1_e2e \
   --max-new-tokens 2 \
   --max-seq-len 8 \
   --prompt-token-ids 23526,25,220 \
-  --bundle /path/to/iree-max64 \
+  --bundle /path/to/iree-max8 \
   /path/to/weights \
   24
 ```
 
 | Phase | Representative FP32 time |
 | --- | ---: |
-| Module initialization | 701.745 ms |
-| Weight loading, including one-time tail upload | 5790.014 ms |
-| Three-token prefill | 79.084 ms |
-| First generated-token completion | 30.231 ms |
-| Next generated-token completion | 29.992 ms |
-| Prefill and two-token decode loop | 113.620 ms |
+| Module initialization | 54.485 ms |
+| Weight loading, including one-time tail upload | 5866.893 ms |
+| Three-token prefill | 84.891 ms |
+| First generated-token completion | 37.460 ms |
+| Next generated-token completion | 39.779 ms |
+| Prefill and two-token decode loop | 130.868 ms |
 
 The runner waits for each VM invocation fence, so the prefill and decode
 progress timings include completed GPU work. Model-tail weights are transposed
 and uploaded once during weight loading and reused by every generated token.
-The representative later-token rate is approximately 33.3 tokens/second, with
+The representative later-token rate is approximately 25.1 tokens/second, with
 generated IDs `[16,13]`.
 
 #### Reduced-precision result
 
 FP32, FP16, and BF16 were also compared using independent Release processes on
-the same `gfx1101`, max8 VMFB, three-token prompt, two-token output, and
+the same `gfx1101`, max8 VMFB, three-token prompt, five-token output, and
 24-layer model:
 
-| Precision | Weight load | Prefill and two-token loop | Later token | Approx. later-token rate | Generated IDs |
-| --- | ---: | ---: | ---: | ---: | --- |
-| FP32 | 5.790 s | 0.114 s | 0.030 s | 33.3 tokens/s | `[16,13]` |
-| FP16 decoder + FP32 tail | 6.194 s | 0.238 s | 0.067 s | 14.9 tokens/s | `[16,15]` |
-| BF16 decoder + FP32 tail | 6.375 s | 0.297 s | 0.085 s | 11.8 tokens/s | `[16,13]` |
+| Precision | Decode steps | Average decode rate | Generated IDs |
+| --- | --- | ---: | --- |
+| FP32 | 39.683, 39.935, 39.988, 39.995, 40.114 ms | 25.0 tokens/s | `[16,13,576,1156,3019]` |
+| FP16 decoder + FP32 tail | 31.275, 31.141, 31.097, 38.698, 39.301 ms | 29.2 tokens/s | `[16,15,15,15,15]` |
+| BF16 decoder + FP32 tail | 30.458, 30.327, 30.345, 30.324, 37.517 ms | 31.5 tokens/s | `[16,15,15,15,15]` |
 
-Reduced precision did not improve batch-1 decode performance in this
-experiment. FP16 changed the second greedy token, while BF16 preserved the
-short FP32 token regression. Release optimization limits the startup penalty
-from converting the shared FP32 host weights to roughly 0.4–0.6 seconds in
-these representative runs.
+The GPU uses automatic clock management, and repeated independent processes
+showed substantial latency variation. The table records a representative run,
+not a fixed-clock guarantee. Fixed clocks require administrator access on the
+test system. Use repeated, interleaved runs when comparing small differences.
 
-These results indicate that merely changing tensor element types does not make
-the current batch-1 matrix-vector lowering use the GPU's 16-bit matrix
-instructions efficiently. The small attention matmuls use WMMA, but the
-dominant `1xN` linear projections remain batch-1 matrix-vector lowerings. Treat
-FP16/BF16 as experimental compatibility modes, not performance
-recommendations. A meaningful reduced-precision speedup likely requires a
-tuned batch-1 GEMV lowering or fused kernels, plus native 16-bit on-disk
-weights to remove startup conversion.
+The FP16 VMFB now lowers the seven dominant batch-one linear projections as
+explicit `linalg.vecmat` operations instead of padded `1xN` matrix
+multiplications. The FP32 path keeps its existing matmul lowering because
+vecmat was slower for FP32 in this workload. The FP16 later-token time fell
+from the previous 0.067-second baseline to 0.033 seconds and is slightly
+faster than FP32 in this run. Its second greedy token remains different from
+FP32.
+
+The precision-specific model tails also use vecmat for the batch-one language
+model head. On `gfx1101`, the BF16 path uses 16-row WMMA contractions with FP32
+accumulation for the dominant projections. Their FP32-to-BF16 conversions are
+combined with the following bias, residual, or SiLU operation to avoid
+standalone conversion dispatches. K/V projections use fourteen 64-element
+BF16 WMMA partial reductions followed by an FP32 sum. The shorter partial
+reductions preserve the tested FP16 greedy sequence; accumulating all 896
+elements in BF16 was faster but changed it.
+
+This optimized BF16 run is the fastest entry in the representative table and
+produces the same five greedy IDs as FP16. It is not guaranteed to beat FP16
+at every automatic clock state. Native 16-bit on-disk weights would still be
+needed to remove startup conversion, while a true batch-one BF16 dot/GEMV
+kernel would remove the remaining 16-row WMMA padding.
 
 ## Triton
 

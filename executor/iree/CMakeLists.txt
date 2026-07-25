@@ -537,10 +537,19 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       tools/iree_qwen_decode3_layer_kv_cache.mlir
       qwen_decode3_layer_kv_cache
     )
+    if(NOT PYTHON_EXECUTABLE)
+      message(FATAL_ERROR "python3 is required to generate IREE Qwen VMFB input")
+    endif()
     set(_qwen_decode_mlir_dir
         "${CMAKE_CURRENT_BINARY_DIR}/generated/qwen_decode"
     )
     file(MAKE_DIRECTORY "${_qwen_decode_mlir_dir}")
+    set_property(
+      DIRECTORY
+      APPEND
+      PROPERTY CMAKE_CONFIGURE_DEPENDS
+               "${PROJECT_SOURCE_DIR}/tools/select_iree_qwen_linear_variant.py"
+    )
     foreach(QWEN_PRECISION IN ITEMS f32 f16 bf16)
       if(QWEN_PRECISION STREQUAL "f32")
         set(_qwen_precision_suffix "")
@@ -557,12 +566,35 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
         set(_qwen_decode_mlir
             "${_qwen_decode_mlir_dir}/${_qwen_decode_module}.mlir"
         )
+        set(_qwen_decode_configured_mlir
+            "${_qwen_decode_mlir_dir}/${_qwen_decode_module}.configured.mlir"
+        )
         set(DECODE_FUNCTION "@${_qwen_decode_module}")
         configure_file(
           "${PROJECT_SOURCE_DIR}/tools/iree_qwen_decode_layer_kv_cache.mlir.in"
-          "${_qwen_decode_mlir}"
+          "${_qwen_decode_configured_mlir}"
           @ONLY
         )
+        if(QWEN_PRECISION STREQUAL "f16")
+          set(_qwen_linear_variant "reduced")
+        elseif(QWEN_PRECISION STREQUAL "bf16")
+          # Preserve BF16 storage while avoiding BF16-only reduction drift.
+          set(_qwen_linear_variant "mixed")
+        else()
+          set(_qwen_linear_variant "matmul")
+        endif()
+        execute_process(
+          COMMAND
+            "${PYTHON_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tools/select_iree_qwen_linear_variant.py"
+            --input "${_qwen_decode_configured_mlir}"
+            --output "${_qwen_decode_mlir}"
+            --variant "${_qwen_linear_variant}"
+          RESULT_VARIABLE _qwen_linear_variant_result
+        )
+        if(NOT _qwen_linear_variant_result EQUAL 0)
+          message(FATAL_ERROR "failed to select IREE Qwen linear variant")
+        endif()
         lrrt_add_iree_vmfb_probe(
           "lrrt_iree_${_qwen_decode_module}_vmfb_probe"
           "lrrt_iree_${_qwen_decode_module}_vmfb"
@@ -599,6 +631,9 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
     unset(NEG_INF)
     unset(QWEN_PRECISION)
     unset(TAIL_FUNCTION)
+    unset(_qwen_decode_configured_mlir)
+    unset(_qwen_linear_variant)
+    unset(_qwen_linear_variant_result)
 
     set(_token_step_outputs_vmfb
         "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"
