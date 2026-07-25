@@ -7,6 +7,7 @@
 
 #include "executor/iree/registration/init.h"
 #include "iree/base/api.h"
+#include "iree/base/internal/math.h"
 #include "iree/hal/api.h"
 #include "iree/hal/buffer_view_util.h"
 #include "iree/io/file_contents.h"
@@ -234,21 +235,55 @@ public:
   iree_status_t make_f32_buffer_view(const std::vector<float> &data,
                                      const std::vector<iree_hal_dim_t> &shape,
                                      BufferViewPtr *out_view) {
+    return make_buffer_view(data.data(), data.size() * sizeof(float), shape,
+                            IREE_HAL_ELEMENT_TYPE_FLOAT_32, out_view);
+  }
+
+  iree_status_t make_f16_buffer_view(const std::vector<float> &data,
+                                     const std::vector<iree_hal_dim_t> &shape,
+                                     BufferViewPtr *out_view) {
+    std::vector<uint16_t> converted(data.size());
+    for (size_t i = 0; i < data.size(); ++i) {
+      converted[i] = iree_math_f32_to_f16(data[i]);
+    }
+    return make_buffer_view(converted.data(),
+                            converted.size() * sizeof(uint16_t), shape,
+                            IREE_HAL_ELEMENT_TYPE_FLOAT_16, out_view);
+  }
+
+  iree_status_t make_bf16_buffer_view(const std::vector<float> &data,
+                                      const std::vector<iree_hal_dim_t> &shape,
+                                      BufferViewPtr *out_view) {
+    std::vector<uint16_t> converted(data.size());
+    for (size_t i = 0; i < data.size(); ++i) {
+      converted[i] = iree_math_f32_to_bf16(data[i]);
+    }
+    return make_buffer_view(converted.data(),
+                            converted.size() * sizeof(uint16_t), shape,
+                            IREE_HAL_ELEMENT_TYPE_BFLOAT_16, out_view);
+  }
+
+private:
+  iree_status_t make_buffer_view(const void *data, size_t data_length,
+                                 const std::vector<iree_hal_dim_t> &shape,
+                                 iree_hal_element_type_t element_type,
+                                 BufferViewPtr *out_view) {
     const iree_hal_buffer_params_t buffer_params = {
         .usage = IREE_HAL_BUFFER_USAGE_DEFAULT,
         .access = IREE_HAL_MEMORY_ACCESS_ALL,
         .type = IREE_HAL_MEMORY_TYPE_DEVICE_LOCAL,
     };
     const iree_const_byte_span_t initial_data = {
-        reinterpret_cast<const uint8_t *>(data.data()),
-        data.size() * sizeof(float),
+        reinterpret_cast<const uint8_t *>(data),
+        data_length,
     };
     return iree_hal_buffer_view_allocate_buffer_copy(
-        device_, allocator_.get(), shape.size(), shape.data(),
-        IREE_HAL_ELEMENT_TYPE_FLOAT_32, IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR,
-        buffer_params, initial_data, out_view->out());
+        device_, allocator_.get(), shape.size(), shape.data(), element_type,
+        IREE_HAL_ENCODING_TYPE_DENSE_ROW_MAJOR, buffer_params, initial_data,
+        out_view->out());
   }
 
+public:
   iree_status_t make_i32_buffer_view(const std::vector<int32_t> &data,
                                      const std::vector<iree_hal_dim_t> &shape,
                                      BufferViewPtr *out_view) {

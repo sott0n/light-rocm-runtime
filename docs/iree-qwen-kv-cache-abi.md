@@ -76,25 +76,28 @@ invocation for the same layer.
 The preferred path is now the `qwen_decode_layer_kv_cache_max<N>` family, which
 removes the need for a new VMFB per token step. Each VMFB uses a fixed cache
 capacity specialization and an explicit current position. The current supported
-specializations are `max8`, `max16`, `max32`, and `max64`. CMake generates
-all four from `tools/iree_qwen_decode_layer_kv_cache.mlir.in`, so extending the
-capacity list does not duplicate the Qwen layer implementation.
+specializations are `max8`, `max16`, `max32`, and `max64`, each compiled for
+`f32`, `f16`, and `bf16`. CMake generates them from
+`tools/iree_qwen_decode_layer_kv_cache.mlir.in`, so extending the capacity or
+precision list does not duplicate the Qwen layer implementation.
 
 | Input | Shape | Meaning |
 | --- | --- | --- |
-| `hidden` | `1x896xf32` | Current token hidden state |
-| `old_key_cache` | `Nx128xf32` | Layer-local K cache storage |
-| `old_value_cache` | `Nx128xf32` | Layer-local V cache storage |
+| `hidden` | `1x896xT` | Current token hidden state |
+| `old_key_cache` | `Nx128xT` | Layer-local K cache storage |
+| `old_value_cache` | `Nx128xT` | Layer-local V cache storage |
 | `position` | `1xi32` | Current token index to append |
-| layer weights | fixed Qwen 0.5B fp32 views | RMSNorm, Q/K/V/O, MLP gate/up/down weights, Q/K/V biases, and `rope_theta` |
+| layer weights | fixed Qwen 0.5B `T` views | RMSNorm, Q/K/V/O, MLP gate/up/down weights, Q/K/V biases, and `rope_theta` |
+
+`T` is the precision recorded by the decode bundle: `f32`, `f16`, or `bf16`.
 
 It returns:
 
 | Output | Shape | Meaning |
 | --- | --- | --- |
-| `key_cache` | `Nx128xf32` | Updated K cache storage |
-| `value_cache` | `Nx128xf32` | Updated V cache storage |
-| `hidden` | `1x896xf32` | Layer output |
+| `key_cache` | `Nx128xT` | Updated K cache storage |
+| `value_cache` | `Nx128xT` | Updated V cache storage |
+| `hidden` | `1x896xT` | Layer output |
 
 The VMFB adds Q/K/V projection biases, applies Qwen's split-half
 `rotate_half` RoPE convention to Q and K using `position` and `rope_theta`,
@@ -121,17 +124,20 @@ manifest:
 
 ```json
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
   "target": "gfx1101",
-  "layer_vmfb": "qwen_decode_layer_kv_cache_max8_gfx1101.vmfb",
-  "tail_vmfb": "qwen_decode1_tail_gfx1101.vmfb",
-  "layer_export": "qwen_decode_layer_kv_cache_max8",
-  "tail_export": "qwen_decode1_tail",
+  "precision": "bf16",
+  "layer_vmfb": "qwen_decode_layer_kv_cache_max8_bf16_gfx1101.vmfb",
+  "tail_vmfb": "qwen_decode1_tail_bf16_gfx1101.vmfb",
+  "layer_export": "qwen_decode_layer_kv_cache_max8_bf16",
+  "tail_export": "qwen_decode1_tail_bf16",
   "sequence_capacity": 8,
   "max_cache_tokens": 8,
   "kv_cache_shape": [8, 128]
 }
 ```
+
+Manifest version 1 remains accepted and implies `precision: "f32"`.
 
 The runner accepts this bundle form:
 
@@ -153,7 +159,8 @@ must be positive and must not exceed `--max-seq-len`. The runner validates
 current physical static tensor extent of the VMFB.
 When an existing decode bundle is reused, the wrapper reads its manifest and
 rejects `--max-seq-len` values larger than the recorded `sequence_capacity`
-before launching the runner.
+before launching the runner. It also rejects a reused bundle whose `precision`
+does not match `--iree-precision`.
 The full 24-layer Qwen E2E path has been validated with an 11-token prompt and
 40 generated tokens using `--max-new-tokens 40 --max-seq-len 64`. All 40
 greedy decode steps matched the Hugging Face FP32 reference with a maximum
@@ -166,10 +173,12 @@ When `--eos-token-id` is present, the runner includes the selected EOS token in
 
 The native runner flushes concise progress records as work begins and
 completes. These identify module initialization, weight loading, every prompt
-token entering prefill, every generated decode step, host submission time for
-asynchronous prefill, and elapsed time for synchronized decode and completed
-startup phases. This makes an interrupted or slow run distinguishable from a
-silent startup stall without producing one line per decoder layer. Pass
+token entering prefill, every generated decode step, and elapsed time for
+completed prefill, decode, and startup phases. The runner waits for every VM
+invocation fence. Model-tail weights are transposed and uploaded once during
+weight loading, then reused across decode steps. This makes an interrupted or
+slow run distinguishable from a silent startup stall without producing one
+line per decoder layer. Pass
 `--verbose-layers` to the native runner, or `--iree-verbose-layers` through
 `tools/run_qwen_e2e.py`, to additionally print
 per-layer weight loading and `step <N> layer <M>/<layers> complete` after every
@@ -180,6 +189,7 @@ The bundle can be created from compiled VMFB artifacts with:
 ```text
 tools/write_iree_qwen_decode_bundle.py \
   --target gfx1101 \
+  --precision <f32|f16|bf16> \
   --layer-vmfb <qwen_decode_layer_kv_cache_max*.vmfb> \
   --tail-vmfb <qwen_decode1_tail.vmfb> \
   --out-dir <bundle-dir> \
@@ -191,11 +201,18 @@ The VMFB paths are relative to `<bundle-dir>`. Absolute paths and `..` path
 components are rejected so that a bundle manifest cannot silently point outside
 the bundle directory. `max_cache_tokens` is a bundle ABI field rather than a
 user-facing inference setting. It must match `kv_cache_shape[0]`; the runner
-still treats the cache as opaque f32 device tensors with shape
+treats the cache as opaque device tensors of the manifest precision with shape
 `[max_cache_tokens, 128]`. `sequence_capacity` must be positive and cannot
 exceed `max_cache_tokens`; this keeps the current static-shape implementation
 compatible with a future single-capacity bundle where runtime `max_seq_len`
 selects the usable prefix.
+
+The shared checkpoint bundle remains FP32 on disk. At startup the runner
+transposes layer matrices, converts them to the selected device precision, and
+uploads them. Token embeddings are converted as they enter the decoder. The
+precision-specific tail accepts the final `f16` or `bf16` hidden state, extends
+it to `f32`, and runs final RMSNorm and the language-model head with FP32
+weights and FP32 logits.
 
 ## Decode Loop Contract
 

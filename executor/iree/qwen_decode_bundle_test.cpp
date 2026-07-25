@@ -90,10 +90,28 @@ void test_parse_manifest() {
   expect(manifest.layer_export == "qwen_decode_layer_kv_cache_max8",
          "layer export");
   expect(manifest.tail_export == "qwen_decode1_tail", "tail export");
+  expect(manifest.precision == "f32", "version 1 defaults to f32");
   expect(manifest.sequence_capacity == 8, "sequence capacity");
   expect(manifest.max_cache_tokens == 8, "max cache tokens");
   expect(manifest.kv_cache_tokens == 8, "kv cache tokens");
   expect(manifest.kv_cache_dim == 128, "kv cache dim");
+}
+
+void test_parse_precision_manifest() {
+  const std::filesystem::path dir = test_dir() / "bf16";
+  std::string text = manifest_text();
+  text.replace(text.find("\"manifest_version\": 1"),
+               std::string("\"manifest_version\": 1").size(),
+               "\"manifest_version\": 2");
+  text.replace(text.find("\"target\": \"gfx1101\","),
+               std::string("\"target\": \"gfx1101\",").size(),
+               "\"target\": \"gfx1101\",\n  \"precision\": \"bf16\",");
+  write_file(dir / "manifest.json", text);
+
+  const auto manifest =
+      lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir);
+  expect(manifest.manifest_version == 2, "precision manifest version");
+  expect(manifest.precision == "bf16", "precision");
 }
 
 void test_invalid_manifest() {
@@ -132,6 +150,22 @@ void test_invalid_manifest() {
                                                                "capacity");
       },
       "sequence_capacity", "sequence capacity over cache capacity must fail");
+
+  std::string unsupported_precision = manifest_text();
+  unsupported_precision.replace(
+      unsupported_precision.find("\"manifest_version\": 1"),
+      std::string("\"manifest_version\": 1").size(), "\"manifest_version\": 2");
+  unsupported_precision.replace(
+      unsupported_precision.find("\"target\": \"gfx1101\","),
+      std::string("\"target\": \"gfx1101\",").size(),
+      "\"target\": \"gfx1101\",\n  \"precision\": \"fp8\",");
+  write_file(dir / "precision" / "manifest.json", unsupported_precision);
+  expect_throw_contains(
+      [&] {
+        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir /
+                                                               "precision");
+      },
+      "must be f32, f16, or bf16", "unsupported precision must fail");
 }
 
 } // namespace
@@ -140,6 +174,7 @@ int main() {
   try {
     std::filesystem::remove_all(test_dir());
     test_parse_manifest();
+    test_parse_precision_manifest();
     test_invalid_manifest();
     std::printf("qwen_decode_bundle_test: ok\n");
     return 0;

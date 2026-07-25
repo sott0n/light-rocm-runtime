@@ -19,6 +19,10 @@ def default_layer_export(max_cache_tokens: int) -> str:
     return f"qwen_decode_layer_kv_cache_max{max_cache_tokens}"
 
 
+def precision_suffix(precision: str) -> str:
+    return "" if precision == "f32" else f"_{precision}"
+
+
 def require_relative_bundle_path(value: str, field: str) -> Path:
     path = Path(value)
     if not value or path.is_absolute():
@@ -42,8 +46,9 @@ def copy_vmfb(source: Path, out_dir: Path, relative_name: Path, force: bool) -> 
 
 def manifest_data(args: argparse.Namespace) -> dict[str, object]:
     return {
-        "manifest_version": 1,
+        "manifest_version": 2,
         "target": args.target,
+        "precision": args.precision,
         "layer_vmfb": args.layer_name.as_posix(),
         "tail_vmfb": args.tail_name.as_posix(),
         "layer_export": args.layer_export,
@@ -72,8 +77,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--layer-vmfb", required=True, type=Path)
     parser.add_argument("--tail-vmfb", required=True, type=Path)
     parser.add_argument("--out-dir", required=True, type=Path)
+    parser.add_argument("--precision", choices=("f32", "f16", "bf16"), default="f32")
     parser.add_argument("--layer-export")
-    parser.add_argument("--tail-export", default=DEFAULT_TAIL_EXPORT)
+    parser.add_argument("--tail-export")
     parser.add_argument(
         "--max-cache-tokens", default=DEFAULT_MAX_CACHE_TOKENS, type=int
     )
@@ -100,7 +106,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if not args.target:
         raise ValueError("--target must not be empty")
     if args.layer_export is None:
-        args.layer_export = default_layer_export(args.max_cache_tokens)
+        args.layer_export = default_layer_export(
+            args.max_cache_tokens
+        ) + precision_suffix(args.precision)
+    if args.tail_export is None:
+        args.tail_export = DEFAULT_TAIL_EXPORT + precision_suffix(args.precision)
     if not args.layer_export:
         raise ValueError("--layer-export must not be empty")
     if not args.tail_export:

@@ -183,6 +183,17 @@ def test_reference_check_requires_iree() -> None:
         raise AssertionError("expected reference-backed Triton run to fail")
 
 
+def test_iree_precision_requires_iree() -> None:
+    runner = load_runner()
+    args = runner.parse_args(["--layers", "1", "--iree-precision", "bf16"])
+    try:
+        runner.prepare_text_inputs(args)
+    except ValueError as error:
+        assert "--iree-precision requires --iree" in str(error)
+    else:
+        raise AssertionError("expected reduced-precision Triton run to fail")
+
+
 def test_generation_regression_requires_iree() -> None:
     runner = load_runner()
     args = runner.parse_args(["--layers", "1", "--expect-generated-token-ids", "7,8"])
@@ -523,22 +534,34 @@ def write_complete_weight_bundle(bundle: Path, layers: int) -> None:
     (tail_dir / "weights.json").write_text("{}", encoding="utf-8")
 
 
-def write_iree_probe_vmfb(probe: Path, capacity: int, target: str = "gfx1101") -> Path:
-    module = f"qwen_decode_layer_kv_cache_max{capacity}"
+def write_iree_probe_vmfb(
+    probe: Path,
+    capacity: int,
+    target: str = "gfx1101",
+    precision: str = "f32",
+) -> Path:
+    suffix = "" if precision == "f32" else f"_{precision}"
+    module = f"qwen_decode_layer_kv_cache_max{capacity}{suffix}"
     layer_vmfb = probe / module / f"{module}_{target}.vmfb"
     layer_vmfb.parent.mkdir(parents=True)
     layer_vmfb.write_text("layer", encoding="utf-8")
     return layer_vmfb
 
 
-def write_iree_tail_vmfb(probe: Path, target: str = "gfx1101") -> Path:
-    tail_vmfb = probe / "qwen_decode1_tail" / f"qwen_decode1_tail_{target}.vmfb"
+def write_iree_tail_vmfb(
+    probe: Path, target: str = "gfx1101", precision: str = "f32"
+) -> Path:
+    suffix = "" if precision == "f32" else f"_{precision}"
+    module = f"qwen_decode1_tail{suffix}"
+    tail_vmfb = probe / module / f"{module}_{target}.vmfb"
     tail_vmfb.parent.mkdir(parents=True)
     tail_vmfb.write_text("tail", encoding="utf-8")
     return tail_vmfb
 
 
-def write_iree_decode_manifest(bundle: Path, sequence_capacity: int) -> None:
+def write_iree_decode_manifest(
+    bundle: Path, sequence_capacity: int, precision: str = "f32"
+) -> None:
     bundle.mkdir()
     (bundle / "manifest.json").write_text(
         json.dumps(
@@ -546,6 +569,7 @@ def write_iree_decode_manifest(bundle: Path, sequence_capacity: int) -> None:
                 "sequence_capacity": sequence_capacity,
                 "max_cache_tokens": max(sequence_capacity, 16),
                 "target": "gfx1101",
+                "precision": precision,
             }
         ),
         encoding="utf-8",
@@ -585,6 +609,31 @@ def test_iree_runner_command_uses_decode_bundle() -> None:
         "/tmp/qwen-weights",
         "2",
     ]
+
+
+def test_iree_runner_rejects_bundle_precision_mismatch() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bundle = Path(tmpdir) / "iree-bundle"
+        write_iree_decode_manifest(bundle, 8, precision="f16")
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--iree-precision",
+                "bf16",
+                "--layers",
+                "1",
+                "--iree-decode-bundle-dir",
+                str(bundle),
+            ]
+        )
+
+        try:
+            runner.iree_runner_command(args, 1)
+        except ValueError as error:
+            assert "does not match --iree-precision" in str(error)
+        else:
+            raise AssertionError("expected decode bundle precision mismatch")
 
 
 def test_iree_runner_command_passes_resolved_eos_token_id() -> None:
@@ -776,6 +825,37 @@ def test_iree_dry_run_discovers_smallest_sufficient_vmfb_capacity() -> None:
         assert "41" in command
         assert "--layer-export" in command
         assert "qwen_decode_layer_kv_cache_max64" in command
+
+
+def test_iree_bf16_selects_precision_specific_vmfbs() -> None:
+    runner = load_runner()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        probe = root / "probe"
+        layer_vmfb = write_iree_probe_vmfb(probe, 8, precision="bf16")
+        tail_vmfb = write_iree_tail_vmfb(probe, precision="bf16")
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--iree-precision",
+                "bf16",
+                "--layers",
+                "1",
+                "--max-new-tokens",
+                "2",
+                "--token-ids",
+                "0",
+                "--iree-probe-dir",
+                str(probe),
+            ]
+        )
+
+        command = runner.iree_bundle_writer_command(args)
+
+        assert str(layer_vmfb) in command
+        assert str(tail_vmfb) in command
+        assert command[command.index("--precision") + 1] == "bf16"
+        assert command[command.index("--layer-export") + 1].endswith("_bf16")
 
 
 def test_iree_rejects_sequence_length_without_discovered_cache_capacity() -> None:
@@ -1015,6 +1095,7 @@ def main() -> int:
     test_chat_system_requires_chat_user()
     test_text_options_require_iree()
     test_reference_check_requires_iree()
+    test_iree_precision_requires_iree()
     test_generation_regression_requires_iree()
     test_resolve_eos_token_id_prefers_explicit_value()
     test_resolve_eos_token_id_reads_checkpoint_config()
@@ -1034,12 +1115,14 @@ def main() -> int:
     test_runner_command_requires_keys_for_tokens()
     test_dry_run_builds_full_e2e_command()
     test_iree_runner_command_uses_decode_bundle()
+    test_iree_runner_rejects_bundle_precision_mismatch()
     test_iree_runner_command_passes_resolved_eos_token_id()
     test_iree_runner_command_enables_verbose_layer_progress()
     test_iree_runner_command_accepts_max_supported_generation_capacity()
     test_iree_converter_command_writes_e2e_directory_bundle()
     test_iree_dry_run_writes_bundle_then_runs()
     test_iree_dry_run_discovers_smallest_sufficient_vmfb_capacity()
+    test_iree_bf16_selects_precision_specific_vmfbs()
     test_iree_rejects_sequence_length_without_discovered_cache_capacity()
     test_iree_rejects_sequence_length_over_discovered_cache_capacity()
     test_iree_rejects_output_length_over_sequence_capacity()

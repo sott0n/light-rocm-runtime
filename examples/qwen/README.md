@@ -10,8 +10,10 @@ GPU executor paths in `light-rocm-runtime`:
   weights, the full decoder-layer stack, final logits validation, and detailed
   runtime timing.
 
-Both paths are experimental, FP32-only Qwen 0.5B integrations rather than
-general model servers.
+Both paths are experimental Qwen 0.5B integrations rather than general model
+servers. Triton remains FP32-only. IREE can run decoder layers, hidden states,
+and KV caches in FP32, FP16, or BF16; its numerically sensitive model tail
+remains FP32.
 
 ## Current Capability
 
@@ -22,6 +24,7 @@ general model servers.
 | Text and chat-template input | Yes | No; explicit token IDs |
 | Prompt prefill | Yes, one token at a time | Fixed benchmark input |
 | Device-resident KV cache | Yes | Yes |
+| Compute precision | FP32, FP16, or BF16 decoder; FP32 tail | FP32 |
 | Multi-token autoregressive generation | Yes, greedy | No |
 | Generated text output | Yes | No |
 | Final logits validation | Yes | Yes |
@@ -95,6 +98,7 @@ The commands below target the development GPU, `gfx1101`. Change
 
 ```sh
 cmake -S . -B build-iree/adapter \
+  -DCMAKE_BUILD_TYPE=Release \
   -DLRRT_ENABLE_IREE_ADAPTER=ON \
   -DLRRT_IREE_ROOT=third_party/iree \
   -DLRRT_IREE_COMPILE_EXECUTABLE="$PWD/build-iree-tools/tools/iree-compile" \
@@ -105,11 +109,19 @@ cmake --build build-iree/adapter -j2
 ```
 
 Compile the max8, max16, max32, and max64 Qwen decode modules plus the model
-tail. These tests write VMFB files under `build-iree-probe/`:
+tail. The default command builds FP32 VMFB files under `build-iree-probe/`:
 
 ```sh
 ctest --test-dir build-iree/adapter --output-on-failure \
   -R 'lrrt_iree_qwen_decode_layer_kv_cache_max(8|16|32|64)_vmfb_probe|lrrt_iree_qwen_decode1_tail_vmfb_probe'
+```
+
+Build the corresponding FP16 and BF16 variants when evaluating reduced
+precision:
+
+```sh
+ctest --test-dir build-iree/adapter --output-on-failure \
+  -R 'lrrt_iree_qwen_decode_layer_kv_cache_max(8|16|32|64)_(f16|bf16)_vmfb_probe|lrrt_iree_qwen_decode1_tail_(f16|bf16)_vmfb_probe'
 ```
 
 ### 3. Generate text
@@ -155,6 +167,29 @@ uv run --with-requirements tools/requirements.txt \
 
 `--prompt`, `--chat-user`, and `--token-ids` are mutually exclusive.
 `--chat-system` is valid only with `--chat-user`.
+
+Select reduced-precision decoder layers and KV caches with
+`--iree-precision`. Use a separate decode bundle for each precision:
+
+```sh
+uv run --with-requirements tools/requirements.txt \
+  python tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir "$QWEN_CHECKPOINT" \
+  --bundle-dir "$QWEN_ARTIFACTS/weights" \
+  --iree-decode-bundle-dir "$QWEN_ARTIFACTS/iree-bf16-max8" \
+  --iree-precision bf16 \
+  --prompt "Hello" \
+  --max-seq-len 8 \
+  --max-new-tokens 2 \
+  --no-convert
+```
+
+The converted weight bundle remains FP32 on disk and is shared by all three
+IREE modes. The runner converts layer weights to the selected device precision
+during startup. The model tail converts the final hidden state to FP32 and
+performs final RMSNorm, the language-model head, logits, and argmax in FP32.
+An existing decode bundle whose recorded precision differs from
+`--iree-precision` is rejected.
 
 ### 4. Reuse existing artifacts
 
@@ -221,10 +256,12 @@ needs additional host memory.
 ### 7. Development performance snapshot
 
 The following numbers are a diagnostic baseline, not a performance guarantee.
-They were measured on the development `gfx1101` GPU at commit `339175a`, using
-the full 24-layer Qwen2.5-0.5B-Instruct model, an already-converted weight
-bundle, and an already-compiled max64 VMFB bundle. Each row is the median of
-three fresh-process runs:
+They were measured with a Release build on the development `gfx1101` GPU,
+using the full 24-layer Qwen2.5-0.5B-Instruct model, an already-converted
+weight bundle, and an already-compiled max8 VMFB bundle. Do not compare
+performance from a build configured without `CMAKE_BUILD_TYPE=Release`;
+unoptimized host-side weight conversion and transposition can dominate both
+startup and per-token timings.
 
 ```sh
 build-iree/adapter/lrrt_iree_qwen_decode1_e2e \
@@ -236,26 +273,47 @@ build-iree/adapter/lrrt_iree_qwen_decode1_e2e \
   24
 ```
 
-| Phase | Median | Observed range |
-| --- | ---: | ---: |
-| Module initialization | 701.947 ms | 700.584–702.348 ms |
-| Weight loading | 6456.584 ms | 6248.650–6481.618 ms |
-| Three-token prefill host submission | 105.180 ms | 104.719–108.417 ms |
-| First generated-token completion | 1439.319 ms | 1433.094–1649.590 ms |
-| Next generated-token completion | 1438.157 ms | 1433.602–1630.368 ms |
-| Prefill and two-token decode loop | 2940.477 ms | 2938.859–3350.780 ms |
+| Phase | Representative FP32 time |
+| --- | ---: |
+| Module initialization | 701.745 ms |
+| Weight loading, including one-time tail upload | 5790.014 ms |
+| Three-token prefill | 79.084 ms |
+| First generated-token completion | 30.231 ms |
+| Next generated-token completion | 29.992 ms |
+| Prefill and two-token decode loop | 113.620 ms |
 
-The median measured process time for module initialization, weight loading, and
-the decode loop was approximately 10.1 seconds. After the first generated
-token, this experiment completed approximately 0.70 generated tokens/second.
-The generated IDs were `[16,13]` in every run.
+The runner waits for each VM invocation fence, so the prefill and decode
+progress timings include completed GPU work. Model-tail weights are transposed
+and uploaded once during weight loading and reused by every generated token.
+The representative later-token rate is approximately 33.3 tokens/second, with
+generated IDs `[16,13]`.
 
-IREE work is submitted asynchronously. Consequently,
-`phase=prefill status=submitted` measures host submission rather than completed
-GPU prefill. The first generated-token completion synchronizes the dependent
-work and includes outstanding prefill cost; it is not a standalone
-time-to-first-token measurement. Use a GPU profiler and a longer run before
-drawing optimization conclusions.
+#### Reduced-precision result
+
+FP32, FP16, and BF16 were also compared using independent Release processes on
+the same `gfx1101`, max8 VMFB, three-token prompt, two-token output, and
+24-layer model:
+
+| Precision | Weight load | Prefill and two-token loop | Later token | Approx. later-token rate | Generated IDs |
+| --- | ---: | ---: | ---: | ---: | --- |
+| FP32 | 5.790 s | 0.114 s | 0.030 s | 33.3 tokens/s | `[16,13]` |
+| FP16 decoder + FP32 tail | 6.194 s | 0.238 s | 0.067 s | 14.9 tokens/s | `[16,15]` |
+| BF16 decoder + FP32 tail | 6.375 s | 0.297 s | 0.085 s | 11.8 tokens/s | `[16,13]` |
+
+Reduced precision did not improve batch-1 decode performance in this
+experiment. FP16 changed the second greedy token, while BF16 preserved the
+short FP32 token regression. Release optimization limits the startup penalty
+from converting the shared FP32 host weights to roughly 0.4–0.6 seconds in
+these representative runs.
+
+These results indicate that merely changing tensor element types does not make
+the current batch-1 matrix-vector lowering use the GPU's 16-bit matrix
+instructions efficiently. The small attention matmuls use WMMA, but the
+dominant `1xN` linear projections remain batch-1 matrix-vector lowerings. Treat
+FP16/BF16 as experimental compatibility modes, not performance
+recommendations. A meaningful reduced-precision speedup likely requires a
+tuned batch-1 GEMV lowering or fused kernels, plus native 16-bit on-disk
+weights to remove startup conversion.
 
 ## Triton
 
@@ -350,8 +408,9 @@ Useful benchmark options include:
 The Qwen paths demonstrate correct integration, but are not production
 inference servers:
 
-- The implemented model shape is the FP32 Qwen2/Qwen2.5 0.5B configuration;
-  BF16, FP16, quantized weights, and other model sizes are not supported.
+- The implemented model shape is the Qwen2/Qwen2.5 0.5B configuration. IREE
+  has experimental FP16/BF16 decoder modes, but Triton remains FP32-only;
+  quantized weights and other model sizes are not supported.
 - IREE runs one sequence at a time and submits prompt tokens sequentially.
   There is no batched prefill, continuous batching, or multi-request scheduler.
 - IREE generation is greedy. Temperature, top-k, top-p, beam search, and

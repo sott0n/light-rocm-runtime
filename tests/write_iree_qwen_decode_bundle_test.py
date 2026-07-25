@@ -56,8 +56,9 @@ def test_writes_bundle_manifest_and_copies_vmfb() -> None:
         assert (out / "tail.vmfb").read_bytes() == b"tail"
         manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
         assert manifest == {
-            "manifest_version": 1,
+            "manifest_version": 2,
             "target": "gfx1101",
+            "precision": "f32",
             "layer_vmfb": "layer.vmfb",
             "tail_vmfb": "tail.vmfb",
             "layer_export": "qwen_decode_layer_kv_cache_max8",
@@ -101,6 +102,40 @@ def test_default_layer_export_follows_cache_capacity() -> None:
         assert manifest["sequence_capacity"] == 10
         assert manifest["max_cache_tokens"] == 16
         assert manifest["kv_cache_shape"] == [16, 128]
+
+
+def test_precision_selects_default_exports() -> None:
+    tool = load_tool()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        root = Path(tmpdir)
+        layer = root / "layer.vmfb"
+        tail = root / "tail.vmfb"
+        out = root / "bundle"
+        write_vmfb(layer, b"layer")
+        write_vmfb(tail, b"tail")
+
+        status = tool.main(
+            [
+                "--target",
+                "gfx1101",
+                "--precision",
+                "bf16",
+                "--layer-vmfb",
+                str(layer),
+                "--tail-vmfb",
+                str(tail),
+                "--out-dir",
+                str(out),
+                "--max-cache-tokens",
+                "32",
+            ]
+        )
+
+        assert status == 0
+        manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["precision"] == "bf16"
+        assert manifest["layer_export"] == "qwen_decode_layer_kv_cache_max32_bf16"
+        assert manifest["tail_export"] == "qwen_decode1_tail_bf16"
 
 
 def test_rejects_sequence_capacity_over_cache_capacity() -> None:
@@ -204,6 +239,7 @@ def test_refuses_overwrite_without_force() -> None:
 def main() -> int:
     test_writes_bundle_manifest_and_copies_vmfb()
     test_default_layer_export_follows_cache_capacity()
+    test_precision_selects_default_exports()
     test_rejects_sequence_capacity_over_cache_capacity()
     test_rejects_parent_bundle_path()
     test_refuses_overwrite_without_force()

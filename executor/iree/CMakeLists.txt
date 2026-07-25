@@ -541,34 +541,64 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
         "${CMAKE_CURRENT_BINARY_DIR}/generated/qwen_decode"
     )
     file(MAKE_DIRECTORY "${_qwen_decode_mlir_dir}")
-    foreach(CACHE_CAPACITY IN ITEMS 8 16 32 64)
-      set(_qwen_decode_module
-          "qwen_decode_layer_kv_cache_max${CACHE_CAPACITY}"
+    foreach(QWEN_PRECISION IN ITEMS f32 f16 bf16)
+      if(QWEN_PRECISION STREQUAL "f32")
+        set(_qwen_precision_suffix "")
+        set(NEG_INF "-3.40282347E+38")
+      else()
+        set(_qwen_precision_suffix "_${QWEN_PRECISION}")
+        set(NEG_INF "-65504.0")
+      endif()
+      set(FLOAT_TYPE "${QWEN_PRECISION}")
+      foreach(CACHE_CAPACITY IN ITEMS 8 16 32 64)
+        set(_qwen_decode_module
+            "qwen_decode_layer_kv_cache_max${CACHE_CAPACITY}${_qwen_precision_suffix}"
+        )
+        set(_qwen_decode_mlir
+            "${_qwen_decode_mlir_dir}/${_qwen_decode_module}.mlir"
+        )
+        set(DECODE_FUNCTION "@${_qwen_decode_module}")
+        configure_file(
+          "${PROJECT_SOURCE_DIR}/tools/iree_qwen_decode_layer_kv_cache.mlir.in"
+          "${_qwen_decode_mlir}"
+          @ONLY
+        )
+        lrrt_add_iree_vmfb_probe(
+          "lrrt_iree_${_qwen_decode_module}_vmfb_probe"
+          "lrrt_iree_${_qwen_decode_module}_vmfb"
+          "${_qwen_decode_mlir}"
+          "${_qwen_decode_module}"
+        )
+      endforeach()
+      set(_qwen_tail_module "qwen_decode1_tail${_qwen_precision_suffix}")
+      set(_qwen_tail_mlir
+          "${_qwen_decode_mlir_dir}/${_qwen_tail_module}.mlir"
       )
-      set(_qwen_decode_mlir
-          "${_qwen_decode_mlir_dir}/${_qwen_decode_module}.mlir"
-      )
-      set(DECODE_FUNCTION "@${_qwen_decode_module}")
-      configure_file(
-        "${PROJECT_SOURCE_DIR}/tools/iree_qwen_decode_layer_kv_cache.mlir.in"
-        "${_qwen_decode_mlir}"
-        @ONLY
-      )
+      if(QWEN_PRECISION STREQUAL "f32")
+        set(_qwen_tail_mlir
+            "${PROJECT_SOURCE_DIR}/tools/iree_qwen_decode1_tail.mlir"
+        )
+      else()
+        set(TAIL_FUNCTION "@${_qwen_tail_module}")
+        configure_file(
+          "${PROJECT_SOURCE_DIR}/tools/iree_qwen_decode1_tail.mlir.in"
+          "${_qwen_tail_mlir}"
+          @ONLY
+        )
+      endif()
       lrrt_add_iree_vmfb_probe(
-        "lrrt_iree_${_qwen_decode_module}_vmfb_probe"
-        "lrrt_iree_${_qwen_decode_module}_vmfb"
-        "${_qwen_decode_mlir}"
-        "${_qwen_decode_module}"
+        "lrrt_iree_${_qwen_tail_module}_vmfb_probe"
+        "lrrt_iree_${_qwen_tail_module}_vmfb"
+        "${_qwen_tail_mlir}"
+        "${_qwen_tail_module}"
       )
     endforeach()
     unset(CACHE_CAPACITY)
     unset(DECODE_FUNCTION)
-    lrrt_add_iree_vmfb_probe(
-      lrrt_iree_qwen_decode1_tail_vmfb_probe
-      lrrt_iree_qwen_decode1_tail_vmfb
-      tools/iree_qwen_decode1_tail.mlir
-      qwen_decode1_tail
-    )
+    unset(FLOAT_TYPE)
+    unset(NEG_INF)
+    unset(QWEN_PRECISION)
+    unset(TAIL_FUNCTION)
 
     set(_token_step_outputs_vmfb
         "${PROJECT_SOURCE_DIR}/build-iree-probe/token_step_kv_cache_outputs/token_step_kv_cache_outputs_${LRRT_AMDGPU_TARGET}.vmfb"

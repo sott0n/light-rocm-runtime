@@ -21,6 +21,7 @@ struct QwenDecodeBundleManifest {
   std::filesystem::path tail_vmfb;
   std::string layer_export;
   std::string tail_export;
+  std::string precision = "f32";
   uint32_t sequence_capacity = 0;
   uint32_t max_cache_tokens = 0;
   uint32_t kv_cache_tokens = 0;
@@ -64,7 +65,7 @@ parse_qwen_decode_bundle_manifest(const std::filesystem::path &bundle_dir,
 
   QwenDecodeBundleManifest manifest;
   manifest.manifest_version = detail::require_u32(root, "manifest_version");
-  if (manifest.manifest_version != 1) {
+  if (manifest.manifest_version != 1 && manifest.manifest_version != 2) {
     throw std::runtime_error("unsupported IREE Qwen bundle manifest_version: " +
                              std::to_string(manifest.manifest_version));
   }
@@ -81,6 +82,14 @@ parse_qwen_decode_bundle_manifest(const std::filesystem::path &bundle_dir,
   manifest.tail_export = detail::require_string(root, "tail_export");
   if (manifest.layer_export.empty() || manifest.tail_export.empty()) {
     throw std::runtime_error("IREE Qwen bundle exports must not be empty");
+  }
+  if (manifest.manifest_version >= 2) {
+    manifest.precision = detail::require_string(root, "precision");
+  }
+  if (manifest.precision != "f32" && manifest.precision != "f16" &&
+      manifest.precision != "bf16") {
+    throw std::runtime_error(
+        "IREE Qwen bundle precision must be f32, f16, or bf16");
   }
 
   manifest.sequence_capacity = detail::require_u32(root, "sequence_capacity");

@@ -34,6 +34,33 @@ constexpr uint32_t kDefaultLayers = 24;
 constexpr uint32_t kSupportedMaxCacheTokens[] = {8, 16, 32, 64};
 using SteadyClock = std::chrono::steady_clock;
 
+enum class FloatPrecision { kF32, kF16, kBF16 };
+
+const char *precision_name(FloatPrecision precision) {
+  switch (precision) {
+  case FloatPrecision::kF32:
+    return "f32";
+  case FloatPrecision::kF16:
+    return "f16";
+  case FloatPrecision::kBF16:
+    return "bf16";
+  }
+  return "unknown";
+}
+
+FloatPrecision parse_precision(const std::string &value) {
+  if (value == "f32") {
+    return FloatPrecision::kF32;
+  }
+  if (value == "f16") {
+    return FloatPrecision::kF16;
+  }
+  if (value == "bf16") {
+    return FloatPrecision::kBF16;
+  }
+  throw std::runtime_error("unsupported IREE Qwen precision: " + value);
+}
+
 double elapsed_ms(SteadyClock::time_point start) {
   return std::chrono::duration<double, std::milli>(SteadyClock::now() - start)
       .count();
@@ -55,6 +82,7 @@ struct Args {
   uint32_t decode_steps = 1;
   uint32_t max_seq_len = 1;
   uint32_t max_cache_tokens = 0;
+  FloatPrecision precision = FloatPrecision::kF32;
   std::vector<uint32_t> prompt_token_ids;
   bool eos_token_id_set = false;
   uint32_t eos_token_id = 0;
@@ -91,6 +119,18 @@ constexpr QwenKvCacheAbi kDecode3CacheAbi = {
     /*visible_tokens=*/3,
     /*kv_dim=*/kKvDim,
 };
+
+iree_hal_element_type_t element_type(FloatPrecision precision) {
+  switch (precision) {
+  case FloatPrecision::kF32:
+    return IREE_HAL_ELEMENT_TYPE_FLOAT_32;
+  case FloatPrecision::kF16:
+    return IREE_HAL_ELEMENT_TYPE_FLOAT_16;
+  case FloatPrecision::kBF16:
+    return IREE_HAL_ELEMENT_TYPE_BFLOAT_16;
+  }
+  return IREE_HAL_ELEMENT_TYPE_NONE;
+}
 
 bool is_supported_max_cache_tokens(uint32_t max_cache_tokens) {
   for (const uint32_t supported : kSupportedMaxCacheTokens) {
@@ -162,6 +202,11 @@ struct LayerWeightViews {
   BufferViewPtr down_weight;
 };
 
+struct ModelTailWeightViews {
+  BufferViewPtr final_norm_weight;
+  BufferViewPtr lm_head_weight;
+};
+
 struct ModuleFunctions {
   iree_vm_function_t layer = {};
   iree_vm_function_t decode2_layer = {};
@@ -172,6 +217,7 @@ struct ModuleFunctions {
 
 struct LoadedQwenWeights {
   ModelTailWeights tail;
+  ModelTailWeightViews tail_views;
   std::vector<DecoderLayerWeights> layers;
   std::vector<LayerWeightViews> layer_views;
 };
@@ -191,10 +237,20 @@ std::vector<float> transpose(const std::vector<float> &source, uint32_t rows,
   return result;
 }
 
-iree_status_t make_view(VmfbRunner *runner, const std::vector<float> &data,
+iree_status_t make_view(VmfbRunner *runner, FloatPrecision precision,
+                        const std::vector<float> &data,
                         std::vector<iree_hal_dim_t> shape,
                         BufferViewPtr *out_view) {
-  return runner->make_f32_buffer_view(data, shape, out_view);
+  switch (precision) {
+  case FloatPrecision::kF32:
+    return runner->make_f32_buffer_view(data, shape, out_view);
+  case FloatPrecision::kF16:
+    return runner->make_f16_buffer_view(data, shape, out_view);
+  case FloatPrecision::kBF16:
+    return runner->make_bf16_buffer_view(data, shape, out_view);
+  }
+  return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                          "unsupported float precision");
 }
 
 iree_status_t make_i32_view(VmfbRunner *runner,
@@ -206,6 +262,7 @@ iree_status_t make_i32_view(VmfbRunner *runner,
 
 iree_status_t make_layer_weight_views(VmfbRunner *runner,
                                       const DecoderLayerWeights &weights,
+                                      FloatPrecision precision,
                                       LayerWeightViews *views) {
   const std::vector<float> q_weight_t =
       transpose(weights.q_weight, kHidden, kHidden, "q_weight");
@@ -222,32 +279,50 @@ iree_status_t make_layer_weight_views(VmfbRunner *runner,
   const std::vector<float> down_weight_t =
       transpose(weights.down_weight, kHidden, kIntermediate, "down_weight");
 
-  IREE_RETURN_IF_ERROR(make_view(runner, weights.attention_norm_weight,
-                                 {kHidden}, &views->attention_norm_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision,
+                                 weights.attention_norm_weight, {kHidden},
+                                 &views->attention_norm_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, q_weight_t,
+                                 {kHidden, kHidden}, &views->q_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, k_weight_t,
+                                 {kHidden, kKvDim}, &views->k_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, v_weight_t,
+                                 {kHidden, kKvDim}, &views->v_weight));
   IREE_RETURN_IF_ERROR(
-      make_view(runner, q_weight_t, {kHidden, kHidden}, &views->q_weight));
+      make_view(runner, precision, weights.q_bias, {kHidden}, &views->q_bias));
   IREE_RETURN_IF_ERROR(
-      make_view(runner, k_weight_t, {kHidden, kKvDim}, &views->k_weight));
+      make_view(runner, precision, weights.k_bias, {kKvDim}, &views->k_bias));
   IREE_RETURN_IF_ERROR(
-      make_view(runner, v_weight_t, {kHidden, kKvDim}, &views->v_weight));
-  IREE_RETURN_IF_ERROR(
-      make_view(runner, weights.q_bias, {kHidden}, &views->q_bias));
-  IREE_RETURN_IF_ERROR(
-      make_view(runner, weights.k_bias, {kKvDim}, &views->k_bias));
-  IREE_RETURN_IF_ERROR(
-      make_view(runner, weights.v_bias, {kKvDim}, &views->v_bias));
-  IREE_RETURN_IF_ERROR(
-      make_view(runner, {weights.rope_theta}, {1}, &views->rope_theta));
-  IREE_RETURN_IF_ERROR(
-      make_view(runner, out_weight_t, {kHidden, kHidden}, &views->out_weight));
-  IREE_RETURN_IF_ERROR(make_view(runner, weights.mlp_norm_weight, {kHidden},
-                                 &views->mlp_norm_weight));
-  IREE_RETURN_IF_ERROR(make_view(
-      runner, gate_weight_t, {kHidden, kIntermediate}, &views->gate_weight));
-  IREE_RETURN_IF_ERROR(make_view(runner, up_weight_t, {kHidden, kIntermediate},
-                                 &views->up_weight));
-  IREE_RETURN_IF_ERROR(make_view(
-      runner, down_weight_t, {kIntermediate, kHidden}, &views->down_weight));
+      make_view(runner, precision, weights.v_bias, {kKvDim}, &views->v_bias));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, {weights.rope_theta}, {1},
+                                 &views->rope_theta));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, out_weight_t,
+                                 {kHidden, kHidden}, &views->out_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, weights.mlp_norm_weight,
+                                 {kHidden}, &views->mlp_norm_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, gate_weight_t,
+                                 {kHidden, kIntermediate},
+                                 &views->gate_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, up_weight_t,
+                                 {kHidden, kIntermediate}, &views->up_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, precision, down_weight_t,
+                                 {kIntermediate, kHidden},
+                                 &views->down_weight));
+  return iree_ok_status();
+}
+
+iree_status_t make_model_tail_weight_views(VmfbRunner *runner,
+                                           const ModelTailWeights &weights,
+                                           ModelTailWeightViews *views) {
+  const std::vector<float> lm_head_weight_t = transpose(
+      weights.lm_head_weight, weights.vocab, weights.hidden, "lm_head_weight");
+
+  IREE_RETURN_IF_ERROR(make_view(runner, FloatPrecision::kF32,
+                                 weights.final_norm_weight, {weights.hidden},
+                                 &views->final_norm_weight));
+  IREE_RETURN_IF_ERROR(make_view(runner, FloatPrecision::kF32, lm_head_weight_t,
+                                 {weights.hidden, weights.vocab},
+                                 &views->lm_head_weight));
   return iree_ok_status();
 }
 
@@ -346,6 +421,7 @@ bool has_layer_cache(const LayerKvCache &cache) {
 iree_status_t validate_layer_cache(iree_hal_buffer_view_t *key_cache,
                                    iree_hal_buffer_view_t *value_cache,
                                    const QwenKvCacheAbi &abi,
+                                   FloatPrecision precision,
                                    const char *label) {
   if (!key_cache || !value_cache) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
@@ -354,30 +430,32 @@ iree_status_t validate_layer_cache(iree_hal_buffer_view_t *key_cache,
   }
   if (iree_hal_buffer_view_shape_rank(key_cache) != 2 ||
       iree_hal_buffer_view_shape_dim(key_cache, 0) != abi.visible_tokens ||
-      iree_hal_buffer_view_shape_dim(key_cache, 1) != abi.kv_dim) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "%s key cache must be %ux%uxf32", label,
-                            abi.visible_tokens, abi.kv_dim);
+      iree_hal_buffer_view_shape_dim(key_cache, 1) != abi.kv_dim ||
+      iree_hal_buffer_view_element_type(key_cache) != element_type(precision)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT, "%s key cache must be %ux%ux%s", label,
+        abi.visible_tokens, abi.kv_dim, precision_name(precision));
   }
   if (iree_hal_buffer_view_shape_rank(value_cache) != 2 ||
       iree_hal_buffer_view_shape_dim(value_cache, 0) != abi.visible_tokens ||
-      iree_hal_buffer_view_shape_dim(value_cache, 1) != abi.kv_dim) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "%s value cache must be %ux%uxf32", label,
-                            abi.visible_tokens, abi.kv_dim);
+      iree_hal_buffer_view_shape_dim(value_cache, 1) != abi.kv_dim ||
+      iree_hal_buffer_view_element_type(value_cache) !=
+          element_type(precision)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT, "%s value cache must be %ux%ux%s", label,
+        abi.visible_tokens, abi.kv_dim, precision_name(precision));
   }
   return iree_ok_status();
 }
 
-iree_status_t
-run_decode_token_step(VmfbRunner *runner,
-                      const iree_vm_function_t &decode1_function,
-                      const iree_vm_function_t &decode2_function,
-                      const iree_vm_function_t &decode3_function,
-                      uint32_t step_index, iree_hal_buffer_view_t *input_hidden,
-                      const std::vector<LayerWeightViews> &weights,
-                      std::vector<LayerKvCache> *layer_caches,
-                      bool verbose_layers, BufferViewPtr *out_hidden) {
+iree_status_t run_decode_token_step(
+    VmfbRunner *runner, const iree_vm_function_t &decode1_function,
+    const iree_vm_function_t &decode2_function,
+    const iree_vm_function_t &decode3_function, uint32_t step_index,
+    iree_hal_buffer_view_t *input_hidden, FloatPrecision precision,
+    const std::vector<LayerWeightViews> &weights,
+    std::vector<LayerKvCache> *layer_caches, bool verbose_layers,
+    BufferViewPtr *out_hidden) {
   if (step_index > 2) {
     return iree_make_status(
         IREE_STATUS_UNIMPLEMENTED,
@@ -397,7 +475,7 @@ run_decode_token_step(VmfbRunner *runner,
                                      weights[layer], &output));
       IREE_RETURN_IF_ERROR(
           validate_layer_cache(output.key_cache.get(), output.value_cache.get(),
-                               kDecode1CacheAbi, "decode step 1"));
+                               kDecode1CacheAbi, precision, "decode step 1"));
     } else if (step_index == 1) {
       if (!has_layer_cache((*layer_caches)[layer])) {
         return iree_make_status(
@@ -411,7 +489,7 @@ run_decode_token_step(VmfbRunner *runner,
           (*layer_caches)[layer].value_cache.get(), weights[layer], &output));
       IREE_RETURN_IF_ERROR(
           validate_layer_cache(output.key_cache.get(), output.value_cache.get(),
-                               kDecode2CacheAbi, "decode step 2"));
+                               kDecode2CacheAbi, precision, "decode step 2"));
     } else {
       if (!has_layer_cache((*layer_caches)[layer])) {
         return iree_make_status(
@@ -425,7 +503,7 @@ run_decode_token_step(VmfbRunner *runner,
           (*layer_caches)[layer].value_cache.get(), weights[layer], &output));
       IREE_RETURN_IF_ERROR(
           validate_layer_cache(output.key_cache.get(), output.value_cache.get(),
-                               kDecode3CacheAbi, "decode step 3"));
+                               kDecode3CacheAbi, precision, "decode step 3"));
     }
 
     hidden = std::move(output.hidden);
@@ -442,17 +520,16 @@ run_decode_token_step(VmfbRunner *runner,
   return iree_ok_status();
 }
 
-iree_status_t
-initialize_variable_layer_caches(VmfbRunner *runner, uint32_t layers,
-                                 uint32_t max_cache_tokens,
-                                 std::vector<LayerKvCache> *layer_caches) {
+iree_status_t initialize_variable_layer_caches(
+    VmfbRunner *runner, uint32_t layers, uint32_t max_cache_tokens,
+    FloatPrecision precision, std::vector<LayerKvCache> *layer_caches) {
   const std::vector<float> zero_cache(static_cast<size_t>(max_cache_tokens) *
                                       kKvDim);
   for (uint32_t layer = 0; layer < layers; ++layer) {
-    IREE_RETURN_IF_ERROR(make_view(runner, zero_cache,
+    IREE_RETURN_IF_ERROR(make_view(runner, precision, zero_cache,
                                    {max_cache_tokens, kKvDim},
                                    &(*layer_caches)[layer].key_cache));
-    IREE_RETURN_IF_ERROR(make_view(runner, zero_cache,
+    IREE_RETURN_IF_ERROR(make_view(runner, precision, zero_cache,
                                    {max_cache_tokens, kKvDim},
                                    &(*layer_caches)[layer].value_cache));
   }
@@ -462,7 +539,7 @@ initialize_variable_layer_caches(VmfbRunner *runner, uint32_t layers,
 iree_status_t run_decode_token_step_with_variable_cache(
     VmfbRunner *runner, const iree_vm_function_t &function, uint32_t step_index,
     uint32_t max_cache_tokens, iree_hal_buffer_view_t *input_hidden,
-    const std::vector<LayerWeightViews> &weights,
+    FloatPrecision precision, const std::vector<LayerWeightViews> &weights,
     std::vector<LayerKvCache> *layer_caches, bool verbose_layers,
     BufferViewPtr *out_hidden) {
   if (step_index >= max_cache_tokens) {
@@ -495,7 +572,7 @@ iree_status_t run_decode_token_step_with_variable_cache(
     IREE_RETURN_IF_ERROR(validate_layer_cache(
         output.key_cache.get(), output.value_cache.get(),
         QwenKvCacheAbi{/*visible_tokens=*/max_cache_tokens, /*kv_dim=*/kKvDim},
-        "variable KV cache decode step"));
+        precision, "variable KV cache decode step"));
 
     hidden = std::move(output.hidden);
     (*layer_caches)[layer].key_cache = std::move(output.key_cache);
@@ -513,23 +590,12 @@ iree_status_t run_decode_token_step_with_variable_cache(
 
 iree_status_t run_tail(VmfbRunner *runner, const iree_vm_function_t &function,
                        iree_hal_buffer_view_t *hidden,
-                       const ModelTailWeights &weights,
+                       const ModelTailWeightViews &weight_views,
                        BufferViewPtr *out_logits) {
-  BufferViewPtr final_norm_weight;
-  BufferViewPtr lm_head_weight;
-  const std::vector<float> lm_head_weight_t = transpose(
-      weights.lm_head_weight, weights.vocab, weights.hidden, "lm_head_weight");
-
-  IREE_RETURN_IF_ERROR(make_view(runner, weights.final_norm_weight,
-                                 {weights.hidden}, &final_norm_weight));
-  IREE_RETURN_IF_ERROR(make_view(runner, lm_head_weight_t,
-                                 {weights.hidden, weights.vocab},
-                                 &lm_head_weight));
-
   std::vector<iree_hal_buffer_view_t *> inputs = {
       hidden,
-      final_norm_weight.get(),
-      lm_head_weight.get(),
+      weight_views.final_norm_weight.get(),
+      weight_views.lm_head_weight.get(),
   };
 
   std::vector<BufferViewPtr> outputs;
@@ -547,11 +613,26 @@ iree_status_t inspect_logits(iree_hal_buffer_view_t *view, uint32_t vocab,
                             "unexpected logits shape");
   }
 
-  std::vector<float> logits(vocab);
+  const iree_hal_element_type_t type = iree_hal_buffer_view_element_type(view);
   iree_hal_buffer_t *buffer = iree_hal_buffer_view_buffer(view);
-  iree_status_t status = iree_hal_buffer_map_read(
-      buffer, 0, logits.data(), logits.size() * sizeof(float));
-  IREE_RETURN_IF_ERROR(status);
+  std::vector<float> logits(vocab);
+  if (type == IREE_HAL_ELEMENT_TYPE_FLOAT_32) {
+    IREE_RETURN_IF_ERROR(iree_hal_buffer_map_read(
+        buffer, 0, logits.data(), logits.size() * sizeof(float)));
+  } else if (type == IREE_HAL_ELEMENT_TYPE_FLOAT_16 ||
+             type == IREE_HAL_ELEMENT_TYPE_BFLOAT_16) {
+    std::vector<uint16_t> packed(vocab);
+    IREE_RETURN_IF_ERROR(iree_hal_buffer_map_read(
+        buffer, 0, packed.data(), packed.size() * sizeof(uint16_t)));
+    for (uint32_t i = 0; i < vocab; ++i) {
+      logits[i] = type == IREE_HAL_ELEMENT_TYPE_FLOAT_16
+                      ? iree_math_f16_to_f32(packed[i])
+                      : iree_math_bf16_to_f32(packed[i]);
+    }
+  } else {
+    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
+                            "logits must be f32, f16, or bf16");
+  }
 
   uint32_t top_index = 0;
   float top_value = -std::numeric_limits<float>::infinity();
@@ -574,7 +655,8 @@ iree_status_t inspect_logits(iree_hal_buffer_view_t *view, uint32_t vocab,
 
 iree_status_t make_token_hidden(VmfbRunner *runner,
                                 const ModelTailWeights &tail_weights,
-                                uint32_t token_id, BufferViewPtr *out_hidden) {
+                                uint32_t token_id, FloatPrecision precision,
+                                BufferViewPtr *out_hidden) {
   const auto iter = std::find(tail_weights.token_ids.begin(),
                               tail_weights.token_ids.end(), token_id);
   if (iter == tail_weights.token_ids.end()) {
@@ -589,7 +671,7 @@ iree_status_t make_token_hidden(VmfbRunner *runner,
   const auto begin = tail_weights.token_embeddings.begin() +
                      static_cast<ptrdiff_t>(token_index * kHidden);
   std::vector<float> initial_hidden(begin, begin + kHidden);
-  return make_view(runner, initial_hidden, {1, kHidden}, out_hidden);
+  return make_view(runner, precision, initial_hidden, {1, kHidden}, out_hidden);
 }
 
 Args parse_args(int argc, char **argv) {
@@ -672,6 +754,7 @@ Args parse_args(int argc, char **argv) {
       const std::filesystem::path bundle_dir = argv[option_index + 1];
       const auto manifest = load_qwen_decode_bundle_manifest(bundle_dir);
       args.max_cache_tokens = manifest.max_cache_tokens;
+      args.precision = parse_precision(manifest.precision);
       if (args.max_seq_len > manifest.sequence_capacity) {
         throw std::runtime_error(
             "--max-seq-len must not exceed bundle sequence_capacity");
@@ -876,6 +959,9 @@ iree_status_t load_qwen_weights(VmfbRunner *runner, const Args &args,
                             "embedding rows");
   }
 
+  IREE_RETURN_IF_ERROR(make_model_tail_weight_views(runner, weights->tail,
+                                                    &weights->tail_views));
+
   weights->layers.clear();
   weights->layers.reserve(args.layers);
   weights->layer_views.clear();
@@ -894,6 +980,7 @@ iree_status_t load_qwen_weights(VmfbRunner *runner, const Args &args,
                               layer);
     }
     IREE_RETURN_IF_ERROR(make_layer_weight_views(runner, weights->layers.back(),
+                                                 args.precision,
                                                  &weights->layer_views[layer]));
     if (args.verbose_layers) {
       std::printf(
@@ -912,7 +999,8 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
   std::vector<LayerKvCache> layer_caches(args.layers);
   if (args.max_cache_tokens != 0) {
     IREE_RETURN_IF_ERROR(initialize_variable_layer_caches(
-        runner, args.layers, args.max_cache_tokens, &layer_caches));
+        runner, args.layers, args.max_cache_tokens, args.precision,
+        &layer_caches));
   }
 
   BufferViewPtr hidden;
@@ -941,22 +1029,22 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
     }
     std::fflush(stdout);
     BufferViewPtr token_hidden;
-    IREE_RETURN_IF_ERROR(
-        make_token_hidden(runner, weights.tail, input_token, &token_hidden));
+    IREE_RETURN_IF_ERROR(make_token_hidden(runner, weights.tail, input_token,
+                                           args.precision, &token_hidden));
     if (args.max_cache_tokens != 0) {
       IREE_RETURN_IF_ERROR(run_decode_token_step_with_variable_cache(
           runner, functions.variable_layer, step, args.max_cache_tokens,
-          token_hidden.get(), weights.layer_views, &layer_caches,
-          args.verbose_layers, &hidden));
+          token_hidden.get(), args.precision, weights.layer_views,
+          &layer_caches, args.verbose_layers, &hidden));
     } else {
       IREE_RETURN_IF_ERROR(run_decode_token_step(
           runner, functions.layer, functions.decode2_layer,
-          functions.decode3_layer, step, token_hidden.get(),
+          functions.decode3_layer, step, token_hidden.get(), args.precision,
           weights.layer_views, &layer_caches, args.verbose_layers, &hidden));
     }
     if (step + 1 == prompt_len) {
-      std::printf("iree_qwen progress phase=prefill status=submitted tokens=%u "
-                  "host_submit_ms=%.3f\n",
+      std::printf("iree_qwen progress phase=prefill status=complete tokens=%u "
+                  "elapsed_ms=%.3f\n",
                   prompt_len, elapsed_ms(decode_start));
       std::fflush(stdout);
     }
@@ -964,7 +1052,7 @@ iree_status_t run_decode_loop(VmfbRunner *runner, const Args &args,
       const uint32_t generation_step = step + 2 - prompt_len;
       BufferViewPtr step_logits;
       IREE_RETURN_IF_ERROR(run_tail(runner, functions.tail, hidden.get(),
-                                    weights.tail, &step_logits));
+                                    weights.tail_views, &step_logits));
       IREE_RETURN_IF_ERROR(inspect_logits(step_logits.get(), weights.tail.vocab,
                                           generation_step, &current_token));
       std::printf("iree_qwen progress phase=decode step=%u/%u status=complete "
@@ -997,9 +1085,9 @@ iree_status_t run(const Args &args) {
           ? 1
           : static_cast<uint32_t>(args.prompt_token_ids.size());
   std::printf("iree_qwen config layers=%u prompt_tokens=%u max_new_tokens=%u "
-              "max_seq_len=%u cache_capacity=%u\n",
+              "max_seq_len=%u cache_capacity=%u precision=%s\n",
               args.layers, prompt_len, args.decode_steps, args.max_seq_len,
-              args.max_cache_tokens);
+              args.max_cache_tokens, precision_name(args.precision));
   std::printf("iree_qwen startup phase=modules status=start\n");
   std::fflush(stdout);
   const auto modules_start = SteadyClock::now();

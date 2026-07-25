@@ -22,7 +22,9 @@ DEFAULT_BUNDLE_DIR = Path("/tmp/lrrt-qwen-e2e")
 DEFAULT_IREE_DECODE_BUNDLE_DIR = Path("/tmp/lrrt-iree-qwen-decode-bundle")
 DEFAULT_IREE_PROBE_DIR = ROOT / "build-iree-probe"
 DEFAULT_IREE_TARGET = "gfx1101"
-IREE_LAYER_MODULE_RE = re.compile(r"^qwen_decode_layer_kv_cache_max([1-9][0-9]*)$")
+IREE_LAYER_MODULE_RE = re.compile(
+    r"^qwen_decode_layer_kv_cache_max([1-9][0-9]*)(?:_(f16|bf16))?$"
+)
 GENERATED_TOKEN_IDS_RE = re.compile(
     r"^generated_token_ids=\[([0-9]+(?:,[0-9]+)*)\]$", re.MULTILINE
 )
@@ -109,6 +111,8 @@ def render_chat_prompt(tokenizer_dir: Path, system: str | None, user: str) -> st
 def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
     if args.reference_check and args.backend != "iree":
         raise ValueError("--reference-check requires --iree")
+    if args.iree_precision != "f32" and args.backend != "iree":
+        raise ValueError("--iree-precision requires --iree")
     if (
         args.expect_generated_token_ids is not None
         or args.expect_generated_text is not None
@@ -506,8 +510,15 @@ def iree_decode_bundle_sequence_capacity(bundle_dir: Path) -> int | None:
     return value
 
 
-def iree_layer_module_name(max_cache_tokens: int) -> str:
-    return f"qwen_decode_layer_kv_cache_max{max_cache_tokens}"
+def iree_precision_suffix(precision: str) -> str:
+    return "" if precision == "f32" else f"_{precision}"
+
+
+def iree_layer_module_name(max_cache_tokens: int, precision: str = "f32") -> str:
+    return (
+        f"qwen_decode_layer_kv_cache_max{max_cache_tokens}"
+        f"{iree_precision_suffix(precision)}"
+    )
 
 
 def parse_iree_layer_capacity(path: Path) -> int | None:
@@ -518,7 +529,9 @@ def parse_iree_layer_capacity(path: Path) -> int | None:
     return None
 
 
-def discover_iree_cache_capacities(probe_dir: Path, target: str) -> list[int]:
+def discover_iree_cache_capacities(
+    probe_dir: Path, target: str, precision: str = "f32"
+) -> list[int]:
     capacities: list[int] = []
     if not probe_dir.is_dir():
         return capacities
@@ -528,7 +541,9 @@ def discover_iree_cache_capacities(probe_dir: Path, target: str) -> list[int]:
         capacity = parse_iree_layer_capacity(child)
         if capacity is None:
             continue
-        module_name = iree_layer_module_name(capacity)
+        module_name = iree_layer_module_name(capacity, precision)
+        if child.name != module_name:
+            continue
         vmfb = child / f"{module_name}_{target}.vmfb"
         if vmfb.is_file():
             capacities.append(capacity)
@@ -569,19 +584,24 @@ def resolve_iree_cache_capacity(args: argparse.Namespace) -> int:
         return args.max_seq_len
     return select_iree_cache_capacity(
         args.max_seq_len,
-        discover_iree_cache_capacities(args.iree_probe_dir, args.iree_target),
+        discover_iree_cache_capacities(
+            args.iree_probe_dir, args.iree_target, args.iree_precision
+        ),
     )
 
 
 def default_iree_layer_vmfb(
-    probe_dir: Path, target: str, max_cache_tokens: int
+    probe_dir: Path, target: str, max_cache_tokens: int, precision: str = "f32"
 ) -> Path:
-    module_name = iree_layer_module_name(max_cache_tokens)
+    module_name = iree_layer_module_name(max_cache_tokens, precision)
     return probe_dir / module_name / f"{module_name}_{target}.vmfb"
 
 
-def default_iree_tail_vmfb(probe_dir: Path, target: str) -> Path:
-    return probe_dir / "qwen_decode1_tail" / f"qwen_decode1_tail_{target}.vmfb"
+def default_iree_tail_vmfb(
+    probe_dir: Path, target: str, precision: str = "f32"
+) -> Path:
+    module_name = f"qwen_decode1_tail{iree_precision_suffix(precision)}"
+    return probe_dir / module_name / f"{module_name}_{target}.vmfb"
 
 
 def resolve_iree_vmfb_path(
@@ -692,12 +712,19 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
     cache_capacity = resolve_iree_cache_capacity(args)
     layer_vmfb = resolve_iree_vmfb_path(
         args.iree_layer_vmfb,
-        default_iree_layer_vmfb(args.iree_probe_dir, args.iree_target, cache_capacity),
+        default_iree_layer_vmfb(
+            args.iree_probe_dir,
+            args.iree_target,
+            cache_capacity,
+            args.iree_precision,
+        ),
         "--iree-layer-vmfb",
     )
     tail_vmfb = resolve_iree_vmfb_path(
         args.iree_tail_vmfb,
-        default_iree_tail_vmfb(args.iree_probe_dir, args.iree_target),
+        default_iree_tail_vmfb(
+            args.iree_probe_dir, args.iree_target, args.iree_precision
+        ),
         "--iree-tail-vmfb",
     )
     command = [
@@ -705,6 +732,8 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
         str(args.iree_bundle_writer),
         "--target",
         args.iree_target,
+        "--precision",
+        args.iree_precision,
         "--layer-vmfb",
         str(layer_vmfb),
         "--tail-vmfb",
@@ -716,7 +745,7 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
         "--max-cache-tokens",
         str(cache_capacity),
         "--layer-export",
-        iree_layer_module_name(cache_capacity),
+        iree_layer_module_name(cache_capacity, args.iree_precision),
     ]
     if args.force_iree_bundle:
         command.append("--force")
@@ -725,12 +754,21 @@ def iree_bundle_writer_command(args: argparse.Namespace) -> list[str]:
 
 def iree_runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     validate_generation_length(args)
+    manifest = iree_decode_bundle_manifest(args.iree_decode_bundle_dir)
     capacity = iree_decode_bundle_sequence_capacity(args.iree_decode_bundle_dir)
     if capacity is not None and args.max_seq_len > capacity:
         raise ValueError(
             f"--max-seq-len {args.max_seq_len} exceeds IREE decode bundle "
             f"sequence_capacity ({capacity})"
         )
+    if manifest is not None:
+        precision = manifest.get("precision", "f32")
+        if precision != args.iree_precision:
+            raise ValueError(
+                f"{args.iree_decode_bundle_dir / 'manifest.json'} precision "
+                f"({precision}) does not match --iree-precision "
+                f"({args.iree_precision})"
+            )
     command = [
         str(args.iree_runner),
         "--max-new-tokens",
@@ -928,6 +966,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--requirements", default=DEFAULT_REQUIREMENTS, type=Path)
     parser.add_argument("--python", type=Path)
     parser.add_argument("--iree-target", default=DEFAULT_IREE_TARGET)
+    parser.add_argument(
+        "--iree-precision",
+        choices=("f32", "f16", "bf16"),
+        default="f32",
+        help="IREE device compute and KV-cache precision",
+    )
     parser.add_argument("--iree-probe-dir", default=DEFAULT_IREE_PROBE_DIR, type=Path)
     parser.add_argument("--iree-layer-vmfb", type=Path)
     parser.add_argument("--iree-tail-vmfb", type=Path)
