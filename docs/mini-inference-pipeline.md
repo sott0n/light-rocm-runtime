@@ -529,6 +529,27 @@ mutually exclusive. Tokenization requires the `tokenizers` package from
 `tools/requirements.txt`; tokenizer and text semantics remain in the Python
 wrapper rather than the runtime or IREE HAL adapter.
 
+For instruction-tuned Qwen checkpoints, use `--chat-user` instead of manually
+constructing ChatML. The wrapper reads `chat_template` from
+`tokenizer_config.json`, renders the system and user messages with an assistant
+generation prompt, and prints the rendered value as `chat_prompt=...` before
+tokenization:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/Qwen2.5-0.5B-Instruct \
+  --chat-system "You are helpful." \
+  --chat-user "Say hello." \
+  --max-seq-len 32 \
+  --max-new-tokens 8
+```
+
+`--chat-user`, `--prompt`, and `--token-ids` are mutually exclusive.
+`--chat-system` is optional and valid only with `--chat-user`; when it is
+omitted, the checkpoint template controls its default system message. Chat
+template rendering additionally requires `jinja2` from
+`tools/requirements.txt`.
+
 Generation stops early when the selected token matches `--eos-token-id`.
 The wrapper infers that id from `generation_config.json`, `config.json`, or
 `tokenizer_config.json` when those files are available, and passes an explicit
@@ -577,6 +598,41 @@ The command fails if either result changes and prints
 regression independent of ambiguity in how adjacent tokenizer pieces are
 rendered; pinning text also covers the complete tokenize, IREE generation, and
 decode path.
+
+Longer chat generation can pin the stop reason as well. For the official
+Qwen2.5-0.5B-Instruct checkpoint, this 20-token chat prompt plus eight generated
+tokens exercises the max32 VMFB and all eight autoregressive feedback steps:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/Qwen2.5-0.5B-Instruct \
+  --chat-system "You are helpful." \
+  --chat-user "Say hello." \
+  --max-seq-len 32 \
+  --max-new-tokens 8 \
+  --reference-check \
+  --expect-generated-token-ids 9707,0,2585,646,358,7789,498,3351 \
+  --expect-generated-text "Hello! How can I assist you today" \
+  --expect-stop-reason max_new_tokens
+```
+
+To cover early EOS termination with the same official model and max32 bundle:
+
+```text
+python3 tools/run_qwen_e2e.py --iree \
+  --checkpoint-dir /path/to/Qwen2.5-0.5B-Instruct \
+  --chat-system "Reply only with OK." \
+  --chat-user "Ready?" \
+  --max-seq-len 32 \
+  --max-new-tokens 8 \
+  --expect-generated-token-ids 3925,151645 \
+  --expect-generated-text "OK" \
+  --expect-stop-reason eos_token
+```
+
+`--expect-stop-reason` accepts `max_new_tokens` or `eos_token`. It makes a
+regression fail if the native runner stops for a different reason, including
+when the token IDs and decoded text would otherwise pass.
 
 By default, the wrapper discovers available layer VMFB capacities and the tail
 VMFB from the standard probe output paths under `build-iree-probe/` for

@@ -33,12 +33,14 @@ class FakeTokenizer:
     def __init__(self, encoded_ids: list[int] | None = None):
         self.encoded_ids = encoded_ids or []
         self.encoded_text: str | None = None
+        self.add_special_tokens: bool | None = None
         self.decoded_ids: list[int] | None = None
         self.skip_special_tokens: bool | None = None
         self.token_ids: dict[str, int] = {}
 
-    def encode(self, text: str) -> FakeEncoding:
+    def encode(self, text: str, add_special_tokens: bool = True) -> FakeEncoding:
         self.encoded_text = text
+        self.add_special_tokens = add_special_tokens
         return FakeEncoding(self.encoded_ids)
 
     def decode(self, token_ids: list[int], skip_special_tokens: bool = True) -> str:
@@ -82,6 +84,7 @@ def test_prepare_text_prompt_uses_checkpoint_tokenizer() -> None:
     assert loaded is tokenizer
     assert loaded_paths == [Path("/tmp/qwen-checkpoint")]
     assert tokenizer.encoded_text == "hello"
+    assert tokenizer.add_special_tokens is False
     assert args.token_ids == "10,20,30"
     assert output.getvalue() == "prompt_token_ids=[10,20,30]\n"
 
@@ -95,6 +98,65 @@ def test_prepare_text_prompt_requires_tokenizer_location() -> None:
         assert "--tokenizer-dir or --checkpoint-dir" in str(error)
     else:
         raise AssertionError("expected missing tokenizer location to fail")
+
+
+def test_prepare_chat_prompt_applies_checkpoint_template() -> None:
+    runner = load_runner()
+    tokenizer = FakeTokenizer([151644, 8948, 198, 2610, 151645, 198])
+    with tempfile.TemporaryDirectory() as tmpdir:
+        checkpoint = Path(tmpdir)
+        (checkpoint / "tokenizer_config.json").write_text(
+            json.dumps(
+                {
+                    "chat_template": (
+                        "{% for message in messages %}"
+                        "<|im_start|>{{ message.role }}\n"
+                        "{{ message.content }}<|im_end|>\n"
+                        "{% endfor %}"
+                        "{% if add_generation_prompt %}"
+                        "<|im_start|>assistant\n{% endif %}"
+                    )
+                }
+            ),
+            encoding="utf-8",
+        )
+        runner.load_tokenizer = lambda path: tokenizer
+        args = runner.parse_args(
+            [
+                "--iree",
+                "--checkpoint-dir",
+                str(checkpoint),
+                "--chat-system",
+                "Be concise.",
+                "--chat-user",
+                "Hello",
+            ]
+        )
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            loaded = runner.prepare_text_inputs(args)
+
+    assert loaded is tokenizer
+    assert tokenizer.encoded_text == (
+        "<|im_start|>system\nBe concise.<|im_end|>\n"
+        "<|im_start|>user\nHello<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    assert tokenizer.add_special_tokens is False
+    assert args.token_ids == "151644,8948,198,2610,151645,198"
+    assert output.getvalue().endswith(
+        "prompt_token_ids=[151644,8948,198,2610,151645,198]\n"
+    )
+
+
+def test_chat_system_requires_chat_user() -> None:
+    runner = load_runner()
+    try:
+        runner.parse_args(["--iree", "--chat-system", "Be concise."])
+    except SystemExit as error:
+        assert error.code == 2
+    else:
+        raise AssertionError("expected standalone --chat-system to fail")
 
 
 def test_text_options_require_iree() -> None:
@@ -231,6 +293,50 @@ def test_check_generation_regression_rejects_token_mismatch() -> None:
         assert "generated token regression mismatch" in str(error)
     else:
         raise AssertionError("expected generated token mismatch to fail")
+
+
+def test_check_generation_regression_checks_stop_reason() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--layers",
+            "1",
+            "--expect-stop-reason",
+            "eos_token",
+        ]
+    )
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
+        runner.check_generation_regression(
+            args,
+            tokenizer=None,
+            runner_output=("generated_token_ids=[7,151645]\nstop_reason=eos_token\n"),
+        )
+    assert output.getvalue() == "text_generation_regression=passed\n"
+
+
+def test_check_generation_regression_rejects_stop_reason_mismatch() -> None:
+    runner = load_runner()
+    args = runner.parse_args(
+        [
+            "--iree",
+            "--layers",
+            "1",
+            "--expect-stop-reason",
+            "eos_token",
+        ]
+    )
+    try:
+        runner.check_generation_regression(
+            args,
+            tokenizer=None,
+            runner_output=("generated_token_ids=[7,8]\nstop_reason=max_new_tokens\n"),
+        )
+    except ValueError as error:
+        assert "stop reason regression mismatch" in str(error)
+    else:
+        raise AssertionError("expected stop reason mismatch to fail")
 
 
 def test_parse_generated_token_ids_requires_one_summary() -> None:
@@ -885,6 +991,8 @@ def main() -> int:
     test_parse_args_preserves_default_token_ids()
     test_prepare_text_prompt_uses_checkpoint_tokenizer()
     test_prepare_text_prompt_requires_tokenizer_location()
+    test_prepare_chat_prompt_applies_checkpoint_template()
+    test_chat_system_requires_chat_user()
     test_text_options_require_iree()
     test_reference_check_requires_iree()
     test_generation_regression_requires_iree()
@@ -894,6 +1002,8 @@ def main() -> int:
     test_resolve_eos_token_id_reads_tokenizer_config()
     test_check_generation_regression_decodes_runner_summary()
     test_check_generation_regression_rejects_token_mismatch()
+    test_check_generation_regression_checks_stop_reason()
+    test_check_generation_regression_rejects_stop_reason_mismatch()
     test_parse_generated_token_ids_requires_one_summary()
     test_parse_iree_top_logit_reads_requested_step()
     test_verify_reference_outputs_checks_every_generated_step()

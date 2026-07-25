@@ -30,6 +30,7 @@ TOP_LOGIT_RE = re.compile(
     r"^step ([1-9][0-9]*) top_token=([0-9]+) logit=([-+0-9.eE]+) vocab=([0-9]+)$",
     re.MULTILINE,
 )
+STOP_REASON_RE = re.compile(r"^stop_reason=(eos_token|max_new_tokens)$", re.MULTILINE)
 
 
 def read_json(path: Path) -> dict[str, object]:
@@ -68,10 +69,41 @@ def load_tokenizer(tokenizer_dir: Path) -> Any:
         from tokenizers import Tokenizer
     except ImportError as error:
         raise RuntimeError(
-            "tokenizers is required for --prompt or --tokenizer-dir; install "
-            "tools/requirements.txt"
+            "tokenizers is required for text input or output; "
+            "install tools/requirements.txt"
         ) from error
     return Tokenizer.from_file(str(path))
+
+
+def render_chat_prompt(tokenizer_dir: Path, system: str | None, user: str) -> str:
+    config_path = tokenizer_dir / "tokenizer_config.json"
+    if not config_path.is_file():
+        raise ValueError(f"tokenizer config was not found: {config_path}")
+    chat_template = read_json(config_path).get("chat_template")
+    if not isinstance(chat_template, str) or not chat_template:
+        raise ValueError(f"{config_path} field 'chat_template' must be a string")
+    try:
+        from jinja2 import StrictUndefined
+        from jinja2.sandbox import ImmutableSandboxedEnvironment
+    except ImportError as error:
+        raise RuntimeError(
+            "jinja2 is required for --chat-user; install tools/requirements.txt"
+        ) from error
+
+    messages: list[dict[str, str]] = []
+    if system is not None:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": user})
+    environment = ImmutableSandboxedEnvironment(
+        trim_blocks=True,
+        lstrip_blocks=True,
+        undefined=StrictUndefined,
+    )
+    return environment.from_string(chat_template).render(
+        messages=messages,
+        tools=None,
+        add_generation_prompt=True,
+    )
 
 
 def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
@@ -80,25 +112,41 @@ def prepare_text_inputs(args: argparse.Namespace) -> Any | None:
     if (
         args.expect_generated_token_ids is not None
         or args.expect_generated_text is not None
+        or args.expect_stop_reason is not None
     ) and args.backend != "iree":
-        raise ValueError("--expect-generated-* requires --iree")
+        raise ValueError(
+            "--expect-generated-* requires --iree; "
+            "--expect-stop-reason also requires --iree"
+        )
     if args.backend != "iree" and (
-        args.prompt is not None or args.tokenizer_dir is not None
+        args.prompt is not None
+        or args.chat_user is not None
+        or args.tokenizer_dir is not None
     ):
-        raise ValueError("--prompt and --tokenizer-dir currently require --iree")
-    if args.prompt is None and args.tokenizer_dir is None:
+        raise ValueError(
+            "--prompt, --chat-user, and --tokenizer-dir currently require --iree"
+        )
+    if args.prompt is None and args.chat_user is None and args.tokenizer_dir is None:
         return None
 
     tokenizer_dir = args.tokenizer_dir
     if tokenizer_dir is None:
         if args.checkpoint_dir is None:
-            raise ValueError("--prompt requires --tokenizer-dir or --checkpoint-dir")
+            raise ValueError("text input requires --tokenizer-dir or --checkpoint-dir")
         tokenizer_dir = args.checkpoint_dir
     tokenizer = load_tokenizer(tokenizer_dir)
-    if args.prompt is not None:
-        prompt_token_ids = tokenizer.encode(args.prompt).ids
+    input_text = args.prompt
+    if args.chat_user is not None:
+        input_text = render_chat_prompt(tokenizer_dir, args.chat_system, args.chat_user)
+        print(
+            "chat_prompt="
+            + json.dumps(input_text, ensure_ascii=False, separators=(",", ":")),
+            flush=True,
+        )
+    if input_text is not None:
+        prompt_token_ids = tokenizer.encode(input_text, add_special_tokens=False).ids
         if not prompt_token_ids:
-            raise ValueError("--prompt encoded to an empty token sequence")
+            raise ValueError("text input encoded to an empty token sequence")
         args.token_ids = ",".join(str(value) for value in prompt_token_ids)
         print(f"prompt_token_ids=[{args.token_ids}]", flush=True)
     return tokenizer
@@ -328,7 +376,7 @@ def run_reference_check(args: argparse.Namespace, runner_output: str) -> None:
     prompt_ids = parse_token_ids(args.token_ids)
     model = AutoModelForCausalLM.from_pretrained(
         str(args.checkpoint_dir),
-        dtype=torch.float32,
+        torch_dtype=torch.float32,
         local_files_only=True,
         attn_implementation="eager",
     )
@@ -373,9 +421,21 @@ def check_generation_regression(
                 "generated text regression mismatch: "
                 f"actual={generated_text!r}, expected={args.expect_generated_text!r}"
             )
+    if args.expect_stop_reason is not None:
+        stop_reasons = STOP_REASON_RE.findall(runner_output)
+        if len(stop_reasons) != 1:
+            raise ValueError(
+                "IREE runner output must contain exactly one stop_reason summary"
+            )
+        if stop_reasons[0] != args.expect_stop_reason:
+            raise ValueError(
+                "generation stop reason regression mismatch: "
+                f"actual={stop_reasons[0]!r}, expected={args.expect_stop_reason!r}"
+            )
     if (
         args.expect_generated_token_ids is not None
         or args.expect_generated_text is not None
+        or args.expect_stop_reason is not None
     ):
         print("text_generation_regression=passed", flush=True)
 
@@ -765,10 +825,13 @@ def run_iree(args: argparse.Namespace, layers: int, tokenizer: Any | None) -> No
             tokenizer is not None
             or args.reference_check
             or args.expect_generated_token_ids is not None
+            or args.expect_stop_reason is not None
         ),
     )
     if (
-        tokenizer is not None or args.expect_generated_token_ids is not None
+        tokenizer is not None
+        or args.expect_generated_token_ids is not None
+        or args.expect_stop_reason is not None
     ) and not args.dry_run:
         assert runner_output is not None
         check_generation_regression(args, tokenizer, runner_output)
@@ -795,12 +858,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--prompt",
         help="text prompt to tokenize for IREE execution",
     )
+    prompt_group.add_argument(
+        "--chat-user",
+        help="Qwen chat-template user message to tokenize for IREE execution",
+    )
+    parser.add_argument(
+        "--chat-system",
+        help="Qwen chat-template system message; with --chat-user only",
+    )
     parser.add_argument(
         "--tokenizer-dir",
         type=Path,
         help=(
             "directory containing tokenizer.json; defaults to --checkpoint-dir "
-            "with --prompt"
+            "with --prompt or --chat-user"
         ),
     )
     parser.add_argument("--iterations", default=1, type=int)
@@ -836,6 +907,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "--expect-generated-text",
         help="require tokenizer-decoded generated text to match exactly",
+    )
+    parser.add_argument(
+        "--expect-stop-reason",
+        choices=["eos_token", "max_new_tokens"],
+        help="require the native runner's generation stop reason to match",
     )
     parser.add_argument("--backend", choices=["triton", "iree"], default="triton")
     parser.add_argument("--iree", action="store_const", const="iree", dest="backend")
@@ -873,10 +949,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         except (ValueError, TypeError) as error:
             parser.error(f"invalid --expect-generated-token-ids: {error}")
     if args.expect_generated_text is not None and (
-        args.prompt is None and args.tokenizer_dir is None
+        args.prompt is None and args.chat_user is None and args.tokenizer_dir is None
     ):
-        parser.error("--expect-generated-text requires --prompt or --tokenizer-dir")
-    if args.token_ids is None and args.prompt is None:
+        parser.error(
+            "--expect-generated-text requires --prompt, --chat-user, or --tokenizer-dir"
+        )
+    if args.chat_system is not None and args.chat_user is None:
+        parser.error("--chat-system requires --chat-user")
+    if args.token_ids is None and args.prompt is None and args.chat_user is None:
         args.token_ids = "0,1,2"
     args.resolved_eos_token_id = None
     return args
