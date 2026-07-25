@@ -218,6 +218,45 @@ uv run --with-requirements tools/requirements.txt \
 This check loads the model in PyTorch as well as the IREE runner and therefore
 needs additional host memory.
 
+### 7. Development performance snapshot
+
+The following numbers are a diagnostic baseline, not a performance guarantee.
+They were measured on the development `gfx1101` GPU at commit `339175a`, using
+the full 24-layer Qwen2.5-0.5B-Instruct model, an already-converted weight
+bundle, and an already-compiled max64 VMFB bundle. Each row is the median of
+three fresh-process runs:
+
+```sh
+build-iree/adapter/lrrt_iree_qwen_decode1_e2e \
+  --max-new-tokens 2 \
+  --max-seq-len 8 \
+  --prompt-token-ids 23526,25,220 \
+  --bundle /path/to/iree-max64 \
+  /path/to/weights \
+  24
+```
+
+| Phase | Median | Observed range |
+| --- | ---: | ---: |
+| Module initialization | 701.947 ms | 700.584–702.348 ms |
+| Weight loading | 6456.584 ms | 6248.650–6481.618 ms |
+| Three-token prefill host submission | 105.180 ms | 104.719–108.417 ms |
+| First generated-token completion | 1439.319 ms | 1433.094–1649.590 ms |
+| Next generated-token completion | 1438.157 ms | 1433.602–1630.368 ms |
+| Prefill and two-token decode loop | 2940.477 ms | 2938.859–3350.780 ms |
+
+The median measured process time for module initialization, weight loading, and
+the decode loop was approximately 10.1 seconds. After the first generated
+token, this experiment completed approximately 0.70 generated tokens/second.
+The generated IDs were `[16,13]` in every run.
+
+IREE work is submitted asynchronously. Consequently,
+`phase=prefill status=submitted` measures host submission rather than completed
+GPU prefill. The first generated-token completion synchronizes the dependent
+work and includes outstanding prefill cost; it is not a standalone
+time-to-first-token measurement. Use a GPU profiler and a longer run before
+drawing optimization conclusions.
+
 ## Triton
 
 ### 1. Build the Triton benchmark path
@@ -305,6 +344,26 @@ Useful benchmark options include:
 - `--trace-setup` for setup allocation/copy diagnostics
 - `--trace-run` for per-run allocation/copy diagnostics
 - `--sync-stack` for synchronized inter-layer correctness runs
+
+## Current Limitations
+
+The Qwen paths demonstrate correct integration, but are not production
+inference servers:
+
+- The implemented model shape is the FP32 Qwen2/Qwen2.5 0.5B configuration;
+  BF16, FP16, quantized weights, and other model sizes are not supported.
+- IREE runs one sequence at a time and submits prompt tokens sequentially.
+  There is no batched prefill, continuous batching, or multi-request scheduler.
+- IREE generation is greedy. Temperature, top-k, top-p, beam search, and
+  user-selectable sampling seeds are not implemented.
+- IREE KV-cache capacity is selected from statically compiled VMFB variants.
+  The checked-in build flow currently provides capacities up to 64 tokens.
+- Compiled VMFB and Triton artifacts are GPU-target-specific; rebuild them when
+  changing the configured AMDGPU target.
+- IREE progress times are coarse host-side diagnostics and include asynchronous
+  queue effects. Triton has the more detailed benchmark path.
+- Triton validates fixed token-ID inputs and logits, but does not currently
+  provide tokenizer-driven autoregressive text generation.
 
 ## Artifact and Build Directory Summary
 
