@@ -197,9 +197,12 @@ changing the core design.
 - Device allocations use the first suitable allocatable coarse-grained global
   HSA region selected for an agent. There is no public memory-pool selection or
   placement policy.
-- There is no pinned-host allocator, managed/unified memory API, fine-grained
-  shared allocation, virtual memory API, external allocation import/export, or
-  IPC handle support.
+- Pinned-host allocations are device-scoped. The runtime locks ordinary host
+  memory with `hsa_amd_memory_lock`, retains both the host and agent mappings,
+  and translates registered host subranges for asynchronous H2D and D2H copies.
+  It does not expose the agent mapping for zero-copy kernel access.
+- There is no managed/unified memory API, fine-grained shared allocation,
+  virtual memory API, external allocation import/export, or IPC handle support.
 - There is no runtime allocation pool or stream-ordered allocation/free API.
   `lr_free` performs a device-wide drain before releasing memory.
 - The allocation registry tracks only memory allocated by `lr_malloc`. Copy
@@ -207,9 +210,9 @@ changing the core design.
   another ROCm component created otherwise valid GPU-accessible memory.
 - `lr_free` accepts only the exact base pointer returned by `lr_malloc`; copy
   APIs may use validated subranges.
-- Host pointer pinning and lifetime are the caller's responsibility for
-  asynchronous H2D and D2H copies. The API does not guarantee useful
-  copy/compute overlap for arbitrary pageable host pointers.
+- `lr_host_malloc` allocations have runtime-managed pinning and lifetime.
+  Arbitrary pageable host pointers remain accepted for compatibility, but the
+  API does not guarantee useful copy/compute overlap for them.
 - Memory statistics cover only allocations and copies submitted through lrrt.
   They do not report available VRAM, allocations owned by other runtimes,
   compiler scratch, LDS, or kernel private-segment usage.

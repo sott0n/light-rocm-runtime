@@ -16,6 +16,7 @@ The C runtime owns low-level AMD GPU resources created through the public C ABI:
 - user-created queues and events
 - loaded HSACO modules and kernel handles
 - allocations returned by `lr_malloc`
+- pinned host allocations returned by `lr_host_malloc`
 - copies submitted through `lr_memcpy` and `lr_memcpy_async`
 - per-device memory statistics for lrrt-managed work
 
@@ -23,6 +24,13 @@ The runtime tracks allocations returned by `lr_malloc` in its allocation
 registry. `lr_free` only accepts exact pointers returned by `lr_malloc` for the
 same device. Copy APIs accept pointers inside registered allocations when the
 requested byte range stays within the allocation bounds.
+
+Pinned host allocations have a separate registry keyed by the host-visible
+base pointer. Each entry retains the device, size, and HSA agent mapping
+returned by `hsa_amd_memory_lock`. Asynchronous H2D and D2H copies translate
+registered host subranges to that agent mapping. `lr_host_free` accepts only the
+exact base pointer and drains the allocation's device before unlocking and
+freeing it.
 
 The runtime intentionally does not infer tensor ownership, tensor shape, dtype,
 strides, model weights, KV cache layout, or graph lifetime. It only validates
@@ -37,6 +45,7 @@ The C++ wrapper owns convenience lifetime management around the C ABI:
 - `lrrt::Event` calls `lr_event_create` and `lr_event_destroy`
 - `lrrt::Module` calls `lr_module_load_hsaco` and `lr_module_destroy`
 - `lrrt::DeviceBuffer` calls `lr_malloc` and `lr_free`
+- `lrrt::PinnedHostBuffer` calls `lr_host_malloc` and `lr_host_free`
 
 These wrappers do not introduce a second ownership model. They are RAII helpers
 for the same C runtime resources.
@@ -70,6 +79,7 @@ Users of the C ABI must keep these rules:
 
 - call `lr_init` before using runtime resources
 - pass `lr_free` only exact pointers returned by `lr_malloc`
+- pass `lr_host_free` only exact pointers returned by `lr_host_malloc`
 - free an allocation on the same device that allocated it
 - keep allocations, modules, queues, and events alive until queued work using
   them has completed or until the runtime API drains pending work during
@@ -77,6 +87,8 @@ Users of the C ABI must keep these rules:
 - pass only valid byte ranges for device pointers used by copy APIs
 - use `lr_synchronize`, `lr_queue_synchronize`, or events when explicit
   completion is required
+- do not modify an H2D source or read a D2H destination until its asynchronous
+  copy event completes
 
 Users of the C++ wrapper should keep the owning object alive for as long as
 non-owning handles or views may use it. For example, a `DeviceBuffer::view`
@@ -87,8 +99,9 @@ created from an arena allocation must not outlive the owning arena buffer.
 `lr_memory_stats_t` reports only work submitted through lrrt:
 
 - live and peak bytes for `lr_malloc` allocations
-- total allocated and freed bytes
-- allocation and free counts
+- live and peak bytes for pinned host allocations
+- device and pinned-host allocated and freed bytes
+- device and pinned-host allocation and free counts
 - copy byte counts by direction
 - copy call count
 

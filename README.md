@@ -56,8 +56,8 @@ ordering must be expressed with explicit event dependencies.
 
 The current implementation has deliberate limitations. It requires
 Linux/AMDGPU and ROCr/HSA, loads pre-built HSACO only, is not HIP API
-compatible, and does not provide peer-to-peer multi-GPU scheduling, pinned or
-managed memory APIs, stream-ordered allocation, graph capture, dynamic launch
+compatible, and does not provide peer-to-peer multi-GPU scheduling, managed
+memory APIs, stream-ordered allocation, graph capture, dynamic launch
 inference, or a general tensor/kernel ABI. Initialization and runtime state are
 process-global, and several safety-oriented operations introduce broad
 synchronization.
@@ -200,9 +200,8 @@ same data as `lrrt::Device::memory_stats()` and resets it with
 
 `lr_memory_stats_t` tracks work that flows through lrrt:
 
-- currently live bytes and peak live bytes for runtime-managed allocations
-- total allocated and freed bytes
-- allocation and free counts
+- live, peak, allocated, and freed bytes for device and pinned-host allocations
+- device and pinned-host allocation and free counts
 - host-to-device, device-to-host, and device-to-device copy bytes
 - total copy call count
 
@@ -277,10 +276,11 @@ int main() {
 }
 ```
 
-`Runtime`, `DeviceBuffer`, and `Module` manage their runtime resources through
-constructors and destructors. `Device` and `Kernel` are lightweight wrappers
-around the C handles; their lifetimes are still tied to the runtime/module that
-created them.
+`Runtime`, `DeviceBuffer`, `PinnedHostBuffer`, and `Module` manage their runtime
+resources through constructors and destructors. `PinnedHostBuffer` provides
+device-scoped page-locked host storage for predictable asynchronous H2D and D2H
+copies. `Device` and `Kernel` are lightweight wrappers around the C handles;
+their lifetimes are still tied to the runtime/module that created them.
 
 ## Development GPU
 

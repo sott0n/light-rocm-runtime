@@ -61,6 +61,12 @@ typedef struct lr_memory_stats_t {
   uint64_t d2h_copy_bytes;
   uint64_t d2d_copy_bytes;
   uint64_t memcpy_count;
+  uint64_t pinned_host_live_bytes;
+  uint64_t pinned_host_peak_live_bytes;
+  uint64_t pinned_host_total_allocated_bytes;
+  uint64_t pinned_host_total_freed_bytes;
+  uint64_t pinned_host_allocation_count;
+  uint64_t pinned_host_free_count;
 } lr_memory_stats_t;
 
 LRRT_API const char *lr_status_string(lr_status_t status);
@@ -115,6 +121,20 @@ LRRT_API lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr);
 
 /* Waits for pending work on the device before releasing ptr. */
 LRRT_API lr_status_t lr_free(lr_device_t device, void *ptr);
+
+/*
+ * Allocates page-locked host memory mapped for device. The returned pointer is
+ * host-accessible and may be used with host-to-device and device-to-host copy
+ * APIs. The allocation is tied to device.
+ */
+LRRT_API lr_status_t lr_host_malloc(lr_device_t device, size_t size,
+                                    void **ptr);
+
+/*
+ * Waits for pending work on device before unmapping and releasing ptr.
+ * ptr must be the exact base pointer returned by lr_host_malloc.
+ */
+LRRT_API lr_status_t lr_host_free(lr_device_t device, void *ptr);
 
 /* Waits for pending work on the device before performing the copy. */
 LRRT_API lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,

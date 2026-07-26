@@ -15,6 +15,7 @@ set(
   lrrt_allocation_registry_tests allocation_registry.cpp
   lrrt_runtime_api_tests runtime_api.cpp
   lrrt_memory_stats_tests memory_stats.cpp
+  lrrt_pinned_host_memory_tests pinned_host_memory.cpp
   lrrt_device_buffer_ownership_tests device_buffer_ownership.cpp
   lrrt_queue_event_lifetime_tests queue_event_lifetime.cpp
   lrrt_module_buffer_lifetime_tests module_buffer_lifetime.cpp

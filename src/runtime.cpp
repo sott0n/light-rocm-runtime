@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -122,9 +123,18 @@ struct AllocationInfo {
   size_t size;
 };
 
+struct HostAllocationInfo {
+  uint32_t device_index;
+  size_t size;
+  void *agent_ptr;
+};
+
 std::mutex g_devices_mutex;
 std::vector<DeviceState> g_devices;
+hsa_agent_t g_host_agent{};
+bool g_has_host_agent = false;
 std::unordered_map<void *, AllocationInfo> g_allocations;
+std::unordered_map<void *, HostAllocationInfo> g_host_allocations;
 std::unordered_set<lr_event_t *> g_events;
 std::unordered_set<lr_queue_t *> g_queues;
 std::unordered_set<lr_module_t *> g_modules;
@@ -134,7 +144,7 @@ lr_status_t to_lr_status(hsa_status_t status) {
   return status == HSA_STATUS_SUCCESS ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
 
-hsa_status_t collect_gpu_agents(hsa_agent_t agent, void *data) {
+hsa_status_t collect_agents(hsa_agent_t agent, void *data) {
   auto *devices = static_cast<std::vector<DeviceState> *>(data);
   hsa_device_type_t device_type = HSA_DEVICE_TYPE_CPU;
   hsa_status_t status =
@@ -143,7 +153,12 @@ hsa_status_t collect_gpu_agents(hsa_agent_t agent, void *data) {
     return status;
   }
 
-  if (device_type == HSA_DEVICE_TYPE_GPU) {
+  if (device_type == HSA_DEVICE_TYPE_CPU) {
+    if (!g_has_host_agent) {
+      g_host_agent = agent;
+      g_has_host_agent = true;
+    }
+  } else if (device_type == HSA_DEVICE_TYPE_GPU) {
     char name[64] = {};
     status = hsa_agent_get_info(agent, HSA_AGENT_INFO_NAME, name);
     if (status != HSA_STATUS_SUCCESS) {
@@ -657,6 +672,35 @@ bool valid_allocation(void *ptr, lr_device_t device, size_t size) {
   return false;
 }
 
+enum class HostPointerLookup {
+  Unregistered,
+  Valid,
+  Invalid,
+};
+
+HostPointerLookup translate_host_pointer(const void *ptr, lr_device_t device,
+                                         size_t size, const void **agent_ptr) {
+  const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+  for (const auto &entry : g_host_allocations) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(entry.first);
+    const HostAllocationInfo &info = entry.second;
+    if (address < base) {
+      continue;
+    }
+    const uintptr_t offset = address - base;
+    if (offset >= info.size) {
+      continue;
+    }
+    if (info.device_index != device.index || size > info.size - offset) {
+      return HostPointerLookup::Invalid;
+    }
+    const uintptr_t agent_base = reinterpret_cast<uintptr_t>(info.agent_ptr);
+    *agent_ptr = reinterpret_cast<const void *>(agent_base + offset);
+    return HostPointerLookup::Valid;
+  }
+  return HostPointerLookup::Unregistered;
+}
+
 void record_allocation(DeviceState *device, size_t size) {
   lr_memory_stats_t &stats = device->memory_stats;
   stats.live_bytes += size;
@@ -665,6 +709,25 @@ void record_allocation(DeviceState *device, size_t size) {
   if (stats.live_bytes > stats.peak_live_bytes) {
     stats.peak_live_bytes = stats.live_bytes;
   }
+}
+
+void record_host_allocation(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.pinned_host_live_bytes += size;
+  stats.pinned_host_total_allocated_bytes += size;
+  ++stats.pinned_host_allocation_count;
+  if (stats.pinned_host_live_bytes > stats.pinned_host_peak_live_bytes) {
+    stats.pinned_host_peak_live_bytes = stats.pinned_host_live_bytes;
+  }
+}
+
+void record_host_free(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.pinned_host_live_bytes = size > stats.pinned_host_live_bytes
+                                     ? 0
+                                     : stats.pinned_host_live_bytes - size;
+  stats.pinned_host_total_freed_bytes += size;
+  ++stats.pinned_host_free_count;
 }
 
 void record_free(DeviceState *device, size_t size) {
@@ -734,7 +797,9 @@ lr_status_t lr_init(void) {
   {
     std::lock_guard<std::mutex> lock(g_devices_mutex);
     g_devices.clear();
-    status = hsa_iterate_agents(collect_gpu_agents, &g_devices);
+    g_host_agent = {};
+    g_has_host_agent = false;
+    status = hsa_iterate_agents(collect_agents, &g_devices);
     if (status == HSA_STATUS_SUCCESS) {
       status = populate_device_regions();
     }
@@ -795,7 +860,18 @@ lr_status_t lr_shutdown(void) {
       hsa_memory_free(allocation.first);
     }
     g_allocations.clear();
+    for (const auto &allocation : g_host_allocations) {
+      hsa_status_t status = hsa_amd_memory_unlock(allocation.first);
+      if (status == HSA_STATUS_SUCCESS) {
+        std::free(allocation.first);
+      } else if (drain_status == LR_SUCCESS) {
+        drain_status = to_lr_status(status);
+      }
+    }
+    g_host_allocations.clear();
     g_devices.clear();
+    g_host_agent = {};
+    g_has_host_agent = false;
 
     if (drain_status != LR_SUCCESS) {
       hsa_shut_down();
@@ -929,6 +1005,9 @@ lr_status_t lr_reset_memory_stats(lr_device_t device) {
   lr_memory_stats_t reset{};
   reset.live_bytes = g_devices[device.index].memory_stats.live_bytes;
   reset.peak_live_bytes = reset.live_bytes;
+  reset.pinned_host_live_bytes =
+      g_devices[device.index].memory_stats.pinned_host_live_bytes;
+  reset.pinned_host_peak_live_bytes = reset.pinned_host_live_bytes;
   g_devices[device.index].memory_stats = reset;
   return LR_SUCCESS;
 #else
@@ -1309,6 +1388,85 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
 #endif
 }
 
+lr_status_t lr_host_malloc(lr_device_t device, size_t size, void **ptr) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!valid_device(device) || size == 0 || !ptr) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  *ptr = nullptr;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!g_has_host_agent) {
+    return LR_ERROR_NOT_SUPPORTED;
+  }
+
+  void *host_ptr = std::malloc(size);
+  if (!host_ptr) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  void *agent_ptr = nullptr;
+  hsa_status_t status =
+      hsa_amd_memory_lock(host_ptr, size, &state.agent, 1, &agent_ptr);
+  if (status != HSA_STATUS_SUCCESS) {
+    std::free(host_ptr);
+    return to_lr_status(status);
+  }
+
+  g_host_allocations[host_ptr] =
+      HostAllocationInfo{device.index, size, agent_ptr};
+  record_host_allocation(&state, size);
+  *ptr = host_ptr;
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_host_free(lr_device_t device, void *ptr) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!valid_device(device) || !ptr) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  auto allocation = g_host_allocations.find(ptr);
+  if (allocation == g_host_allocations.end() ||
+      allocation->second.device_index != device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  lr_status_t drain_status = drain_device_locked(&state);
+  if (drain_status != LR_SUCCESS) {
+    return drain_status;
+  }
+
+  hsa_status_t status = hsa_amd_memory_unlock(ptr);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+
+  const size_t size = allocation->second.size;
+  std::free(ptr);
+  g_host_allocations.erase(allocation);
+  record_host_free(&state, size);
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
 lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
                       size_t size, lr_memcpy_kind_t kind) {
   if (!g_initialized.load()) {
@@ -1398,12 +1556,46 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     }
   }
 
+  DeviceState &state = g_devices[device.index];
+  hsa_agent_t null_agent{};
+  hsa_agent_t dst_agent = null_agent;
+  hsa_agent_t src_agent = null_agent;
+  void *copy_dst = dst;
+  const void *copy_src = src;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    dst_agent = state.agent;
+    const void *mapped_src = nullptr;
+    HostPointerLookup lookup =
+        translate_host_pointer(src, device, size, &mapped_src);
+    if (lookup == HostPointerLookup::Invalid) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == HostPointerLookup::Valid) {
+      copy_src = mapped_src;
+      src_agent = g_host_agent;
+    }
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    src_agent = state.agent;
+    const void *mapped_dst = nullptr;
+    HostPointerLookup lookup =
+        translate_host_pointer(dst, device, size, &mapped_dst);
+    if (lookup == HostPointerLookup::Invalid) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == HostPointerLookup::Valid) {
+      copy_dst = const_cast<void *>(mapped_dst);
+      dst_agent = g_host_agent;
+    }
+  } else {
+    dst_agent = state.agent;
+    src_agent = state.agent;
+  }
+
   lr_status_t wait_status = event_wait_locked(event);
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
 
-  DeviceState &state = g_devices[device.index];
   if (event->dependency_count != 0) {
     lr_status_t drain_status = drain_device_locked(&state);
     if (drain_status != LR_SUCCESS) {
@@ -1426,18 +1618,6 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     return to_lr_status(status);
   }
 
-  hsa_agent_t null_agent{};
-  hsa_agent_t dst_agent = null_agent;
-  hsa_agent_t src_agent = null_agent;
-  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
-    dst_agent = state.agent;
-  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
-    src_agent = state.agent;
-  } else {
-    dst_agent = state.agent;
-    src_agent = state.agent;
-  }
-
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::AsyncCopy;
   event->completed = false;
@@ -1458,9 +1638,10 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
       dependencies.push_back(dependency->signal);
     }
   }
-  status = hsa_amd_memory_async_copy(dst, dst_agent, src, src_agent, size,
-                                     static_cast<uint32_t>(dependencies.size()),
-                                     dependencies.data(), event->signal);
+  status =
+      hsa_amd_memory_async_copy(copy_dst, dst_agent, copy_src, src_agent, size,
+                                static_cast<uint32_t>(dependencies.size()),
+                                dependencies.data(), event->signal);
   if (status != HSA_STATUS_SUCCESS) {
     event->kind = lr_event_t::Kind::None;
     return to_lr_status(status);

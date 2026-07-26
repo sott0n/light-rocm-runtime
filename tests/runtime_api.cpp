@@ -93,6 +93,14 @@ static int expect_not_initialized_statuses(void) {
                      "lr_free before init")) {
     return 0;
   }
+  if (!expect_status(lr_host_malloc(device, sizeof(args), &ptr),
+                     LR_ERROR_NOT_INITIALIZED, "lr_host_malloc before init")) {
+    return 0;
+  }
+  if (!expect_status(lr_host_free(device, ptr), LR_ERROR_NOT_INITIALIZED,
+                     "lr_host_free before init")) {
+    return 0;
+  }
   if (!expect_status(
           lr_memcpy(device, ptr, &args, sizeof(args), LR_MEMCPY_HOST_TO_DEVICE),
           LR_ERROR_NOT_INITIALIZED, "lr_memcpy before init")) {

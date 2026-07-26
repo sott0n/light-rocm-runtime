@@ -7,6 +7,57 @@
 
 namespace lrrt {
 
+class PinnedHostBuffer {
+public:
+  PinnedHostBuffer(lr_device_t device, size_t size)
+      : device_(device), ptr_(nullptr), size_(size) {
+    check(lr_host_malloc(device_, size_, &ptr_), "lr_host_malloc");
+  }
+
+  PinnedHostBuffer(Device device, size_t size)
+      : PinnedHostBuffer(device.get(), size) {}
+
+  ~PinnedHostBuffer() { reset(); }
+
+  PinnedHostBuffer(PinnedHostBuffer &&other) noexcept
+      : device_(other.device_), ptr_(other.ptr_), size_(other.size_) {
+    other.ptr_ = nullptr;
+    other.size_ = 0;
+  }
+
+  PinnedHostBuffer(const PinnedHostBuffer &) = delete;
+  PinnedHostBuffer &operator=(const PinnedHostBuffer &) = delete;
+
+  PinnedHostBuffer &operator=(PinnedHostBuffer &&other) noexcept {
+    if (this != &other) {
+      reset();
+      device_ = other.device_;
+      ptr_ = other.ptr_;
+      size_ = other.size_;
+      other.ptr_ = nullptr;
+      other.size_ = 0;
+    }
+    return *this;
+  }
+
+  void *data() const { return ptr_; }
+  size_t size() const { return size_; }
+  lr_device_t device() const { return device_; }
+
+private:
+  void reset() noexcept {
+    if (ptr_) {
+      lr_host_free(device_, ptr_);
+    }
+    ptr_ = nullptr;
+    size_ = 0;
+  }
+
+  lr_device_t device_;
+  void *ptr_;
+  size_t size_;
+};
+
 class DeviceBuffer {
 public:
   DeviceBuffer(lr_device_t device, size_t size)
