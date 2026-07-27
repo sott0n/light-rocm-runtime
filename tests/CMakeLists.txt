@@ -16,6 +16,7 @@ set(
   lrrt_runtime_api_tests runtime_api.cpp
   lrrt_memory_stats_tests memory_stats.cpp
   lrrt_pinned_host_memory_tests pinned_host_memory.cpp
+  lrrt_double_buffer_pipeline_tests double_buffer_pipeline.cpp
   lrrt_device_buffer_ownership_tests device_buffer_ownership.cpp
   lrrt_queue_event_lifetime_tests queue_event_lifetime.cpp
   lrrt_module_buffer_lifetime_tests module_buffer_lifetime.cpp
@@ -140,6 +141,7 @@ if(ASYNC_COPY_LAUNCH_HSACO)
       lrrt_multiple_queues_tests
       lrrt_queue_event_lifetime_tests
       lrrt_module_buffer_lifetime_tests
+      lrrt_double_buffer_pipeline_tests
   )
     lrrt_bind_hsaco(
       ${target}

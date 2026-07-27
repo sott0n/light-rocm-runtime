@@ -124,6 +124,7 @@ cmake --build build-bench
 ./build-bench/lrrt_launch_overhead_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
 ./build-bench/lrrt_pinned_host_transfer_benchmark
+./build-bench/lrrt_double_buffer_pipeline_benchmark
 ```
 
 Pass an optional dispatch count to replace the default `10000` iterations.
@@ -167,6 +168,45 @@ wait for asynchronous copies. For pageable asynchronous copies, host API time
 includes the temporary page lock and mapping; the mapping remains live until
 the completion event is drained. Large pinned allocations depend on system
 page-lock limits; use `--max-size-mib` on constrained systems.
+
+The double-buffer pipeline benchmark compares a serialized
+`prepare -> H2D -> GPU -> wait` loop with two pinned host/device slots. The
+double-buffered path waits only when a slot is reused, so CPU preparation and
+H2D for one chunk can overlap GPU work for the other:
+
+```sh
+./build-bench/lrrt_double_buffer_pipeline_benchmark
+./build-bench/lrrt_double_buffer_pipeline_benchmark \
+  --chunks 100 --warmup-chunks 4 --chunk-size-mib 8 --compute-rounds 128
+```
+
+The reported end-to-end time includes CPU preparation, H2D copies, GPU work,
+and the final pipeline drain. Allocation and output validation are excluded.
+Overlap depends on the GPU copy engines, workload balance, and system load, so
+the benchmark reports measurements rather than enforcing a speedup threshold.
+
+`lrrt::PinnedHostDoubleBuffer` exposes the same mechanism for applications:
+
+```cpp
+lrrt::Queue queue(device);
+lrrt::PinnedHostDoubleBuffer pipeline(device, chunk_bytes);
+
+for (size_t chunk = 0; chunk < chunk_count; ++chunk) {
+  auto &slot = pipeline.acquire(); // waits only when this slot is reused
+  prepare_chunk(slot.host_data(), chunk_bytes, chunk);
+  pipeline.copy_to_device_async(slot, chunk_bytes);
+
+  Args args = make_args(slot.device_buffer(), chunk);
+  lrrt::launch(queue, kernel, config, args, {&slot.copy_complete()});
+  pipeline.mark_work_submitted(slot, queue);
+}
+pipeline.finish();
+```
+
+`mark_work_submitted` records a marker after the work already enqueued on
+`queue`. Consequently, all device work that consumes a slot must be submitted
+before this call. `finish` drains both slots and makes them available for
+another pipeline pass.
 
 ## Execution Semantics
 

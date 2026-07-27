@@ -13,6 +13,15 @@ target_link_libraries(
   PRIVATE lrrt::lrrt
 )
 
+add_executable(
+  lrrt_double_buffer_pipeline_benchmark
+  double_buffer_pipeline.cpp
+)
+target_link_libraries(
+  lrrt_double_buffer_pipeline_benchmark
+  PRIVATE lrrt::lrrt
+)
+
 if(LRRT_BUILD_TRITON_BENCHMARKS)
   add_executable(
     lrrt_triton_mini_decoder_weight_bundle
@@ -57,6 +66,11 @@ lrrt_add_hsaco_kernel(
   async_copy_launch_benchmark_kernel
   benchmarks/async_copy_launch_kernel.cpp
   ASYNC_COPY_LAUNCH_BENCHMARK_HSACO
+)
+lrrt_add_hsaco_kernel(
+  double_buffer_pipeline_benchmark_kernel
+  benchmarks/double_buffer_pipeline_kernel.cpp
+  DOUBLE_BUFFER_PIPELINE_BENCHMARK_HSACO
 )
 
 if(LRRT_BUILD_TRITON_BENCHMARKS)
@@ -134,6 +148,18 @@ if(ASYNC_COPY_LAUNCH_BENCHMARK_HSACO)
     lrrt_async_copy_launch_benchmark
     PRIVATE
       LRRT_ASYNC_COPY_LAUNCH_BENCHMARK_HSACO="${ASYNC_COPY_LAUNCH_BENCHMARK_HSACO}"
+  )
+endif()
+
+if(DOUBLE_BUFFER_PIPELINE_BENCHMARK_HSACO)
+  add_dependencies(
+    lrrt_double_buffer_pipeline_benchmark
+    double_buffer_pipeline_benchmark_kernel_hsaco
+  )
+  target_compile_definitions(
+    lrrt_double_buffer_pipeline_benchmark
+    PRIVATE
+      LRRT_DOUBLE_BUFFER_PIPELINE_HSACO="${DOUBLE_BUFFER_PIPELINE_BENCHMARK_HSACO}"
   )
 endif()
 

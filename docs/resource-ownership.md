@@ -52,6 +52,8 @@ The C++ wrapper owns convenience lifetime management around the C ABI:
 - `lrrt::Module` calls `lr_module_load_hsaco` and `lr_module_destroy`
 - `lrrt::DeviceBuffer` calls `lr_malloc` and `lr_free`
 - `lrrt::PinnedHostBuffer` calls `lr_host_malloc` and `lr_host_free`
+- `lrrt::PinnedHostDoubleBuffer` owns two pinned host buffers, two device
+  buffers, and the copy/work completion events required for safe slot reuse
 
 These wrappers do not introduce a second ownership model. They are RAII helpers
 for the same C runtime resources.
