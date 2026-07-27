@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -33,6 +34,27 @@ int main() {
 
     constexpr size_t element_count = 8;
     constexpr size_t byte_count = element_count * sizeof(float);
+    {
+      std::vector<float> pageable_input(element_count);
+      std::vector<float> pageable_output(element_count, 0.0f);
+      for (size_t i = 0; i < element_count; ++i) {
+        pageable_input[i] = static_cast<float>(i) + 0.5f;
+      }
+      lrrt::DeviceBuffer device_buffer(device, byte_count);
+      lrrt::Event copy_event(device);
+      lrrt::copy_to_device_async(device_buffer, pageable_input.data(),
+                                 byte_count, copy_event);
+      copy_event.synchronize();
+      lrrt::copy_to_host_async(pageable_output.data(), device_buffer,
+                               byte_count, copy_event);
+      copy_event.synchronize();
+      for (size_t i = 0; i < element_count; ++i) {
+        if (std::fabs(pageable_output[i] - pageable_input[i]) > 0.001f) {
+          throw std::runtime_error("pageable async copy result mismatch");
+        }
+      }
+    }
+
     {
       lrrt::PinnedHostBuffer first_input(device, byte_count);
       lrrt::PinnedHostBuffer input(std::move(first_input));

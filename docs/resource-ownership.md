@@ -32,6 +32,12 @@ registered host subranges to that agent mapping. `lr_host_free` accepts only the
 exact base pointer and drains the allocation's device before unlocking and
 freeing it.
 
+Asynchronous copies also accept pageable host pointers for compatibility. The
+runtime temporarily locks and maps the requested host range, keeps that mapping
+owned by the completion event, and unlocks it when the event is synchronized or
+otherwise drained. This per-copy mapping is the overhead that persistent pinned
+host allocations avoid.
+
 The runtime intentionally does not infer tensor ownership, tensor shape, dtype,
 strides, model weights, KV cache layout, or graph lifetime. It only validates
 the resources it directly owns.

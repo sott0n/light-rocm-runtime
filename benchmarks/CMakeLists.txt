@@ -4,6 +4,15 @@ target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
 
+add_executable(
+  lrrt_pinned_host_transfer_benchmark
+  pinned_host_transfer.cpp
+)
+target_link_libraries(
+  lrrt_pinned_host_transfer_benchmark
+  PRIVATE lrrt::lrrt
+)
+
 if(LRRT_BUILD_TRITON_BENCHMARKS)
   add_executable(
     lrrt_triton_mini_decoder_weight_bundle

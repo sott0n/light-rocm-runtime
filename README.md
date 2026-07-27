@@ -123,6 +123,7 @@ cmake -S . -B build-bench -DLRRT_BUILD_BENCHMARKS=ON
 cmake --build build-bench
 ./build-bench/lrrt_launch_overhead_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
+./build-bench/lrrt_pinned_host_transfer_benchmark
 ```
 
 Pass an optional dispatch count to replace the default `10000` iterations.
@@ -146,6 +147,26 @@ dependencies in both copy-to-launch and launch-to-copy directions. It reports
 submission time and the complete operation round trip. Pass an optional
 iteration count; the default is `100` with a 4 MiB D2D copy in the
 copy-to-launch direction.
+
+The pinned-host transfer benchmark compares pageable and pinned host memory for
+both H2D and D2H transfers. It reports the first-call latency, steady-state host
+API time, asynchronous event wait time, total latency, and effective bandwidth
+from 4 KiB through 1 GiB. The default iteration count is adaptive so each row
+transfers about 256 MiB, clamped to 3 through 1000 iterations:
+
+```sh
+./build-bench/lrrt_pinned_host_transfer_benchmark
+./build-bench/lrrt_pinned_host_transfer_benchmark \
+  --iterations 10 --warmup 2 --max-size-mib 256
+```
+
+The first-call value can expose one-time setup costs, but it is order-sensitive
+and should not be interpreted as a guaranteed cold-cache measurement.
+Steady-state bandwidth uses the complete operation time, including the event
+wait for asynchronous copies. For pageable asynchronous copies, host API time
+includes the temporary page lock and mapping; the mapping remains live until
+the completion event is drained. Large pinned allocations depend on system
+page-lock limits; use `--max-size-mib` on constrained systems.
 
 ## Execution Semantics
 

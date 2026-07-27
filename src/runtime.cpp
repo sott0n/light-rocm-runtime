@@ -62,6 +62,7 @@ struct lr_event_t {
   uint64_t completion_tick;
   std::vector<lr_event_t *> dependencies;
   QueueState *recorded_queue;
+  void *locked_host_ptr;
 #endif
 };
 
@@ -395,6 +396,14 @@ lr_status_t event_wait_locked(lr_event_t *event) {
     }
   } else if (result == LR_SUCCESS) {
     result = LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  if (event->locked_host_ptr) {
+    hsa_status_t status = hsa_amd_memory_unlock(event->locked_host_ptr);
+    event->locked_host_ptr = nullptr;
+    if (status != HSA_STATUS_SUCCESS && result == LR_SUCCESS) {
+      result = to_lr_status(status);
+    }
   }
 
   for (lr_event_t *dependency : event->dependencies) {
@@ -1124,6 +1133,7 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   created_event->dependency_count = 0;
   created_event->completion_tick = 0;
   created_event->recorded_queue = nullptr;
+  created_event->locked_host_ptr = nullptr;
   g_events.insert(created_event);
   *event = created_event;
   return LR_SUCCESS;
@@ -1562,6 +1572,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   hsa_agent_t src_agent = null_agent;
   void *copy_dst = dst;
   const void *copy_src = src;
+  void *pageable_host_ptr = nullptr;
   if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
     dst_agent = state.agent;
     const void *mapped_src = nullptr;
@@ -1573,6 +1584,8 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     if (lookup == HostPointerLookup::Valid) {
       copy_src = mapped_src;
       src_agent = g_host_agent;
+    } else {
+      pageable_host_ptr = const_cast<void *>(src);
     }
   } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
     src_agent = state.agent;
@@ -1585,6 +1598,8 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     if (lookup == HostPointerLookup::Valid) {
       copy_dst = const_cast<void *>(mapped_dst);
       dst_agent = g_host_agent;
+    } else {
+      pageable_host_ptr = dst;
     }
   } else {
     dst_agent = state.agent;
@@ -1624,6 +1639,25 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   event->dependency_queues.clear();
   event->completion_tick = 0;
   event->recorded_queue = nullptr;
+  event->locked_host_ptr = nullptr;
+
+  if (pageable_host_ptr) {
+    void *mapped_host_ptr = nullptr;
+    status = hsa_amd_memory_lock(pageable_host_ptr, size, &state.agent, 1,
+                                 &mapped_host_ptr);
+    if (status != HSA_STATUS_SUCCESS) {
+      event->kind = lr_event_t::Kind::None;
+      return to_lr_status(status);
+    }
+    if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+      copy_src = mapped_host_ptr;
+      src_agent = g_host_agent;
+    } else {
+      copy_dst = mapped_host_ptr;
+      dst_agent = g_host_agent;
+    }
+    event->locked_host_ptr = pageable_host_ptr;
+  }
 
   std::vector<hsa_signal_t> dependencies;
   if (use_implicit_dependencies) {
@@ -1643,6 +1677,10 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
                                 static_cast<uint32_t>(dependencies.size()),
                                 dependencies.data(), event->signal);
   if (status != HSA_STATUS_SUCCESS) {
+    if (event->locked_host_ptr) {
+      hsa_amd_memory_unlock(event->locked_host_ptr);
+      event->locked_host_ptr = nullptr;
+    }
     event->kind = lr_event_t::Kind::None;
     return to_lr_status(status);
   }
