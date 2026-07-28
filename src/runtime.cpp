@@ -59,6 +59,7 @@ struct lr_event_t {
   bool completed;
   std::unordered_set<QueueState *> dependency_queues;
   size_t dependency_count;
+  uint64_t start_tick;
   uint64_t completion_tick;
   std::vector<lr_event_t *> dependencies;
   QueueState *recorded_queue;
@@ -382,6 +383,7 @@ lr_status_t event_wait_locked(lr_event_t *event) {
     if (status != HSA_STATUS_SUCCESS) {
       result = to_lr_status(status);
     } else {
+      event->start_tick = time.start;
       event->completion_tick = time.end;
     }
   } else if (result == LR_SUCCESS &&
@@ -392,6 +394,7 @@ lr_status_t event_wait_locked(lr_event_t *event) {
     if (status != HSA_STATUS_SUCCESS) {
       result = to_lr_status(status);
     } else {
+      event->start_tick = time.start;
       event->completion_tick = time.end;
     }
   } else if (result == LR_SUCCESS) {
@@ -1131,6 +1134,7 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   created_event->pending = false;
   created_event->completed = false;
   created_event->dependency_count = 0;
+  created_event->start_tick = 0;
   created_event->completion_tick = 0;
   created_event->recorded_queue = nullptr;
   created_event->locked_host_ptr = nullptr;
@@ -1234,6 +1238,7 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
   event->dependency_queues.clear();
+  event->start_tick = 0;
   event->completion_tick = 0;
   event->recorded_queue = &state;
 
@@ -1316,6 +1321,43 @@ lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
 
   uint64_t ticks = end->completion_tick - start->completion_tick;
   *elapsed_ns = static_cast<uint64_t>(
+      (static_cast<unsigned __int128>(ticks) * 1000000000ULL) / frequency);
+  return LR_SUCCESS;
+#else
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_event_duration_ns(const lr_event_t *event,
+                                 uint64_t *duration_ns) {
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+  if (!event || !duration_ns) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  *duration_ns = 0;
+#if LRRT_ENABLE_HSA
+  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  if (g_events.find(const_cast<lr_event_t *>(event)) == g_events.end() ||
+      event->device.index >= g_devices.size() || event->pending ||
+      !event->completed || event->completion_tick < event->start_tick) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  uint64_t frequency = 0;
+  hsa_status_t status =
+      hsa_system_get_info(HSA_SYSTEM_INFO_TIMESTAMP_FREQUENCY, &frequency);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+  if (frequency == 0) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  const uint64_t ticks = event->completion_tick - event->start_tick;
+  *duration_ns = static_cast<uint64_t>(
       (static_cast<unsigned __int128>(ticks) * 1000000000ULL) / frequency);
   return LR_SUCCESS;
 #else
@@ -1637,6 +1679,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   event->kind = lr_event_t::Kind::AsyncCopy;
   event->completed = false;
   event->dependency_queues.clear();
+  event->start_tick = 0;
   event->completion_tick = 0;
   event->recorded_queue = nullptr;
   event->locked_host_ptr = nullptr;

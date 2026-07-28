@@ -200,6 +200,7 @@ int main(void) {
     if (lrrt::elapsed_time_ns(start, end) == 0) {
       throw std::runtime_error("event elapsed time was zero");
     }
+    static_cast<void>(lrrt::duration_ns(end));
 
     lrrt::copy_to_host(out, device_out);
 

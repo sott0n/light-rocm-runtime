@@ -117,6 +117,14 @@ LRRT_API lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
                                               const lr_event_t *end,
                                               uint64_t *elapsed_ns);
 
+/*
+ * Returns the profiled duration of one completed event operation. For an
+ * asynchronous copy this is the copy-engine duration; for a marker this is the
+ * marker packet duration.
+ */
+LRRT_API lr_status_t lr_event_duration_ns(const lr_event_t *event,
+                                          uint64_t *duration_ns);
+
 LRRT_API lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr);
 
 /* Waits for pending work on the device before releasing ptr. */

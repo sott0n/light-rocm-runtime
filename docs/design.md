@@ -261,9 +261,9 @@ changing the core design.
 - Kernel execution failures can be asynchronous and may be observed only by a
   later event wait, queue synchronization, device synchronization, or
   destruction operation that drains work.
-- Event elapsed time is available for completed markers and copies, but the
-  runtime does not expose a full tracing stream, hardware counters, or
-  per-kernel occupancy information.
+- Event elapsed time and individual operation duration are available for
+  completed markers and copies, but the runtime does not expose a full tracing
+  stream, hardware counters, or per-kernel occupancy information.
 - Profiling is enabled on every lrrt-created queue. There is currently no API to
   disable it or select profiling features.
 

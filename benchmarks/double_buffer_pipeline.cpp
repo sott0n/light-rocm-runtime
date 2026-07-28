@@ -1,6 +1,7 @@
 #include "lrrt/lrrt.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
@@ -38,6 +39,16 @@ struct KernelArgs {
 struct Measurement {
   double total_ms;
   double prepare_ms;
+};
+
+struct StageProfile {
+  double wall_ms = 0.0;
+  double prepare_ms = 0.0;
+  double host_wait_ms = 0.0;
+  double copy_api_ms = 0.0;
+  double queue_api_ms = 0.0;
+  double h2d_device_ms = 0.0;
+  double gpu_stage_ms = 0.0;
 };
 
 uint32_t parse_uint32(const char *text, const char *option) {
@@ -212,6 +223,133 @@ Measurement run_double_buffered(lrrt::Device device, const lrrt::Queue &queue,
   return {total_ms, prepare_ms};
 }
 
+StageProfile profile_sequential(lrrt::Device device, const lrrt::Queue &queue,
+                                const lrrt::Kernel &kernel,
+                                const lr_launch_config_t &config, size_t bytes,
+                                uint32_t chunks, uint32_t rounds,
+                                uint32_t first_seed) {
+  lrrt::PinnedHostBuffer host(device, bytes);
+  lrrt::DeviceBuffer device_buffer(device, bytes);
+  lrrt::Event copy_complete(device);
+  lrrt::Event gpu_start(device);
+  lrrt::Event work_complete(device);
+  const size_t element_count = bytes / sizeof(uint32_t);
+  StageProfile profile;
+
+  const auto begin = Clock::now();
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const auto prepare_begin = Clock::now();
+    prepare(host.data(), element_count, first_seed + chunk);
+    profile.prepare_ms += milliseconds(prepare_begin, Clock::now());
+
+    const auto copy_api_begin = Clock::now();
+    lrrt::copy_to_device_async(device_buffer, host.data(), bytes, copy_complete,
+                               {});
+    profile.copy_api_ms += milliseconds(copy_api_begin, Clock::now());
+
+    const auto queue_api_begin = Clock::now();
+    gpu_start.record(queue);
+    const KernelArgs args = {static_cast<uint32_t *>(device_buffer.data()),
+                             static_cast<uint32_t>(element_count), rounds};
+    lrrt::launch(queue, kernel, config, args, {&copy_complete});
+    work_complete.record(queue);
+    profile.queue_api_ms += milliseconds(queue_api_begin, Clock::now());
+
+    const auto wait_begin = Clock::now();
+    work_complete.synchronize();
+    profile.host_wait_ms += milliseconds(wait_begin, Clock::now());
+    copy_complete.synchronize();
+    gpu_start.synchronize();
+    profile.h2d_device_ms +=
+        static_cast<double>(lrrt::duration_ns(copy_complete)) / 1.0e6;
+    profile.gpu_stage_ms +=
+        static_cast<double>(lrrt::elapsed_time_ns(gpu_start, work_complete)) /
+        1.0e6;
+  }
+  profile.wall_ms = milliseconds(begin, Clock::now());
+  return profile;
+}
+
+StageProfile profile_double_buffered(lrrt::Device device,
+                                     const lrrt::Queue &queue,
+                                     const lrrt::Kernel &kernel,
+                                     const lr_launch_config_t &config,
+                                     size_t bytes, uint32_t chunks,
+                                     uint32_t rounds, uint32_t first_seed) {
+  using Slot = lrrt::PinnedHostDoubleBuffer::Slot;
+
+  lrrt::PinnedHostDoubleBuffer pipeline(device, bytes);
+  std::array<lrrt::Event, 2> gpu_starts = {lrrt::Event(device),
+                                           lrrt::Event(device)};
+  std::unordered_map<const Slot *, size_t> slot_indices;
+  std::array<bool, 2> sample_pending = {false, false};
+  const size_t element_count = bytes / sizeof(uint32_t);
+  StageProfile profile;
+
+  auto slot_index = [&](const Slot &slot) {
+    const auto found = slot_indices.find(&slot);
+    if (found != slot_indices.end()) {
+      return found->second;
+    }
+    const size_t index = slot_indices.size();
+    if (index >= gpu_starts.size()) {
+      throw std::runtime_error("double-buffer returned more than two slots");
+    }
+    slot_indices.emplace(&slot, index);
+    return index;
+  };
+
+  auto collect = [&](const Slot &slot, size_t index) {
+    if (!sample_pending[index]) {
+      return;
+    }
+    slot.copy_complete().synchronize();
+    gpu_starts[index].synchronize();
+    profile.h2d_device_ms +=
+        static_cast<double>(lrrt::duration_ns(slot.copy_complete())) / 1.0e6;
+    profile.gpu_stage_ms += static_cast<double>(lrrt::elapsed_time_ns(
+                                gpu_starts[index], slot.work_complete())) /
+                            1.0e6;
+    sample_pending[index] = false;
+  };
+
+  const auto begin = Clock::now();
+  for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+    const auto wait_begin = Clock::now();
+    Slot &slot = pipeline.acquire();
+    profile.host_wait_ms += milliseconds(wait_begin, Clock::now());
+    const size_t index = slot_index(slot);
+    collect(slot, index);
+
+    const auto prepare_begin = Clock::now();
+    prepare(slot.host_data(), element_count, first_seed + chunk);
+    profile.prepare_ms += milliseconds(prepare_begin, Clock::now());
+
+    const auto copy_api_begin = Clock::now();
+    pipeline.copy_to_device_async(slot, bytes);
+    profile.copy_api_ms += milliseconds(copy_api_begin, Clock::now());
+
+    const auto queue_api_begin = Clock::now();
+    gpu_starts[index].record(queue);
+    const KernelArgs args = {
+        static_cast<uint32_t *>(slot.device_buffer().data()),
+        static_cast<uint32_t>(element_count), rounds};
+    lrrt::launch(queue, kernel, config, args, {&slot.copy_complete()});
+    pipeline.mark_work_submitted(slot, queue);
+    profile.queue_api_ms += milliseconds(queue_api_begin, Clock::now());
+    sample_pending[index] = true;
+  }
+
+  const auto wait_begin = Clock::now();
+  pipeline.finish();
+  profile.host_wait_ms += milliseconds(wait_begin, Clock::now());
+  for (const auto &entry : slot_indices) {
+    collect(*entry.first, entry.second);
+  }
+  profile.wall_ms = milliseconds(begin, Clock::now());
+  return profile;
+}
+
 void print_measurement(const char *mode, const Measurement &measurement,
                        size_t bytes, uint32_t chunks) {
   const double gib =
@@ -219,6 +357,13 @@ void print_measurement(const char *mode, const Measurement &measurement,
   const double seconds = measurement.total_ms / 1000.0;
   std::printf("%-16s %12.3f %12.3f %12.1f %12.3f\n", mode, measurement.total_ms,
               measurement.prepare_ms, chunks / seconds, gib / seconds);
+}
+
+void print_profile(const char *mode, const StageProfile &profile) {
+  std::printf("%-16s %10.3f %10.3f %10.3f %10.3f %10.3f %10.3f %10.3f\n", mode,
+              profile.wall_ms, profile.prepare_ms, profile.host_wait_ms,
+              profile.copy_api_ms, profile.queue_api_ms, profile.h2d_device_ms,
+              profile.gpu_stage_ms);
 }
 
 } // namespace
@@ -262,6 +407,12 @@ int main(int argc, char **argv) {
     const Measurement double_buffered =
         run_double_buffered(device, queue, kernel, config, bytes,
                             options.chunks, options.compute_rounds, 3001, true);
+    const StageProfile sequential_profile =
+        profile_sequential(device, queue, kernel, config, bytes, options.chunks,
+                           options.compute_rounds, 4001);
+    const StageProfile double_buffered_profile =
+        profile_double_buffered(device, queue, kernel, config, bytes,
+                                options.chunks, options.compute_rounds, 5001);
 
     std::printf("\nLRRT Pinned Host Double-buffer Pipeline Benchmark\n");
     std::printf("================================================\n");
@@ -279,9 +430,32 @@ int main(int argc, char **argv) {
                       options.chunks);
     std::printf("\nEnd-to-end speedup: %.3fx\n",
                 sequential.total_ms / double_buffered.total_ms);
+    const double saved_ms = sequential.total_ms - double_buffered.total_ms;
+    std::printf("Observed wall-time saving: %.3f ms (%.1f%%)\n", saved_ms,
+                saved_ms * 100.0 / sequential.total_ms);
     std::printf(
         "Total includes CPU preparation, H2D transfer, GPU work, and final "
         "drain; allocation and validation are excluded.\n");
+
+    std::printf("\nInstrumented stage profile (sum across all chunks)\n");
+    std::printf("--------------------------------------------------\n");
+    std::printf("%-16s %10s %10s %10s %10s %10s %10s %10s\n", "Mode", "Wall ms",
+                "Prepare", "Host wait", "Copy API", "Queue API", "H2D dev",
+                "GPU stage");
+    std::printf("%-16s %10s %10s %10s %10s %10s %10s %10s\n",
+                "----------------", "----------", "----------", "----------",
+                "----------", "----------", "----------", "----------");
+    print_profile("sequential", sequential_profile);
+    print_profile("double-buffered", double_buffered_profile);
+    std::printf(
+        "H2D dev is copy-engine duration. GPU stage spans the queue marker "
+        "before the copy dependency through kernel completion, so it includes "
+        "dependency wait plus kernel time.\n");
+    std::printf(
+        "Host columns are wall-clock sums. Device-stage totals can overlap "
+        "each other and CPU work, so all columns need not add up to Wall ms. "
+        "The throughput table above is measured separately without profiling "
+        "queries.\n");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

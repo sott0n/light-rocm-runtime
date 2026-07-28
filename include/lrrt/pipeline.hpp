@@ -16,6 +16,7 @@ public:
     DeviceBuffer &device_buffer() { return device_; }
     const DeviceBuffer &device_buffer() const { return device_; }
     const Event &copy_complete() const { return copy_complete_; }
+    const Event &work_complete() const { return work_complete_; }
 
   private:
     friend class PinnedHostDoubleBuffer;

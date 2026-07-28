@@ -184,6 +184,11 @@ The reported end-to-end time includes CPU preparation, H2D copies, GPU work,
 and the final pipeline drain. Allocation and output validation are excluded.
 Overlap depends on the GPU copy engines, workload balance, and system load, so
 the benchmark reports measurements rather than enforcing a speedup threshold.
+It also performs a separate instrumented pass that reports CPU preparation,
+host blocking, copy/queue API submission time, exact H2D copy-engine duration,
+and a GPU queue stage spanning the copy dependency through kernel completion.
+Device-stage totals are summed across chunks and may overlap, so they are not
+expected to add up to wall time.
 
 `lrrt::PinnedHostDoubleBuffer` exposes the same mechanism for applications:
 
@@ -243,7 +248,8 @@ Events provide a lightweight way to mark queue progress and measure elapsed
 time. `lr_event_record` enqueues a marker after previously submitted work on the
 event's device, `lr_event_synchronize` waits for that marker, and
 `lr_event_elapsed_time_ns` reports the nanoseconds between two completed
-markers.
+markers. `lr_event_duration_ns` reports the profiled duration of one completed
+operation, including exact copy-engine duration for an asynchronous copy.
 
 Asynchronous copies and kernel dispatches are ordered through device-side
 signals. `lr_memcpy_async` passes pending dispatch completion signals to HSA as

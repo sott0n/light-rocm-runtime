@@ -246,6 +246,18 @@ int main(void) {
     return 1;
   }
 
+  uint64_t duration_ns = 0;
+  status = lr_event_duration_ns(end, &duration_ns);
+  if (!expect_status(status, LR_SUCCESS, "lr_event_duration_ns")) {
+    lr_event_destroy(end);
+    lr_event_destroy(start);
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
   status =
       lr_memcpy(device, out, device_out, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
   if (!expect_status(status, LR_SUCCESS, "copy out")) {

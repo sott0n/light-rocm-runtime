@@ -150,6 +150,12 @@ inline uint64_t elapsed_time_ns(const Event &start, const Event &end) {
   return elapsed_ns;
 }
 
+inline uint64_t duration_ns(const Event &event) {
+  uint64_t value = 0;
+  check(lr_event_duration_ns(event.get(), &value), "lr_event_duration_ns");
+  return value;
+}
+
 class Runtime {
 public:
   Runtime() { check(lr_init(), "lr_init"); }

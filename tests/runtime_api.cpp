@@ -81,6 +81,11 @@ static int expect_not_initialized_statuses(void) {
                      "lr_event_elapsed_time_ns before init")) {
     return 0;
   }
+  if (!expect_status(lr_event_duration_ns(event, &stats.live_bytes),
+                     LR_ERROR_NOT_INITIALIZED,
+                     "lr_event_duration_ns before init")) {
+    return 0;
+  }
   if (!expect_status(lr_event_destroy(event), LR_ERROR_NOT_INITIALIZED,
                      "lr_event_destroy before init")) {
     return 0;
@@ -374,6 +379,13 @@ int main(void) {
   status = lr_event_elapsed_time_ns(event, event, &elapsed_ns);
   if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
                      "unrecorded event elapsed time")) {
+    lr_event_destroy(event);
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_event_duration_ns(event, &elapsed_ns);
+  if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
+                     "unrecorded event duration")) {
     lr_event_destroy(event);
     lr_shutdown();
     return 1;
