@@ -209,6 +209,12 @@ int main(void) {
     return 1;
   }
 
+  if (count == 0) {
+    printf("runtime_api: skipped GPU handle checks, no GPU devices\n");
+    lr_shutdown();
+    return 0;
+  }
+
   lr_device_t invalid_device = {count};
   lr_memory_stats_t stats = {};
   status = lr_get_memory_stats(invalid_device, &stats);
@@ -216,12 +222,6 @@ int main(void) {
                      "lr_get_memory_stats invalid device")) {
     lr_shutdown();
     return 1;
-  }
-
-  if (count == 0) {
-    printf("runtime_api: skipped GPU handle checks, no GPU devices\n");
-    lr_shutdown();
-    return 0;
   }
 
   lr_device_t device = {0};

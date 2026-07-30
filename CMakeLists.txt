@@ -10,6 +10,7 @@ set(
 )
 option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
 option(LRRT_ENABLE_IREE_ADAPTER "Build the experimental IREE HAL adapter" OFF)
+option(LRRT_ENABLE_HSA "Build with HSA/ROCr support when available" ON)
 option(LRRT_BUILD_BENCHMARKS "Build runtime benchmarks" OFF)
 option(LRRT_BUILD_TRITON_BENCHMARKS "Build Triton runtime benchmarks" OFF)
 set(
@@ -68,11 +69,13 @@ target_include_directories(
 
 target_compile_features(lrrt PUBLIC cxx_std_17)
 
-if(HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
+if(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)
   target_include_directories(lrrt PRIVATE "${HSA_INCLUDE_DIR}")
   target_link_libraries(lrrt PRIVATE "${HSA_RUNTIME_LIBRARY}")
   message(STATUS "HSA runtime enabled: ${HSA_RUNTIME_LIBRARY}")
+elseif(NOT LRRT_ENABLE_HSA)
+  message(STATUS "HSA runtime disabled; building stub runtime")
 else()
   message(STATUS "HSA runtime not found; building stub runtime")
 endif()
