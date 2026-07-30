@@ -28,6 +28,7 @@ struct Options {
   uint32_t warmup_chunks = 4;
   uint32_t chunk_size_mib = 4;
   uint32_t compute_rounds = 64;
+  uint32_t trace_chunks = 0;
 };
 
 struct KernelArgs {
@@ -49,6 +50,19 @@ struct StageProfile {
   double queue_api_ms = 0.0;
   double h2d_device_ms = 0.0;
   double gpu_stage_ms = 0.0;
+  double final_drain_ms = 0.0;
+  struct Chunk {
+    uint32_t chunk = 0;
+    size_t slot = 0;
+    double start_ms = 0.0;
+    double acquire_wait_ms = 0.0;
+    double prepare_ms = 0.0;
+    double copy_api_ms = 0.0;
+    double queue_api_ms = 0.0;
+    double h2d_device_ms = 0.0;
+    double gpu_stage_ms = 0.0;
+  };
+  std::vector<Chunk> chunks;
 };
 
 uint32_t parse_uint32(const char *text, const char *option) {
@@ -87,10 +101,13 @@ Options parse_options(int argc, char **argv) {
     } else if (argument == "--compute-rounds") {
       options.compute_rounds =
           parse_uint32(require_value("--compute-rounds"), "--compute-rounds");
+    } else if (argument == "--trace-chunks") {
+      options.trace_chunks =
+          parse_uint32(require_value("--trace-chunks"), "--trace-chunks");
     } else if (argument == "--help") {
       std::printf("usage: lrrt_double_buffer_pipeline_benchmark "
                   "[--chunks N] [--warmup-chunks N] [--chunk-size-mib N] "
-                  "[--compute-rounds N]\n");
+                  "[--compute-rounds N] [--trace-chunks N]\n");
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + argument);
@@ -270,12 +287,10 @@ StageProfile profile_sequential(lrrt::Device device, const lrrt::Queue &queue,
   return profile;
 }
 
-StageProfile profile_double_buffered(lrrt::Device device,
-                                     const lrrt::Queue &queue,
-                                     const lrrt::Kernel &kernel,
-                                     const lr_launch_config_t &config,
-                                     size_t bytes, uint32_t chunks,
-                                     uint32_t rounds, uint32_t first_seed) {
+StageProfile profile_double_buffered(
+    lrrt::Device device, const lrrt::Queue &queue, const lrrt::Kernel &kernel,
+    const lr_launch_config_t &config, size_t bytes, uint32_t chunks,
+    uint32_t rounds, uint32_t first_seed, uint32_t trace_chunks) {
   using Slot = lrrt::PinnedHostDoubleBuffer::Slot;
 
   lrrt::PinnedHostDoubleBuffer pipeline(device, bytes);
@@ -283,8 +298,11 @@ StageProfile profile_double_buffered(lrrt::Device device,
                                            lrrt::Event(device)};
   std::unordered_map<const Slot *, size_t> slot_indices;
   std::array<bool, 2> sample_pending = {false, false};
+  constexpr size_t no_trace = std::numeric_limits<size_t>::max();
+  std::array<size_t, 2> pending_trace_indices = {no_trace, no_trace};
   const size_t element_count = bytes / sizeof(uint32_t);
   StageProfile profile;
+  profile.chunks.reserve(std::min(chunks, trace_chunks));
 
   auto slot_index = [&](const Slot &slot) {
     const auto found = slot_indices.find(&slot);
@@ -305,11 +323,19 @@ StageProfile profile_double_buffered(lrrt::Device device,
     }
     slot.copy_complete().synchronize();
     gpu_starts[index].synchronize();
-    profile.h2d_device_ms +=
+    const double h2d_device_ms =
         static_cast<double>(lrrt::duration_ns(slot.copy_complete())) / 1.0e6;
-    profile.gpu_stage_ms += static_cast<double>(lrrt::elapsed_time_ns(
-                                gpu_starts[index], slot.work_complete())) /
-                            1.0e6;
+    const double gpu_stage_ms = static_cast<double>(lrrt::elapsed_time_ns(
+                                    gpu_starts[index], slot.work_complete())) /
+                                1.0e6;
+    profile.h2d_device_ms += h2d_device_ms;
+    profile.gpu_stage_ms += gpu_stage_ms;
+    if (pending_trace_indices[index] != no_trace) {
+      StageProfile::Chunk &trace = profile.chunks[pending_trace_indices[index]];
+      trace.h2d_device_ms = h2d_device_ms;
+      trace.gpu_stage_ms = gpu_stage_ms;
+      pending_trace_indices[index] = no_trace;
+    }
     sample_pending[index] = false;
   };
 
@@ -317,17 +343,21 @@ StageProfile profile_double_buffered(lrrt::Device device,
   for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
     const auto wait_begin = Clock::now();
     Slot &slot = pipeline.acquire();
-    profile.host_wait_ms += milliseconds(wait_begin, Clock::now());
+    const auto acquired = Clock::now();
+    const double acquire_wait_ms = milliseconds(wait_begin, acquired);
+    profile.host_wait_ms += acquire_wait_ms;
     const size_t index = slot_index(slot);
     collect(slot, index);
 
     const auto prepare_begin = Clock::now();
     prepare(slot.host_data(), element_count, first_seed + chunk);
-    profile.prepare_ms += milliseconds(prepare_begin, Clock::now());
+    const double prepare_ms = milliseconds(prepare_begin, Clock::now());
+    profile.prepare_ms += prepare_ms;
 
     const auto copy_api_begin = Clock::now();
     pipeline.copy_to_device_async(slot, bytes);
-    profile.copy_api_ms += milliseconds(copy_api_begin, Clock::now());
+    const double copy_api_ms = milliseconds(copy_api_begin, Clock::now());
+    profile.copy_api_ms += copy_api_ms;
 
     const auto queue_api_begin = Clock::now();
     gpu_starts[index].record(queue);
@@ -336,13 +366,21 @@ StageProfile profile_double_buffered(lrrt::Device device,
         static_cast<uint32_t>(element_count), rounds};
     lrrt::launch(queue, kernel, config, args, {&slot.copy_complete()});
     pipeline.mark_work_submitted(slot, queue);
-    profile.queue_api_ms += milliseconds(queue_api_begin, Clock::now());
+    const double queue_api_ms = milliseconds(queue_api_begin, Clock::now());
+    profile.queue_api_ms += queue_api_ms;
     sample_pending[index] = true;
+    if (chunk < trace_chunks) {
+      pending_trace_indices[index] = profile.chunks.size();
+      profile.chunks.push_back({chunk, index, milliseconds(begin, wait_begin),
+                                acquire_wait_ms, prepare_ms, copy_api_ms,
+                                queue_api_ms, 0.0, 0.0});
+    }
   }
 
   const auto wait_begin = Clock::now();
   pipeline.finish();
-  profile.host_wait_ms += milliseconds(wait_begin, Clock::now());
+  profile.final_drain_ms = milliseconds(wait_begin, Clock::now());
+  profile.host_wait_ms += profile.final_drain_ms;
   for (const auto &entry : slot_indices) {
     collect(*entry.first, entry.second);
   }
@@ -364,6 +402,29 @@ void print_profile(const char *mode, const StageProfile &profile) {
               profile.wall_ms, profile.prepare_ms, profile.host_wait_ms,
               profile.copy_api_ms, profile.queue_api_ms, profile.h2d_device_ms,
               profile.gpu_stage_ms);
+}
+
+void print_chunk_trace(const StageProfile &profile) {
+  if (profile.chunks.empty()) {
+    return;
+  }
+  std::printf("\nDouble-buffered chunk trace\n");
+  std::printf("---------------------------\n");
+  std::printf("%-7s %5s %10s %10s %10s %10s %10s %10s %10s\n", "Chunk", "Slot",
+              "Start ms", "Acquire", "Prepare", "Copy API", "Queue API",
+              "H2D dev", "GPU stage");
+  for (const StageProfile::Chunk &chunk : profile.chunks) {
+    std::printf("%-7u %5zu %10.3f %10.3f %10.3f %10.3f %10.3f %10.3f "
+                "%10.3f\n",
+                chunk.chunk, chunk.slot, chunk.start_ms, chunk.acquire_wait_ms,
+                chunk.prepare_ms, chunk.copy_api_ms, chunk.queue_api_ms,
+                chunk.h2d_device_ms, chunk.gpu_stage_ms);
+  }
+  std::printf("Final drain: %.3f ms\n", profile.final_drain_ms);
+  std::printf(
+      "Acquire is the host wait before the listed chunk can reuse its slot. "
+      "H2D dev and GPU stage are device durations collected when that slot "
+      "completes; they are not host timeline offsets.\n");
 }
 
 } // namespace
@@ -410,9 +471,9 @@ int main(int argc, char **argv) {
     const StageProfile sequential_profile =
         profile_sequential(device, queue, kernel, config, bytes, options.chunks,
                            options.compute_rounds, 4001);
-    const StageProfile double_buffered_profile =
-        profile_double_buffered(device, queue, kernel, config, bytes,
-                                options.chunks, options.compute_rounds, 5001);
+    const StageProfile double_buffered_profile = profile_double_buffered(
+        device, queue, kernel, config, bytes, options.chunks,
+        options.compute_rounds, 5001, options.trace_chunks);
 
     std::printf("\nLRRT Pinned Host Double-buffer Pipeline Benchmark\n");
     std::printf("================================================\n");
@@ -456,6 +517,7 @@ int main(int argc, char **argv) {
         "each other and CPU work, so all columns need not add up to Wall ms. "
         "The throughput table above is measured separately without profiling "
         "queries.\n");
+    print_chunk_trace(double_buffered_profile);
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

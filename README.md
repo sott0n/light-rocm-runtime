@@ -178,6 +178,8 @@ H2D for one chunk can overlap GPU work for the other:
 ./build-bench/lrrt_double_buffer_pipeline_benchmark
 ./build-bench/lrrt_double_buffer_pipeline_benchmark \
   --chunks 100 --warmup-chunks 4 --chunk-size-mib 8 --compute-rounds 128
+./build-bench/lrrt_double_buffer_pipeline_benchmark \
+  --chunks 20 --trace-chunks 8
 ```
 
 The reported end-to-end time includes CPU preparation, H2D copies, GPU work,
@@ -189,6 +191,12 @@ host blocking, copy/queue API submission time, exact H2D copy-engine duration,
 and a GPU queue stage spanning the copy dependency through kernel completion.
 Device-stage totals are summed across chunks and may overlap, so they are not
 expected to add up to wall time.
+
+`--trace-chunks N` prints those measurements for the first `N`
+double-buffered chunks, including the slot index, host timeline start, and
+slot-reuse wait. The final pipeline drain is reported separately. Device
+durations are collected after slot completion and are not host timeline
+offsets.
 
 `lrrt::PinnedHostDoubleBuffer` exposes the same mechanism for applications:
 
