@@ -29,6 +29,7 @@ struct Options {
   uint32_t chunk_size_mib = 4;
   uint32_t compute_rounds = 64;
   uint32_t trace_chunks = 0;
+  bool csv = false;
 };
 
 struct KernelArgs {
@@ -104,10 +105,12 @@ Options parse_options(int argc, char **argv) {
     } else if (argument == "--trace-chunks") {
       options.trace_chunks =
           parse_uint32(require_value("--trace-chunks"), "--trace-chunks");
+    } else if (argument == "--csv") {
+      options.csv = true;
     } else if (argument == "--help") {
       std::printf("usage: lrrt_double_buffer_pipeline_benchmark "
                   "[--chunks N] [--warmup-chunks N] [--chunk-size-mib N] "
-                  "[--compute-rounds N] [--trace-chunks N]\n");
+                  "[--compute-rounds N] [--trace-chunks N] [--csv]\n");
       std::exit(0);
     } else {
       throw std::invalid_argument("unknown option: " + argument);
@@ -427,6 +430,28 @@ void print_chunk_trace(const StageProfile &profile) {
       "completes; they are not host timeline offsets.\n");
 }
 
+void print_csv(const Options &options, const Measurement &sequential,
+               const Measurement &double_buffered,
+               const StageProfile &double_buffered_profile) {
+  const double chunk_count = static_cast<double>(options.chunks);
+  const double slot_wait_ms =
+      std::max(0.0, double_buffered_profile.host_wait_ms -
+                        double_buffered_profile.final_drain_ms);
+  std::printf("chunk_size_mib,compute_rounds,chunks,sequential_ms,"
+              "double_buffered_ms,speedup,prepare_ms_per_chunk,"
+              "h2d_ms_per_chunk,gpu_stage_ms_per_chunk,slot_wait_ms_per_chunk,"
+              "final_drain_ms\n");
+  std::printf("%u,%u,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+              options.chunk_size_mib, options.compute_rounds, options.chunks,
+              sequential.total_ms, double_buffered.total_ms,
+              sequential.total_ms / double_buffered.total_ms,
+              double_buffered_profile.prepare_ms / chunk_count,
+              double_buffered_profile.h2d_device_ms / chunk_count,
+              double_buffered_profile.gpu_stage_ms / chunk_count,
+              slot_wait_ms / chunk_count,
+              double_buffered_profile.final_drain_ms);
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -474,6 +499,11 @@ int main(int argc, char **argv) {
     const StageProfile double_buffered_profile = profile_double_buffered(
         device, queue, kernel, config, bytes, options.chunks,
         options.compute_rounds, 5001, options.trace_chunks);
+
+    if (options.csv) {
+      print_csv(options, sequential, double_buffered, double_buffered_profile);
+      return 0;
+    }
 
     std::printf("\nLRRT Pinned Host Double-buffer Pipeline Benchmark\n");
     std::printf("================================================\n");

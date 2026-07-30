@@ -112,93 +112,38 @@ configure. Use `-DLRRT_IREE_ROOT=/path/to/iree` to point at a different IREE
 source or install tree. `iree-compile` and `iree-run-module` are optional for
 the current skeleton build and will be required only by later validation tests.
 
-## Launch Overhead Benchmark
+## Benchmarks
 
-The launch benchmark is opt-in and uses a minimal pre-built kernel to separate
-host enqueue cost, synchronization cost, sustained dispatch throughput, and
-device-side batch time:
+Runtime benchmarks are opt-in:
 
 ```sh
 cmake -S . -B build-bench -DLRRT_BUILD_BENCHMARKS=ON
 cmake --build build-bench
+```
+
+| Executable | Measures |
+| --- | --- |
+| `lrrt_launch_overhead_benchmark` | Kernel enqueue, synchronization, dispatch throughput, and round-trip cost |
+| `lrrt_async_copy_launch_benchmark` | Host waits compared with device-side copy/launch dependencies |
+| `lrrt_pinned_host_transfer_benchmark` | Pageable and pinned H2D/D2H latency and bandwidth |
+| `lrrt_double_buffer_pipeline_benchmark` | Sequential and double-buffered CPU preparation, H2D, and GPU work |
+
+Run them from the build directory:
+
+```sh
 ./build-bench/lrrt_launch_overhead_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
 ./build-bench/lrrt_pinned_host_transfer_benchmark
 ./build-bench/lrrt_double_buffer_pipeline_benchmark
 ```
 
-Pass an optional dispatch count to replace the default `10000` iterations.
-Results are printed as a table with microseconds per launch and sustained
-launches per second for straightforward comparison across runtime changes.
-Interactive terminal output uses color; set `NO_COLOR=1` to disable it. Color
-is disabled automatically when output is redirected or `TERM=dumb`.
+Results vary with the GPU, CPU, system load, and ROCm version. Use repeated
+runs in the same environment when comparing changes.
 
-- **Idle synchronize**: host cost of synchronizing an idle device
-- **Host enqueue**: host enqueue cost while the queue has capacity
-- **Device batch interval**: device event interval across a dispatch batch
-- **Submit and synchronize**: sustained batched dispatch cost
-- **Launch round trip**: serialized launch and synchronization cost
+## Pinned Host Double-buffer Pipeline
 
-The values depend on the GPU, CPU, system load, and ROCm version. The benchmark
-does not enforce performance thresholds; use repeated runs in the same
-environment when comparing runtime changes.
-
-The async dependency benchmark compares explicit host waits with device-side
-dependencies in both copy-to-launch and launch-to-copy directions. It reports
-submission time and the complete operation round trip. Pass an optional
-iteration count; the default is `100` with a 4 MiB D2D copy in the
-copy-to-launch direction.
-
-The pinned-host transfer benchmark compares pageable and pinned host memory for
-both H2D and D2H transfers. It reports the first-call latency, steady-state host
-API time, asynchronous event wait time, total latency, and effective bandwidth
-from 4 KiB through 1 GiB. The default iteration count is adaptive so each row
-transfers about 256 MiB, clamped to 3 through 1000 iterations:
-
-```sh
-./build-bench/lrrt_pinned_host_transfer_benchmark
-./build-bench/lrrt_pinned_host_transfer_benchmark \
-  --iterations 10 --warmup 2 --max-size-mib 256
-```
-
-The first-call value can expose one-time setup costs, but it is order-sensitive
-and should not be interpreted as a guaranteed cold-cache measurement.
-Steady-state bandwidth uses the complete operation time, including the event
-wait for asynchronous copies. For pageable asynchronous copies, host API time
-includes the temporary page lock and mapping; the mapping remains live until
-the completion event is drained. Large pinned allocations depend on system
-page-lock limits; use `--max-size-mib` on constrained systems.
-
-The double-buffer pipeline benchmark compares a serialized
-`prepare -> H2D -> GPU -> wait` loop with two pinned host/device slots. The
-double-buffered path waits only when a slot is reused, so CPU preparation and
-H2D for one chunk can overlap GPU work for the other:
-
-```sh
-./build-bench/lrrt_double_buffer_pipeline_benchmark
-./build-bench/lrrt_double_buffer_pipeline_benchmark \
-  --chunks 100 --warmup-chunks 4 --chunk-size-mib 8 --compute-rounds 128
-./build-bench/lrrt_double_buffer_pipeline_benchmark \
-  --chunks 20 --trace-chunks 8
-```
-
-The reported end-to-end time includes CPU preparation, H2D copies, GPU work,
-and the final pipeline drain. Allocation and output validation are excluded.
-Overlap depends on the GPU copy engines, workload balance, and system load, so
-the benchmark reports measurements rather than enforcing a speedup threshold.
-It also performs a separate instrumented pass that reports CPU preparation,
-host blocking, copy/queue API submission time, exact H2D copy-engine duration,
-and a GPU queue stage spanning the copy dependency through kernel completion.
-Device-stage totals are summed across chunks and may overlap, so they are not
-expected to add up to wall time.
-
-`--trace-chunks N` prints those measurements for the first `N`
-double-buffered chunks, including the slot index, host timeline start, and
-slot-reuse wait. The final pipeline drain is reported separately. Device
-durations are collected after slot completion and are not host timeline
-offsets.
-
-`lrrt::PinnedHostDoubleBuffer` exposes the same mechanism for applications:
+`lrrt::PinnedHostDoubleBuffer` overlaps preparation and H2D transfer for one
+chunk with GPU work for another:
 
 ```cpp
 lrrt::Queue queue(device);
