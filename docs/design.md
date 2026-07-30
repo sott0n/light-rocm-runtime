@@ -177,9 +177,9 @@ changing the core design.
   mutex. This simplifies handle validation and lifetime safety, but host-side
   API calls do not scale independently across devices or queues.
 - Queues are created with a fixed requested capacity of 1024 packets, reduced
-  to the device maximum. When tracked work reaches queue capacity, the current
-  recovery path may drain the entire device rather than applying fine-grained
-  backpressure to one producer.
+  to the device maximum. Submission reclaims completed packets before applying
+  backpressure, but a producer that fills a queue may block until that queue
+  makes progress. Queue sizing and producer fairness are not configurable.
 - Queue priorities, callbacks, cooperative dispatch policy, and per-thread
   default queue semantics are not exposed.
 

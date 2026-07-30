@@ -494,15 +494,6 @@ lr_status_t drain_async_copies_locked(DeviceState *device) {
   return result;
 }
 
-lr_status_t ensure_queue_slot_locked(DeviceState *device, QueueState *queue) {
-  if (queue->pending_dispatches.size() + queue->pending_barriers.size() +
-          queue->pending_events.size() <
-      queue->queue->size) {
-    return LR_SUCCESS;
-  }
-  return drain_device_locked(device);
-}
-
 void release_queue_pools_locked(QueueState *queue, lr_status_t *result) {
   for (hsa_signal_t signal : queue->signal_pool) {
     hsa_status_t status = hsa_signal_destroy(signal);
@@ -575,11 +566,116 @@ void reap_completed_event_dependencies_locked(lr_event_t *event) {
   }
 }
 
+void reap_completed_dispatches_locked(QueueState *queue) {
+  // Dispatch packets are submitted completion-ordered on each lrrt queue, so
+  // retaining the unfinished suffix also keeps the oldest waiter at the front.
+  size_t completed_count = 0;
+  while (completed_count < queue->pending_dispatches.size()) {
+    PendingDispatch &dispatch = queue->pending_dispatches[completed_count];
+    if (hsa_signal_load_scacquire(dispatch.completion_signal) != 0) {
+      break;
+    }
+
+    hsa_signal_store_relaxed(dispatch.completion_signal, 1);
+    queue->signal_pool.push_back(dispatch.completion_signal);
+    queue->kernarg_pool.push_back(dispatch.kernarg);
+    ++completed_count;
+  }
+  if (completed_count != 0) {
+    queue->pending_dispatches.erase(queue->pending_dispatches.begin(),
+                                    queue->pending_dispatches.begin() +
+                                        completed_count);
+  }
+}
+
+lr_status_t reap_completed_queue_events_locked(QueueState *queue) {
+  lr_status_t result = LR_SUCCESS;
+  size_t index = 0;
+  while (index < queue->pending_events.size()) {
+    lr_event_t *event = queue->pending_events[index];
+    if (hsa_signal_load_scacquire(event->signal) != 0) {
+      ++index;
+      continue;
+    }
+
+    lr_status_t status = event_wait_locked(event);
+    if (status != LR_SUCCESS && result == LR_SUCCESS) {
+      result = status;
+    }
+  }
+  return result;
+}
+
+lr_status_t reap_completed_queue_work_locked(QueueState *queue) {
+  // Barriers retain dispatch completion signals, so retire them before those
+  // signals can be reset and returned to the queue pool.
+  reap_completed_barriers_locked(queue);
+  reap_completed_dispatches_locked(queue);
+  return reap_completed_queue_events_locked(queue);
+}
+
+size_t pending_queue_packet_count(const QueueState *queue) {
+  return queue->pending_dispatches.size() + queue->pending_barriers.size() +
+         queue->pending_events.size();
+}
+
+lr_status_t wait_for_queue_progress_locked(QueueState *queue) {
+  if (!queue->pending_dispatches.empty()) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        queue->pending_dispatches.front().completion_signal,
+        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    if (value != 0) {
+      return LR_ERROR_RUNTIME;
+    }
+  } else if (!queue->pending_events.empty()) {
+    lr_status_t status = event_wait_locked(queue->pending_events.front());
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+  } else if (!queue->pending_barriers.empty()) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        queue->pending_barriers.front().retirement_signal,
+        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    if (value != 0) {
+      return LR_ERROR_RUNTIME;
+    }
+  } else {
+    return LR_ERROR_RUNTIME;
+  }
+  return reap_completed_queue_work_locked(queue);
+}
+
+lr_status_t ensure_queue_capacity_locked(QueueState *queue,
+                                         size_t required_packets) {
+  if (required_packets == 0 || required_packets > queue->queue->size) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  while (true) {
+    lr_status_t reap_status = reap_completed_queue_work_locked(queue);
+    if (reap_status != LR_SUCCESS) {
+      return reap_status;
+    }
+    if (pending_queue_packet_count(queue) + required_packets <=
+        queue->queue->size) {
+      return LR_SUCCESS;
+    }
+
+    lr_status_t wait_status = wait_for_queue_progress_locked(queue);
+    if (wait_status != LR_SUCCESS) {
+      return wait_status;
+    }
+  }
+}
+
 lr_status_t enqueue_event_dependencies_locked(
     DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies) {
   while (true) {
-    reap_completed_barriers_locked(queue);
+    lr_status_t reap_status = reap_completed_queue_work_locked(queue);
+    if (reap_status != LR_SUCCESS) {
+      return reap_status;
+    }
 
     std::vector<lr_event_t *> dependencies;
     if (explicit_dependencies) {
@@ -600,15 +696,10 @@ lr_status_t enqueue_event_dependencies_locked(
     }
 
     const size_t barrier_count = (dependencies.size() + 4) / 5;
-    const size_t pending_packets = queue->pending_dispatches.size() +
-                                   queue->pending_barriers.size() +
-                                   queue->pending_events.size();
-    if (pending_packets + barrier_count + 1 > queue->queue->size) {
-      lr_status_t drain_status = drain_device_locked(device);
-      if (drain_status != LR_SUCCESS) {
-        return drain_status;
-      }
-      continue;
+    lr_status_t capacity_status =
+        ensure_queue_capacity_locked(queue, barrier_count + 1);
+    if (capacity_status != LR_SUCCESS) {
+      return capacity_status;
     }
 
     for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
@@ -1239,9 +1330,9 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
       return copy_status;
     }
   }
-  lr_status_t slot_status = ensure_queue_slot_locked(&device, &state);
-  if (slot_status != LR_SUCCESS) {
-    return slot_status;
+  lr_status_t capacity_status = ensure_queue_capacity_locked(&state, 1);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
   }
 
   hsa_signal_store_relaxed(event->signal, 1);
@@ -1719,6 +1810,15 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   std::vector<hsa_signal_t> dependencies;
   if (use_implicit_dependencies) {
     QueueState &default_queue = state.default_queue->state;
+    lr_status_t reap_status = reap_completed_queue_work_locked(&default_queue);
+    if (reap_status != LR_SUCCESS) {
+      if (event->locked_host_ptr) {
+        hsa_amd_memory_unlock(event->locked_host_ptr);
+        event->locked_host_ptr = nullptr;
+      }
+      event->kind = lr_event_t::Kind::None;
+      return reap_status;
+    }
     dependencies.reserve(default_queue.pending_dispatches.size());
     for (const PendingDispatch &dispatch : default_queue.pending_dispatches) {
       dependencies.push_back(dispatch.completion_signal);

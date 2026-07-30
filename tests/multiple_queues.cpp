@@ -121,6 +121,26 @@ int main() {
     expect_value(final_output, input.back() * alpha * alpha,
                  "copy-compute-chain");
 
+    lrrt::DeviceBuffer first_burst_output(device, sizeof(float));
+    lrrt::DeviceBuffer second_burst_output(device, sizeof(float));
+    const ScaleArgs first_burst_args = {
+        static_cast<const float *>(source.data()),
+        static_cast<float *>(first_burst_output.data()), alpha, n - 1};
+    const ScaleArgs second_burst_args = {
+        static_cast<const float *>(source.data()),
+        static_cast<float *>(second_burst_output.data()), alpha, n - 1};
+    constexpr uint32_t burst_launches = 2048;
+    for (uint32_t i = 0; i < burst_launches; ++i) {
+      lrrt::launch(first_queue, kernel, config, first_burst_args);
+      lrrt::launch(second_queue, kernel, config, second_burst_args);
+    }
+    first_queue.synchronize();
+    second_queue.synchronize();
+    expect_value(first_burst_output, input.back() * alpha,
+                 "first saturated queue");
+    expect_value(second_burst_output, input.back() * alpha,
+                 "second saturated queue");
+
     lr_queue_t *destroyed_queue = nullptr;
     lrrt::check(lr_queue_create(device.get(), &destroyed_queue),
                 "lr_queue_create");
