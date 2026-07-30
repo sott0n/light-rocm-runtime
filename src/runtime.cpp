@@ -567,6 +567,14 @@ void reap_completed_barriers_locked(QueueState *queue) {
   }
 }
 
+void reap_completed_event_dependencies_locked(lr_event_t *event) {
+  std::vector<QueueState *> queues(event->dependency_queues.begin(),
+                                   event->dependency_queues.end());
+  for (QueueState *queue : queues) {
+    reap_completed_barriers_locked(queue);
+  }
+}
+
 lr_status_t enqueue_event_dependencies_locked(
     DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies) {
@@ -1166,6 +1174,7 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
+  reap_completed_event_dependencies_locked(event);
   if (event->dependency_count != 0) {
     lr_status_t drain_status =
         drain_device_locked(&g_devices[event->device.index]);
@@ -1217,6 +1226,7 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
+  reap_completed_event_dependencies_locked(event);
   if (event->dependency_count != 0) {
     lr_status_t drain_status = drain_device_locked(&device);
     if (drain_status != LR_SUCCESS) {
@@ -1653,6 +1663,10 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     return wait_status;
   }
 
+  // A completed dispatch may already have consumed this event's barrier even
+  // though the queue bookkeeping has not been drained yet. Reap those barriers
+  // before falling back to a blocking device-wide drain.
+  reap_completed_event_dependencies_locked(event);
   if (event->dependency_count != 0) {
     lr_status_t drain_status = drain_device_locked(&state);
     if (drain_status != LR_SUCCESS) {

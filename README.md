@@ -256,7 +256,9 @@ signals. `lr_memcpy_async` passes pending dispatch completion signals to HSA as
 copy dependencies, while `lr_launch` inserts HSA barrier packets for pending
 async-copy signals. Neither direction waits for completion on the host.
 Destroying or re-recording an event that is still referenced by a queued
-dependency drains the device before reusing its signal.
+dependency first retires completed queue barriers without blocking. The runtime
+drains the device before reusing the signal only when an active queued
+operation still references it.
 
 ## Memory Statistics
 

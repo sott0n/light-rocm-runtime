@@ -140,9 +140,11 @@ asynchronous copies. APIs with `_with_dependencies` use only the dependencies
 provided by the caller. Explicit user queues do not acquire implicit
 dependencies.
 
-An event is device-scoped and owns one HSA signal. Re-recording or destroying
-an event may wait or drain the device if queued packets still reference that
-signal.
+An event is device-scoped and owns one HSA signal. Before re-recording,
+destroying, or reusing an event for another asynchronous copy, the runtime
+non-blockingly retires completed queue barriers that referenced its signal. It
+falls back to waiting or draining the device only while an active queued
+operation still references the signal.
 
 ## Current Limitations
 
