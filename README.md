@@ -66,12 +66,21 @@ See [Runtime Design](docs/design.md) for the complete responsibility boundaries,
 execution model, limitations, intentional non-goals, and criteria for extending
 the runtime core.
 
-## Qwen Execution
+## Executors
 
-Qwen2/Qwen2.5 checkpoints can be exercised through the IREE and Triton
-executor paths. See the [Qwen IREE and Triton execution
-guide](examples/qwen/README.md) for prerequisites, build commands, checkpoint
-conversion, text generation, correctness checks, and benchmarks.
+The executor layer currently supports two compiler integration paths:
+
+- **Triton** loads generated kernel bundles and provides the reference path for
+  executor-level scheduling, validation, and benchmarking.
+- **IREE** provides an experimental HAL adapter that runs compiled IREE modules
+  through the same lrrt resource and dispatch path.
+
+Qwen2/Qwen2.5 0.5B serves as the end-to-end model integration. The IREE path
+covers checkpoint conversion, prompt prefill, device-resident KV cache, and
+autoregressive text generation; the Triton executor runs the full decoder stack
+for correctness validation and detailed benchmarking. See the [Qwen IREE and
+Triton execution guide](examples/qwen/README.md) for prerequisites, build and
+conversion steps, validation, and benchmark commands.
 
 ## Build
 
@@ -83,9 +92,9 @@ cmake --build build
 The runtime uses the HSA/ROCr API directly for device memory, code object
 loading, and kernel dispatch.
 
-Triton examples are opt-in and are not part of the default build. They use `uv`
-to resolve `examples/triton/requirements.txt` and compile Triton kernels with
-Python 3.13 by default:
+Triton executor examples are opt-in and are not part of the default build. They
+use `uv` to resolve `examples/triton/requirements.txt` and compile Triton
+kernels with Python 3.13 by default:
 
 ```sh
 cmake -S . -B build-triton -DLRRT_ENABLE_TRITON_EXAMPLES=ON
@@ -96,9 +105,8 @@ ctest --test-dir build-triton --output-on-failure -R lrrt_triton
 Use `-DLRRT_TRITON_PYTHON=/path/to/python3.13` or another `uv --python` value
 to override the Python used for Triton bundle generation.
 
-The experimental IREE HAL adapter is also opt-in and is not part of the
-default build. The adapter uses the pinned IREE submodule for IREE runtime
-headers:
+The IREE executor and its experimental HAL adapter are also opt-in and are not
+part of the default build. They use the pinned IREE submodule:
 
 ```sh
 git submodule update --init third_party/iree
@@ -106,11 +114,9 @@ cmake -S . -B build-iree \
   -DLRRT_ENABLE_IREE_ADAPTER=ON
 ```
 
-The first adapter milestone only probes the IREE dependency surface. It does
-not add IREE to the default build and does not download IREE during CMake
-configure. Use `-DLRRT_IREE_ROOT=/path/to/iree` to point at a different IREE
-source or install tree. `iree-compile` and `iree-run-module` are optional for
-the current skeleton build and will be required only by later validation tests.
+Use `-DLRRT_IREE_ROOT=/path/to/iree` to point at a different IREE source or
+install tree. The Qwen guide covers the additional IREE compiler-tool build and
+model-specific setup required for end-to-end execution.
 
 ## Benchmarks
 
