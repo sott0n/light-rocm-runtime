@@ -227,8 +227,11 @@ changing the core design.
 - Implicit copy/dispatch dependencies apply to the default convenience path.
   Work submitted to explicit queues requires explicit event dependencies.
 - Events are reusable completion/timing objects, but they may be re-recorded
-  only after safe reuse. There are no public timeline semaphores, external
-  semaphores, host callbacks, or wait-any operation.
+  only after safe reuse. Reusing or destroying an event signal waits only for
+  queues and asynchronous copies that still reference it; default-queue
+  recording may separately apply its implicit copy ordering. There are no
+  public timeline semaphores, external semaphores, host callbacks, or wait-any
+  operation.
 - Dependencies are device-local. The runtime does not detect higher-level data
   hazards; it only orders the events supplied by the caller or implied by the
   default path.

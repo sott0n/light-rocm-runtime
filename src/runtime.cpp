@@ -566,6 +566,60 @@ void reap_completed_event_dependencies_locked(lr_event_t *event) {
   }
 }
 
+lr_status_t wait_for_event_consumers_locked(DeviceState *device,
+                                            lr_event_t *event) {
+  while (event->dependency_count != 0) {
+    reap_completed_event_dependencies_locked(event);
+    if (event->dependency_count == 0) {
+      return LR_SUCCESS;
+    }
+
+    bool waited = false;
+    std::vector<lr_event_t *> pending_events = device->pending_events;
+    for (lr_event_t *dependent : pending_events) {
+      if (!dependent->pending ||
+          std::find(dependent->dependencies.begin(),
+                    dependent->dependencies.end(),
+                    event) == dependent->dependencies.end()) {
+        continue;
+      }
+      lr_status_t status = event_wait_locked(dependent);
+      if (status != LR_SUCCESS) {
+        return status;
+      }
+      waited = true;
+    }
+
+    std::vector<QueueState *> queues(event->dependency_queues.begin(),
+                                     event->dependency_queues.end());
+    for (QueueState *queue : queues) {
+      auto barrier = std::find_if(
+          queue->pending_barriers.begin(), queue->pending_barriers.end(),
+          [event](const PendingBarrier &pending) {
+            return std::find(pending.dependencies.begin(),
+                             pending.dependencies.end(),
+                             event) != pending.dependencies.end();
+          });
+      if (barrier == queue->pending_barriers.end()) {
+        continue;
+      }
+      hsa_signal_value_t value = hsa_signal_wait_scacquire(
+          barrier->retirement_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+          HSA_WAIT_STATE_BLOCKED);
+      if (value != 0) {
+        return LR_ERROR_RUNTIME;
+      }
+      reap_completed_barriers_locked(queue);
+      waited = true;
+    }
+
+    if (!waited && event->dependency_count != 0) {
+      return LR_ERROR_RUNTIME;
+    }
+  }
+  return LR_SUCCESS;
+}
+
 void reap_completed_dispatches_locked(QueueState *queue) {
   // Dispatch packets are submitted completion-ordered on each lrrt queue, so
   // retaining the unfinished suffix also keeps the oldest waiter at the front.
@@ -1265,13 +1319,10 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
-  reap_completed_event_dependencies_locked(event);
-  if (event->dependency_count != 0) {
-    lr_status_t drain_status =
-        drain_device_locked(&g_devices[event->device.index]);
-    if (drain_status != LR_SUCCESS) {
-      return drain_status;
-    }
+  lr_status_t consumer_status =
+      wait_for_event_consumers_locked(&g_devices[event->device.index], event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
   }
 
   hsa_status_t status = hsa_signal_destroy(event->signal);
@@ -1317,12 +1368,9 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   if (wait_status != LR_SUCCESS) {
     return wait_status;
   }
-  reap_completed_event_dependencies_locked(event);
-  if (event->dependency_count != 0) {
-    lr_status_t drain_status = drain_device_locked(&device);
-    if (drain_status != LR_SUCCESS) {
-      return drain_status;
-    }
+  lr_status_t consumer_status = wait_for_event_consumers_locked(&device, event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
   }
   if (use_default_queue) {
     lr_status_t copy_status = drain_async_copies_locked(&device);
@@ -1754,15 +1802,9 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     return wait_status;
   }
 
-  // A completed dispatch may already have consumed this event's barrier even
-  // though the queue bookkeeping has not been drained yet. Reap those barriers
-  // before falling back to a blocking device-wide drain.
-  reap_completed_event_dependencies_locked(event);
-  if (event->dependency_count != 0) {
-    lr_status_t drain_status = drain_device_locked(&state);
-    if (drain_status != LR_SUCCESS) {
-      return drain_status;
-    }
+  lr_status_t consumer_status = wait_for_event_consumers_locked(&state, event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
   }
 
   std::vector<lr_event_t *> event_dependencies;

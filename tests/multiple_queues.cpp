@@ -121,6 +121,42 @@ int main() {
     expect_value(final_output, input.back() * alpha * alpha,
                  "copy-compute-chain");
 
+    lrrt::Event reusable_event(device);
+    lrrt::launch(first_queue, kernel, config, first_args);
+    reusable_event.record(first_queue);
+    lrrt::launch(second_queue, kernel, config, second_args, {&reusable_event});
+    lrrt::Event dependent_copy(device);
+    lrrt::copy_device_to_device_async(copied_output, first_output,
+                                      sizeof(float), dependent_copy,
+                                      {&reusable_event});
+
+    reusable_event.record(first_queue);
+    second_queue.synchronize();
+    dependent_copy.synchronize();
+    expect_value(final_output, input.back() * alpha * alpha,
+                 "event queue consumer");
+    expect_value(copied_output, input.back() * alpha, "event copy consumer");
+
+    const ScaleArgs reused_args = {
+        static_cast<const float *>(copied_output.data()),
+        static_cast<float *>(final_output.data()), alpha, 0};
+    lrrt::launch(second_queue, kernel, config, reused_args, {&reusable_event});
+    lrrt::copy_device_to_device_async(copied_output, final_output,
+                                      sizeof(float), reusable_event, {});
+    reusable_event.synchronize();
+    expect_value(copied_output, input.back() * alpha * alpha,
+                 "event reused for copy");
+
+    {
+      lrrt::Event destroyed_event(device);
+      lrrt::launch(first_queue, kernel, config, first_args);
+      destroyed_event.record(first_queue);
+      lrrt::launch(second_queue, kernel, config, second_args,
+                   {&destroyed_event});
+    }
+    expect_value(final_output, input.back() * alpha * alpha,
+                 "destroyed event consumer");
+
     lrrt::DeviceBuffer first_burst_output(device, sizeof(float));
     lrrt::DeviceBuffer second_burst_output(device, sizeof(float));
     const ScaleArgs first_burst_args = {
