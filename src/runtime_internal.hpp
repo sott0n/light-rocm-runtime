@@ -116,9 +116,10 @@ extern std::mutex g_devices_mutex;
 extern std::vector<DeviceState> g_devices;
 extern hsa_agent_t g_host_agent;
 extern bool g_has_host_agent;
-extern std::unordered_set<lr_event_t *> g_events;
 
 lr_status_t to_lr_status(hsa_status_t status);
+hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
+                          bool is_default, lr_queue_t **queue);
 uint16_t packet_header(hsa_packet_type_t type);
 uint16_t barrier_packet_header(hsa_packet_type_t type);
 void publish_packet_header(uint16_t *header, uint16_t value);
@@ -139,8 +140,16 @@ lr_status_t collect_event_dependencies_locked(
 lr_status_t enqueue_event_dependencies_locked(
     DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies);
+lr_status_t ensure_queue_capacity_locked(QueueState *queue,
+                                         size_t required_packets);
+void reap_completed_barriers_locked(QueueState *queue);
 bool valid_queue_locked(lr_queue_t *queue);
+bool valid_event_locked(lr_event_t *event);
 bool valid_kernel_locked(lr_kernel_t *kernel);
+void release_device_queue_pools_locked(DeviceState *device,
+                                       lr_status_t *result);
+void destroy_all_queues_locked();
+void release_events_locked();
 void release_modules_locked();
 void release_memory_allocations_locked(lr_status_t *result);
 #endif

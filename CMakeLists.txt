@@ -53,7 +53,15 @@ include(cmake/Hsaco.cmake)
 include(cmake/TritonBundle.cmake)
 include(cmake/IreeAdapter.cmake)
 
-add_library(lrrt src/launch.cpp src/memory.cpp src/module.cpp src/runtime.cpp)
+add_library(
+  lrrt
+  src/event.cpp
+  src/launch.cpp
+  src/memory.cpp
+  src/module.cpp
+  src/queue.cpp
+  src/runtime.cpp
+)
 add_library(lrrt::lrrt ALIAS lrrt)
 
 add_library(lrrt_bundle src/bundle.cpp)
