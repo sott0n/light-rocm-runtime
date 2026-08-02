@@ -128,6 +128,8 @@ lr_status_t collect_event_dependencies_locked(
     lr_device_t device, lr_event_t *const *dependencies,
     size_t dependency_count, const lr_event_t *completion_event,
     std::vector<lr_event_t *> *pending_dependencies);
+bool valid_kernel_locked(lr_kernel_t *kernel);
+void release_modules_locked();
 void release_memory_allocations_locked(lr_status_t *result);
 #endif
 
