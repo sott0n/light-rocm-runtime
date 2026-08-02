@@ -348,6 +348,8 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
   return reader_status;
 }
 
+void reap_completed_barriers_locked(QueueState *queue);
+
 lr_status_t event_wait_locked(lr_event_t *event) {
   if (!event->pending) {
     return LR_SUCCESS;
@@ -364,6 +366,12 @@ lr_status_t event_wait_locked(lr_event_t *event) {
     device.pending_events.pop_back();
   }
   if (event->recorded_queue) {
+    if (value == 0) {
+      // A marker signal may also retire copy-dependency barriers submitted
+      // immediately before that marker. Release those references before the
+      // marker signal can be reset for reuse.
+      reap_completed_barriers_locked(event->recorded_queue);
+    }
     auto queue_pending =
         std::find(event->recorded_queue->pending_events.begin(),
                   event->recorded_queue->pending_events.end(), event);
@@ -475,20 +483,6 @@ lr_status_t drain_device_locked(DeviceState *device) {
     lr_status_t status = drain_queue_work_locked(&queue->state);
     if (status != LR_SUCCESS && result == LR_SUCCESS) {
       result = status;
-    }
-  }
-  return result;
-}
-
-lr_status_t drain_async_copies_locked(DeviceState *device) {
-  lr_status_t result = LR_SUCCESS;
-  std::vector<lr_event_t *> pending_events = device->pending_events;
-  for (lr_event_t *event : pending_events) {
-    if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy) {
-      lr_status_t status = event_wait_locked(event);
-      if (status != LR_SUCCESS && result == LR_SUCCESS) {
-        result = status;
-      }
     }
   }
   return result;
@@ -1372,13 +1366,10 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   if (consumer_status != LR_SUCCESS) {
     return consumer_status;
   }
-  if (use_default_queue) {
-    lr_status_t copy_status = drain_async_copies_locked(&device);
-    if (copy_status != LR_SUCCESS) {
-      return copy_status;
-    }
-  }
-  lr_status_t capacity_status = ensure_queue_capacity_locked(&state, 1);
+  lr_status_t capacity_status =
+      use_default_queue ? enqueue_event_dependencies_locked(
+                              &device, &state, event->signal, nullptr)
+                        : ensure_queue_capacity_locked(&state, 1);
   if (capacity_status != LR_SUCCESS) {
     return capacity_status;
   }

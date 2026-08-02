@@ -136,15 +136,16 @@ Asynchronous copies use `hsa_amd_memory_async_copy` and report completion
 through an event.
 
 The convenience APIs add dependencies between default-queue dispatches and
-asynchronous copies. APIs with `_with_dependencies` use only the dependencies
-provided by the caller. Explicit user queues do not acquire implicit
-dependencies.
+asynchronous copies. Default-queue event markers also use device-side barriers
+for pending asynchronous copies instead of waiting on the host. APIs with
+`_with_dependencies` use only the dependencies provided by the caller.
+Explicit user queues do not acquire implicit dependencies.
 
 An event is device-scoped and owns one HSA signal. Before re-recording,
 destroying, or reusing an event for another asynchronous copy, the runtime
 non-blockingly retires completed queue barriers that referenced its signal. It
-falls back to waiting or draining the device only while an active queued
-operation still references the signal.
+waits only for active queue or asynchronous-copy consumers that still reference
+the signal.
 
 ## Current Limitations
 

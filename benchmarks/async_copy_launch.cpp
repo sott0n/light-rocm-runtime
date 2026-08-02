@@ -157,6 +157,71 @@ Comparison compare_paths(lrrt::Device device, lrrt::DeviceBuffer &staging,
   return totals;
 }
 
+Measurements measure_copy_marker_once(lrrt::Device device,
+                                      lrrt::DeviceBuffer &staging,
+                                      const lrrt::DeviceBuffer &source,
+                                      lrrt::Event &copy_complete,
+                                      lrrt::Event &marker, bool host_wait) {
+  auto round_trip_begin = Clock::now();
+  lrrt::copy_device_to_device_async(staging, source, staging.size(),
+                                    copy_complete);
+  auto submission_begin = Clock::now();
+  if (host_wait) {
+    copy_complete.synchronize();
+  }
+  marker.record();
+  auto submission_end = Clock::now();
+  marker.synchronize();
+  auto round_trip_end = Clock::now();
+  device.synchronize();
+  return {elapsed_ns(submission_begin, submission_end),
+          elapsed_ns(round_trip_begin, round_trip_end)};
+}
+
+Comparison compare_copy_marker_paths(lrrt::Device device,
+                                     lrrt::DeviceBuffer &staging,
+                                     const lrrt::DeviceBuffer &source,
+                                     uint32_t iterations) {
+  lrrt::Event host_wait_copy(device);
+  lrrt::Event host_wait_marker(device);
+  lrrt::Event device_dependency_copy(device);
+  lrrt::Event device_dependency_marker(device);
+  Comparison totals{};
+
+  auto add = [](Measurements *total, Measurements sample) {
+    total->submission_ns += sample.submission_ns;
+    total->round_trip_ns += sample.round_trip_ns;
+  };
+  auto run_host_wait = [&] {
+    add(&totals.host_wait,
+        measure_copy_marker_once(device, staging, source, host_wait_copy,
+                                 host_wait_marker, true));
+  };
+  auto run_device_dependency = [&] {
+    add(&totals.device_dependency,
+        measure_copy_marker_once(device, staging, source,
+                                 device_dependency_copy,
+                                 device_dependency_marker, false));
+  };
+
+  for (uint32_t i = 0; i < iterations; ++i) {
+    if (i % 2 == 0) {
+      run_host_wait();
+      run_device_dependency();
+    } else {
+      run_device_dependency();
+      run_host_wait();
+    }
+  }
+
+  const double count = static_cast<double>(iterations);
+  totals.host_wait.submission_ns /= count;
+  totals.host_wait.round_trip_ns /= count;
+  totals.device_dependency.submission_ns /= count;
+  totals.device_dependency.round_trip_ns /= count;
+  return totals;
+}
+
 Measurements measure_launch_copy_once(
     lrrt::Device device, lrrt::DeviceBuffer &copy_output,
     const lrrt::DeviceBuffer &kernel_output, const lrrt::Kernel &kernel,
@@ -294,6 +359,9 @@ int main(int argc, char **argv) {
     Comparison comparison = compare_paths(device, staging, source, kernel,
                                           config, args, iterations);
     verify_result(result, input.back() * alpha);
+    compare_copy_marker_paths(device, staging, source, warmup_iterations);
+    Comparison copy_marker =
+        compare_copy_marker_paths(device, staging, source, iterations);
     compare_launch_copy_paths(device, copied_result, result, kernel, config,
                               args, warmup_iterations);
     Comparison launch_copy = compare_launch_copy_paths(
@@ -312,6 +380,7 @@ int main(int argc, char **argv) {
     printf("Iterations:         %u\n", iterations);
     printf("Warm-up iterations: %u per path\n\n", warmup_iterations);
     print_comparison("Copy -> launch", comparison, colors);
+    print_comparison("Copy -> default marker", copy_marker, colors);
     print_comparison("Launch -> copy", launch_copy, colors);
     return 0;
   } catch (const std::exception &error) {

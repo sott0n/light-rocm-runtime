@@ -64,9 +64,11 @@ int main() {
     input.back() = 3.0f;
     lrrt::DeviceBuffer source(device, input.size() * sizeof(float));
     lrrt::DeviceBuffer staging(device, input.size() * sizeof(float));
+    lrrt::DeviceBuffer marker_staging(device, input.size() * sizeof(float));
     lrrt::DeviceBuffer copied(device, input.size() * sizeof(float));
     lrrt::DeviceBuffer kernel_output(device, sizeof(float));
     lrrt::DeviceBuffer final_output(device, sizeof(float));
+    lrrt::DeviceBuffer marker_output(device, sizeof(float));
     lrrt::copy_to_device(source, input);
 
     std::vector<unsigned char> hsaco = read_file(LRRT_ASYNC_COPY_LAUNCH_HSACO);
@@ -99,6 +101,23 @@ int main() {
                                       {&kernel_complete});
     device.synchronize();
     expect_value(final_output, input.back() * alpha, "launch-copy");
+
+    std::vector<float> marker_initial(n, 0.0f);
+    lrrt::copy_to_device(marker_staging, marker_initial);
+    lrrt::Event marker_copy(device);
+    lrrt::copy_device_to_device_async(marker_staging, source, source.size(),
+                                      marker_copy, {});
+    lrrt::Event copy_marker(device);
+    copy_marker.record();
+    copy_marker.record();
+    lrrt::Queue marker_consumer_queue(device);
+    const ScaleArgs marker_args = {
+        static_cast<const float *>(marker_staging.data()),
+        static_cast<float *>(marker_output.data()), alpha, n - 1};
+    lrrt::launch(marker_consumer_queue, kernel, config, marker_args,
+                 {&copy_marker});
+    marker_consumer_queue.synchronize();
+    expect_value(marker_output, input.back() * alpha, "copy-marker-launch");
 
     lrrt::Event unrecorded(device);
     lr_event_t *invalid_dependency[] = {unrecorded.get()};

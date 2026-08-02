@@ -130,7 +130,7 @@ cmake --build build-bench
 | Executable | Measures |
 | --- | --- |
 | `lrrt_launch_overhead_benchmark` | Kernel enqueue, synchronization, dispatch throughput, and round-trip cost |
-| `lrrt_async_copy_launch_benchmark` | Host waits compared with device-side copy/launch dependencies |
+| `lrrt_async_copy_launch_benchmark` | Host waits compared with device-side copy, launch, and event dependencies |
 | `lrrt_pinned_host_transfer_benchmark` | Pageable and pinned H2D/D2H latency and bandwidth |
 | `lrrt_double_buffer_pipeline_benchmark` | Sequential and double-buffered CPU preparation, H2D, and GPU work |
 
@@ -212,12 +212,10 @@ operation, including exact copy-engine duration for an asynchronous copy.
 
 Asynchronous copies and kernel dispatches are ordered through device-side
 signals. `lr_memcpy_async` passes pending dispatch completion signals to HSA as
-copy dependencies, while `lr_launch` inserts HSA barrier packets for pending
-async-copy signals. Neither direction waits for completion on the host.
-Destroying or re-recording an event that is still referenced by a queued
-dependency first retires completed queue barriers without blocking. The runtime
-drains the device before reusing the signal only when an active queued
-operation still references it.
+copy dependencies, while `lr_launch` and default-queue event recording insert
+HSA barrier packets for pending async-copy signals. These paths do not wait for
+completion on the host. Reusing or destroying an event waits only for active
+queue or asynchronous-copy consumers that still reference its signal.
 
 ## Memory Statistics
 
