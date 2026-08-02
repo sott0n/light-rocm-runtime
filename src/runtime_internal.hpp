@@ -119,6 +119,14 @@ extern bool g_has_host_agent;
 extern std::unordered_set<lr_event_t *> g_events;
 
 lr_status_t to_lr_status(hsa_status_t status);
+uint16_t packet_header(hsa_packet_type_t type);
+uint16_t barrier_packet_header(hsa_packet_type_t type);
+void publish_packet_header(uint16_t *header, uint16_t value);
+uint16_t packet_setup(uint16_t dimensions);
+uint16_t dispatch_dimensions(const lr_launch_config_t *config);
+hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal);
+hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
+                                    size_t size, KernargBuffer *kernarg);
 lr_status_t event_wait_locked(lr_event_t *event);
 lr_status_t wait_for_event_consumers_locked(DeviceState *device,
                                             lr_event_t *event);
@@ -128,6 +136,10 @@ lr_status_t collect_event_dependencies_locked(
     lr_device_t device, lr_event_t *const *dependencies,
     size_t dependency_count, const lr_event_t *completion_event,
     std::vector<lr_event_t *> *pending_dependencies);
+lr_status_t enqueue_event_dependencies_locked(
+    DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
+    const std::vector<lr_event_t *> *explicit_dependencies);
+bool valid_queue_locked(lr_queue_t *queue);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked();
 void release_memory_allocations_locked(lr_status_t *result);
