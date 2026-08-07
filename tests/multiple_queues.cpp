@@ -1,9 +1,12 @@
 #include "lrrt/lrrt.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <stdexcept>
 #include <stdint.h>
 #include <stdio.h>
+#include <thread>
 #include <vector>
 
 #ifndef LRRT_ASYNC_COPY_LAUNCH_HSACO
@@ -17,6 +20,11 @@ struct ScaleArgs {
   float *out;
   float alpha;
   int32_t index;
+};
+
+struct WaitArgs {
+  unsigned long long iterations;
+  unsigned long long *output;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -67,14 +75,63 @@ int main() {
     lrrt::DeviceBuffer first_output(device, sizeof(float));
     lrrt::DeviceBuffer copied_output(device, sizeof(float));
     lrrt::DeviceBuffer final_output(device, sizeof(float));
+    lrrt::DeviceBuffer wait_output(device, sizeof(unsigned long long));
     lrrt::copy_to_device(source, input);
 
     std::vector<unsigned char> hsaco = read_file(LRRT_ASYNC_COPY_LAUNCH_HSACO);
     lrrt::Module module(device, hsaco);
     lrrt::Kernel kernel = module.kernel("async_copy_launch_kernel");
+    lrrt::Kernel wait_kernel = module.kernel("queue_wait_kernel");
     lrrt::Queue first_queue(device);
     lrrt::Queue second_queue(device);
     const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+
+    const WaitArgs wait_args = {
+        10000ULL,
+        static_cast<unsigned long long *>(wait_output.data()),
+    };
+    lrrt::launch(first_queue, wait_kernel, config, wait_args);
+    std::atomic<bool> synchronize_started{false};
+    std::atomic<bool> synchronize_completed{false};
+    std::thread synchronizer([&] {
+      synchronize_started.store(true, std::memory_order_release);
+      first_queue.synchronize();
+      synchronize_completed.store(true, std::memory_order_release);
+    });
+    while (!synchronize_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    const ScaleArgs concurrent_args = {
+        static_cast<const float *>(source.data()),
+        static_cast<float *>(copied_output.data()), alpha, n - 1};
+    lrrt::launch(second_queue, kernel, config, concurrent_args);
+    if (synchronize_completed.load(std::memory_order_acquire)) {
+      synchronizer.join();
+      throw std::runtime_error(
+          "queue synchronization blocked an independent queue launch");
+    }
+    synchronizer.join();
+    second_queue.synchronize();
+
+    lr_queue_t *lifetime_queue = nullptr;
+    lrrt::check(lr_queue_create(device.get(), &lifetime_queue),
+                "lr_queue_create");
+    lrrt::check(lr_launch_on_queue(lifetime_queue, wait_kernel.get(), &config,
+                                   &wait_args, sizeof(wait_args)),
+                "lr_launch_on_queue");
+    std::atomic<bool> lifetime_synchronize_started{false};
+    lr_status_t lifetime_synchronize_status = LR_ERROR_RUNTIME;
+    std::thread lifetime_synchronizer([&] {
+      lifetime_synchronize_started.store(true, std::memory_order_release);
+      lifetime_synchronize_status = lr_queue_synchronize(lifetime_queue);
+    });
+    while (!lifetime_synchronize_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    lrrt::check(lr_queue_destroy(lifetime_queue), "lr_queue_destroy");
+    lifetime_synchronizer.join();
+    lrrt::check(lifetime_synchronize_status, "lr_queue_synchronize");
 
     const ScaleArgs first_args = {static_cast<const float *>(source.data()),
                                   static_cast<float *>(first_output.data()),

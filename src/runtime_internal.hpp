@@ -4,6 +4,7 @@
 #include "lrrt/lrrt.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -33,6 +34,11 @@ struct PendingBarrier {
   std::vector<lr_event_t *> dependencies;
 };
 
+struct PendingSynchronization {
+  hsa_signal_t completion_signal;
+  std::vector<hsa_signal_t> dispatch_dependencies;
+};
+
 struct QueueState {
   hsa_queue_t *queue;
   std::vector<PendingDispatch> pending_dispatches;
@@ -40,6 +46,9 @@ struct QueueState {
   std::vector<lr_event_t *> pending_events;
   std::vector<hsa_signal_t> signal_pool;
   std::vector<KernargBuffer> kernarg_pool;
+  std::vector<PendingSynchronization> pending_synchronizations;
+  size_t active_synchronizers;
+  bool destroying;
 };
 #endif
 
@@ -113,6 +122,7 @@ struct DeviceState {
 };
 
 extern std::mutex g_devices_mutex;
+extern std::condition_variable g_queue_state_changed;
 extern std::vector<DeviceState> g_devices;
 extern hsa_agent_t g_host_agent;
 extern bool g_has_host_agent;
@@ -149,6 +159,8 @@ bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_device_queue_pools_locked(DeviceState *device,
                                        lr_status_t *result);
 void destroy_all_queues_locked();
+void wait_for_queue_synchronizers_locked(
+    std::unique_lock<std::mutex> *devices_lock);
 void release_events_locked();
 void release_modules_locked();
 void release_memory_allocations_locked(lr_status_t *result);

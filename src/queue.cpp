@@ -14,7 +14,7 @@ namespace lrrt_internal {
 std::unordered_set<lr_queue_t *> g_queues;
 
 bool valid_queue_locked(lr_queue_t *queue) {
-  return g_queues.find(queue) != g_queues.end();
+  return g_queues.find(queue) != g_queues.end() && !queue->state.destroying;
 }
 
 hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
@@ -40,6 +40,8 @@ hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
   auto *created_queue = new lr_queue_t{};
   created_queue->device = device_handle;
   created_queue->is_default = is_default;
+  created_queue->state.active_synchronizers = 0;
+  created_queue->state.destroying = false;
   status = hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
                             nullptr, nullptr, UINT32_MAX, UINT32_MAX,
                             &created_queue->state.queue);
@@ -227,6 +229,22 @@ void reap_completed_dispatches_locked(QueueState *queue) {
     if (hsa_signal_load_scacquire(dispatch.completion_signal) != 0) {
       break;
     }
+    const bool synchronization_consumer = std::any_of(
+        queue->pending_synchronizations.begin(),
+        queue->pending_synchronizations.end(),
+        [&dispatch](const PendingSynchronization &synchronization) {
+          return hsa_signal_load_scacquire(synchronization.completion_signal) !=
+                     0 &&
+                 std::any_of(synchronization.dispatch_dependencies.begin(),
+                             synchronization.dispatch_dependencies.end(),
+                             [&dispatch](hsa_signal_t dependency) {
+                               return dependency.handle ==
+                                      dispatch.completion_signal.handle;
+                             });
+        });
+    if (synchronization_consumer) {
+      break;
+    }
 
     hsa_signal_store_relaxed(dispatch.completion_signal, 1);
     queue->signal_pool.push_back(dispatch.completion_signal);
@@ -287,6 +305,13 @@ lr_status_t wait_for_queue_progress_locked(QueueState *queue) {
   } else if (!queue->pending_barriers.empty()) {
     hsa_signal_value_t value = hsa_signal_wait_scacquire(
         queue->pending_barriers.front().retirement_signal,
+        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+    if (value != 0) {
+      return LR_ERROR_RUNTIME;
+    }
+  } else if (!queue->pending_synchronizations.empty()) {
+    hsa_signal_value_t value = hsa_signal_wait_scacquire(
+        queue->pending_synchronizations.front().completion_signal,
         HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
     if (value != 0) {
       return LR_ERROR_RUNTIME;
@@ -401,6 +426,20 @@ void destroy_all_queues_locked() {
   }
   g_queues.clear();
 }
+
+void wait_for_queue_synchronizers_locked(
+    std::unique_lock<std::mutex> *devices_lock) {
+  g_queue_state_changed.wait(*devices_lock, [] {
+    for (const DeviceState &device : g_devices) {
+      for (const lr_queue_t *queue : device.queues) {
+        if (queue->state.active_synchronizers != 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  });
+}
 #endif
 
 } // namespace lrrt_internal
@@ -439,20 +478,25 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::unique_lock<std::mutex> lock(g_devices_mutex);
   auto queue_entry = g_queues.find(queue);
   if (queue_entry == g_queues.end() || queue->is_default ||
-      queue->device.index >= g_devices.size()) {
+      queue->device.index >= g_devices.size() || queue->state.destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  queue->state.destroying = true;
+  g_queue_state_changed.wait(
+      lock, [queue] { return queue->state.active_synchronizers == 0; });
   DeviceState &device = g_devices[queue->device.index];
   lr_status_t result = drain_queue_locked(&queue->state);
   release_queue_pools_locked(&queue->state, &result);
   if (result != LR_SUCCESS) {
+    queue->state.destroying = false;
     return result;
   }
   hsa_status_t status = hsa_queue_destroy(queue->state.queue);
   if (status != HSA_STATUS_SUCCESS) {
+    queue->state.destroying = false;
     return to_lr_status(status);
   }
   auto device_queue =
@@ -476,12 +520,117 @@ lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
-  if (g_queues.find(queue) == g_queues.end() ||
-      queue->device.index >= g_devices.size()) {
+  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  if (!valid_queue_locked(queue) || queue->device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return drain_queue_locked(&queue->state);
+
+  QueueState &state = queue->state;
+  lr_status_t reap_status = reap_completed_queue_work_locked(&state);
+  if (reap_status != LR_SUCCESS) {
+    return reap_status;
+  }
+
+  struct SynchronizationDependency {
+    hsa_signal_t signal;
+    lr_event_t *event;
+  };
+  std::vector<SynchronizationDependency> dependencies;
+  dependencies.reserve(state.pending_dispatches.size() +
+                       state.pending_events.size());
+  std::vector<hsa_signal_t> dispatch_dependencies;
+  dispatch_dependencies.reserve(state.pending_dispatches.size());
+  for (const PendingDispatch &dispatch : state.pending_dispatches) {
+    dependencies.push_back(
+        SynchronizationDependency{dispatch.completion_signal, nullptr});
+    dispatch_dependencies.push_back(dispatch.completion_signal);
+  }
+  for (lr_event_t *event : state.pending_events) {
+    if (event->pending && hsa_signal_load_scacquire(event->signal) != 0) {
+      dependencies.push_back(SynchronizationDependency{event->signal, event});
+    }
+  }
+  if (dependencies.empty()) {
+    return LR_SUCCESS;
+  }
+
+  const size_t packet_count = (dependencies.size() + 4) / 5;
+  lr_status_t capacity_status =
+      ensure_queue_capacity_locked(&state, packet_count);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
+  }
+
+  hsa_signal_t completion_signal{};
+  hsa_status_t status =
+      hsa_signal_create(static_cast<hsa_signal_value_t>(packet_count), 0,
+                        nullptr, &completion_signal);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+
+  uint64_t last_index = 0;
+  for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
+    last_index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
+    auto *packets =
+        static_cast<hsa_barrier_and_packet_t *>(state.queue->base_address);
+    hsa_barrier_and_packet_t *packet =
+        &packets[last_index & (state.queue->size - 1)];
+    std::memset(packet, 0, sizeof(*packet));
+    const size_t end = std::min(offset + 5, dependencies.size());
+    for (size_t i = offset; i < end; ++i) {
+      packet->dep_signal[i - offset] = dependencies[i].signal;
+    }
+    packet->completion_signal = completion_signal;
+    publish_packet_header(&packet->header,
+                          barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+
+    std::vector<lr_event_t *> event_dependencies;
+    for (size_t i = offset; i < end; ++i) {
+      if (dependencies[i].event) {
+        ++dependencies[i].event->dependency_count;
+        dependencies[i].event->dependency_queues.insert(&state);
+        event_dependencies.push_back(dependencies[i].event);
+      }
+    }
+    state.pending_barriers.push_back(
+        PendingBarrier{completion_signal, std::move(event_dependencies)});
+  }
+
+  state.pending_synchronizations.push_back(PendingSynchronization{
+      completion_signal, std::move(dispatch_dependencies)});
+  ++state.active_synchronizers;
+  hsa_signal_store_screlease(state.queue->doorbell_signal, last_index);
+
+  lock.unlock();
+  hsa_signal_value_t value =
+      hsa_signal_wait_scacquire(completion_signal, HSA_SIGNAL_CONDITION_LT, 1,
+                                UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+  lock.lock();
+
+  auto pending = std::find_if(
+      state.pending_synchronizations.begin(),
+      state.pending_synchronizations.end(),
+      [completion_signal](const PendingSynchronization &synchronization) {
+        return synchronization.completion_signal.handle ==
+               completion_signal.handle;
+      });
+  if (pending != state.pending_synchronizations.end()) {
+    state.pending_synchronizations.erase(pending);
+  }
+  --state.active_synchronizers;
+  g_queue_state_changed.notify_all();
+
+  lr_status_t result = value == 0 ? LR_SUCCESS : LR_ERROR_RUNTIME;
+  reap_status = reap_completed_queue_work_locked(&state);
+  if (result == LR_SUCCESS) {
+    result = reap_status;
+  }
+  status = hsa_signal_destroy(completion_signal);
+  if (result == LR_SUCCESS && status != HSA_STATUS_SUCCESS) {
+    result = to_lr_status(status);
+  }
+  return result;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
