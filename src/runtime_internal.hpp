@@ -29,7 +29,9 @@ struct PendingDispatch {
 };
 
 struct PendingBarrier {
-  // Completion of the following dispatch proves the barrier was consumed.
+  // Reaching zero proves the queue consumed the barrier packet. Depending on
+  // the producer, this may be a following dispatch signal or a synchronization
+  // barrier's shared completion signal.
   hsa_signal_t retirement_signal;
   std::vector<lr_event_t *> dependencies;
 };
