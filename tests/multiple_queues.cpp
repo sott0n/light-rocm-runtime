@@ -114,6 +114,78 @@ int main() {
     synchronizer.join();
     second_queue.synchronize();
 
+    lrrt::launch(first_queue, wait_kernel, config, wait_args);
+    lrrt::Event synchronized_event(device);
+    synchronized_event.record(first_queue);
+    std::atomic<bool> event_synchronize_started{false};
+    std::atomic<bool> event_synchronize_completed{false};
+    std::thread event_synchronizer([&] {
+      event_synchronize_started.store(true, std::memory_order_release);
+      synchronized_event.synchronize();
+      event_synchronize_completed.store(true, std::memory_order_release);
+    });
+    while (!event_synchronize_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(second_queue, kernel, config, concurrent_args);
+    if (event_synchronize_completed.load(std::memory_order_acquire)) {
+      event_synchronizer.join();
+      throw std::runtime_error(
+          "event synchronization blocked an independent queue launch");
+    }
+    event_synchronizer.join();
+    second_queue.synchronize();
+
+    lr_event_t *reused_while_synchronizing = nullptr;
+    lrrt::check(lr_event_create(device.get(), &reused_while_synchronizing),
+                "lr_event_create");
+    lrrt::launch(first_queue, wait_kernel, config, wait_args);
+    lrrt::check(
+        lr_event_record_on_queue(reused_while_synchronizing, first_queue.get()),
+        "lr_event_record_on_queue");
+    std::atomic<bool> reuse_synchronize_started{false};
+    lr_status_t reuse_synchronize_status = LR_ERROR_RUNTIME;
+    std::thread reuse_synchronizer([&] {
+      reuse_synchronize_started.store(true, std::memory_order_release);
+      reuse_synchronize_status =
+          lr_event_synchronize(reused_while_synchronizing);
+    });
+    while (!reuse_synchronize_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    lrrt::check(
+        lr_event_record_on_queue(reused_while_synchronizing, first_queue.get()),
+        "lr_event_record_on_queue");
+    reuse_synchronizer.join();
+    lrrt::check(reuse_synchronize_status, "lr_event_synchronize");
+    lrrt::check(lr_event_synchronize(reused_while_synchronizing),
+                "lr_event_synchronize");
+    lrrt::check(lr_event_destroy(reused_while_synchronizing),
+                "lr_event_destroy");
+
+    lr_event_t *destroyed_while_synchronizing = nullptr;
+    lrrt::check(lr_event_create(device.get(), &destroyed_while_synchronizing),
+                "lr_event_create");
+    lrrt::launch(first_queue, wait_kernel, config, wait_args);
+    lrrt::check(lr_event_record_on_queue(destroyed_while_synchronizing,
+                                         first_queue.get()),
+                "lr_event_record_on_queue");
+    std::atomic<bool> destroy_synchronize_started{false};
+    lr_status_t destroy_synchronize_status = LR_ERROR_RUNTIME;
+    std::thread destroy_synchronizer([&] {
+      destroy_synchronize_started.store(true, std::memory_order_release);
+      destroy_synchronize_status =
+          lr_event_synchronize(destroyed_while_synchronizing);
+    });
+    while (!destroy_synchronize_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    lrrt::check(lr_event_destroy(destroyed_while_synchronizing),
+                "lr_event_destroy");
+    destroy_synchronizer.join();
+    lrrt::check(destroy_synchronize_status, "lr_event_synchronize");
+
     lr_queue_t *lifetime_queue = nullptr;
     lrrt::check(lr_queue_create(device.get(), &lifetime_queue),
                 "lr_queue_create");

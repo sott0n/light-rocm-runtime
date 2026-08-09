@@ -67,6 +67,8 @@ struct lr_event_t {
   Kind kind;
   bool pending;
   bool completed;
+  size_t active_synchronizers;
+  bool destroying;
   std::unordered_set<QueueState *> dependency_queues;
   size_t dependency_count;
   uint64_t start_tick;
@@ -125,6 +127,7 @@ struct DeviceState {
 
 extern std::mutex g_devices_mutex;
 extern std::condition_variable g_queue_state_changed;
+extern std::condition_variable g_event_state_changed;
 extern std::vector<DeviceState> g_devices;
 extern hsa_agent_t g_host_agent;
 extern bool g_has_host_agent;
@@ -141,6 +144,10 @@ hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal);
 hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
                                     size_t size, KernargBuffer *kernarg);
 lr_status_t event_wait_locked(lr_event_t *event);
+void wait_for_event_synchronizers_locked(
+    std::unique_lock<std::mutex> *devices_lock, lr_event_t *event);
+void wait_for_all_event_synchronizers_locked(
+    std::unique_lock<std::mutex> *devices_lock);
 lr_status_t wait_for_event_consumers_locked(DeviceState *device,
                                             lr_event_t *event);
 lr_status_t drain_device_locked(DeviceState *device);

@@ -416,9 +416,13 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   }
 
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::unique_lock<std::mutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !valid_event_locked(event) ||
-      event->device.index != device.index) {
+      event->device.index != device.index || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  wait_for_event_synchronizers_locked(&lock, event);
+  if (!valid_event_locked(event) || event->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
