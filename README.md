@@ -144,7 +144,9 @@ Run them from the build directory:
 ```
 
 Results vary with the GPU, CPU, system load, and ROCm version. Use repeated
-runs in the same environment when comparing changes.
+runs in the same environment when comparing changes. See the
+[benchmark guide and development result snapshot](benchmarks/README.md) for
+measurement details and representative numbers.
 
 ## Pinned Host Double-buffer Pipeline
 
