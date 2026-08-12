@@ -137,6 +137,27 @@ int main() {
     event_synchronizer.join();
     second_queue.synchronize();
 
+    lrrt::launch(first_queue, wait_kernel, config, wait_args);
+    std::atomic<bool> device_synchronize_started{false};
+    std::atomic<bool> device_synchronize_completed{false};
+    std::thread device_synchronizer([&] {
+      device_synchronize_started.store(true, std::memory_order_release);
+      device.synchronize();
+      device_synchronize_completed.store(true, std::memory_order_release);
+    });
+    while (!device_synchronize_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(second_queue, kernel, config, concurrent_args);
+    if (device_synchronize_completed.load(std::memory_order_acquire)) {
+      device_synchronizer.join();
+      throw std::runtime_error(
+          "device synchronization blocked a later queue launch");
+    }
+    device_synchronizer.join();
+    second_queue.synchronize();
+
     lr_event_t *reused_while_synchronizing = nullptr;
     lrrt::check(lr_event_create(device.get(), &reused_while_synchronizing),
                 "lr_event_create");

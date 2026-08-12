@@ -144,6 +144,8 @@ hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal);
 hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
                                     size_t size, KernargBuffer *kernarg);
 lr_status_t event_wait_locked(lr_event_t *event);
+lr_status_t finish_event_wait_locked(lr_event_t *event,
+                                     hsa_signal_value_t value);
 void wait_for_event_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock, lr_event_t *event);
 void wait_for_all_event_synchronizers_locked(
@@ -170,6 +172,14 @@ void release_device_queue_pools_locked(DeviceState *device,
 void destroy_all_queues_locked();
 void wait_for_queue_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock);
+lr_status_t
+enqueue_queue_synchronization_locked(QueueState *queue,
+                                     hsa_signal_t *completion_signal);
+lr_status_t finish_queue_synchronization_locked(QueueState *queue,
+                                                hsa_signal_t completion_signal,
+                                                hsa_signal_value_t wait_value);
+lr_status_t synchronize_device(DeviceState *device,
+                               std::unique_lock<std::mutex> *devices_lock);
 void release_events_locked();
 void release_modules_locked();
 void release_memory_allocations_locked(lr_status_t *result);

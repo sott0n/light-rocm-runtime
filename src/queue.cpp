@@ -451,35 +451,44 @@ enqueue_queue_synchronization_locked(QueueState *queue,
                                      hsa_signal_t *completion_signal) {
   *completion_signal = hsa_signal_t{};
 
-  lr_status_t reap_status = reap_completed_queue_work_locked(queue);
-  if (reap_status != LR_SUCCESS) {
-    return reap_status;
-  }
-
   std::vector<SynchronizationDependency> dependencies;
-  dependencies.reserve(queue->pending_dispatches.size() +
-                       queue->pending_events.size());
   std::vector<hsa_signal_t> dispatch_dependencies;
-  dispatch_dependencies.reserve(queue->pending_dispatches.size());
-  for (const PendingDispatch &dispatch : queue->pending_dispatches) {
-    dependencies.push_back(
-        SynchronizationDependency{dispatch.completion_signal, nullptr});
-    dispatch_dependencies.push_back(dispatch.completion_signal);
-  }
-  for (lr_event_t *event : queue->pending_events) {
-    if (event->pending && hsa_signal_load_scacquire(event->signal) != 0) {
-      dependencies.push_back(SynchronizationDependency{event->signal, event});
+  size_t packet_count = 0;
+  while (true) {
+    lr_status_t reap_status = reap_completed_queue_work_locked(queue);
+    if (reap_status != LR_SUCCESS) {
+      return reap_status;
     }
-  }
-  if (dependencies.empty()) {
-    return LR_SUCCESS;
-  }
 
-  const size_t packet_count = (dependencies.size() + 4) / 5;
-  lr_status_t capacity_status =
-      ensure_queue_capacity_locked(queue, packet_count);
-  if (capacity_status != LR_SUCCESS) {
-    return capacity_status;
+    dependencies.clear();
+    dependencies.reserve(queue->pending_dispatches.size() +
+                         queue->pending_events.size());
+    dispatch_dependencies.clear();
+    dispatch_dependencies.reserve(queue->pending_dispatches.size());
+    for (const PendingDispatch &dispatch : queue->pending_dispatches) {
+      dependencies.push_back(
+          SynchronizationDependency{dispatch.completion_signal, nullptr});
+      dispatch_dependencies.push_back(dispatch.completion_signal);
+    }
+    for (lr_event_t *event : queue->pending_events) {
+      if (event->pending && hsa_signal_load_scacquire(event->signal) != 0) {
+        dependencies.push_back(SynchronizationDependency{event->signal, event});
+      }
+    }
+    if (dependencies.empty()) {
+      return LR_SUCCESS;
+    }
+
+    packet_count = (dependencies.size() + 4) / 5;
+    if (pending_queue_packet_count(queue) + packet_count <=
+        queue->queue->size) {
+      break;
+    }
+
+    lr_status_t wait_status = wait_for_queue_progress_locked(queue);
+    if (wait_status != LR_SUCCESS) {
+      return wait_status;
+    }
   }
 
   hsa_status_t status =

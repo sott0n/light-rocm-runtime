@@ -18,6 +18,7 @@ std::condition_variable g_event_state_changed;
 std::vector<DeviceState> g_devices;
 hsa_agent_t g_host_agent{};
 bool g_has_host_agent = false;
+
 lr_status_t to_lr_status(hsa_status_t status) {
   return status == HSA_STATUS_SUCCESS ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
@@ -298,12 +299,13 @@ lr_status_t lr_synchronize(lr_device_t device) {
     return LR_ERROR_NOT_INITIALIZED;
   }
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::unique_lock<std::mutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() ||
       !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return drain_device_locked(&g_devices[device.index]);
+
+  return synchronize_device(&g_devices[device.index], &lock);
 #else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;

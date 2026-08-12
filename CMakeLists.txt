@@ -55,6 +55,7 @@ include(cmake/IreeAdapter.cmake)
 
 add_library(
   lrrt
+  src/device_synchronization.cpp
   src/event.cpp
   src/launch.cpp
   src/memory.cpp
