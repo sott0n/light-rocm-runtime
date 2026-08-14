@@ -1,3 +1,6 @@
 [submodule "third_party/iree"]
 	path = third_party/iree
 	url = https://github.com/iree-org/iree.git
+[submodule "third_party/sparsewave"]
+	path = third_party/sparsewave
+	url = https://github.com/sott0n/SparseWaveComp.git
