@@ -42,7 +42,7 @@ int main() {
     }
 
     lrrt::Device device = runtime.open_device(0);
-    const lrrt::executor::sparsewave::SpmmProblem problem{4, 8, 4, 8};
+    const lrrt::executor::sparsewave::SpmmProblem problem{4, 8, 4};
     const lrrt::executor::sparsewave::CsrMatrix matrix{
         {0, 2, 4, 6, 8},
         {0, 3, 1, 7, 2, 4, 5, 6},

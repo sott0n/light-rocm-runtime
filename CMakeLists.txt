@@ -80,6 +80,8 @@ add_library(lrrt_bundle src/bundle.cpp)
 add_library(lrrt::bundle ALIAS lrrt_bundle)
 target_link_libraries(lrrt_bundle PUBLIC lrrt::lrrt)
 
+set_target_properties(lrrt lrrt_bundle PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 target_include_directories(
   lrrt
   PUBLIC

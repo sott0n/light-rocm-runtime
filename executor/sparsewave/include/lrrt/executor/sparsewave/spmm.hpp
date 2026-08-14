@@ -16,7 +16,6 @@ struct SpmmProblem {
   uint32_t rows;
   uint32_t columns;
   uint32_t rhs_columns;
-  uint32_t nonzeros;
 };
 
 struct CsrMatrix {
@@ -108,8 +107,7 @@ private:
     if (matrix.row_offsets.size() != static_cast<size_t>(problem_.rows) + 1) {
       throw std::invalid_argument("SparseWave SpMM row-offset size mismatch");
     }
-    if (matrix.column_indices.size() != problem_.nonzeros ||
-        matrix.values.size() != problem_.nonzeros) {
+    if (matrix.column_indices.size() != matrix.values.size()) {
       throw std::invalid_argument("SparseWave SpMM nonzero size mismatch");
     }
     const size_t rhs_elements =
@@ -117,8 +115,10 @@ private:
     if (rhs.size() != rhs_elements) {
       throw std::invalid_argument("SparseWave SpMM RHS size mismatch");
     }
-    if (matrix.row_offsets.front() != 0 ||
-        matrix.row_offsets.back() != static_cast<int32_t>(problem_.nonzeros)) {
+    if (matrix.values.size() > static_cast<size_t>(INT32_MAX) ||
+        matrix.row_offsets.front() != 0 ||
+        matrix.row_offsets.back() !=
+            static_cast<int32_t>(matrix.values.size())) {
       throw std::invalid_argument("SparseWave SpMM CSR bounds are invalid");
     }
     for (size_t i = 1; i < matrix.row_offsets.size(); ++i) {

@@ -108,3 +108,38 @@ target_compile_definitions(
 )
 
 add_test(NAME lrrt_sparsewave_spmm_e2e COMMAND lrrt_sparsewave_spmm)
+
+find_package(Python3 3.11 COMPONENTS Interpreter Development.SABIModule REQUIRED)
+Python3_add_library(
+  _lrrt_sparsewave MODULE USE_SABI 3.11 WITH_SOABI python_binding.cpp
+)
+target_link_libraries(_lrrt_sparsewave PRIVATE lrrt::sparsewave_executor)
+
+set(SPARSEWAVE_PYTHON_DIR "${CMAKE_CURRENT_BINARY_DIR}/python")
+set_target_properties(
+  _lrrt_sparsewave
+  PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${SPARSEWAVE_PYTHON_DIR}"
+)
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/lrrt_sparsewave.py"
+  "${SPARSEWAVE_PYTHON_DIR}/lrrt_sparsewave.py"
+  COPYONLY
+)
+
+add_custom_target(
+  lrrt_sparsewave_python
+  DEPENDS _lrrt_sparsewave
+)
+
+add_test(
+  NAME lrrt_sparsewave_python_spmm_e2e
+  COMMAND
+    "${CMAKE_COMMAND}" -E env
+    "PYTHONPATH=${SPARSEWAVE_PYTHON_DIR}"
+    "LRRT_SPARSEWAVE_SPMM_MANIFEST=${SPARSEWAVE_SPMM_MANIFEST}"
+    "UV_CACHE_DIR=${LRRT_SPARSEWAVE_UV_CACHE_DIR}"
+    "UV_PROJECT_ENVIRONMENT=${CMAKE_BINARY_DIR}/sparsewave-pytorch-venv"
+    "${UV_EXECUTABLE}" run --project "${SPARSEWAVE_TORCH_PROJECT}" --frozen
+    --with pytest==9.0.2 pytest -q
+    "${PROJECT_SOURCE_DIR}/tests/executor/sparsewave/test_spmm_e2e.py"
+)
