@@ -43,3 +43,7 @@ elseif(LRRT_ENABLE_TRITON_EXAMPLES)
 else()
   message(STATUS "Triton examples disabled")
 endif()
+
+if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)
+  add_subdirectory(sparsewave)
+endif()

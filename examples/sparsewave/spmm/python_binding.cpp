@@ -1,7 +1,8 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-#include "lrrt/executor/sparsewave/spmm.hpp"
+#include "executor.hpp"
+#include "runtime_context.hpp"
 
 #include <stdint.h>
 
@@ -11,44 +12,20 @@
 #include <utility>
 #include <vector>
 
+namespace lrrt::executor::sparsewave {
+
 namespace {
 
-constexpr const char *kSpmmCapsuleName = "lrrt_sparsewave.SpmmExecutor";
+constexpr const char *kCapsuleName = "lrrt_sparsewave.SpmmExecutor";
 
-struct RuntimeContext {
-  RuntimeContext() : runtime(), device(open_device(runtime)) {}
-
-  static lrrt::Device open_device(lrrt::Runtime &runtime) {
-    if (runtime.device_count() == 0) {
-      throw std::runtime_error("SparseWave SpMM requires an AMDGPU device");
-    }
-    return runtime.open_device(0);
-  }
-
-  lrrt::Runtime runtime;
-  lrrt::Device device;
-};
-
-std::weak_ptr<RuntimeContext> runtime_context;
-
-std::shared_ptr<RuntimeContext> get_runtime_context() {
-  std::shared_ptr<RuntimeContext> context = runtime_context.lock();
-  if (!context) {
-    context = std::make_shared<RuntimeContext>();
-    runtime_context = context;
-  }
-  return context;
-}
-
-struct SpmmProgram {
-  SpmmProgram(std::shared_ptr<RuntimeContext> context,
-              const char *manifest_path,
-              lrrt::executor::sparsewave::SpmmProblem problem)
+struct Program {
+  Program(std::shared_ptr<RuntimeContext> context, const char *manifest_path,
+          lrrt::examples::sparsewave::spmm::Problem problem)
       : context(std::move(context)),
         executor(this->context->device, manifest_path, problem) {}
 
   std::shared_ptr<RuntimeContext> context;
-  lrrt::executor::sparsewave::SpmmExecutor executor;
+  lrrt::examples::sparsewave::spmm::Executor executor;
 };
 
 template <typename T>
@@ -58,16 +35,16 @@ std::vector<T> copy_input(unsigned long long address, size_t count) {
   return std::vector<T>(data, data + count);
 }
 
-void destroy_spmm_program(PyObject *capsule) {
-  void *pointer = PyCapsule_GetPointer(capsule, kSpmmCapsuleName);
+void destroy_program(PyObject *capsule) {
+  void *pointer = PyCapsule_GetPointer(capsule, kCapsuleName);
   if (pointer) {
-    delete static_cast<SpmmProgram *>(pointer);
+    delete static_cast<Program *>(pointer);
   } else {
     PyErr_Clear();
   }
 }
 
-PyObject *load_spmm(PyObject *, PyObject *args) {
+PyObject *load(PyObject *, PyObject *args) {
   const char *manifest_path = nullptr;
   unsigned long long rows = 0;
   unsigned long long columns = 0;
@@ -81,13 +58,13 @@ PyObject *load_spmm(PyObject *, PyObject *args) {
     if (rows > UINT32_MAX || columns > UINT32_MAX || rhs_columns > UINT32_MAX) {
       throw std::invalid_argument("SparseWave SpMM dimensions exceed uint32");
     }
-    auto program = std::make_unique<SpmmProgram>(
+    auto program = std::make_unique<Program>(
         get_runtime_context(), manifest_path,
-        lrrt::executor::sparsewave::SpmmProblem{
+        lrrt::examples::sparsewave::spmm::Problem{
             static_cast<uint32_t>(rows), static_cast<uint32_t>(columns),
             static_cast<uint32_t>(rhs_columns)});
     PyObject *capsule =
-        PyCapsule_New(program.get(), kSpmmCapsuleName, destroy_spmm_program);
+        PyCapsule_New(program.get(), kCapsuleName, destroy_program);
     if (!capsule) {
       return nullptr;
     }
@@ -99,7 +76,7 @@ PyObject *load_spmm(PyObject *, PyObject *args) {
   }
 }
 
-PyObject *execute_spmm(PyObject *, PyObject *args) {
+PyObject *execute(PyObject *, PyObject *args) {
   PyObject *capsule = nullptr;
   unsigned long long nonzeros = 0;
   unsigned long long row_offsets_address = 0;
@@ -113,8 +90,8 @@ PyObject *execute_spmm(PyObject *, PyObject *args) {
     return nullptr;
   }
 
-  auto *program = static_cast<SpmmProgram *>(
-      PyCapsule_GetPointer(capsule, kSpmmCapsuleName));
+  auto *program =
+      static_cast<Program *>(PyCapsule_GetPointer(capsule, kCapsuleName));
   if (!program) {
     return nullptr;
   }
@@ -130,14 +107,13 @@ PyObject *execute_spmm(PyObject *, PyObject *args) {
     }
 
     const auto &problem = program->executor.problem();
-    const lrrt::executor::sparsewave::CsrMatrix matrix{
+    const lrrt::examples::sparsewave::spmm::Inputs inputs{
         copy_input<int32_t>(row_offsets_address, problem.rows + 1),
         copy_input<int32_t>(column_indices_address, nonzeros),
-        copy_input<float>(values_address, nonzeros)};
-    const std::vector<float> rhs =
+        copy_input<float>(values_address, nonzeros),
         copy_input<float>(rhs_address, static_cast<size_t>(problem.columns) *
-                                           problem.rhs_columns);
-    const std::vector<float> output = program->executor.execute(matrix, rhs);
+                                           problem.rhs_columns)};
+    const std::vector<float> output = program->executor.execute(inputs);
     std::memcpy(
         reinterpret_cast<void *>(static_cast<uintptr_t>(output_address)),
         output.data(), output.size() * sizeof(float));
@@ -149,16 +125,17 @@ PyObject *execute_spmm(PyObject *, PyObject *args) {
 }
 
 PyMethodDef methods[] = {
-    {"load_spmm", load_spmm, METH_VARARGS,
+    {"load_spmm", load, METH_VARARGS,
      "Load a compiled SparseWave CSR SpMM bundle."},
-    {"execute_spmm", execute_spmm, METH_VARARGS,
+    {"execute_spmm", execute, METH_VARARGS,
      "Execute a loaded SparseWave CSR SpMM bundle."},
     {nullptr, nullptr, 0, nullptr},
 };
 
-PyModuleDef module = {PyModuleDef_HEAD_INIT, "_lrrt_sparsewave", nullptr, -1,
-                      methods};
-
 } // namespace
 
-PyMODINIT_FUNC PyInit__lrrt_sparsewave() { return PyModule_Create(&module); }
+int add_spmm_bindings(PyObject *module) {
+  return PyModule_AddFunctions(module, methods);
+}
+
+} // namespace lrrt::executor::sparsewave

@@ -104,12 +104,12 @@ endif()
 
 enable_testing()
 
-add_subdirectory(examples)
-add_subdirectory(tests)
-
 if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)
   add_subdirectory(executor/sparsewave)
 endif()
+
+add_subdirectory(examples)
+add_subdirectory(tests)
 
 if(LRRT_ENABLE_IREE_ADAPTER)
   lrrt_find_iree()
