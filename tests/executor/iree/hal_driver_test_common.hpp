@@ -1,6 +1,6 @@
 #pragma once
 
-#include "hal_driver.h"
+#include "executor/iree/hal_driver.h"
 
 #include <cstring>
 #include <fstream>

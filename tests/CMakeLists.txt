@@ -46,7 +46,7 @@ endwhile()
 
 set(
   LRRT_TRITON_EXECUTOR_TESTS
-  lrrt_triton_executor_tests triton_executor.cpp
+  lrrt_triton_executor_tests executor/triton/triton_executor.cpp
 )
 
 set(LRRT_QWEN_EXECUTOR_TESTS lrrt_qwen_weight_bundle_tests qwen_weight_bundle.cpp)

@@ -10,11 +10,19 @@ target_include_directories(
 
 target_link_libraries(lrrt_iree_adapter INTERFACE lrrt::lrrt)
 
-add_executable(lrrt_iree_adapter_smoke smoke.cpp)
+set(LRRT_IREE_TEST_SOURCE_DIR "${PROJECT_SOURCE_DIR}/tests/executor/iree")
+
+add_executable(
+  lrrt_iree_adapter_smoke
+  "${LRRT_IREE_TEST_SOURCE_DIR}/smoke.cpp"
+)
 target_link_libraries(lrrt_iree_adapter_smoke PRIVATE lrrt::iree_adapter)
 add_test(NAME lrrt_iree_adapter_smoke COMMAND lrrt_iree_adapter_smoke)
 
-add_executable(lrrt_iree_adapter_contract_tests adapter_contract_test.cpp)
+add_executable(
+  lrrt_iree_adapter_contract_tests
+  "${LRRT_IREE_TEST_SOURCE_DIR}/adapter_contract_test.cpp"
+)
 target_link_libraries(
   lrrt_iree_adapter_contract_tests
   PRIVATE lrrt::iree_adapter
@@ -24,7 +32,10 @@ add_test(
   COMMAND lrrt_iree_adapter_contract_tests
 )
 
-add_executable(lrrt_iree_qwen_decode_bundle_tests qwen_decode_bundle_test.cpp)
+add_executable(
+  lrrt_iree_qwen_decode_bundle_tests
+  "${LRRT_IREE_TEST_SOURCE_DIR}/qwen_decode_bundle_test.cpp"
+)
 target_link_libraries(
   lrrt_iree_qwen_decode_bundle_tests
   PRIVATE lrrt::iree_adapter
@@ -160,23 +171,23 @@ if(EXISTS "${LRRT_IREE_BASE_LIB}"
 
   lrrt_add_iree_hal_driver_test(
     lrrt_iree_hal_driver_registration_tests
-    hal_driver_registration_test.cpp
+    "${LRRT_IREE_TEST_SOURCE_DIR}/hal_driver_registration_test.cpp"
   )
   lrrt_add_iree_hal_driver_test(
     lrrt_iree_hal_driver_allocator_tests
-    hal_driver_allocator_test.cpp
+    "${LRRT_IREE_TEST_SOURCE_DIR}/hal_driver_allocator_test.cpp"
   )
   lrrt_add_iree_hal_driver_test(
     lrrt_iree_hal_driver_transfer_tests
-    hal_driver_transfer_test.cpp
+    "${LRRT_IREE_TEST_SOURCE_DIR}/hal_driver_transfer_test.cpp"
   )
   lrrt_add_iree_hal_driver_test(
     lrrt_iree_hal_driver_unsupported_tests
-    hal_driver_unsupported_test.cpp
+    "${LRRT_IREE_TEST_SOURCE_DIR}/hal_driver_unsupported_test.cpp"
   )
   lrrt_add_iree_hal_driver_test(
     lrrt_iree_hal_driver_executable_tests
-    hal_driver_executable_test.cpp
+    "${LRRT_IREE_TEST_SOURCE_DIR}/hal_driver_executable_test.cpp"
   )
 else()
   message(
@@ -662,7 +673,7 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
 
     add_executable(
       lrrt_iree_token_step_kv_cache_device_resident_smoke
-      token_step_kv_cache_device_resident_smoke.cpp
+      "${LRRT_IREE_TEST_SOURCE_DIR}/token_step_kv_cache_device_resident_smoke.cpp"
     )
     target_link_libraries(
       lrrt_iree_token_step_kv_cache_device_resident_smoke
@@ -691,7 +702,7 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
 
     add_executable(
       lrrt_iree_mini_decoder_layer_device_resident_smoke
-      mini_decoder_layer_device_resident_smoke.cpp
+      "${LRRT_IREE_TEST_SOURCE_DIR}/mini_decoder_layer_device_resident_smoke.cpp"
     )
     target_link_libraries(
       lrrt_iree_mini_decoder_layer_device_resident_smoke
@@ -721,7 +732,7 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
 
     add_executable(
       lrrt_iree_qwen_decode_e2e_smoke
-      qwen_decode_e2e_smoke.cpp
+      "${LRRT_IREE_TEST_SOURCE_DIR}/qwen_decode_e2e_smoke.cpp"
     )
     target_link_libraries(
       lrrt_iree_qwen_decode_e2e_smoke
@@ -846,7 +857,10 @@ if(LRRT_IREE_COMPILE_EXECUTABLE AND LRRT_IREE_RUN_MODULE_EXECUTABLE)
     )
   endif()
 
-  add_executable(lrrt_iree_hsaco_dispatch_smoke hsaco_dispatch_smoke.cpp)
+  add_executable(
+    lrrt_iree_hsaco_dispatch_smoke
+    "${LRRT_IREE_TEST_SOURCE_DIR}/hsaco_dispatch_smoke.cpp"
+  )
   target_link_libraries(lrrt_iree_hsaco_dispatch_smoke PRIVATE lrrt::iree_adapter)
   target_compile_definitions(
     lrrt_iree_hsaco_dispatch_smoke

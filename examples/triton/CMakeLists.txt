@@ -19,7 +19,11 @@ lrrt_add_triton_executable(lrrt_triton_scale triton_scale.cpp)
 lrrt_add_triton_executable(lrrt_triton_rmsnorm triton_rmsnorm.cpp)
 lrrt_add_triton_executable(
   lrrt_triton_rmsnorm_precision_tests
-  "${PROJECT_SOURCE_DIR}/tests/triton_rmsnorm_precision.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/executor/triton/triton_rmsnorm_precision.cpp"
+)
+target_include_directories(
+  lrrt_triton_rmsnorm_precision_tests
+  PRIVATE "${PROJECT_SOURCE_DIR}/tests"
 )
 lrrt_add_triton_executable(lrrt_triton_rope triton_rope.cpp)
 lrrt_add_triton_executable(lrrt_triton_silu_mul triton_silu_mul.cpp)
@@ -31,7 +35,11 @@ lrrt_add_triton_executable(
 lrrt_add_triton_executable(lrrt_triton_matvec triton_matvec.cpp)
 lrrt_add_triton_executable(
   lrrt_triton_matvec_precision_tests
-  "${PROJECT_SOURCE_DIR}/tests/triton_matvec_precision.cpp"
+  "${PROJECT_SOURCE_DIR}/tests/executor/triton/triton_matvec_precision.cpp"
+)
+target_include_directories(
+  lrrt_triton_matvec_precision_tests
+  PRIVATE "${PROJECT_SOURCE_DIR}/tests"
 )
 lrrt_add_triton_executable(lrrt_triton_qkv_projection triton_qkv_projection.cpp)
 target_include_directories(
@@ -396,7 +404,7 @@ if(PYTHON_EXECUTABLE AND LLVM_READELF)
       NAME lrrt_triton_${bundle_name}_bundle_consistency
       COMMAND
         "${PYTHON_EXECUTABLE}"
-        "${PROJECT_SOURCE_DIR}/tests/triton_bundle_consistency.py"
+        "${PROJECT_SOURCE_DIR}/tests/executor/triton/triton_bundle_consistency.py"
         "--manifest=${${manifest_var}}"
         "--llvm-readelf=${LLVM_READELF}"
     )
