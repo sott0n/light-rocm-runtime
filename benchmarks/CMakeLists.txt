@@ -36,6 +36,7 @@ if(LRRT_BUILD_TRITON_BENCHMARKS)
     PRIVATE
       "${PROJECT_SOURCE_DIR}"
       "${PROJECT_SOURCE_DIR}/executor/triton"
+      "${PROJECT_SOURCE_DIR}/examples/triton"
   )
 endif()
 
@@ -53,9 +54,21 @@ if(LRRT_BUILD_TRITON_BENCHMARKS AND UV_EXECUTABLE)
     PRIVATE
       "${PROJECT_SOURCE_DIR}"
       "${PROJECT_SOURCE_DIR}/executor/triton"
+      "${PROJECT_SOURCE_DIR}/examples/triton"
   )
 elseif(LRRT_BUILD_TRITON_BENCHMARKS)
   message(STATUS "uv not found; skipping Triton mini decoder layer benchmark")
+endif()
+
+if(TARGET lrrt_iree_vmfb_runner)
+  add_executable(
+    lrrt_iree_mini_decoder_layer_benchmark
+    iree/mini_decoder_layer_device_resident.cpp
+  )
+  target_link_libraries(
+    lrrt_iree_mini_decoder_layer_benchmark
+    PRIVATE lrrt::iree_vmfb_runner
+  )
 endif()
 
 lrrt_add_hsaco_kernel(

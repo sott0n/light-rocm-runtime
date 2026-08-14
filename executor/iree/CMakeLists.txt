@@ -32,19 +32,6 @@ add_test(
   COMMAND lrrt_iree_adapter_contract_tests
 )
 
-add_executable(
-  lrrt_iree_qwen_decode_bundle_tests
-  "${LRRT_IREE_TEST_SOURCE_DIR}/qwen_decode_bundle_test.cpp"
-)
-target_link_libraries(
-  lrrt_iree_qwen_decode_bundle_tests
-  PRIVATE lrrt::iree_adapter
-)
-add_test(
-  NAME lrrt_iree_qwen_decode_bundle_tests
-  COMMAND lrrt_iree_qwen_decode_bundle_tests
-)
-
 set(LRRT_IREE_RUNTIME_BUILD_DIR
     "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src"
 )
@@ -204,6 +191,19 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
     CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/build-iree-tools/runtime/src/iree/*.a"
     "${PROJECT_SOURCE_DIR}/build-iree-tools/build_tools/third_party/*.a"
+  )
+  add_library(lrrt_iree_vmfb_runner INTERFACE)
+  add_library(lrrt::iree_vmfb_runner ALIAS lrrt_iree_vmfb_runner)
+  target_link_libraries(
+    lrrt_iree_vmfb_runner
+    INTERFACE
+      lrrt::iree_hal_driver
+      "-Wl,--start-group"
+      ${LRRT_IREE_RUNTIME_STATIC_LIBS}
+      "-Wl,--end-group"
+      dl
+      m
+      pthread
   )
   function(lrrt_add_iree_run_module_launcher target)
     add_executable(${target} run_module.c)
@@ -728,68 +728,6 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
           lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_vmfb
         LABELS "iree;gpu"
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    )
-
-    add_executable(
-      lrrt_iree_qwen_decode_e2e_smoke
-      "${LRRT_IREE_TEST_SOURCE_DIR}/qwen_decode_e2e_smoke.cpp"
-    )
-    target_link_libraries(
-      lrrt_iree_qwen_decode_e2e_smoke
-      PRIVATE
-        lrrt::iree_hal_driver
-        "-Wl,--start-group"
-        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
-        "-Wl,--end-group"
-        dl
-        m
-        pthread
-    )
-    add_test(
-      NAME lrrt_iree_qwen_decode_e2e_smoke
-      COMMAND
-        lrrt_iree_qwen_decode_e2e_smoke
-        "${_mini_decoder_layer_outputs_vmfb}"
-    )
-    set_tests_properties(
-      lrrt_iree_qwen_decode_e2e_smoke
-      PROPERTIES
-        FIXTURES_REQUIRED
-          lrrt_iree_mini_decoder_layer_rope_kv_cache_outputs_vmfb
-        LABELS "iree;gpu"
-        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
-    )
-
-    add_executable(
-      lrrt_iree_qwen_decode1_e2e
-      qwen_decode1_e2e.cpp
-    )
-    target_link_libraries(
-      lrrt_iree_qwen_decode1_e2e
-      PRIVATE
-        lrrt::iree_hal_driver
-        "-Wl,--start-group"
-        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
-        "-Wl,--end-group"
-        dl
-        m
-        pthread
-    )
-
-    add_executable(
-      lrrt_iree_mini_decoder_layer_benchmark
-      mini_decoder_layer_device_resident_benchmark.cpp
-    )
-    target_link_libraries(
-      lrrt_iree_mini_decoder_layer_benchmark
-      PRIVATE
-        lrrt::iree_hal_driver
-        "-Wl,--start-group"
-        ${LRRT_IREE_RUNTIME_STATIC_LIBS}
-        "-Wl,--end-group"
-        dl
-        m
-        pthread
     )
 
     lrrt_add_iree_vmfb_probe(

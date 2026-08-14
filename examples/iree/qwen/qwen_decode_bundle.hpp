@@ -1,7 +1,7 @@
-#ifndef LRRT_EXECUTOR_IREE_QWEN_DECODE_BUNDLE_HPP_
-#define LRRT_EXECUTOR_IREE_QWEN_DECODE_BUNDLE_HPP_
+#ifndef LRRT_EXAMPLES_IREE_QWEN_DECODE_BUNDLE_HPP_
+#define LRRT_EXAMPLES_IREE_QWEN_DECODE_BUNDLE_HPP_
 
-#include "metadata_json.hpp"
+#include "executor/iree/metadata_json.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -12,7 +12,9 @@
 #include <stdexcept>
 #include <string>
 
-namespace lrrt::executor::iree {
+namespace lrrt::examples::iree::qwen {
+
+namespace detail = lrrt::executor::iree::detail;
 
 struct QwenDecodeBundleManifest {
   uint32_t manifest_version = 0;
@@ -132,6 +134,6 @@ load_qwen_decode_bundle_manifest(const std::filesystem::path &bundle_dir) {
                                            bundle_dir / "manifest.json");
 }
 
-} // namespace lrrt::executor::iree
+} // namespace lrrt::examples::iree::qwen
 
-#endif // LRRT_EXECUTOR_IREE_QWEN_DECODE_BUNDLE_HPP_
+#endif // LRRT_EXAMPLES_IREE_QWEN_DECODE_BUNDLE_HPP_

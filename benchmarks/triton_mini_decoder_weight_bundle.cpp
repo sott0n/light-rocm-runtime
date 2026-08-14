@@ -52,19 +52,19 @@ make_weights(const lrrt::executor::qwen::DecoderLayerShape &shape) {
   weights.down_weight.resize(shape.hidden * shape.intermediate);
 
   fill_norm_weights(weights.attention_norm_weight, weights.mlp_norm_weight);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.q_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.q_weight,
                                                        shape.hidden, 1);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.k_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.k_weight,
                                                        shape.hidden, 2);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.v_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.v_weight,
                                                        shape.hidden, 3);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.out_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.out_weight,
                                                        q_dim, 4);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.gate_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.gate_weight,
                                                        shape.hidden, 5);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.up_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.up_weight,
                                                        shape.hidden, 6);
-  lrrt::executor::triton::mini::fill_projection_weight(weights.down_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(weights.down_weight,
                                                        shape.intermediate, 7);
   return weights;
 }

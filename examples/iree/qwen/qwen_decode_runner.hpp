@@ -1,5 +1,5 @@
-#ifndef LRRT_EXECUTOR_IREE_QWEN_DECODE_RUNNER_HPP_
-#define LRRT_EXECUTOR_IREE_QWEN_DECODE_RUNNER_HPP_
+#ifndef LRRT_EXAMPLES_IREE_QWEN_DECODE_RUNNER_HPP_
+#define LRRT_EXAMPLES_IREE_QWEN_DECODE_RUNNER_HPP_
 
 #include <array>
 #include <cmath>
@@ -12,7 +12,11 @@
 #include "iree/base/api.h"
 #include "iree/hal/api.h"
 
-namespace lrrt::iree_executor {
+namespace lrrt::examples::iree::qwen {
+
+using lrrt::iree_executor::BufferViewPtr;
+using lrrt::iree_executor::BufferViewReplacement;
+using lrrt::iree_executor::VmfbRunner;
 
 enum class QwenDecodeInputIndex : iree_host_size_t {
   kInput = 0,
@@ -123,6 +127,6 @@ inline bool qwen_decode_expect_hidden(iree_hal_buffer_view_t *view,
   return true;
 }
 
-} // namespace lrrt::iree_executor
+} // namespace lrrt::examples::iree::qwen
 
-#endif // LRRT_EXECUTOR_IREE_QWEN_DECODE_RUNNER_HPP_
+#endif // LRRT_EXAMPLES_IREE_QWEN_DECODE_RUNNER_HPP_

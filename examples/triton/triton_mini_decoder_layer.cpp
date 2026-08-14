@@ -86,13 +86,13 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
     attention_norm_weight[i] = 1.0f + 0.001f * (float)(i % 29);
     mlp_norm_weight[i] = 1.0f - 0.001f * (float)(i % 17);
   }
-  lrrt::executor::triton::mini::fill_projection_weight(q_weight, hidden, 1);
-  lrrt::executor::triton::mini::fill_projection_weight(k_weight, hidden, 2);
-  lrrt::executor::triton::mini::fill_projection_weight(v_weight, hidden, 3);
-  lrrt::executor::triton::mini::fill_projection_weight(out_weight, q_dim, 4);
-  lrrt::executor::triton::mini::fill_projection_weight(gate_weight, hidden, 5);
-  lrrt::executor::triton::mini::fill_projection_weight(up_weight, hidden, 6);
-  lrrt::executor::triton::mini::fill_projection_weight(down_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(q_weight, hidden, 1);
+  lrrt::examples::triton::mini::fill_projection_weight(k_weight, hidden, 2);
+  lrrt::examples::triton::mini::fill_projection_weight(v_weight, hidden, 3);
+  lrrt::examples::triton::mini::fill_projection_weight(out_weight, q_dim, 4);
+  lrrt::examples::triton::mini::fill_projection_weight(gate_weight, hidden, 5);
+  lrrt::examples::triton::mini::fill_projection_weight(up_weight, hidden, 6);
+  lrrt::examples::triton::mini::fill_projection_weight(down_weight,
                                                        intermediate, 7);
   for (uint32_t token = 0; token < keys; ++token) {
     for (uint32_t frequency = 0; frequency < half; ++frequency) {
@@ -105,7 +105,7 @@ static void run_case(lrrt::Device &device, uint32_t keys, uint32_t hidden,
     }
   }
 
-  lrrt::executor::triton::mini::DecoderLayer executor(
+  lrrt::examples::triton::mini::DecoderLayer executor(
       device, keys, hidden, heads, kv_heads, head_dim, intermediate);
   executor.copy_inputs(hidden_states, attention_norm_weight, mlp_norm_weight,
                        q_weight, k_weight, v_weight, out_weight, gate_weight,

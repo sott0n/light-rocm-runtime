@@ -1,4 +1,4 @@
-#include "qwen_decode_bundle.hpp"
+#include "examples/iree/qwen/qwen_decode_bundle.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -82,7 +82,7 @@ void test_parse_manifest() {
   write_file(dir / "manifest.json", manifest_text());
 
   const auto manifest =
-      lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir);
+      lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(dir);
   expect(manifest.manifest_version == 1, "manifest version");
   expect(manifest.target == "gfx1101", "target");
   expect(manifest.layer_vmfb == dir / "layer.vmfb", "layer vmfb path");
@@ -109,7 +109,7 @@ void test_parse_precision_manifest() {
   write_file(dir / "manifest.json", text);
 
   const auto manifest =
-      lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir);
+      lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(dir);
   expect(manifest.manifest_version == 2, "precision manifest version");
   expect(manifest.precision == "bf16", "precision");
 }
@@ -121,15 +121,16 @@ void test_invalid_manifest() {
              manifest_text("/tmp/layer.vmfb"));
   expect_throw_contains(
       [&] {
-        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir /
-                                                               "absolute");
+        lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(
+            dir / "absolute");
       },
       "relative path", "absolute VMFB path must fail");
 
   write_file(dir / "parent" / "manifest.json", manifest_text("../layer.vmfb"));
   expect_throw_contains(
       [&] {
-        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir / "parent");
+        lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(dir /
+                                                                     "parent");
       },
       "must not contain '..'", "parent VMFB path must fail");
 
@@ -137,7 +138,8 @@ void test_invalid_manifest() {
              manifest_text("layer.vmfb", "tail.vmfb", 8, 4, 128));
   expect_throw_contains(
       [&] {
-        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir / "shape");
+        lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(dir /
+                                                                     "shape");
       },
       "must match kv_cache_shape[0]",
       "max_cache_tokens and shape mismatch must fail");
@@ -146,8 +148,8 @@ void test_invalid_manifest() {
              manifest_text("layer.vmfb", "tail.vmfb", 16, 16, 128, 17));
   expect_throw_contains(
       [&] {
-        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir /
-                                                               "capacity");
+        lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(
+            dir / "capacity");
       },
       "sequence_capacity", "sequence capacity over cache capacity must fail");
 
@@ -162,8 +164,8 @@ void test_invalid_manifest() {
   write_file(dir / "precision" / "manifest.json", unsupported_precision);
   expect_throw_contains(
       [&] {
-        lrrt::executor::iree::load_qwen_decode_bundle_manifest(dir /
-                                                               "precision");
+        lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest(
+            dir / "precision");
       },
       "must be f32, f16, or bf16", "unsupported precision must fail");
 }

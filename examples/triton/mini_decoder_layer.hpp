@@ -49,7 +49,12 @@
 #define LRRT_TRITON_MINI_LAYER_SILU_MUL_MANIFEST "manifest.json"
 #endif
 
-namespace lrrt::executor::triton::mini {
+namespace lrrt::examples::triton::mini {
+
+using lrrt::executor::triton::arg;
+using lrrt::executor::triton::BufferSet;
+using lrrt::executor::triton::BundleSet;
+using lrrt::executor::triton::launch;
 
 struct DecoderLayerStageTiming {
   double attention_norm_ns = 0.0;
@@ -724,4 +729,4 @@ inline void fill_projection_weight(std::vector<float> &weight, uint32_t input,
   }
 }
 
-} // namespace lrrt::executor::triton::mini
+} // namespace lrrt::examples::triton::mini

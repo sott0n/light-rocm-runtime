@@ -47,3 +47,7 @@ endif()
 if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)
   add_subdirectory(sparsewave)
 endif()
+
+if(LRRT_ENABLE_IREE_ADAPTER)
+  add_subdirectory(iree)
+endif()

@@ -2,18 +2,18 @@
 #include <cstdio>
 #include <vector>
 
-#include "executor/iree/qwen_decode_runner.hpp"
+#include "examples/iree/qwen/qwen_decode_runner.hpp"
 #include "executor/iree/vmfb_runner.hpp"
 #include "iree/base/api.h"
 #include "iree/base/tooling/flags.h"
 
 namespace {
 
+using lrrt::examples::iree::qwen::qwen_decode_expect_hidden;
+using lrrt::examples::iree::qwen::qwen_decode_step;
+using lrrt::examples::iree::qwen::qwen_decode_stub_step;
+using lrrt::examples::iree::qwen::QwenDecodeOutputIndex;
 using lrrt::iree_executor::BufferViewPtr;
-using lrrt::iree_executor::qwen_decode_expect_hidden;
-using lrrt::iree_executor::qwen_decode_step;
-using lrrt::iree_executor::qwen_decode_stub_step;
-using lrrt::iree_executor::QwenDecodeOutputIndex;
 using lrrt::iree_executor::VmfbRunner;
 
 iree_status_t run_smoke(const char *module_path) {

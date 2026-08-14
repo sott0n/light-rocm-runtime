@@ -119,7 +119,7 @@ struct SetupBreakdown {
 
 void accumulate_stage_breakdown(
     StageBreakdown &dst,
-    const lrrt::executor::triton::mini::DecoderLayerStageTiming &src) {
+    const lrrt::examples::triton::mini::DecoderLayerStageTiming &src) {
   dst.attention_norm_ns += src.attention_norm_ns;
   dst.qkv_projection_ns += src.qkv_projection_ns;
   dst.kv_cache_ns += src.kv_cache_ns;
@@ -131,7 +131,7 @@ void accumulate_stage_breakdown(
 
 void accumulate_stage_breakdown(
     StageBreakdown &dst,
-    const lrrt::executor::triton::mini::ModelTailStageTiming &src) {
+    const lrrt::examples::triton::mini::ModelTailStageTiming &src) {
   dst.tail_final_norm_ns += src.final_norm_ns;
   dst.tail_lm_head_ns += src.lm_head_ns;
   ++dst.tail_runs;
@@ -377,19 +377,19 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t heads,
     benchmark_case.mlp_norm_weight[i] = 1.0f - 0.001f * (float)(i % 17);
   }
 
-  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.q_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(benchmark_case.q_weight,
                                                        hidden, 1);
-  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.k_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(benchmark_case.k_weight,
                                                        hidden, 2);
-  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.v_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(benchmark_case.v_weight,
                                                        hidden, 3);
-  lrrt::executor::triton::mini::fill_projection_weight(
+  lrrt::examples::triton::mini::fill_projection_weight(
       benchmark_case.out_weight, qkv_dim, 4);
-  lrrt::executor::triton::mini::fill_projection_weight(
+  lrrt::examples::triton::mini::fill_projection_weight(
       benchmark_case.gate_weight, hidden, 5);
-  lrrt::executor::triton::mini::fill_projection_weight(benchmark_case.up_weight,
+  lrrt::examples::triton::mini::fill_projection_weight(benchmark_case.up_weight,
                                                        hidden, 6);
-  lrrt::executor::triton::mini::fill_projection_weight(
+  lrrt::examples::triton::mini::fill_projection_weight(
       benchmark_case.down_weight, intermediate, 7);
 
   const uint32_t half = head_dim / 2;
@@ -438,7 +438,7 @@ BenchmarkCase make_case(uint32_t keys, uint32_t hidden, uint32_t head_dim,
                    10000.0f, 7);
 }
 
-void copy_inputs(lrrt::executor::triton::mini::DecoderLayer &executor,
+void copy_inputs(lrrt::examples::triton::mini::DecoderLayer &executor,
                  const BenchmarkCase &benchmark_case) {
   executor.copy_inputs(benchmark_case.hidden_states,
                        benchmark_case.attention_norm_weight,
@@ -482,7 +482,7 @@ Measurements measure_case(lrrt::Device &device,
                           uint32_t iterations, uint32_t warmup_iterations) {
   device.reset_memory_stats();
   auto setup_begin = Clock::now();
-  lrrt::executor::triton::mini::DecoderLayer executor(
+  lrrt::examples::triton::mini::DecoderLayer executor(
       device, benchmark_case.keys, benchmark_case.hidden, benchmark_case.heads,
       benchmark_case.kv_heads, benchmark_case.head_dim,
       benchmark_case.intermediate);
@@ -500,7 +500,7 @@ Measurements measure_case(lrrt::Device &device,
   StageBreakdown stage_breakdown;
   for (uint32_t i = 0; i < iterations; ++i) {
     auto begin = Clock::now();
-    lrrt::executor::triton::mini::DecoderLayerStageTiming timing;
+    lrrt::examples::triton::mini::DecoderLayerStageTiming timing;
     executor.run(benchmark_case.valid_keys, {}, &timing);
     executor.synchronize();
     auto end = Clock::now();
@@ -579,10 +579,10 @@ measure_stack_case(lrrt::Device &device,
 
   auto setup_begin = Clock::now();
   SetupBreakdown setup_breakdown;
-  auto layer_bundles = lrrt::executor::triton::mini::make_decoder_layer_bundles(
+  auto layer_bundles = lrrt::examples::triton::mini::make_decoder_layer_bundles(
       device, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
       shape.head_dim, shape.intermediate);
-  std::vector<std::unique_ptr<lrrt::executor::triton::mini::DecoderLayer>>
+  std::vector<std::unique_ptr<lrrt::examples::triton::mini::DecoderLayer>>
       executors;
   executors.reserve(layer_count);
   for (size_t i = 0; i < layer_count; ++i) {
@@ -597,7 +597,7 @@ measure_stack_case(lrrt::Device &device,
       fflush(stderr);
     }
     executors.push_back(
-        std::make_unique<lrrt::executor::triton::mini::DecoderLayer>(
+        std::make_unique<lrrt::examples::triton::mini::DecoderLayer>(
             device, layer.keys, layer.hidden, layer.heads, layer.kv_heads,
             layer.head_dim, layer.intermediate, layer_bundles));
     auto construct_end = Clock::now();
@@ -628,15 +628,15 @@ measure_stack_case(lrrt::Device &device,
       fflush(stderr);
     }
   }
-  std::unique_ptr<lrrt::executor::triton::mini::ModelTail> tail;
+  std::unique_ptr<lrrt::examples::triton::mini::ModelTail> tail;
   if (tail_weights) {
     if (trace_setup) {
       fprintf(stderr, "  setup model tail begin\n");
       fflush(stderr);
     }
-    auto tail_bundles = lrrt::executor::triton::mini::make_model_tail_bundles(
+    auto tail_bundles = lrrt::examples::triton::mini::make_model_tail_bundles(
         device, tail_weights->hidden);
-    tail = std::make_unique<lrrt::executor::triton::mini::ModelTail>(
+    tail = std::make_unique<lrrt::examples::triton::mini::ModelTail>(
         device, tail_weights->hidden, tail_weights->vocab, tail_bundles);
     std::vector<float> first_token_embedding(
         tail_weights->token_embeddings.begin(),
@@ -692,7 +692,7 @@ measure_stack_case(lrrt::Device &device,
           dependencies.push_back(
               submission.handoff_complete[handoff_index(layer - 1, key)].get());
         }
-        lrrt::executor::triton::mini::DecoderLayerStageTiming timing;
+        lrrt::examples::triton::mini::DecoderLayerStageTiming timing;
         executors[layer]->run(key, dependencies,
                               stage_breakdown ? &timing : nullptr);
         if (stage_breakdown) {
@@ -720,7 +720,7 @@ measure_stack_case(lrrt::Device &device,
       executors.back()->copy_output_to_buffer_async(
           tail->hidden_buffer(), *submission.tail_source_complete,
           *submission.tail_handoff_complete);
-      lrrt::executor::triton::mini::ModelTailStageTiming timing;
+      lrrt::examples::triton::mini::ModelTailStageTiming timing;
       tail->run({submission.tail_handoff_complete.get()},
                 stage_breakdown ? &timing : nullptr);
       if (stage_breakdown) {
@@ -745,7 +745,7 @@ measure_stack_case(lrrt::Device &device,
   auto run_stack_synchronous = [&](StageBreakdown *stage_breakdown) {
     for (size_t layer = 0; layer < layer_count; ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
-        lrrt::executor::triton::mini::DecoderLayerStageTiming timing;
+        lrrt::examples::triton::mini::DecoderLayerStageTiming timing;
         executors[layer]->run(key, {}, stage_breakdown ? &timing : nullptr);
         executors[layer]->synchronize();
         if (stage_breakdown) {
@@ -766,7 +766,7 @@ measure_stack_case(lrrt::Device &device,
     }
     if (tail) {
       executors.back()->copy_output_to_buffer(tail->hidden_buffer());
-      lrrt::executor::triton::mini::ModelTailStageTiming timing;
+      lrrt::examples::triton::mini::ModelTailStageTiming timing;
       tail->run({}, stage_breakdown ? &timing : nullptr);
       tail->synchronize();
       if (stage_breakdown) {

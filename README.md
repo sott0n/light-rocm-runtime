@@ -68,12 +68,20 @@ the runtime core.
 
 ## Executors
 
-The executor layer currently supports two compiler integration paths:
+The executor layer currently supports three compiler integration paths:
 
 - **Triton** loads generated kernel bundles and provides the reference path for
   executor-level scheduling, validation, and benchmarking.
 - **IREE** provides an experimental HAL adapter that runs compiled IREE modules
   through the same lrrt resource and dispatch path.
+- **SparseWave** loads compiler-produced sparse kernel bundles through a common
+  Python facade, with application executors for SpMM and SparseAttention.
+
+Compiler integration code follows a common responsibility split. Generic
+bundle, HAL, and launch support lives under `executor/<compiler>`;
+application-specific pipelines live under `examples/<compiler>`; executor and
+E2E coverage lives under `tests/executor/<compiler>`; and timing entry points
+live under `benchmarks`.
 
 Qwen2/Qwen2.5 0.5B serves as the end-to-end model integration. The IREE path
 covers checkpoint conversion, prompt prefill, device-resident KV cache, and

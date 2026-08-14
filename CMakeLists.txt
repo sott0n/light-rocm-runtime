@@ -108,13 +108,13 @@ if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)
   add_subdirectory(executor/sparsewave)
 endif()
 
-add_subdirectory(examples)
-add_subdirectory(tests)
-
 if(LRRT_ENABLE_IREE_ADAPTER)
   lrrt_find_iree()
   add_subdirectory(executor/iree)
 endif()
+
+add_subdirectory(examples)
+add_subdirectory(tests)
 
 if(LRRT_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)

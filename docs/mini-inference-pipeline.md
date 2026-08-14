@@ -748,9 +748,9 @@ ABI. It should be a thin coordinator around already-generated bundles.
 The current `executor/triton` helper is the first version of this layer. It
 owns named bundle and buffer lookup, common launch argument binding, and
 diagnostic wrapping for executor-level failures. It is intentionally smaller
-than a graph runtime. The mini decoder layer helper lives in this executor
-area because it coordinates a Triton bundle pipeline without adding model
-semantics to the runtime core.
+than a graph runtime. The application-specific mini decoder layer helper lives
+under `examples/triton`; it coordinates a Triton bundle pipeline without
+adding model semantics to the generic executor or runtime core.
 
 ## Runtime Responsibilities
 
@@ -823,7 +823,7 @@ Qwen-like path can be meaningful:
   manifest-driven launch helpers.
 - `triton_mini_attention`, `triton_kv_cache`, and
   `triton_mini_decoder_layer` use executor-style helpers for multi-op paths.
-- `lrrt::executor::triton::mini::DecoderLayer` is shared by the mini decoder
+- `lrrt::examples::triton::mini::DecoderLayer` is shared by the mini decoder
   layer example and benchmark.
 - Keep further executor changes focused on repeated wiring, diagnostics,
   specialization selection, and benchmark boundaries.

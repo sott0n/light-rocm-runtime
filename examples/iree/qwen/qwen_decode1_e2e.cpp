@@ -11,7 +11,7 @@
 #include <string>
 #include <vector>
 
-#include "executor/iree/qwen_decode_bundle.hpp"
+#include "examples/iree/qwen/qwen_decode_bundle.hpp"
 #include "executor/iree/vmfb_runner.hpp"
 #include "executor/qwen/weight_bundle.hpp"
 #include "iree/base/api.h"
@@ -19,7 +19,7 @@
 
 namespace {
 
-using lrrt::executor::iree::load_qwen_decode_bundle_manifest;
+using lrrt::examples::iree::qwen::load_qwen_decode_bundle_manifest;
 using lrrt::executor::qwen::DecoderLayerWeights;
 using lrrt::executor::qwen::load_decoder_layer_weights;
 using lrrt::executor::qwen::load_model_tail_weights;
