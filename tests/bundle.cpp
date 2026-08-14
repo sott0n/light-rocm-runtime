@@ -246,6 +246,49 @@ void test_multiple_kernels() {
   expect_throw([&] { parse(json, ""); }, "empty kernel name must fail");
 }
 
+void test_manifest_field_order_is_irrelevant() {
+  const char *json = R"json(
+  {
+    "kernels": [
+      {
+        "args": [
+          {"name":"rowOffsets","offset":0,"size":8,"type":"ptr"},
+          {"name":"output","offset":8,"size":8,"type":"ptr"}
+        ],
+        "block": [64, 1, 1],
+        "code_object": "kernels.hsaco",
+        "grid": ["ceil_div(n, 2) * 64", 1, 1],
+        "kernarg_size": 16,
+        "sparsewave": {
+          "name": "producer_name",
+          "shared_memory_bytes": 99,
+          "target": "wrong",
+          "workspace_bytes": 99
+        },
+        "name": "spmm",
+        "shared_memory_bytes": 0,
+        "symbol": "spmm_kernel",
+        "workspace_bytes": 0
+      }
+    ],
+    "manifest_version": 1,
+    "target": "gfx1101"
+  }
+  )json";
+
+  lrrt::KernelManifest manifest = parse(json, "spmm");
+  expect(manifest.target == "gfx1101", "top-level target ignores nested field");
+  expect(manifest.name == "spmm", "kernel name ignores argument names");
+  expect(manifest.symbol == "spmm_kernel", "reordered kernel symbol");
+  expect(manifest.shared_memory_bytes == 0,
+         "kernel shared memory ignores producer metadata");
+  expect(manifest.workspace_bytes == 0,
+         "kernel workspace ignores producer metadata");
+  expect(manifest.args.size() == 2 && manifest.args[0].name == "rowOffsets" &&
+             manifest.args[1].name == "output",
+         "reordered kernel arguments");
+}
+
 void test_invalid_manifests() {
   expect_throw([] { lrrt::parse_bundle_manifest(nullptr, 0); },
                "empty manifest must fail");
@@ -458,6 +501,7 @@ int main() {
   test_kernarg_buffer();
   test_kernarg_buffer_manifest_validation();
   test_multiple_kernels();
+  test_manifest_field_order_is_irrelevant();
   test_invalid_manifests();
   test_grid_overflow();
   test_launch_config_validation();

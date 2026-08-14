@@ -95,26 +95,30 @@ public:
 
   std::vector<lrrt::KernelManifest> parse_kernels() const {
     std::vector<lrrt::KernelManifest> manifests;
+    const size_t root_begin = skip_space(0, text_.size());
+    if (root_begin >= text_.size() || text_[root_begin] != '{') {
+      throw std::runtime_error("bundle manifest root is not object");
+    }
+    const size_t root_end = matching_brace(root_begin);
     const uint32_t manifest_version =
-        read_u32_at(field_value("manifest_version", 0, text_.size()),
-                    text_.size(), "manifest_version");
+        read_u32_at(field_value("manifest_version", root_begin, root_end),
+                    root_end, "manifest_version");
     if (manifest_version != lrrt::kSupportedBundleManifestVersion) {
       throw std::runtime_error(
           std::string("unsupported bundle manifest_version: ") +
           std::to_string(manifest_version));
     }
-    const std::string target = read_string("target", 0, text_.size());
+    const std::string target = read_string("target", root_begin, root_end);
     if (target.empty()) {
       throw std::runtime_error("bundle manifest target is empty");
     }
 
-    const size_t kernels = require("\"kernels\"", 0, text_.size());
-    size_t position = field_value("kernels", kernels, text_.size());
-    if (position >= text_.size() || text_[position] != '[') {
+    size_t position = field_value("kernels", root_begin, root_end);
+    if (position >= root_end || text_[position] != '[') {
       throw std::runtime_error("manifest kernels is not array");
     }
 
-    position = skip_space(position + 1, text_.size());
+    position = skip_space(position + 1, root_end);
     size_t kernel_index = 0;
     while (position < text_.size() && text_[position] != ']') {
       if (text_[position] != '{') {
@@ -211,14 +215,6 @@ private:
     return context;
   }
 
-  size_t require(const char *needle, size_t from, size_t limit) const {
-    size_t position = text_.find(needle, from);
-    if (position == std::string::npos || position >= limit) {
-      throw std::runtime_error(std::string("missing manifest token ") + needle);
-    }
-    return position;
-  }
-
   size_t matching_brace(size_t begin) const {
     size_t depth = 0;
     bool in_string = false;
@@ -257,11 +253,65 @@ private:
     return position;
   }
 
-  size_t field_value(const char *field, size_t from, size_t limit) const {
-    std::string key = std::string("\"") + field + "\"";
-    size_t key_position = require(key.c_str(), from, limit);
-    size_t colon = require(":", key_position + key.size(), limit);
-    return skip_space(colon + 1, limit);
+  size_t find_field_value(const char *field, size_t object_begin,
+                          size_t object_end) const {
+    if (object_begin >= object_end || text_[object_begin] != '{') {
+      throw std::runtime_error("manifest field container is not object");
+    }
+
+    size_t nested_depth = 0;
+    for (size_t position = object_begin + 1; position < object_end;) {
+      const char value = text_[position];
+      if (value == '"') {
+        const size_t string_begin = position + 1;
+        size_t string_end = string_begin;
+        bool escaped = false;
+        while (string_end < object_end) {
+          const char character = text_[string_end];
+          if (escaped) {
+            escaped = false;
+          } else if (character == '\\') {
+            escaped = true;
+          } else if (character == '"') {
+            break;
+          }
+          ++string_end;
+        }
+        if (string_end >= object_end) {
+          throw std::runtime_error("unterminated manifest string");
+        }
+        if (nested_depth == 0 &&
+            text_.compare(string_begin, string_end - string_begin, field) ==
+                0) {
+          const size_t colon = skip_space(string_end + 1, object_end);
+          if (colon < object_end && text_[colon] == ':') {
+            return skip_space(colon + 1, object_end);
+          }
+        }
+        position = string_end + 1;
+        continue;
+      }
+      if (value == '{' || value == '[') {
+        ++nested_depth;
+      } else if (value == '}' || value == ']') {
+        if (nested_depth == 0) {
+          break;
+        }
+        --nested_depth;
+      }
+      ++position;
+    }
+    return std::string::npos;
+  }
+
+  size_t field_value(const char *field, size_t object_begin,
+                     size_t object_end) const {
+    const size_t position = find_field_value(field, object_begin, object_end);
+    if (position == std::string::npos) {
+      throw std::runtime_error(std::string("missing manifest token \"") +
+                               field + "\"");
+    }
+    return position;
   }
 
   std::string read_string(const char *field, size_t from, size_t limit) const {
@@ -310,22 +360,19 @@ private:
 
   size_t read_optional_size(const char *field, size_t from, size_t limit,
                             size_t default_value) const {
-    std::string key = std::string("\"") + field + "\"";
-    size_t position = text_.find(key, from);
-    if (position == std::string::npos || position >= limit) {
+    const size_t position = find_field_value(field, from, limit);
+    if (position == std::string::npos) {
       return default_value;
     }
-    return read_size(field, from, limit);
+    return read_size_at(position, limit, field);
   }
 
   bool read_optional_bool(const char *field, size_t from, size_t limit,
                           bool default_value) const {
-    std::string key = std::string("\"") + field + "\"";
-    size_t key_position = text_.find(key, from);
-    if (key_position == std::string::npos || key_position >= limit) {
+    const size_t position = find_field_value(field, from, limit);
+    if (position == std::string::npos) {
       return default_value;
     }
-    size_t position = field_value(field, from, limit);
     if (text_.compare(position, 4, "true") == 0) {
       return true;
     }
