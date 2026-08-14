@@ -197,3 +197,21 @@ add_test(
     --with pytest==9.0.2 pytest -q
     "${PROJECT_SOURCE_DIR}/tests/executor/sparsewave/test_attention_e2e.py"
 )
+
+add_custom_target(
+  lrrt_sparsewave_sparse_attention_demo
+  COMMAND
+    "${CMAKE_COMMAND}" -E env
+    "PYTHONPATH=${SPARSEWAVE_PYTHON_DIR}:${SPARSEWAVE_TORCH_PROJECT}"
+    "UV_CACHE_DIR=${LRRT_SPARSEWAVE_UV_CACHE_DIR}"
+    "UV_PROJECT_ENVIRONMENT=${CMAKE_BINARY_DIR}/sparsewave-pytorch-venv"
+    "${UV_EXECUTABLE}" run --project "${SPARSEWAVE_TORCH_PROJECT}" --frozen
+    python "${CMAKE_CURRENT_SOURCE_DIR}/sparse_attention/demo.py"
+    --bundle-tool "${LRRT_SPARSEWAVE_BUNDLE_EXECUTABLE}"
+    --sparsewave-opt "${LRRT_SPARSEWAVE_OPT_EXECUTABLE}"
+    --sparsewave-pytorch-opt "${LRRT_SPARSEWAVE_PYTORCH_OPT_EXECUTABLE}"
+    --chip "${LRRT_AMDGPU_TARGET}"
+  DEPENDS _lrrt_sparsewave
+  COMMENT "Running the SparseWave-to-lrrt SparseAttention E2E demo"
+  USES_TERMINAL
+)

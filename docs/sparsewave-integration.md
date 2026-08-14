@@ -138,6 +138,18 @@ PYTHONPATH="$PWD/build-sparsewave/e2e/executor/sparsewave/python" \
   --manifest build-sparsewave/e2e/examples/sparsewave/sparse_attention.bundle/manifest.json
 ```
 
+For a presentation-friendly E2E run, use the demo target:
+
+```sh
+cmake --build build-sparsewave/e2e \
+  --target lrrt_sparsewave_sparse_attention_demo
+```
+
+Unlike `run.py`, this target always exports the PyTorch model and compiles a
+fresh temporary bundle. Its output labels the PyTorch frontend, SparseWave
+compiler, lrrt Executor, lrrt Runtime, and PyTorch validation stages. The
+temporary bundle is removed after the run.
+
 Loaded executors retain their HSACOs and can be reused with different values
 and NNZ counts. SparseWave owns graph export and compilation; the Python
 binding only loads and executes compiled artifacts.
