@@ -9,6 +9,7 @@ set(
   CACHE STRING "Python version or interpreter for Triton examples"
 )
 option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
+option(LRRT_ENABLE_SPARSEWAVE_EXECUTOR "Build the SparseWave executor" OFF)
 option(LRRT_ENABLE_IREE_ADAPTER "Build the experimental IREE HAL adapter" OFF)
 option(LRRT_ENABLE_HSA "Build with HSA/ROCr support when available" ON)
 option(LRRT_BUILD_BENCHMARKS "Build runtime benchmarks" OFF)
@@ -17,6 +18,16 @@ set(
   LRRT_IREE_ROOT
   ""
   CACHE PATH "Path to an IREE install or source tree for the IREE HAL adapter"
+)
+set(
+  LRRT_SPARSEWAVE_ROOT
+  "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sparsewave"
+  CACHE PATH "Path to the SparseWave compiler source tree"
+)
+set(
+  LRRT_SPARSEWAVE_BUILD_DIR
+  "${CMAKE_CURRENT_SOURCE_DIR}/build-sparsewave/llvm"
+  CACHE PATH "Path to the SparseWave LLVM build tree"
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -93,6 +104,10 @@ enable_testing()
 
 add_subdirectory(examples)
 add_subdirectory(tests)
+
+if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)
+  add_subdirectory(executor/sparsewave)
+endif()
 
 if(LRRT_ENABLE_IREE_ADAPTER)
   lrrt_find_iree()

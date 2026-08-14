@@ -45,13 +45,39 @@ cmake -G Ninja \
   -DLLVM_TARGETS_TO_BUILD="AMDGPU;Native" \
   -DCMAKE_BUILD_TYPE=Release
 cmake --build build-sparsewave/llvm \
-  --target sparsewave-opt check-sparsewave
+  --target sparsewave-opt sparsewave-bundle check-sparsewave
 ```
 
-This builds `build-sparsewave/llvm/bin/sparsewave-opt` and runs the compiler's
+This builds `build-sparsewave/llvm/bin/sparsewave-opt` and
+`build-sparsewave/llvm/bin/sparsewave-bundle`, then runs the compiler's
 regression suite. Tests that require PyTorch or MLIR's HIP runtime wrapper are
 optional compiler-project features; lrrt executor correctness is covered by
 the separate end-to-end paths in this repository.
+
+## SpMM Executor Build
+
+Enable the opt-in executor after building SparseWave:
+
+```sh
+cmake -S . -B build-sparsewave/e2e \
+  -DLRRT_ENABLE_SPARSEWAVE_EXECUTOR=ON \
+  -DLRRT_SPARSEWAVE_BUILD_DIR="$PWD/build-sparsewave/llvm"
+cmake --build build-sparsewave/e2e --target lrrt_sparsewave_spmm
+ctest --test-dir build-sparsewave/e2e -R lrrt_sparsewave_spmm_e2e \
+  --output-on-failure
+```
+
+The build uses SparseWave's locked PyTorch environment to capture
+`torch.sparse.mm` with `torch.export` and import the raw graph through
+torch-mlir. The raw Torch MLIR is passed directly to `sparsewave-bundle`, which
+owns Torch-to-SparseWave lowering, dynamic-CSR bare-pointer preparation, HSACO
+generation, and manifest verification. The runtime integration does not
+rewrite MLIR or supply an NNZ specialization.
+
+The first build uses `uv` to install the exact PyTorch and torch-mlir versions
+from SparseWave's lockfile into the build directory. Set
+`LRRT_SPARSEWAVE_ROOT` and `LRRT_SPARSEWAVE_BUILD_DIR` to use an explicitly
+selected external compiler checkout and its matching build tree.
 
 ## Bundle Contract
 
