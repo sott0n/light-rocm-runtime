@@ -28,8 +28,8 @@ struct DeviceSynchronization {
   lr_status_t preparation_status;
 };
 
-DeviceSynchronization
-prepare_device_synchronization_locked(DeviceState *device) {
+DeviceSynchronization prepare_device_synchronization_locked(
+    DeviceState *device, std::unique_lock<std::mutex> *devices_lock) {
   DeviceSynchronization synchronization{};
   synchronization.preparation_status = LR_SUCCESS;
   synchronization.events.reserve(device->pending_events.size());
@@ -47,19 +47,29 @@ prepare_device_synchronization_locked(DeviceState *device) {
   }
 
   synchronization.queues.reserve(device->queues.size());
+  std::vector<QueueState *> queues;
+  queues.reserve(device->queues.size());
   for (lr_queue_t *queue : device->queues) {
+    ++queue->state.active_synchronizers;
+    queues.push_back(&queue->state);
+  }
+  for (QueueState *queue : queues) {
     hsa_signal_t signal{};
     lr_status_t status =
-        enqueue_queue_synchronization_locked(&queue->state, &signal);
+        enqueue_queue_synchronization_locked(queue, &signal, devices_lock);
     if (status != LR_SUCCESS) {
       synchronization.preparation_status = status;
       break;
     }
     if (signal.handle != 0) {
       synchronization.queues.push_back(
-          DeviceQueueSynchronization{&queue->state, signal, 1});
+          DeviceQueueSynchronization{queue, signal, 1});
     }
   }
+  for (QueueState *queue : queues) {
+    --queue->active_synchronizers;
+  }
+  g_queue_state_changed.notify_all();
   return synchronization;
 }
 
@@ -107,7 +117,7 @@ finish_device_synchronization_locked(DeviceSynchronization *synchronization) {
 lr_status_t synchronize_device(DeviceState *device,
                                std::unique_lock<std::mutex> *devices_lock) {
   DeviceSynchronization synchronization =
-      prepare_device_synchronization_locked(device);
+      prepare_device_synchronization_locked(device, devices_lock);
 
   devices_lock->unlock();
   wait_for_device_synchronization(&synchronization);

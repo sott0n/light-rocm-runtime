@@ -122,9 +122,18 @@ lr_status_t drain_queue_work_locked(QueueState *queue) {
     if (value != 0 && result == LR_SUCCESS) {
       result = LR_ERROR_RUNTIME;
     }
-    hsa_signal_store_relaxed(dispatch.completion_signal, 1);
-    queue->signal_pool.push_back(dispatch.completion_signal);
-    queue->kernarg_pool.push_back(dispatch.kernarg);
+    const bool progress_waiter = std::any_of(
+        queue->progress_wait_signals.begin(),
+        queue->progress_wait_signals.end(), [&dispatch](hsa_signal_t signal) {
+          return signal.handle == dispatch.completion_signal.handle;
+        });
+    if (progress_waiter) {
+      queue->deferred_dispatches.push_back(dispatch);
+    } else {
+      hsa_signal_store_relaxed(dispatch.completion_signal, 1);
+      queue->signal_pool.push_back(dispatch.completion_signal);
+      queue->kernarg_pool.push_back(dispatch.kernarg);
+    }
   }
   queue->pending_dispatches.clear();
   return result;
@@ -234,6 +243,11 @@ void reap_completed_dispatches_locked(QueueState *queue) {
     if (hsa_signal_load_scacquire(dispatch.completion_signal) != 0) {
       break;
     }
+    const bool progress_waiter = std::any_of(
+        queue->progress_wait_signals.begin(),
+        queue->progress_wait_signals.end(), [&dispatch](hsa_signal_t signal) {
+          return signal.handle == dispatch.completion_signal.handle;
+        });
     const bool synchronization_consumer = std::any_of(
         queue->pending_synchronizations.begin(),
         queue->pending_synchronizations.end(),
@@ -251,9 +265,13 @@ void reap_completed_dispatches_locked(QueueState *queue) {
       break;
     }
 
-    hsa_signal_store_relaxed(dispatch.completion_signal, 1);
-    queue->signal_pool.push_back(dispatch.completion_signal);
-    queue->kernarg_pool.push_back(dispatch.kernarg);
+    if (progress_waiter) {
+      queue->deferred_dispatches.push_back(dispatch);
+    } else {
+      hsa_signal_store_relaxed(dispatch.completion_signal, 1);
+      queue->signal_pool.push_back(dispatch.completion_signal);
+      queue->kernarg_pool.push_back(dispatch.kernarg);
+    }
     ++completed_count;
   }
   if (completed_count != 0) {
@@ -294,41 +312,77 @@ size_t pending_queue_packet_count(const QueueState *queue) {
          queue->pending_events.size();
 }
 
-lr_status_t wait_for_queue_progress_locked(QueueState *queue) {
+lr_status_t
+wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
+                               QueueState *queue) {
+  hsa_signal_t signal{};
+  lr_event_t *event = nullptr;
   if (!queue->pending_dispatches.empty()) {
-    hsa_signal_value_t value = hsa_signal_wait_scacquire(
-        queue->pending_dispatches.front().completion_signal,
-        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-    if (value != 0) {
-      return LR_ERROR_RUNTIME;
-    }
+    signal = queue->pending_dispatches.front().completion_signal;
   } else if (!queue->pending_events.empty()) {
-    lr_status_t status = event_wait_locked(queue->pending_events.front());
-    if (status != LR_SUCCESS) {
-      return status;
-    }
-  } else if (!queue->pending_barriers.empty()) {
-    hsa_signal_value_t value = hsa_signal_wait_scacquire(
-        queue->pending_barriers.front().retirement_signal,
-        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-    if (value != 0) {
-      return LR_ERROR_RUNTIME;
-    }
-  } else if (!queue->pending_synchronizations.empty()) {
-    hsa_signal_value_t value = hsa_signal_wait_scacquire(
-        queue->pending_synchronizations.front().completion_signal,
-        HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-    if (value != 0) {
-      return LR_ERROR_RUNTIME;
-    }
+    event = queue->pending_events.front();
+    signal = event->signal;
+    ++event->active_synchronizers;
   } else {
     return LR_ERROR_RUNTIME;
+  }
+
+  queue->progress_wait_signals.push_back(signal);
+  ++queue->active_synchronizers;
+  devices_lock->unlock();
+  hsa_signal_value_t value = hsa_signal_wait_scacquire(
+      signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+  devices_lock->lock();
+
+  auto waiter = std::find_if(queue->progress_wait_signals.begin(),
+                             queue->progress_wait_signals.end(),
+                             [signal](hsa_signal_t pending) {
+                               return pending.handle == signal.handle;
+                             });
+  if (waiter != queue->progress_wait_signals.end()) {
+    queue->progress_wait_signals.erase(waiter);
+  }
+  const bool signal_still_waited = std::any_of(
+      queue->progress_wait_signals.begin(), queue->progress_wait_signals.end(),
+      [signal](hsa_signal_t pending) {
+        return pending.handle == signal.handle;
+      });
+  if (!signal_still_waited) {
+    auto deferred = std::find_if(
+        queue->deferred_dispatches.begin(), queue->deferred_dispatches.end(),
+        [signal](const PendingDispatch &item) {
+          return item.completion_signal.handle == signal.handle;
+        });
+    if (deferred != queue->deferred_dispatches.end()) {
+      hsa_signal_store_relaxed(deferred->completion_signal, 1);
+      queue->signal_pool.push_back(deferred->completion_signal);
+      queue->kernarg_pool.push_back(deferred->kernarg);
+      queue->deferred_dispatches.erase(deferred);
+    }
+  }
+  if (event) {
+    --event->active_synchronizers;
+    g_event_state_changed.notify_all();
+  }
+  --queue->active_synchronizers;
+  g_queue_state_changed.notify_all();
+
+  if (value != 0) {
+    return LR_ERROR_RUNTIME;
+  }
+  if (queue->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
   }
   return reap_completed_queue_work_locked(queue);
 }
 
-lr_status_t ensure_queue_capacity_locked(QueueState *queue,
-                                         size_t required_packets) {
+lr_status_t
+ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
+                             QueueState *queue, size_t required_packets,
+                             bool *lock_released) {
+  if (lock_released) {
+    *lock_released = false;
+  }
   if (required_packets == 0 || required_packets > queue->queue->size) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -343,7 +397,11 @@ lr_status_t ensure_queue_capacity_locked(QueueState *queue,
       return LR_SUCCESS;
     }
 
-    lr_status_t wait_status = wait_for_queue_progress_locked(queue);
+    if (lock_released) {
+      *lock_released = true;
+    }
+    lr_status_t wait_status =
+        wait_for_queue_progress_locked(devices_lock, queue);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -351,7 +409,8 @@ lr_status_t ensure_queue_capacity_locked(QueueState *queue,
 }
 
 lr_status_t enqueue_event_dependencies_locked(
-    DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
+    std::unique_lock<std::mutex> *devices_lock, DeviceState *device,
+    QueueState *queue, hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies) {
   while (true) {
     lr_status_t reap_status = reap_completed_queue_work_locked(queue);
@@ -378,9 +437,16 @@ lr_status_t enqueue_event_dependencies_locked(
     }
 
     const size_t barrier_count = (dependencies.size() + 4) / 5;
+    for (lr_event_t *event : dependencies) {
+      ++event->active_synchronizers;
+    }
     lr_status_t capacity_status =
-        ensure_queue_capacity_locked(queue, barrier_count + 1);
+        ensure_queue_capacity_locked(devices_lock, queue, barrier_count + 1);
     if (capacity_status != LR_SUCCESS) {
+      for (lr_event_t *event : dependencies) {
+        --event->active_synchronizers;
+      }
+      g_event_state_changed.notify_all();
       return capacity_status;
     }
 
@@ -408,8 +474,32 @@ lr_status_t enqueue_event_dependencies_locked(
           PendingBarrier{retirement_signal, std::move(packet_dependencies)});
       hsa_signal_store_screlease(queue->queue->doorbell_signal, index);
     }
+    for (lr_event_t *event : dependencies) {
+      --event->active_synchronizers;
+    }
+    if (!dependencies.empty()) {
+      g_event_state_changed.notify_all();
+    }
     return LR_SUCCESS;
   }
+}
+
+size_t event_dependency_packet_count_locked(
+    DeviceState *device, QueueState *queue,
+    const std::vector<lr_event_t *> *explicit_dependencies) {
+  size_t dependency_count = 0;
+  const std::vector<lr_event_t *> &events =
+      explicit_dependencies ? *explicit_dependencies : device->pending_events;
+  for (lr_event_t *event : events) {
+    const bool eligible_kind =
+        explicit_dependencies || event->kind == lr_event_t::Kind::AsyncCopy;
+    if (eligible_kind && event->pending &&
+        event->dependency_queues.count(queue) == 0 &&
+        hsa_signal_load_scacquire(event->signal) != 0) {
+      ++dependency_count;
+    }
+  }
+  return (dependency_count + 4) / 5;
 }
 
 void release_device_queue_pools_locked(DeviceState *device,
@@ -446,10 +536,13 @@ void wait_for_queue_synchronizers_locked(
   });
 }
 
-lr_status_t
-enqueue_queue_synchronization_locked(QueueState *queue,
-                                     hsa_signal_t *completion_signal) {
+lr_status_t enqueue_queue_synchronization_locked(
+    QueueState *queue, hsa_signal_t *completion_signal,
+    std::unique_lock<std::mutex> *devices_lock) {
   *completion_signal = hsa_signal_t{};
+  if (queue->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
 
   std::vector<SynchronizationDependency> dependencies;
   std::vector<hsa_signal_t> dispatch_dependencies;
@@ -485,7 +578,8 @@ enqueue_queue_synchronization_locked(QueueState *queue,
       break;
     }
 
-    lr_status_t wait_status = wait_for_queue_progress_locked(queue);
+    lr_status_t wait_status =
+        wait_for_queue_progress_locked(devices_lock, queue);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -648,7 +742,7 @@ lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
   QueueState &state = queue->state;
   hsa_signal_t completion_signal{};
   lr_status_t status =
-      enqueue_queue_synchronization_locked(&state, &completion_signal);
+      enqueue_queue_synchronization_locked(&state, &completion_signal, &lock);
   if (status != LR_SUCCESS || completion_signal.handle == 0) {
     return status;
   }

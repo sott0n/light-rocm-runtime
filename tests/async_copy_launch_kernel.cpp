@@ -16,3 +16,12 @@ extern "C" __global__ void queue_wait_kernel(unsigned long long iterations,
   }
   output[0] = value;
 }
+
+extern "C" __global__ void
+queue_gate_kernel(const volatile unsigned long long *gate) {
+  if (threadIdx.x != 0) {
+    return;
+  }
+  while (*gate == 0) {
+  }
+}

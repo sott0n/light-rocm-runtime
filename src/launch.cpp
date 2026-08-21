@@ -34,7 +34,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
 
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::unique_lock<std::mutex> lock(g_devices_mutex);
   if (!valid_kernel_locked(kernel)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -54,12 +54,32 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
   QueueState &queue = execution_queue->state;
   std::vector<lr_event_t *> event_dependencies;
-  if (!use_implicit_dependencies) {
-    lr_status_t dependency_status = collect_event_dependencies_locked(
-        device, explicit_dependencies, dependency_count, nullptr,
-        &event_dependencies);
-    if (dependency_status != LR_SUCCESS) {
-      return dependency_status;
+  while (true) {
+    event_dependencies.clear();
+    if (!use_implicit_dependencies) {
+      lr_status_t dependency_status = collect_event_dependencies_locked(
+          device, explicit_dependencies, dependency_count, nullptr,
+          &event_dependencies);
+      if (dependency_status != LR_SUCCESS) {
+        return dependency_status;
+      }
+    }
+    const std::vector<lr_event_t *> *capacity_dependencies =
+        use_implicit_dependencies ? nullptr : &event_dependencies;
+    const size_t required_packets = event_dependency_packet_count_locked(
+                                        &state, &queue, capacity_dependencies) +
+                                    1;
+    bool lock_released = false;
+    lr_status_t capacity_status = ensure_queue_capacity_locked(
+        &lock, &queue, required_packets, &lock_released);
+    if (capacity_status != LR_SUCCESS) {
+      return capacity_status;
+    }
+    if (!lock_released) {
+      break;
+    }
+    if (!valid_kernel_locked(kernel) || !valid_queue_locked(execution_queue)) {
+      return LR_ERROR_INVALID_ARGUMENT;
     }
   }
   KernargBuffer kernarg{};
@@ -79,8 +99,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
   const std::vector<lr_event_t *> *dependencies =
       use_implicit_dependencies ? nullptr : &event_dependencies;
-  lr_status_t dependency_status =
-      enqueue_event_dependencies_locked(&state, &queue, signal, dependencies);
+  lr_status_t dependency_status = enqueue_event_dependencies_locked(
+      &lock, &state, &queue, signal, dependencies);
   if (dependency_status != LR_SUCCESS) {
     queue.signal_pool.push_back(signal);
     queue.kernarg_pool.push_back(kernarg);

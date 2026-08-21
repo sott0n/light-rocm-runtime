@@ -44,11 +44,13 @@ struct PendingSynchronization {
 struct QueueState {
   hsa_queue_t *queue;
   std::vector<PendingDispatch> pending_dispatches;
+  std::vector<PendingDispatch> deferred_dispatches;
   std::vector<PendingBarrier> pending_barriers;
   std::vector<lr_event_t *> pending_events;
   std::vector<hsa_signal_t> signal_pool;
   std::vector<KernargBuffer> kernarg_pool;
   std::vector<PendingSynchronization> pending_synchronizations;
+  std::vector<hsa_signal_t> progress_wait_signals;
   size_t active_synchronizers;
   bool destroying;
 };
@@ -158,11 +160,17 @@ lr_status_t collect_event_dependencies_locked(
     lr_device_t device, lr_event_t *const *dependencies,
     size_t dependency_count, const lr_event_t *completion_event,
     std::vector<lr_event_t *> *pending_dependencies);
-lr_status_t enqueue_event_dependencies_locked(
-    DeviceState *device, QueueState *queue, hsa_signal_t retirement_signal,
+size_t event_dependency_packet_count_locked(
+    DeviceState *device, QueueState *queue,
     const std::vector<lr_event_t *> *explicit_dependencies);
-lr_status_t ensure_queue_capacity_locked(QueueState *queue,
-                                         size_t required_packets);
+lr_status_t enqueue_event_dependencies_locked(
+    std::unique_lock<std::mutex> *devices_lock, DeviceState *device,
+    QueueState *queue, hsa_signal_t retirement_signal,
+    const std::vector<lr_event_t *> *explicit_dependencies);
+lr_status_t
+ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
+                             QueueState *queue, size_t required_packets,
+                             bool *lock_released = nullptr);
 void reap_completed_barriers_locked(QueueState *queue);
 bool valid_queue_locked(lr_queue_t *queue);
 bool valid_event_locked(lr_event_t *event);
@@ -172,9 +180,9 @@ void release_device_queue_pools_locked(DeviceState *device,
 void destroy_all_queues_locked();
 void wait_for_queue_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock);
-lr_status_t
-enqueue_queue_synchronization_locked(QueueState *queue,
-                                     hsa_signal_t *completion_signal);
+lr_status_t enqueue_queue_synchronization_locked(
+    QueueState *queue, hsa_signal_t *completion_signal,
+    std::unique_lock<std::mutex> *devices_lock);
 lr_status_t finish_queue_synchronization_locked(QueueState *queue,
                                                 hsa_signal_t completion_signal,
                                                 hsa_signal_value_t wait_value);

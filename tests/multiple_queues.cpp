@@ -27,6 +27,10 @@ struct WaitArgs {
   unsigned long long *output;
 };
 
+struct GateArgs {
+  const unsigned long long *gate;
+};
+
 std::vector<unsigned char> read_file(const char *path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) {
@@ -82,12 +86,13 @@ int main() {
     lrrt::Module module(device, hsaco);
     lrrt::Kernel kernel = module.kernel("async_copy_launch_kernel");
     lrrt::Kernel wait_kernel = module.kernel("queue_wait_kernel");
+    lrrt::Kernel gate_kernel = module.kernel("queue_gate_kernel");
     lrrt::Queue first_queue(device);
     lrrt::Queue second_queue(device);
     const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
 
     const WaitArgs wait_args = {
-        10000ULL,
+        50000ULL,
         static_cast<unsigned long long *>(wait_output.data()),
     };
     lrrt::launch(first_queue, wait_kernel, config, wait_args);
@@ -314,6 +319,50 @@ int main() {
     lrrt::check(lr_queue_destroy(lifetime_queue), "lr_queue_destroy");
     lifetime_synchronizer.join();
     lrrt::check(lifetime_synchronize_status, "lr_queue_synchronize");
+
+    lrrt::Queue backpressure_queue(device);
+    lrrt::Queue independent_queue(device);
+    lrrt::DeviceBuffer gate(device, sizeof(unsigned long long));
+    const unsigned long long closed_gate = 0;
+    lrrt::copy_to_device(gate, &closed_gate, sizeof(closed_gate));
+    const GateArgs gate_args = {
+        static_cast<const unsigned long long *>(gate.data()),
+    };
+    const WaitArgs filler_args = {
+        0,
+        static_cast<unsigned long long *>(wait_output.data()),
+    };
+    constexpr uint32_t queue_capacity = 1024;
+    lrrt::launch(backpressure_queue, gate_kernel, config, gate_args);
+    for (uint32_t i = 1; i < queue_capacity; ++i) {
+      lrrt::launch(backpressure_queue, wait_kernel, config, filler_args);
+    }
+
+    std::atomic<bool> backpressure_launch_started{false};
+    std::atomic<bool> backpressure_launch_completed{false};
+    std::thread backpressure_launcher([&] {
+      backpressure_launch_started.store(true, std::memory_order_release);
+      lrrt::launch(backpressure_queue, wait_kernel, config, filler_args);
+      backpressure_launch_completed.store(true, std::memory_order_release);
+    });
+    while (!backpressure_launch_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(independent_queue, kernel, config, concurrent_args);
+    if (backpressure_launch_completed.load(std::memory_order_acquire)) {
+      backpressure_launcher.join();
+      throw std::runtime_error(
+          "queue backpressure did not overlap an independent queue launch");
+    }
+    const unsigned long long open_gate = 1;
+    lrrt::Event gate_opened(device);
+    lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
+                               gate_opened);
+    backpressure_launcher.join();
+    gate_opened.synchronize();
+    backpressure_queue.synchronize();
+    independent_queue.synchronize();
 
     const ScaleArgs first_args = {static_cast<const float *>(source.data()),
                                   static_cast<float *>(first_output.data()),

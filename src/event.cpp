@@ -350,10 +350,13 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   if (consumer_status != LR_SUCCESS) {
     return consumer_status;
   }
+  ++event->active_synchronizers;
   lr_status_t capacity_status =
       use_default_queue ? enqueue_event_dependencies_locked(
-                              &device, &state, event->signal, nullptr)
-                        : ensure_queue_capacity_locked(&state, 1);
+                              &lock, &device, &state, event->signal, nullptr)
+                        : ensure_queue_capacity_locked(&lock, &state, 1);
+  --event->active_synchronizers;
+  g_event_state_changed.notify_all();
   if (capacity_status != LR_SUCCESS) {
     return capacity_status;
   }
