@@ -195,6 +195,8 @@ lr_status_t synchronize_device(DeviceState *device,
                                std::unique_lock<std::mutex> *devices_lock);
 void release_events_locked();
 void release_modules_locked();
+void wait_for_memory_operations_locked(
+    std::unique_lock<std::mutex> *devices_lock);
 void release_memory_allocations_locked(lr_status_t *result);
 #endif
 

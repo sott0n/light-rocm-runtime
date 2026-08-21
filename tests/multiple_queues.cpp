@@ -332,6 +332,93 @@ int main() {
         0,
         static_cast<unsigned long long *>(wait_output.data()),
     };
+
+    void *synchronous_copy_device = nullptr;
+    void *synchronous_copy_host = nullptr;
+    lrrt::check(lr_malloc(device.get(), sizeof(unsigned long long),
+                          &synchronous_copy_device),
+                "lr_malloc synchronous copy device buffer");
+    lrrt::check(lr_host_malloc(device.get(), sizeof(unsigned long long),
+                               &synchronous_copy_host),
+                "lr_host_malloc synchronous copy host buffer");
+    *static_cast<unsigned long long *>(synchronous_copy_host) = 42;
+
+    lrrt::launch(first_queue, gate_kernel, config, gate_args);
+    std::atomic<bool> synchronous_copy_started{false};
+    std::atomic<bool> synchronous_copy_completed{false};
+    lr_status_t synchronous_copy_status = LR_ERROR_RUNTIME;
+    std::thread synchronous_copier([&] {
+      synchronous_copy_started.store(true, std::memory_order_release);
+      synchronous_copy_status = lr_memcpy(
+          device.get(), synchronous_copy_device, synchronous_copy_host,
+          sizeof(unsigned long long), LR_MEMCPY_HOST_TO_DEVICE);
+      synchronous_copy_completed.store(true, std::memory_order_release);
+    });
+    while (!synchronous_copy_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(independent_queue, kernel, config, concurrent_args);
+    if (synchronous_copy_completed.load(std::memory_order_acquire)) {
+      const unsigned long long open_gate_after_failure = 1;
+      lrrt::Event gate_opened_after_failure(device);
+      lrrt::copy_to_device_async(gate, &open_gate_after_failure,
+                                 sizeof(open_gate_after_failure),
+                                 gate_opened_after_failure);
+      synchronous_copier.join();
+      gate_opened_after_failure.synchronize();
+      lrrt::check(lr_free(device.get(), synchronous_copy_device),
+                  "lr_free failed synchronous copy buffer");
+      lrrt::check(lr_host_free(device.get(), synchronous_copy_host),
+                  "lr_host_free failed synchronous copy buffer");
+      throw std::runtime_error(
+          "synchronous copy did not remain blocked by earlier queue work");
+    }
+
+    std::atomic<bool> device_free_completed{false};
+    std::atomic<bool> host_free_completed{false};
+    lr_status_t device_free_status = LR_ERROR_RUNTIME;
+    lr_status_t host_free_status = LR_ERROR_RUNTIME;
+    std::thread device_freer([&] {
+      device_free_status = lr_free(device.get(), synchronous_copy_device);
+      device_free_completed.store(true, std::memory_order_release);
+    });
+    std::thread host_freer([&] {
+      host_free_status = lr_host_free(device.get(), synchronous_copy_host);
+      host_free_completed.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    if (device_free_completed.load(std::memory_order_acquire) ||
+        host_free_completed.load(std::memory_order_acquire)) {
+      const unsigned long long open_gate_after_failure = 1;
+      lrrt::Event gate_opened_after_failure(device);
+      lrrt::copy_to_device_async(gate, &open_gate_after_failure,
+                                 sizeof(open_gate_after_failure),
+                                 gate_opened_after_failure);
+      synchronous_copier.join();
+      device_freer.join();
+      host_freer.join();
+      throw std::runtime_error(
+          "synchronous copy allocations were not pinned while waiting");
+    }
+
+    const unsigned long long open_gate_for_synchronous_copy = 1;
+    lrrt::Event synchronous_copy_gate_opened(device);
+    lrrt::copy_to_device_async(gate, &open_gate_for_synchronous_copy,
+                               sizeof(open_gate_for_synchronous_copy),
+                               synchronous_copy_gate_opened);
+    synchronous_copier.join();
+    device_freer.join();
+    host_freer.join();
+    lrrt::check(synchronous_copy_status, "lr_memcpy concurrent wait");
+    lrrt::check(device_free_status, "lr_free concurrent copy");
+    lrrt::check(host_free_status, "lr_host_free concurrent copy");
+    synchronous_copy_gate_opened.synchronize();
+    first_queue.synchronize();
+    independent_queue.synchronize();
+
+    lrrt::copy_to_device(gate, &closed_gate, sizeof(closed_gate));
     constexpr uint32_t queue_capacity = 1024;
     lrrt::launch(backpressure_queue, gate_kernel, config, gate_args);
     for (uint32_t i = 1; i < queue_capacity; ++i) {

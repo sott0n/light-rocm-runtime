@@ -181,6 +181,7 @@ lr_status_t lr_shutdown(void) {
     std::unique_lock<std::mutex> lock(g_devices_mutex);
     wait_for_queue_synchronizers_locked(&lock);
     wait_for_all_event_synchronizers_locked(&lock);
+    wait_for_memory_operations_locked(&lock);
     lr_status_t drain_status = LR_SUCCESS;
     for (DeviceState &device : g_devices) {
       lr_status_t status = drain_device_locked(&device);
