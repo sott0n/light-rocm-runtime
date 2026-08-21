@@ -125,58 +125,90 @@ void reap_completed_event_dependencies_locked(lr_event_t *event) {
   }
 }
 
-lr_status_t wait_for_event_consumers_locked(DeviceState *device,
-                                            lr_event_t *event) {
+lr_status_t
+wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
+                                DeviceState *device, lr_event_t *event) {
+  ++event->active_synchronizers;
+  lr_status_t result = LR_SUCCESS;
   while (event->dependency_count != 0) {
     reap_completed_event_dependencies_locked(event);
     if (event->dependency_count == 0) {
-      return LR_SUCCESS;
+      break;
     }
 
-    bool waited = false;
-    std::vector<lr_event_t *> pending_events = device->pending_events;
-    for (lr_event_t *dependent : pending_events) {
-      if (!dependent->pending ||
-          std::find(dependent->dependencies.begin(),
-                    dependent->dependencies.end(),
-                    event) == dependent->dependencies.end()) {
-        continue;
+    auto dependent = std::find_if(
+        device->pending_events.begin(), device->pending_events.end(),
+        [event](lr_event_t *pending) {
+          return pending->pending &&
+                 std::find(pending->dependencies.begin(),
+                           pending->dependencies.end(),
+                           event) != pending->dependencies.end();
+        });
+    if (dependent != device->pending_events.end()) {
+      lr_event_t *dependent_event = *dependent;
+      hsa_signal_t signal = dependent_event->signal;
+      QueueState *recorded_queue = dependent_event->recorded_queue;
+      ++dependent_event->active_synchronizers;
+      if (recorded_queue) {
+        ++recorded_queue->active_synchronizers;
       }
-      lr_status_t status = event_wait_locked(dependent);
+
+      devices_lock->unlock();
+      hsa_signal_value_t value =
+          hsa_signal_wait_scacquire(signal, HSA_SIGNAL_CONDITION_LT, 1,
+                                    UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+      devices_lock->lock();
+
+      lr_status_t status = finish_event_wait_locked(dependent_event, value);
+      --dependent_event->active_synchronizers;
+      g_event_state_changed.notify_all();
+      if (recorded_queue) {
+        --recorded_queue->active_synchronizers;
+        g_queue_state_changed.notify_all();
+      }
       if (status != LR_SUCCESS) {
-        return status;
+        result = status;
+        break;
       }
-      waited = true;
+      continue;
     }
 
-    std::vector<QueueState *> queues(event->dependency_queues.begin(),
-                                     event->dependency_queues.end());
-    for (QueueState *queue : queues) {
-      auto barrier = std::find_if(
-          queue->pending_barriers.begin(), queue->pending_barriers.end(),
-          [event](const PendingBarrier &pending) {
-            return std::find(pending.dependencies.begin(),
-                             pending.dependencies.end(),
-                             event) != pending.dependencies.end();
-          });
-      if (barrier == queue->pending_barriers.end()) {
-        continue;
+    if (!event->dependency_queues.empty()) {
+      QueueState *queue = *event->dependency_queues.begin();
+      ++queue->active_synchronizers;
+      hsa_signal_t completion_signal{};
+      lr_status_t status = enqueue_queue_tail_marker_locked(
+          queue, &completion_signal, devices_lock);
+      if (status != LR_SUCCESS) {
+        --queue->active_synchronizers;
+        g_queue_state_changed.notify_all();
+        result = status;
+        break;
       }
-      hsa_signal_value_t value = hsa_signal_wait_scacquire(
-          barrier->retirement_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
-          HSA_WAIT_STATE_BLOCKED);
-      if (value != 0) {
-        return LR_ERROR_RUNTIME;
+
+      devices_lock->unlock();
+      hsa_signal_value_t value =
+          hsa_signal_wait_scacquire(completion_signal, HSA_SIGNAL_CONDITION_LT,
+                                    1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
+      devices_lock->lock();
+
+      status =
+          finish_queue_synchronization_locked(queue, completion_signal, value);
+      --queue->active_synchronizers;
+      g_queue_state_changed.notify_all();
+      if (status != LR_SUCCESS) {
+        result = status;
+        break;
       }
-      reap_completed_barriers_locked(queue);
-      waited = true;
+      continue;
     }
 
-    if (!waited && event->dependency_count != 0) {
-      return LR_ERROR_RUNTIME;
-    }
+    result = LR_ERROR_RUNTIME;
+    break;
   }
-  return LR_SUCCESS;
+  --event->active_synchronizers;
+  g_event_state_changed.notify_all();
+  return result;
 }
 
 lr_status_t collect_event_dependencies_locked(
@@ -291,8 +323,8 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
     event->destroying = false;
     return wait_status;
   }
-  lr_status_t consumer_status =
-      wait_for_event_consumers_locked(&g_devices[event->device.index], event);
+  lr_status_t consumer_status = wait_for_event_consumers_locked(
+      &lock, &g_devices[event->device.index], event);
   if (consumer_status != LR_SUCCESS) {
     event->destroying = false;
     return consumer_status;
@@ -332,7 +364,20 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+  lr_status_t wait_status = event_wait_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
   DeviceState &device = g_devices[event->device.index];
+  lr_status_t consumer_status =
+      wait_for_event_consumers_locked(&lock, &device, event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
+  }
+  if (!valid_event_locked(event) || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
   if (use_default_queue) {
     queue = device.default_queue;
   }
@@ -341,15 +386,6 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &state = queue->state;
-
-  lr_status_t wait_status = event_wait_locked(event);
-  if (wait_status != LR_SUCCESS) {
-    return wait_status;
-  }
-  lr_status_t consumer_status = wait_for_event_consumers_locked(&device, event);
-  if (consumer_status != LR_SUCCESS) {
-    return consumer_status;
-  }
   ++event->active_synchronizers;
   lr_status_t capacity_status =
       use_default_queue ? enqueue_event_dependencies_locked(

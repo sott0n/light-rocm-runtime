@@ -627,6 +627,41 @@ lr_status_t enqueue_queue_synchronization_locked(
   return LR_SUCCESS;
 }
 
+lr_status_t
+enqueue_queue_tail_marker_locked(QueueState *queue,
+                                 hsa_signal_t *completion_signal,
+                                 std::unique_lock<std::mutex> *devices_lock) {
+  *completion_signal = hsa_signal_t{};
+  lr_status_t capacity_status =
+      ensure_queue_capacity_locked(devices_lock, queue, 1);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
+  }
+
+  hsa_status_t status = hsa_signal_create(1, 0, nullptr, completion_signal);
+  if (status != HSA_STATUS_SUCCESS) {
+    return to_lr_status(status);
+  }
+
+  const uint64_t index = hsa_queue_add_write_index_scacq_screl(queue->queue, 1);
+  auto *packets =
+      static_cast<hsa_barrier_and_packet_t *>(queue->queue->base_address);
+  hsa_barrier_and_packet_t *packet = &packets[index & (queue->queue->size - 1)];
+  std::memset(packet, 0, sizeof(*packet));
+  packet->completion_signal = *completion_signal;
+  // The barrier bit makes this marker complete after every packet already
+  // published to the queue, without borrowing any earlier packet's signal.
+  publish_packet_header(&packet->header,
+                        barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+
+  queue->pending_barriers.push_back(PendingBarrier{*completion_signal, {}});
+  queue->pending_synchronizations.push_back(
+      PendingSynchronization{*completion_signal, {}});
+  ++queue->active_synchronizers;
+  hsa_signal_store_screlease(queue->queue->doorbell_signal, index);
+  return LR_SUCCESS;
+}
+
 lr_status_t finish_queue_synchronization_locked(QueueState *queue,
                                                 hsa_signal_t completion_signal,
                                                 hsa_signal_value_t wait_value) {

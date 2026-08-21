@@ -370,6 +370,83 @@ int main() {
     const ScaleArgs second_args = {
         static_cast<const float *>(first_output.data()),
         static_cast<float *>(final_output.data()), alpha, 0};
+
+    lrrt::copy_to_device(gate, &closed_gate, sizeof(closed_gate));
+    lrrt::Event consumer_wait_event(device);
+    consumer_wait_event.record(first_queue);
+    lrrt::launch(second_queue, gate_kernel, config, gate_args,
+                 {&consumer_wait_event});
+
+    std::atomic<bool> consumer_wait_started{false};
+    std::atomic<bool> consumer_wait_completed{false};
+    lr_status_t consumer_wait_status = LR_ERROR_RUNTIME;
+    std::thread consumer_waiter([&] {
+      consumer_wait_started.store(true, std::memory_order_release);
+      consumer_wait_status = lr_event_record_on_queue(consumer_wait_event.get(),
+                                                      first_queue.get());
+      consumer_wait_completed.store(true, std::memory_order_release);
+    });
+    while (!consumer_wait_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(independent_queue, kernel, config, concurrent_args);
+    if (consumer_wait_completed.load(std::memory_order_acquire)) {
+      consumer_waiter.join();
+      throw std::runtime_error(
+          "event consumer wait did not remain blocked by its consumer queue");
+    }
+
+    lrrt::Event consumer_gate_opened(device);
+    lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
+                               consumer_gate_opened);
+    consumer_waiter.join();
+    lrrt::check(consumer_wait_status, "lr_event_record_on_queue");
+    consumer_gate_opened.synchronize();
+    second_queue.synchronize();
+    independent_queue.synchronize();
+
+    lrrt::copy_to_device(gate, &closed_gate, sizeof(closed_gate));
+    lrrt::Event copy_consumer_wait_event(device);
+    copy_consumer_wait_event.record(first_queue);
+    lrrt::launch(second_queue, gate_kernel, config, gate_args);
+    lrrt::Event copy_consumer_gate(device);
+    copy_consumer_gate.record(second_queue);
+    lrrt::Event dependent_copy_wait_event(device);
+    lrrt::copy_device_to_device_async(
+        copied_output, first_output, sizeof(float), dependent_copy_wait_event,
+        {&copy_consumer_wait_event, &copy_consumer_gate});
+
+    std::atomic<bool> copy_consumer_wait_started{false};
+    std::atomic<bool> copy_consumer_wait_completed{false};
+    lr_status_t copy_consumer_wait_status = LR_ERROR_RUNTIME;
+    std::thread copy_consumer_waiter([&] {
+      copy_consumer_wait_started.store(true, std::memory_order_release);
+      copy_consumer_wait_status = lr_event_record_on_queue(
+          copy_consumer_wait_event.get(), first_queue.get());
+      copy_consumer_wait_completed.store(true, std::memory_order_release);
+    });
+    while (!copy_consumer_wait_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(independent_queue, kernel, config, concurrent_args);
+    if (copy_consumer_wait_completed.load(std::memory_order_acquire)) {
+      copy_consumer_waiter.join();
+      throw std::runtime_error(
+          "event consumer wait did not remain blocked by its copy consumer");
+    }
+
+    lrrt::Event copy_consumer_gate_opened(device);
+    lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
+                               copy_consumer_gate_opened);
+    copy_consumer_waiter.join();
+    lrrt::check(copy_consumer_wait_status, "lr_event_record_on_queue");
+    copy_consumer_gate_opened.synchronize();
+    dependent_copy_wait_event.synchronize();
+    second_queue.synchronize();
+    independent_queue.synchronize();
+
     lrrt::launch(first_queue, kernel, config, first_args);
     lrrt::Event first_complete(device);
     first_complete.record(first_queue);

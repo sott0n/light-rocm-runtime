@@ -426,6 +426,21 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+  DeviceState &state = g_devices[device.index];
+  lr_status_t wait_status = event_wait_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+
+  lr_status_t consumer_status =
+      wait_for_event_consumers_locked(&lock, &state, event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
+  }
+  if (!valid_event_locked(event) || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
   if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
     if (!valid_allocation(dst, device, size)) {
       return LR_ERROR_INVALID_ARGUMENT;
@@ -441,7 +456,6 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     }
   }
 
-  DeviceState &state = g_devices[device.index];
   hsa_agent_t null_agent{};
   hsa_agent_t dst_agent = null_agent;
   hsa_agent_t src_agent = null_agent;
@@ -479,16 +493,6 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   } else {
     dst_agent = state.agent;
     src_agent = state.agent;
-  }
-
-  lr_status_t wait_status = event_wait_locked(event);
-  if (wait_status != LR_SUCCESS) {
-    return wait_status;
-  }
-
-  lr_status_t consumer_status = wait_for_event_consumers_locked(&state, event);
-  if (consumer_status != LR_SUCCESS) {
-    return consumer_status;
   }
 
   std::vector<lr_event_t *> event_dependencies;

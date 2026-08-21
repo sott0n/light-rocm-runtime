@@ -152,8 +152,9 @@ void wait_for_event_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock, lr_event_t *event);
 void wait_for_all_event_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock);
-lr_status_t wait_for_event_consumers_locked(DeviceState *device,
-                                            lr_event_t *event);
+lr_status_t
+wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
+                                DeviceState *device, lr_event_t *event);
 lr_status_t drain_device_locked(DeviceState *device);
 lr_status_t reap_completed_queue_work_locked(QueueState *queue);
 lr_status_t collect_event_dependencies_locked(
@@ -183,6 +184,10 @@ void wait_for_queue_synchronizers_locked(
 lr_status_t enqueue_queue_synchronization_locked(
     QueueState *queue, hsa_signal_t *completion_signal,
     std::unique_lock<std::mutex> *devices_lock);
+lr_status_t
+enqueue_queue_tail_marker_locked(QueueState *queue,
+                                 hsa_signal_t *completion_signal,
+                                 std::unique_lock<std::mutex> *devices_lock);
 lr_status_t finish_queue_synchronization_locked(QueueState *queue,
                                                 hsa_signal_t completion_signal,
                                                 hsa_signal_value_t wait_value);
