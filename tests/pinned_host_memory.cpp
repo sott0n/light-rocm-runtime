@@ -87,6 +87,11 @@ int main() {
                                     LR_MEMCPY_HOST_TO_DEVICE, copy_event.get()),
                     LR_ERROR_INVALID_ARGUMENT,
                     "out-of-bounds pinned host copy");
+      expect_status(lr_memcpy(device.get(), device_buffer.data(),
+                              input_values + 6, 4 * sizeof(float),
+                              LR_MEMCPY_HOST_TO_DEVICE),
+                    LR_ERROR_INVALID_ARGUMENT,
+                    "out-of-bounds synchronous pinned host copy");
       expect_status(lr_host_free(device.get(), input_values + 1),
                     LR_ERROR_INVALID_ARGUMENT, "pinned host subpointer free");
 

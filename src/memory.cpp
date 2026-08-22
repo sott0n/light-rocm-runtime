@@ -90,22 +90,55 @@ HostPointerLookup translate_host_pointer(const void *ptr, lr_device_t device,
   return HostPointerLookup::Unregistered;
 }
 
-void release_operation_pins(const std::vector<void *> &device_allocations,
-                            const std::vector<void *> &host_allocations) {
-  for (void *base : device_allocations) {
-    auto allocation = g_allocations.find(base);
-    if (allocation != g_allocations.end()) {
-      --allocation->second.active_operations;
+class MemoryOperationPins {
+public:
+  MemoryOperationPins() = default;
+  MemoryOperationPins(const MemoryOperationPins &) = delete;
+  MemoryOperationPins &operator=(const MemoryOperationPins &) = delete;
+
+  ~MemoryOperationPins() {
+    release(g_allocations, device_allocations_);
+    release(g_host_allocations, host_allocations_);
+    if (!device_allocations_.empty() || !host_allocations_.empty()) {
+      g_memory_state_changed.notify_all();
     }
   }
-  for (void *base : host_allocations) {
-    auto allocation = g_host_allocations.find(base);
-    if (allocation != g_host_allocations.end()) {
-      --allocation->second.active_operations;
+
+  bool pin_device(void *base) {
+    return pin(g_allocations, base, &device_allocations_);
+  }
+
+  bool pin_host(void *base) {
+    return pin(g_host_allocations, base, &host_allocations_);
+  }
+
+private:
+  template <typename AllocationMap>
+  static bool pin(AllocationMap &allocations, void *base,
+                  std::vector<void *> *pinned_allocations) {
+    auto allocation = allocations.find(base);
+    if (allocation == allocations.end() || allocation->second.destroying) {
+      return false;
+    }
+    pinned_allocations->push_back(base);
+    ++allocation->second.active_operations;
+    return true;
+  }
+
+  template <typename AllocationMap>
+  static void release(AllocationMap &allocations,
+                      const std::vector<void *> &pinned_allocations) {
+    for (void *base : pinned_allocations) {
+      auto allocation = allocations.find(base);
+      if (allocation != allocations.end()) {
+        --allocation->second.active_operations;
+      }
     }
   }
-  g_memory_state_changed.notify_all();
-}
+
+  std::vector<void *> device_allocations_;
+  std::vector<void *> host_allocations_;
+};
 
 void record_allocation(DeviceState *device, size_t size) {
   lr_memory_stats_t &stats = device->memory_stats;
@@ -448,29 +481,25 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-  std::vector<void *> device_allocations;
-  std::vector<void *> host_allocations;
+  MemoryOperationPins operation_pins;
   if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
     void *base = find_allocation_base(dst, device, size);
-    if (!base) {
+    if (!base || !operation_pins.pin_device(base)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
-    device_allocations.push_back(base);
   } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
     void *base = find_allocation_base(const_cast<void *>(src), device, size);
-    if (!base) {
+    if (!base || !operation_pins.pin_device(base)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
-    device_allocations.push_back(base);
   } else {
     void *dst_base = find_allocation_base(dst, device, size);
     void *src_base =
         find_allocation_base(const_cast<void *>(src), device, size);
-    if (!dst_base || !src_base) {
+    if (!dst_base || !src_base || !operation_pins.pin_device(dst_base) ||
+        !operation_pins.pin_device(src_base)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
-    device_allocations.push_back(dst_base);
-    device_allocations.push_back(src_base);
   }
 
   const void *unused_agent_ptr = nullptr;
@@ -488,21 +517,13 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
       return LR_ERROR_INVALID_ARGUMENT;
     }
   }
-  if (host_base) {
-    host_allocations.push_back(host_base);
-  }
-
-  for (void *base : device_allocations) {
-    ++g_allocations.find(base)->second.active_operations;
-  }
-  for (void *base : host_allocations) {
-    ++g_host_allocations.find(base)->second.active_operations;
+  if (host_base && !operation_pins.pin_host(host_base)) {
+    return LR_ERROR_INVALID_ARGUMENT;
   }
 
   lr_status_t synchronization_status =
       synchronize_device(&g_devices[device.index], &lock);
   if (synchronization_status != LR_SUCCESS) {
-    release_operation_pins(device_allocations, host_allocations);
     return synchronization_status;
   }
 
@@ -512,7 +533,6 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
   if (status == HSA_STATUS_SUCCESS) {
     record_memcpy(&g_devices[device.index], kind, size);
   }
-  release_operation_pins(device_allocations, host_allocations);
   return to_lr_status(status);
 #else
   return LR_ERROR_NOT_SUPPORTED;
