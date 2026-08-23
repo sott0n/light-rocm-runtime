@@ -1,6 +1,9 @@
 add_executable(lrrt_launch_overhead_benchmark launch_overhead.cpp)
 target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_mutex_contention_benchmark mutex_contention.cpp)
+target_link_libraries(lrrt_mutex_contention_benchmark PRIVATE lrrt::lrrt)
+
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
 
@@ -76,6 +79,10 @@ lrrt_add_hsaco_kernel(
   LAUNCH_BENCHMARK_HSACO
 )
 lrrt_add_hsaco_kernel(
+  mutex_contention_kernel benchmarks/mutex_contention_kernel.cpp
+  MUTEX_CONTENTION_HSACO
+)
+lrrt_add_hsaco_kernel(
   async_copy_launch_benchmark_kernel
   benchmarks/async_copy_launch_kernel.cpp
   ASYNC_COPY_LAUNCH_BENCHMARK_HSACO
@@ -149,6 +156,17 @@ if(LAUNCH_BENCHMARK_HSACO)
   target_compile_definitions(
     lrrt_launch_overhead_benchmark
     PRIVATE LRRT_LAUNCH_BENCHMARK_HSACO="${LAUNCH_BENCHMARK_HSACO}"
+  )
+endif()
+
+if(MUTEX_CONTENTION_HSACO)
+  add_dependencies(
+    lrrt_mutex_contention_benchmark
+    mutex_contention_kernel_hsaco
+  )
+  target_compile_definitions(
+    lrrt_mutex_contention_benchmark
+    PRIVATE LRRT_MUTEX_CONTENTION_HSACO="${MUTEX_CONTENTION_HSACO}"
   )
 endif()
 

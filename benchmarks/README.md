@@ -13,6 +13,7 @@ cmake -S . -B build-bench -DLRRT_BUILD_BENCHMARKS=ON
 cmake --build build-bench -j2
 
 ./build-bench/lrrt_launch_overhead_benchmark
+./build-bench/lrrt_mutex_contention_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
 ./build-bench/lrrt_pinned_host_transfer_benchmark
 ./build-bench/lrrt_double_buffer_pipeline_benchmark
@@ -21,6 +22,7 @@ cmake --build build-bench -j2
 | Executable | Default workload |
 | --- | --- |
 | `lrrt_launch_overhead_benchmark` | 10,000 sustained launches, a 512-launch burst, and 1,000 synchronized round trips |
+| `lrrt_mutex_contention_benchmark` | Lightweight API probes during queue, event, backpressure, and synchronous-copy waits |
 | `lrrt_async_copy_launch_benchmark` | 100 iterations of copy/launch and launch/copy dependency paths |
 | `lrrt_pinned_host_transfer_benchmark` | 4 KiB through 1 GiB H2D and D2H transfers; adaptive iteration count targeting 256 MiB per row |
 | `lrrt_double_buffer_pipeline_benchmark` | 50 x 4 MiB chunks with 64 GPU compute rounds per chunk |
@@ -114,6 +116,7 @@ and the final drain; allocation and validation are excluded.
 ## Interpreting and reproducing results
 
 - Pass a positive iteration count to the launch and dependency benchmarks.
+- Pass a positive GPU wait iteration count to the mutex contention benchmark.
 - Use `--max-size-mib`, `--iterations`, and `--warmup` to control the host
   transfer sweep.
 - Use `--chunks`, `--warmup-chunks`, `--chunk-size-mib`, and
