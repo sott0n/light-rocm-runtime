@@ -18,6 +18,12 @@ struct SynchronizationDependency {
   lr_event_t *event;
 };
 
+struct QueueDestruction {
+  hsa_signal_t completion_signal;
+  hsa_signal_value_t wait_value;
+  size_t destruction_pin_count;
+};
+
 bool valid_queue_locked(lr_queue_t *queue) {
   return g_queues.find(queue) != g_queues.end() && !queue->state.destroying;
 }
@@ -314,7 +320,7 @@ size_t pending_queue_packet_count(const QueueState *queue) {
 
 lr_status_t
 wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
-                               QueueState *queue) {
+                               QueueState *queue, bool allow_destroying) {
   hsa_signal_t signal{};
   lr_event_t *event = nullptr;
   if (!queue->pending_dispatches.empty()) {
@@ -370,7 +376,7 @@ wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
   if (value != 0) {
     return LR_ERROR_RUNTIME;
   }
-  if (queue->destroying) {
+  if (queue->destroying && !allow_destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   return reap_completed_queue_work_locked(queue);
@@ -379,7 +385,7 @@ wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
 lr_status_t
 ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
                              QueueState *queue, size_t required_packets,
-                             bool *lock_released) {
+                             bool *lock_released, bool allow_destroying) {
   if (lock_released) {
     *lock_released = false;
   }
@@ -401,7 +407,7 @@ ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
       *lock_released = true;
     }
     lr_status_t wait_status =
-        wait_for_queue_progress_locked(devices_lock, queue);
+        wait_for_queue_progress_locked(devices_lock, queue, allow_destroying);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -579,7 +585,7 @@ lr_status_t enqueue_queue_synchronization_locked(
     }
 
     lr_status_t wait_status =
-        wait_for_queue_progress_locked(devices_lock, queue);
+        wait_for_queue_progress_locked(devices_lock, queue, false);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -627,13 +633,12 @@ lr_status_t enqueue_queue_synchronization_locked(
   return LR_SUCCESS;
 }
 
-lr_status_t
-enqueue_queue_tail_marker_locked(QueueState *queue,
-                                 hsa_signal_t *completion_signal,
-                                 std::unique_lock<std::mutex> *devices_lock) {
+lr_status_t enqueue_queue_tail_marker_locked(
+    QueueState *queue, hsa_signal_t *completion_signal,
+    std::unique_lock<std::mutex> *devices_lock, bool allow_destroying) {
   *completion_signal = hsa_signal_t{};
-  lr_status_t capacity_status =
-      ensure_queue_capacity_locked(devices_lock, queue, 1);
+  lr_status_t capacity_status = ensure_queue_capacity_locked(
+      devices_lock, queue, 1, nullptr, allow_destroying);
   if (capacity_status != LR_SUCCESS) {
     return capacity_status;
   }
@@ -689,6 +694,56 @@ lr_status_t finish_queue_synchronization_locked(QueueState *queue,
   }
   return result;
 }
+
+lr_status_t
+prepare_queue_destruction_locked(QueueState *queue,
+                                 QueueDestruction *destruction,
+                                 std::unique_lock<std::mutex> *devices_lock) {
+  destruction->completion_signal = hsa_signal_t{};
+  destruction->wait_value = 0;
+  destruction->destruction_pin_count = 1;
+  queue->destroying = true;
+  ++queue->active_synchronizers;
+  g_queue_state_changed.wait(
+      *devices_lock, [queue] { return queue->active_synchronizers == 1; });
+
+  lr_status_t status = enqueue_queue_tail_marker_locked(
+      queue, &destruction->completion_signal, devices_lock, true);
+  if (status != LR_SUCCESS) {
+    --queue->active_synchronizers;
+    g_queue_state_changed.notify_all();
+    queue->destroying = false;
+    return status;
+  }
+  ++destruction->destruction_pin_count;
+  return LR_SUCCESS;
+}
+
+void wait_for_queue_destruction(QueueDestruction *destruction) {
+  if (destruction->completion_signal.handle == 0) {
+    return;
+  }
+  destruction->wait_value = hsa_signal_wait_scacquire(
+      destruction->completion_signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX,
+      HSA_WAIT_STATE_BLOCKED);
+}
+
+lr_status_t
+finish_queue_destruction_locked(QueueState *queue,
+                                const QueueDestruction &destruction,
+                                std::unique_lock<std::mutex> *devices_lock) {
+  g_queue_state_changed.wait(*devices_lock, [queue, &destruction] {
+    return queue->active_synchronizers == destruction.destruction_pin_count;
+  });
+  lr_status_t result = finish_queue_synchronization_locked(
+      queue, destruction.completion_signal, destruction.wait_value);
+  --queue->active_synchronizers;
+  g_queue_state_changed.notify_all();
+  if (result == LR_SUCCESS) {
+    result = drain_queue_locked(queue);
+  }
+  return result;
+}
 #endif
 
 } // namespace lrrt_internal
@@ -733,11 +788,20 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
       queue->device.index >= g_devices.size() || queue->state.destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  queue->state.destroying = true;
-  g_queue_state_changed.wait(
-      lock, [queue] { return queue->state.active_synchronizers == 0; });
+
+  QueueDestruction destruction{};
+  lr_status_t result =
+      prepare_queue_destruction_locked(&queue->state, &destruction, &lock);
+  if (result != LR_SUCCESS) {
+    return result;
+  }
+
+  lock.unlock();
+  wait_for_queue_destruction(&destruction);
+  lock.lock();
+
   DeviceState &device = g_devices[queue->device.index];
-  lr_status_t result = drain_queue_locked(&queue->state);
+  result = finish_queue_destruction_locked(&queue->state, destruction, &lock);
   release_queue_pools_locked(&queue->state, &result);
   if (result != LR_SUCCESS) {
     queue->state.destroying = false;

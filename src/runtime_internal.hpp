@@ -171,7 +171,8 @@ lr_status_t enqueue_event_dependencies_locked(
 lr_status_t
 ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
                              QueueState *queue, size_t required_packets,
-                             bool *lock_released = nullptr);
+                             bool *lock_released = nullptr,
+                             bool allow_destroying = false);
 void reap_completed_barriers_locked(QueueState *queue);
 bool valid_queue_locked(lr_queue_t *queue);
 bool valid_event_locked(lr_event_t *event);
@@ -184,10 +185,9 @@ void wait_for_queue_synchronizers_locked(
 lr_status_t enqueue_queue_synchronization_locked(
     QueueState *queue, hsa_signal_t *completion_signal,
     std::unique_lock<std::mutex> *devices_lock);
-lr_status_t
-enqueue_queue_tail_marker_locked(QueueState *queue,
-                                 hsa_signal_t *completion_signal,
-                                 std::unique_lock<std::mutex> *devices_lock);
+lr_status_t enqueue_queue_tail_marker_locked(
+    QueueState *queue, hsa_signal_t *completion_signal,
+    std::unique_lock<std::mutex> *devices_lock, bool allow_destroying = false);
 lr_status_t finish_queue_synchronization_locked(QueueState *queue,
                                                 hsa_signal_t completion_signal,
                                                 hsa_signal_value_t wait_value);

@@ -163,6 +163,34 @@ int main() {
     device_synchronizer.join();
     second_queue.synchronize();
 
+    lr_queue_t *destroyed_while_busy = nullptr;
+    lrrt::check(lr_queue_create(device.get(), &destroyed_while_busy),
+                "lr_queue_create");
+    lrrt::check(lr_launch_on_queue(destroyed_while_busy, wait_kernel.get(),
+                                   &config, &wait_args, sizeof(wait_args)),
+                "lr_launch_on_queue");
+    std::atomic<bool> queue_destroy_started{false};
+    std::atomic<bool> busy_queue_destroy_completed{false};
+    lr_status_t busy_queue_destroy_status = LR_ERROR_RUNTIME;
+    std::thread busy_queue_destroyer([&] {
+      queue_destroy_started.store(true, std::memory_order_release);
+      busy_queue_destroy_status = lr_queue_destroy(destroyed_while_busy);
+      busy_queue_destroy_completed.store(true, std::memory_order_release);
+    });
+    while (!queue_destroy_started.load(std::memory_order_acquire)) {
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    lrrt::launch(second_queue, kernel, config, concurrent_args);
+    if (busy_queue_destroy_completed.load(std::memory_order_acquire)) {
+      busy_queue_destroyer.join();
+      throw std::runtime_error(
+          "queue destroy blocked an independent queue launch");
+    }
+    busy_queue_destroyer.join();
+    lrrt::check(busy_queue_destroy_status, "lr_queue_destroy");
+    second_queue.synchronize();
+
     lr_queue_t *device_synchronized_queue = nullptr;
     lrrt::check(lr_queue_create(device.get(), &device_synchronized_queue),
                 "lr_queue_create");
