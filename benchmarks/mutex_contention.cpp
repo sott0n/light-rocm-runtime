@@ -258,6 +258,16 @@ int main(int argc, char **argv) {
     }
 
     {
+      lr_queue_t *queue = nullptr;
+      lrrt::check(lr_queue_create(device.get(), &queue), "lr_queue_create");
+      lrrt::check(lr_launch_on_queue(queue, wait_kernel.get(), &config,
+                                     &wait_args, sizeof(wait_args)),
+                  "lr_launch_on_queue");
+      measurements.push_back(measure_wait(
+          device, "Queue destroy", [&] { return lr_queue_destroy(queue); }));
+    }
+
+    {
       lrrt::Queue queue(device);
       lrrt::Event event(device);
       lrrt::launch(queue, wait_kernel, config, wait_args);
