@@ -69,8 +69,11 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
 } // namespace
 
 bool valid_kernel_locked(lr_kernel_t *kernel) {
-  return g_kernels.find(kernel) != g_kernels.end() &&
-         g_modules.find(kernel->module) != g_modules.end();
+  if (g_kernels.find(kernel) == g_kernels.end()) {
+    return false;
+  }
+  lr_module_t *module = kernel->module;
+  return g_modules.find(module) != g_modules.end() && !module->destroying;
 }
 
 void release_modules_locked() {
@@ -166,22 +169,24 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::unique_lock<std::mutex> lock(g_devices_mutex);
   auto module_entry = g_modules.find(module);
-  if (module_entry == g_modules.end()) {
+  if (module_entry == g_modules.end() || module->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
   if (module->device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  lr_status_t drain_status =
-      drain_device_locked(&g_devices[module->device.index]);
-  if (drain_status != LR_SUCCESS) {
-    return drain_status;
+  module->destroying = true;
+  lr_status_t synchronization_status =
+      synchronize_device(&g_devices[module->device.index], &lock);
+  if (synchronization_status != LR_SUCCESS) {
+    module->destroying = false;
+    return synchronization_status;
   }
 
-  g_modules.erase(module_entry);
+  g_modules.erase(module);
   return to_lr_status(destroy_module_resources(module));
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -200,7 +205,7 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
   *kernel = nullptr;
 #if LRRT_ENABLE_HSA
   std::lock_guard<std::mutex> lock(g_devices_mutex);
-  if (g_modules.find(module) == g_modules.end()) {
+  if (g_modules.find(module) == g_modules.end() || module->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   if (module->device.index >= g_devices.size()) {

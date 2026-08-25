@@ -93,6 +93,7 @@ struct lr_module_t {
   lr_device_t device;
   std::vector<lr_kernel_t *> kernels;
 #if LRRT_ENABLE_HSA
+  bool destroying;
   hsa_code_object_reader_t reader;
   hsa_executable_t executable;
   hsa_loaded_code_object_t loaded_code_object;

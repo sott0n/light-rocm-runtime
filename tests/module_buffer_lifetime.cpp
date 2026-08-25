@@ -1,9 +1,12 @@
 #include "lrrt/lrrt.hpp"
 
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <stdexcept>
 #include <stdint.h>
 #include <stdio.h>
+#include <thread>
 #include <vector>
 
 #ifndef LRRT_ASYNC_COPY_LAUNCH_HSACO
@@ -17,6 +20,11 @@ struct ScaleArgs {
   float *out;
   float alpha;
   int32_t index;
+};
+
+struct WaitArgs {
+  unsigned long long iterations;
+  unsigned long long *output;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -93,6 +101,74 @@ void test_module_destroy_drains(lrrt::Device device,
   lrrt::check(lr_free(device.get(), device_input), "lr_free input");
 }
 
+void test_module_destroy_releases_runtime_lock(
+    lrrt::Device device, const std::vector<unsigned char> &hsaco,
+    const std::vector<float> &input) {
+  lrrt::DeviceBuffer source(device, input.size() * sizeof(float));
+  lrrt::DeviceBuffer output(device, sizeof(float));
+  lrrt::DeviceBuffer wait_output(device, sizeof(unsigned long long));
+  lrrt::copy_to_device(source, input);
+
+  lr_module_t *destroyed_module = nullptr;
+  lrrt::check(lr_module_load_hsaco(device.get(), hsaco.data(), hsaco.size(),
+                                   &destroyed_module),
+              "lr_module_load_hsaco");
+  lr_kernel_t *wait_kernel = nullptr;
+  lrrt::check(
+      lr_kernel_get(destroyed_module, "queue_wait_kernel", &wait_kernel),
+      "lr_kernel_get wait");
+
+  lrrt::Module concurrent_module(device, hsaco);
+  lrrt::Kernel concurrent_kernel =
+      concurrent_module.kernel("async_copy_launch_kernel");
+  lrrt::Queue wait_queue(device);
+  lrrt::Queue concurrent_queue(device);
+  const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+  const WaitArgs wait_args = {
+      50000ULL,
+      static_cast<unsigned long long *>(wait_output.data()),
+  };
+  lrrt::check(lr_launch_on_queue(wait_queue.get(), wait_kernel, &config,
+                                 &wait_args, sizeof(wait_args)),
+              "lr_launch_on_queue wait");
+
+  std::atomic<bool> destroy_started{false};
+  std::atomic<bool> destroy_completed{false};
+  lr_status_t destroy_status = LR_ERROR_RUNTIME;
+  std::thread destroyer([&] {
+    destroy_started.store(true, std::memory_order_release);
+    destroy_status = lr_module_destroy(destroyed_module);
+    destroy_completed.store(true, std::memory_order_release);
+  });
+  while (!destroy_started.load(std::memory_order_acquire)) {
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  const ScaleArgs args = {
+      static_cast<const float *>(source.data()),
+      static_cast<float *>(output.data()),
+      2.5f,
+      static_cast<int32_t>(input.size() - 1),
+  };
+  lrrt::launch(concurrent_queue, concurrent_kernel, config, args);
+  if (destroy_completed.load(std::memory_order_acquire)) {
+    destroyer.join();
+    throw std::runtime_error(
+        "module destruction blocked an independent module launch");
+  }
+  if (lr_launch_on_queue(wait_queue.get(), wait_kernel, &config, &wait_args,
+                         sizeof(wait_args)) != LR_ERROR_INVALID_ARGUMENT) {
+    destroyer.join();
+    throw std::runtime_error("destroying module accepted a new launch");
+  }
+
+  destroyer.join();
+  lrrt::check(destroy_status, "lr_module_destroy");
+  concurrent_queue.synchronize();
+  expect_value(device.get(), output.data(), input.back() * 2.5f,
+               "concurrent launch during module destroy");
+}
+
 void test_free_drains(lrrt::Device device,
                       const std::vector<unsigned char> &hsaco,
                       const std::vector<float> &input) {
@@ -142,6 +218,7 @@ int main() {
     std::vector<unsigned char> hsaco = read_file(LRRT_ASYNC_COPY_LAUNCH_HSACO);
 
     test_module_destroy_drains(device, hsaco, input);
+    test_module_destroy_releases_runtime_lock(device, hsaco, input);
     test_free_drains(device, hsaco, input);
 
     printf("module_buffer_lifetime: ok\n");
