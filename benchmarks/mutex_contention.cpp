@@ -268,6 +268,25 @@ int main(int argc, char **argv) {
     }
 
     {
+      lr_module_t *destroyed_module = nullptr;
+      lrrt::check(lr_module_load_hsaco(device.get(), hsaco.data(), hsaco.size(),
+                                       &destroyed_module),
+                  "lr_module_load_hsaco");
+      lr_kernel_t *destroyed_module_kernel = nullptr;
+      lrrt::check(lr_kernel_get(destroyed_module,
+                                "mutex_contention_wait_kernel",
+                                &destroyed_module_kernel),
+                  "lr_kernel_get");
+      lrrt::Queue queue(device);
+      lrrt::check(lr_launch_on_queue(queue.get(), destroyed_module_kernel,
+                                     &config, &wait_args, sizeof(wait_args)),
+                  "lr_launch_on_queue");
+      measurements.push_back(measure_wait(device, "Module destroy", [&] {
+        return lr_module_destroy(destroyed_module);
+      }));
+    }
+
+    {
       lrrt::Queue queue(device);
       lrrt::Event event(device);
       lrrt::launch(queue, wait_kernel, config, wait_args);
