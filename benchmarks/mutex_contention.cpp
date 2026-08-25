@@ -34,9 +34,24 @@ struct Measurement {
   uint64_t wait_ns;
   uint64_t probe_call_ns;
   uint64_t probe_window_ns;
+  uint64_t p50_probe_ns;
+  uint64_t p95_probe_ns;
+  uint64_t p99_probe_ns;
   uint64_t maximum_probe_ns;
   uint64_t probe_count;
 };
+
+std::array<uint64_t, 3> calculate_percentiles(std::vector<uint64_t> *samples) {
+  if (samples->empty()) {
+    return {};
+  }
+  std::sort(samples->begin(), samples->end());
+  const auto percentile = [samples](size_t percentage) {
+    const size_t rank = (samples->size() * percentage + 99) / 100;
+    return (*samples)[rank - 1];
+  };
+  return {percentile(50), percentile(95), percentile(99)};
+}
 
 std::vector<unsigned char> read_file(const char *path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -81,7 +96,8 @@ uint64_t elapsed_ns(Clock::time_point begin, Clock::time_point end) {
 template <typename Predicate>
 Measurement probe_while(lrrt::Device device, const char *name, uint64_t wait_ns,
                         Predicate active) {
-  Measurement measurement{name, wait_ns, 0, 0, 0, 0};
+  Measurement measurement{name, wait_ns, 0, 0, 0, 0, 0, 0, 0};
+  std::vector<uint64_t> probe_samples;
   const auto probe_begin = Clock::now();
   while (active()) {
     lr_memory_stats_t stats{};
@@ -92,9 +108,15 @@ Measurement probe_while(lrrt::Device device, const char *name, uint64_t wait_ns,
     measurement.probe_call_ns += duration;
     measurement.maximum_probe_ns =
         std::max(measurement.maximum_probe_ns, duration);
+    probe_samples.push_back(duration);
     ++measurement.probe_count;
   }
   measurement.probe_window_ns = elapsed_ns(probe_begin, Clock::now());
+  const std::array<uint64_t, 3> percentiles =
+      calculate_percentiles(&probe_samples);
+  measurement.p50_probe_ns = percentiles[0];
+  measurement.p95_probe_ns = percentiles[1];
+  measurement.p99_probe_ns = percentiles[2];
   return measurement;
 }
 
@@ -203,12 +225,16 @@ void print_measurement(const Measurement &measurement) {
           ? 0.0
           : static_cast<double>(measurement.probe_count) * 1.0e9 /
                 static_cast<double>(measurement.probe_window_ns);
-  std::printf("%-22s %10.3f %10llu %12.3f %12.3f %12.0f\n", measurement.name,
-              static_cast<double>(measurement.wait_ns) / 1.0e3,
-              static_cast<unsigned long long>(measurement.probe_count),
-              average_probe_ns / 1.0e3,
-              static_cast<double>(measurement.maximum_probe_ns) / 1.0e3,
-              probe_rate);
+  std::printf(
+      "%-22s %10.3f %10llu %10.3f %10.3f %10.3f %10.3f %10.3f "
+      "%12.0f\n",
+      measurement.name, static_cast<double>(measurement.wait_ns) / 1.0e3,
+      static_cast<unsigned long long>(measurement.probe_count),
+      average_probe_ns / 1.0e3,
+      static_cast<double>(measurement.p50_probe_ns) / 1.0e3,
+      static_cast<double>(measurement.p95_probe_ns) / 1.0e3,
+      static_cast<double>(measurement.p99_probe_ns) / 1.0e3,
+      static_cast<double>(measurement.maximum_probe_ns) / 1.0e3, probe_rate);
 }
 
 } // namespace
@@ -237,6 +263,8 @@ int main(int argc, char **argv) {
 
     uint64_t baseline_total_ns = 0;
     uint64_t baseline_maximum_ns = 0;
+    std::vector<uint64_t> baseline_samples;
+    baseline_samples.reserve(kBaselineProbes);
     for (uint32_t i = 0; i < kBaselineProbes; ++i) {
       lr_memory_stats_t stats{};
       const auto begin = Clock::now();
@@ -245,7 +273,10 @@ int main(int argc, char **argv) {
       const uint64_t duration = elapsed_ns(begin, Clock::now());
       baseline_total_ns += duration;
       baseline_maximum_ns = std::max(baseline_maximum_ns, duration);
+      baseline_samples.push_back(duration);
     }
+    const std::array<uint64_t, 3> baseline_percentiles =
+        calculate_percentiles(&baseline_samples);
 
     std::vector<Measurement> measurements;
 
@@ -320,23 +351,29 @@ int main(int argc, char **argv) {
     std::printf("GPU wait iterations:   %llu\n",
                 static_cast<unsigned long long>(wait_iterations));
     std::printf("Probe API:             lr_get_memory_stats\n");
-    std::printf("Baseline probe:        %.3f us average, %.3f us maximum\n\n",
+    std::printf("Baseline probe:        %.3f us average, %.3f us p50, %.3f us "
+                "p95, %.3f us p99, %.3f us maximum\n\n",
                 static_cast<double>(baseline_total_ns) /
                     static_cast<double>(kBaselineProbes) / 1.0e3,
+                static_cast<double>(baseline_percentiles[0]) / 1.0e3,
+                static_cast<double>(baseline_percentiles[1]) / 1.0e3,
+                static_cast<double>(baseline_percentiles[2]) / 1.0e3,
                 static_cast<double>(baseline_maximum_ns) / 1.0e3);
-    std::printf("%-22s %10s %10s %12s %12s %12s\n", "Concurrent wait",
-                "Wait us", "Probes", "Avg probe us", "Max probe us",
-                "Probes/s");
-    std::printf("%-22s %10s %10s %12s %12s %12s\n", "----------------------",
-                "----------", "----------", "------------", "------------",
-                "------------");
+    std::printf("%-22s %10s %10s %10s %10s %10s %10s %10s %12s\n",
+                "Concurrent wait", "Wait us", "Probes", "Avg us", "p50 us",
+                "p95 us", "p99 us", "Max us", "Probes/s");
+    std::printf("%-22s %10s %10s %10s %10s %10s %10s %10s %12s\n",
+                "----------------------", "----------", "----------",
+                "----------", "----------", "----------", "----------",
+                "----------", "------------");
     for (const Measurement &measurement : measurements) {
       print_measurement(measurement);
     }
     std::printf(
-        "\nA maximum probe time far below Wait us indicates that the runtime "
-        "mutex\nremained available while the other thread waited for GPU "
-        "progress.\n");
+        "\np99 shows the representative tail latency; maximum can include OS "
+        "scheduling\noutliers. Values far below Wait us indicate that the "
+        "runtime mutex remained\navailable while the other thread waited for "
+        "GPU progress.\n");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());
