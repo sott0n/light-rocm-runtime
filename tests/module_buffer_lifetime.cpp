@@ -169,6 +169,64 @@ void test_module_destroy_releases_runtime_lock(
                "concurrent launch during module destroy");
 }
 
+void expect_free_releases_runtime_lock(lrrt::Device device,
+                                       const lrrt::Kernel &wait_kernel,
+                                       void *allocation, bool host_allocation) {
+  lrrt::DeviceBuffer wait_output(device, sizeof(unsigned long long));
+  lrrt::Queue wait_queue(device);
+  const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+  const WaitArgs wait_args = {
+      50000ULL,
+      static_cast<unsigned long long *>(wait_output.data()),
+  };
+  lrrt::launch(wait_queue, wait_kernel, config, wait_args);
+
+  std::atomic<bool> free_started{false};
+  std::atomic<bool> free_completed{false};
+  lr_status_t free_status = LR_ERROR_RUNTIME;
+  std::thread freer([&] {
+    free_started.store(true, std::memory_order_release);
+    free_status = host_allocation ? lr_host_free(device.get(), allocation)
+                                  : lr_free(device.get(), allocation);
+    free_completed.store(true, std::memory_order_release);
+  });
+  while (!free_started.load(std::memory_order_acquire)) {
+  }
+  std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+  lr_memory_stats_t stats{};
+  lrrt::check(lr_get_memory_stats(device.get(), &stats),
+              "lr_get_memory_stats during free");
+  const bool completed_while_probing =
+      free_completed.load(std::memory_order_acquire);
+
+  freer.join();
+  lrrt::check(free_status, host_allocation ? "lr_host_free" : "lr_free");
+  if (completed_while_probing) {
+    throw std::runtime_error(
+        "memory free held the runtime lock while waiting for GPU work");
+  }
+}
+
+void test_free_releases_runtime_lock(lrrt::Device device,
+                                     const std::vector<unsigned char> &hsaco) {
+  lrrt::Module module(device, hsaco);
+  lrrt::Kernel wait_kernel = module.kernel("queue_wait_kernel");
+
+  void *device_allocation = nullptr;
+  lrrt::check(
+      lr_malloc(device.get(), sizeof(unsigned long long), &device_allocation),
+      "lr_malloc free lock test");
+  expect_free_releases_runtime_lock(device, wait_kernel, device_allocation,
+                                    false);
+
+  void *host_allocation = nullptr;
+  lrrt::check(lr_host_malloc(device.get(), sizeof(unsigned long long),
+                             &host_allocation),
+              "lr_host_malloc free lock test");
+  expect_free_releases_runtime_lock(device, wait_kernel, host_allocation, true);
+}
+
 void test_free_drains(lrrt::Device device,
                       const std::vector<unsigned char> &hsaco,
                       const std::vector<float> &input) {
@@ -219,6 +277,7 @@ int main() {
 
     test_module_destroy_drains(device, hsaco, input);
     test_module_destroy_releases_runtime_lock(device, hsaco, input);
+    test_free_releases_runtime_lock(device, hsaco);
     test_free_drains(device, hsaco, input);
 
     printf("module_buffer_lifetime: ok\n");

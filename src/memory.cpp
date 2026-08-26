@@ -344,11 +344,12 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-  lr_status_t drain_status = drain_device_locked(&g_devices[device.index]);
-  if (drain_status != LR_SUCCESS) {
+  lr_status_t synchronization_status =
+      synchronize_device(&g_devices[device.index], &lock);
+  if (synchronization_status != LR_SUCCESS) {
     allocation->second.destroying = false;
     g_memory_state_changed.notify_all();
-    return drain_status;
+    return synchronization_status;
   }
 
   const size_t size = allocation->second.size;
@@ -437,11 +438,11 @@ lr_status_t lr_host_free(lr_device_t device, void *ptr) {
   }
 
   DeviceState &state = g_devices[device.index];
-  lr_status_t drain_status = drain_device_locked(&state);
-  if (drain_status != LR_SUCCESS) {
+  lr_status_t synchronization_status = synchronize_device(&state, &lock);
+  if (synchronization_status != LR_SUCCESS) {
     allocation->second.destroying = false;
     g_memory_state_changed.notify_all();
-    return drain_status;
+    return synchronization_status;
   }
 
   hsa_status_t status = hsa_amd_memory_unlock(ptr);
