@@ -1,6 +1,9 @@
 add_executable(lrrt_launch_overhead_benchmark launch_overhead.cpp)
 target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_parallel_launch_benchmark parallel_launch.cpp)
+target_link_libraries(lrrt_parallel_launch_benchmark PRIVATE lrrt::lrrt)
+
 add_executable(lrrt_mutex_contention_benchmark mutex_contention.cpp)
 target_link_libraries(lrrt_mutex_contention_benchmark PRIVATE lrrt::lrrt)
 
@@ -153,8 +156,16 @@ if(LAUNCH_BENCHMARK_HSACO)
     lrrt_launch_overhead_benchmark
     launch_benchmark_kernel_hsaco
   )
+  add_dependencies(
+    lrrt_parallel_launch_benchmark
+    launch_benchmark_kernel_hsaco
+  )
   target_compile_definitions(
     lrrt_launch_overhead_benchmark
+    PRIVATE LRRT_LAUNCH_BENCHMARK_HSACO="${LAUNCH_BENCHMARK_HSACO}"
+  )
+  target_compile_definitions(
+    lrrt_parallel_launch_benchmark
     PRIVATE LRRT_LAUNCH_BENCHMARK_HSACO="${LAUNCH_BENCHMARK_HSACO}"
   )
 endif()

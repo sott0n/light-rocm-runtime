@@ -13,6 +13,7 @@ cmake -S . -B build-bench -DLRRT_BUILD_BENCHMARKS=ON
 cmake --build build-bench -j2
 
 ./build-bench/lrrt_launch_overhead_benchmark
+./build-bench/lrrt_parallel_launch_benchmark
 ./build-bench/lrrt_mutex_contention_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
 ./build-bench/lrrt_pinned_host_transfer_benchmark
@@ -22,6 +23,7 @@ cmake --build build-bench -j2
 | Executable | Default workload |
 | --- | --- |
 | `lrrt_launch_overhead_benchmark` | 10,000 sustained launches, a 512-launch burst, and 1,000 synchronized round trips |
+| `lrrt_parallel_launch_benchmark` | 512 launches from 1, 2, 4, or 8 threads using a shared queue or per-thread queues |
 | `lrrt_mutex_contention_benchmark` | Lightweight API probes during queue/module/event, backpressure, synchronous-copy, and memory-free waits |
 | `lrrt_async_copy_launch_benchmark` | 100 iterations of copy/launch and launch/copy dependency paths |
 | `lrrt_pinned_host_transfer_benchmark` | 4 KiB through 1 GiB H2D and D2H transfers; adaptive iteration count targeting 256 MiB per row |
