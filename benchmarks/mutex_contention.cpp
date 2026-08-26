@@ -344,6 +344,30 @@ int main(int argc, char **argv) {
       }));
     }
 
+    {
+      void *freed_device_memory = nullptr;
+      lrrt::check(lr_malloc(device.get(), sizeof(unsigned long long),
+                            &freed_device_memory),
+                  "lr_malloc freed device memory");
+      lrrt::Queue queue(device);
+      lrrt::launch(queue, wait_kernel, config, wait_args);
+      measurements.push_back(measure_wait(device, "Device memory free", [&] {
+        return lr_free(device.get(), freed_device_memory);
+      }));
+    }
+
+    {
+      void *freed_host_memory = nullptr;
+      lrrt::check(lr_host_malloc(device.get(), sizeof(unsigned long long),
+                                 &freed_host_memory),
+                  "lr_host_malloc freed host memory");
+      lrrt::Queue queue(device);
+      lrrt::launch(queue, wait_kernel, config, wait_args);
+      measurements.push_back(measure_wait(device, "Pinned host free", [&] {
+        return lr_host_free(device.get(), freed_host_memory);
+      }));
+    }
+
     std::printf("\nLRRT Global Mutex Contention Benchmark\n");
     std::printf("======================================\n");
     std::printf("Device index:          %u\n", device.index());
