@@ -153,6 +153,8 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
   }
 
   *module = loaded_module;
+  loaded_module->active_submissions = 0;
+  loaded_module->destroying = false;
   g_modules.insert(loaded_module);
   return LR_SUCCESS;
 #else
@@ -179,6 +181,8 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   module->destroying = true;
+  g_launch_state_changed.wait(
+      lock, [module] { return module->active_submissions == 0; });
   lr_status_t synchronization_status =
       synchronize_device(&g_devices[module->device.index], &lock);
   if (synchronization_status != LR_SUCCESS) {

@@ -7,6 +7,34 @@
 
 using namespace lrrt_internal;
 
+#if LRRT_ENABLE_HSA
+namespace {
+
+class LaunchSubmissionPins {
+public:
+  LaunchSubmissionPins(lr_module_t *module, QueueState *queue)
+      : module_(module), queue_(queue) {
+    ++module_->active_submissions;
+    ++queue_->active_submissions;
+  }
+
+  LaunchSubmissionPins(const LaunchSubmissionPins &) = delete;
+  LaunchSubmissionPins &operator=(const LaunchSubmissionPins &) = delete;
+
+  ~LaunchSubmissionPins() {
+    --queue_->active_submissions;
+    --module_->active_submissions;
+    g_launch_state_changed.notify_all();
+  }
+
+private:
+  lr_module_t *module_;
+  QueueState *queue_;
+};
+
+} // namespace
+#endif
+
 extern "C" {
 
 static lr_status_t
@@ -53,6 +81,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &queue = execution_queue->state;
+  LaunchSubmissionPins submission_pins(kernel->module, &queue);
   std::vector<lr_event_t *> event_dependencies;
   while (true) {
     event_dependencies.clear();

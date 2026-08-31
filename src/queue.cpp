@@ -51,6 +51,7 @@ hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
   auto *created_queue = new lr_queue_t{};
   created_queue->device = device_handle;
   created_queue->is_default = is_default;
+  created_queue->state.active_submissions = 0;
   created_queue->state.active_synchronizers = 0;
   created_queue->state.destroying = false;
   status = hsa_queue_create(device->agent, queue_size, HSA_QUEUE_TYPE_MULTI,
@@ -542,6 +543,20 @@ void wait_for_queue_synchronizers_locked(
   });
 }
 
+void wait_for_queue_submissions_locked(
+    std::unique_lock<std::mutex> *devices_lock) {
+  g_launch_state_changed.wait(*devices_lock, [] {
+    for (const DeviceState &device : g_devices) {
+      for (const lr_queue_t *queue : device.queues) {
+        if (queue->state.active_submissions != 0) {
+          return false;
+        }
+      }
+    }
+    return true;
+  });
+}
+
 lr_status_t enqueue_queue_synchronization_locked(
     QueueState *queue, hsa_signal_t *completion_signal,
     std::unique_lock<std::mutex> *devices_lock) {
@@ -703,6 +718,8 @@ prepare_queue_destruction_locked(QueueState *queue,
   destruction->wait_value = 0;
   destruction->destruction_pin_count = 1;
   queue->destroying = true;
+  g_launch_state_changed.wait(
+      *devices_lock, [queue] { return queue->active_submissions == 0; });
   ++queue->active_synchronizers;
   g_queue_state_changed.wait(
       *devices_lock, [queue] { return queue->active_synchronizers == 1; });

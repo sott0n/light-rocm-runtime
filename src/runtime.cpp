@@ -13,6 +13,7 @@ std::atomic<bool> g_initialized{false};
 
 #if LRRT_ENABLE_HSA
 std::mutex g_devices_mutex;
+std::condition_variable g_launch_state_changed;
 std::condition_variable g_queue_state_changed;
 std::condition_variable g_event_state_changed;
 std::vector<DeviceState> g_devices;
@@ -179,6 +180,7 @@ lr_status_t lr_shutdown(void) {
 #if LRRT_ENABLE_HSA
   {
     std::unique_lock<std::mutex> lock(g_devices_mutex);
+    wait_for_queue_submissions_locked(&lock);
     wait_for_queue_synchronizers_locked(&lock);
     wait_for_all_event_synchronizers_locked(&lock);
     wait_for_memory_operations_locked(&lock);

@@ -51,6 +51,7 @@ struct QueueState {
   std::vector<KernargBuffer> kernarg_pool;
   std::vector<PendingSynchronization> pending_synchronizations;
   std::vector<hsa_signal_t> progress_wait_signals;
+  size_t active_submissions;
   size_t active_synchronizers;
   bool destroying;
 };
@@ -93,6 +94,7 @@ struct lr_module_t {
   lr_device_t device;
   std::vector<lr_kernel_t *> kernels;
 #if LRRT_ENABLE_HSA
+  size_t active_submissions;
   bool destroying;
   hsa_code_object_reader_t reader;
   hsa_executable_t executable;
@@ -129,6 +131,7 @@ struct DeviceState {
 };
 
 extern std::mutex g_devices_mutex;
+extern std::condition_variable g_launch_state_changed;
 extern std::condition_variable g_queue_state_changed;
 extern std::condition_variable g_event_state_changed;
 extern std::vector<DeviceState> g_devices;
@@ -181,6 +184,8 @@ bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_device_queue_pools_locked(DeviceState *device,
                                        lr_status_t *result);
 void destroy_all_queues_locked();
+void wait_for_queue_submissions_locked(
+    std::unique_lock<std::mutex> *devices_lock);
 void wait_for_queue_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock);
 lr_status_t enqueue_queue_synchronization_locked(
