@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 using namespace lrrt_internal;
@@ -32,13 +33,41 @@ private:
   QueueState *queue_;
 };
 
+class EventDependencyPins {
+public:
+  EventDependencyPins(const std::vector<lr_event_t *> &dependencies,
+                      bool enabled)
+      : dependencies_(enabled ? &dependencies : nullptr) {
+    if (dependencies_) {
+      for (lr_event_t *event : *dependencies_) {
+        ++event->active_synchronizers;
+      }
+    }
+  }
+
+  EventDependencyPins(const EventDependencyPins &) = delete;
+  EventDependencyPins &operator=(const EventDependencyPins &) = delete;
+
+  ~EventDependencyPins() {
+    if (dependencies_) {
+      for (lr_event_t *event : *dependencies_) {
+        --event->active_synchronizers;
+      }
+      g_event_state_changed.notify_all();
+    }
+  }
+
+private:
+  const std::vector<lr_event_t *> *dependencies_;
+};
+
 class QueueLocalSubmissionScope {
 public:
   QueueLocalSubmissionScope(std::unique_lock<std::mutex> *devices_lock,
                             std::unique_lock<std::mutex> *queue_lock,
-                            bool enabled)
-      : devices_lock_(devices_lock), queue_lock_(queue_lock),
-        enabled_(enabled) {
+                            bool enabled, bool restore_queue_lock = false)
+      : devices_lock_(devices_lock), queue_lock_(queue_lock), enabled_(enabled),
+        restore_queue_lock_(restore_queue_lock) {
     if (enabled_) {
       devices_lock_->unlock();
     }
@@ -54,6 +83,9 @@ public:
       // released by their enclosing scope.
       queue_lock_->unlock();
       devices_lock_->lock();
+      if (restore_queue_lock_) {
+        queue_lock_->lock();
+      }
     }
   }
 
@@ -61,6 +93,7 @@ private:
   std::unique_lock<std::mutex> *devices_lock_;
   std::unique_lock<std::mutex> *queue_lock_;
   bool enabled_;
+  bool restore_queue_lock_;
 };
 
 } // namespace
@@ -116,6 +149,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   LaunchSubmissionPins submission_pins(kernel->module, &queue);
   const bool use_queue_local_submission =
       !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
+  const bool use_explicit_queue_dependencies =
+      !use_default_queue && !use_implicit_dependencies && dependency_count != 0;
   std::vector<lr_event_t *> event_dependencies;
   while (true) {
     event_dependencies.clear();
@@ -157,22 +192,47 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   const hsa_region_t kernarg_region = state.kernarg_region;
   const std::vector<lr_event_t *> *dependencies =
       use_implicit_dependencies ? nullptr : &event_dependencies;
-  QueueLocalSubmissionScope queue_local_scope(&lock, &queue_lock,
-                                              use_queue_local_submission);
+  EventDependencyPins dependency_pins(event_dependencies,
+                                      use_explicit_queue_dependencies);
   KernargBuffer kernarg{};
-  hsa_status_t status = acquire_kernarg_locked(&queue, kernarg_region,
-                                               kernel->kernarg_size, &kernarg);
-  if (status != HSA_STATUS_SUCCESS) {
-    return to_lr_status(status);
-  }
-  std::memset(kernarg.ptr, 0, kernel->kernarg_size);
-  std::memcpy(kernarg.ptr, args, args_size);
-
   hsa_signal_t signal{};
-  status = acquire_signal_locked(&queue, &signal);
-  if (status != HSA_STATUS_SUCCESS) {
-    queue.kernarg_pool.push_back(kernarg);
-    return to_lr_status(status);
+  auto acquire_submission_resources = [&]() -> lr_status_t {
+    hsa_status_t status = acquire_kernarg_locked(
+        &queue, kernarg_region, kernel->kernarg_size, &kernarg);
+    if (status != HSA_STATUS_SUCCESS) {
+      return to_lr_status(status);
+    }
+    status = acquire_signal_locked(&queue, &signal);
+    if (status != HSA_STATUS_SUCCESS) {
+      queue.kernarg_pool.push_back(kernarg);
+      kernarg = KernargBuffer{};
+      return to_lr_status(status);
+    }
+    return LR_SUCCESS;
+  };
+
+  if (use_explicit_queue_dependencies) {
+    // Dependency pins keep the event handles and signals alive while resource
+    // acquisition runs without the global registry lock. Restore both locks
+    // before updating event-to-queue dependency tracking.
+    {
+      QueueLocalSubmissionScope resource_scope(&lock, &queue_lock, true, true);
+      lr_status_t resource_status = acquire_submission_resources();
+      if (resource_status != LR_SUCCESS) {
+        return resource_status;
+      }
+    }
+  }
+
+  std::optional<QueueLocalSubmissionScope> queue_local_scope;
+  if (use_queue_local_submission) {
+    queue_local_scope.emplace(&lock, &queue_lock, true);
+  }
+  if (!use_explicit_queue_dependencies) {
+    lr_status_t resource_status = acquire_submission_resources();
+    if (resource_status != LR_SUCCESS) {
+      return resource_status;
+    }
   }
   if (!use_queue_local_submission) {
     lr_status_t dependency_status = enqueue_event_dependencies_locked(
@@ -183,6 +243,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
       return dependency_status;
     }
   }
+  if (use_explicit_queue_dependencies) {
+    queue_local_scope.emplace(&lock, &queue_lock, true);
+  }
+  std::memset(kernarg.ptr, 0, kernel->kernarg_size);
+  std::memcpy(kernarg.ptr, args, args_size);
   // Keep packets on the same lrrt queue completion-ordered. Several executor
   // pipelines pass one kernel's output directly to the next kernel.
   const bool wait_for_dependencies =
