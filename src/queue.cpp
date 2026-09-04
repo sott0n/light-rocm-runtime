@@ -150,7 +150,7 @@ lr_status_t drain_queue_locked(QueueState *queue) {
   lr_status_t result = LR_SUCCESS;
   std::vector<lr_event_t *> pending_events = queue->pending_events;
   for (lr_event_t *event : pending_events) {
-    lr_status_t status = event_wait_locked(event);
+    lr_status_t status = event_wait_locked(event, queue);
     if (status != LR_SUCCESS && result == LR_SUCCESS) {
       result = status;
     }
@@ -169,6 +169,7 @@ lr_status_t drain_device_locked(DeviceState *device) {
     }
   }
   for (lr_queue_t *queue : device->queues) {
+    std::lock_guard<std::mutex> queue_lock(queue->state.mutex);
     lr_status_t status = drain_queue_work_locked(&queue->state);
     if (status != LR_SUCCESS && result == LR_SUCCESS) {
       result = status;
@@ -298,7 +299,7 @@ lr_status_t reap_completed_queue_events_locked(QueueState *queue) {
       continue;
     }
 
-    lr_status_t status = event_wait_locked(event);
+    lr_status_t status = event_wait_locked(event, queue);
     if (status != LR_SUCCESS && result == LR_SUCCESS) {
       result = status;
     }
@@ -321,6 +322,7 @@ size_t pending_queue_packet_count(const QueueState *queue) {
 
 lr_status_t
 wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
+                               std::unique_lock<std::mutex> *queue_lock,
                                QueueState *queue, bool allow_destroying) {
   hsa_signal_t signal{};
   lr_event_t *event = nullptr;
@@ -336,10 +338,12 @@ wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
 
   queue->progress_wait_signals.push_back(signal);
   ++queue->active_synchronizers;
+  queue_lock->unlock();
   devices_lock->unlock();
   hsa_signal_value_t value = hsa_signal_wait_scacquire(
       signal, HSA_SIGNAL_CONDITION_LT, 1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
   devices_lock->lock();
+  queue_lock->lock();
 
   auto waiter = std::find_if(queue->progress_wait_signals.begin(),
                              queue->progress_wait_signals.end(),
@@ -385,6 +389,7 @@ wait_for_queue_progress_locked(std::unique_lock<std::mutex> *devices_lock,
 
 lr_status_t
 ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
+                             std::unique_lock<std::mutex> *queue_lock,
                              QueueState *queue, size_t required_packets,
                              bool *lock_released, bool allow_destroying) {
   if (lock_released) {
@@ -407,8 +412,8 @@ ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
     if (lock_released) {
       *lock_released = true;
     }
-    lr_status_t wait_status =
-        wait_for_queue_progress_locked(devices_lock, queue, allow_destroying);
+    lr_status_t wait_status = wait_for_queue_progress_locked(
+        devices_lock, queue_lock, queue, allow_destroying);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -417,7 +422,8 @@ ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
 
 lr_status_t enqueue_event_dependencies_locked(
     std::unique_lock<std::mutex> *devices_lock, DeviceState *device,
-    QueueState *queue, hsa_signal_t retirement_signal,
+    std::unique_lock<std::mutex> *queue_lock, QueueState *queue,
+    hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies) {
   while (true) {
     lr_status_t reap_status = reap_completed_queue_work_locked(queue);
@@ -447,8 +453,8 @@ lr_status_t enqueue_event_dependencies_locked(
     for (lr_event_t *event : dependencies) {
       ++event->active_synchronizers;
     }
-    lr_status_t capacity_status =
-        ensure_queue_capacity_locked(devices_lock, queue, barrier_count + 1);
+    lr_status_t capacity_status = ensure_queue_capacity_locked(
+        devices_lock, queue_lock, queue, barrier_count + 1);
     if (capacity_status != LR_SUCCESS) {
       for (lr_event_t *event : dependencies) {
         --event->active_synchronizers;
@@ -512,6 +518,7 @@ size_t event_dependency_packet_count_locked(
 void release_device_queue_pools_locked(DeviceState *device,
                                        lr_status_t *result) {
   for (lr_queue_t *queue : device->queues) {
+    std::lock_guard<std::mutex> queue_lock(queue->state.mutex);
     release_queue_pools_locked(&queue->state, result);
   }
 }
@@ -557,9 +564,11 @@ void wait_for_queue_submissions_locked(
   });
 }
 
-lr_status_t enqueue_queue_synchronization_locked(
-    QueueState *queue, hsa_signal_t *completion_signal,
-    std::unique_lock<std::mutex> *devices_lock) {
+lr_status_t
+enqueue_queue_synchronization_locked(QueueState *queue,
+                                     hsa_signal_t *completion_signal,
+                                     std::unique_lock<std::mutex> *devices_lock,
+                                     std::unique_lock<std::mutex> *queue_lock) {
   *completion_signal = hsa_signal_t{};
   if (queue->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -600,7 +609,7 @@ lr_status_t enqueue_queue_synchronization_locked(
     }
 
     lr_status_t wait_status =
-        wait_for_queue_progress_locked(devices_lock, queue, false);
+        wait_for_queue_progress_locked(devices_lock, queue_lock, queue, false);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -650,10 +659,11 @@ lr_status_t enqueue_queue_synchronization_locked(
 
 lr_status_t enqueue_queue_tail_marker_locked(
     QueueState *queue, hsa_signal_t *completion_signal,
-    std::unique_lock<std::mutex> *devices_lock, bool allow_destroying) {
+    std::unique_lock<std::mutex> *devices_lock,
+    std::unique_lock<std::mutex> *queue_lock, bool allow_destroying) {
   *completion_signal = hsa_signal_t{};
   lr_status_t capacity_status = ensure_queue_capacity_locked(
-      devices_lock, queue, 1, nullptr, allow_destroying);
+      devices_lock, queue_lock, queue, 1, nullptr, allow_destroying);
   if (capacity_status != LR_SUCCESS) {
     return capacity_status;
   }
@@ -713,19 +723,28 @@ lr_status_t finish_queue_synchronization_locked(QueueState *queue,
 lr_status_t
 prepare_queue_destruction_locked(QueueState *queue,
                                  QueueDestruction *destruction,
-                                 std::unique_lock<std::mutex> *devices_lock) {
+                                 std::unique_lock<std::mutex> *devices_lock,
+                                 std::unique_lock<std::mutex> *queue_lock) {
   destruction->completion_signal = hsa_signal_t{};
   destruction->wait_value = 0;
   destruction->destruction_pin_count = 1;
   queue->destroying = true;
-  g_launch_state_changed.wait(
-      *devices_lock, [queue] { return queue->active_submissions == 0; });
+  while (queue->active_submissions != 0) {
+    queue_lock->unlock();
+    g_launch_state_changed.wait(
+        *devices_lock, [queue] { return queue->active_submissions == 0; });
+    queue_lock->lock();
+  }
   ++queue->active_synchronizers;
-  g_queue_state_changed.wait(
-      *devices_lock, [queue] { return queue->active_synchronizers == 1; });
+  while (queue->active_synchronizers != 1) {
+    queue_lock->unlock();
+    g_queue_state_changed.wait(
+        *devices_lock, [queue] { return queue->active_synchronizers == 1; });
+    queue_lock->lock();
+  }
 
   lr_status_t status = enqueue_queue_tail_marker_locked(
-      queue, &destruction->completion_signal, devices_lock, true);
+      queue, &destruction->completion_signal, devices_lock, queue_lock, true);
   if (status != LR_SUCCESS) {
     --queue->active_synchronizers;
     g_queue_state_changed.notify_all();
@@ -748,10 +767,15 @@ void wait_for_queue_destruction(QueueDestruction *destruction) {
 lr_status_t
 finish_queue_destruction_locked(QueueState *queue,
                                 const QueueDestruction &destruction,
-                                std::unique_lock<std::mutex> *devices_lock) {
-  g_queue_state_changed.wait(*devices_lock, [queue, &destruction] {
-    return queue->active_synchronizers == destruction.destruction_pin_count;
-  });
+                                std::unique_lock<std::mutex> *devices_lock,
+                                std::unique_lock<std::mutex> *queue_lock) {
+  while (queue->active_synchronizers != destruction.destruction_pin_count) {
+    queue_lock->unlock();
+    g_queue_state_changed.wait(*devices_lock, [queue, &destruction] {
+      return queue->active_synchronizers == destruction.destruction_pin_count;
+    });
+    queue_lock->lock();
+  }
   lr_status_t result = finish_queue_synchronization_locked(
       queue, destruction.completion_signal, destruction.wait_value);
   --queue->active_synchronizers;
@@ -807,18 +831,22 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
   }
 
   QueueDestruction destruction{};
-  lr_status_t result =
-      prepare_queue_destruction_locked(&queue->state, &destruction, &lock);
+  std::unique_lock<std::mutex> queue_lock(queue->state.mutex);
+  lr_status_t result = prepare_queue_destruction_locked(
+      &queue->state, &destruction, &lock, &queue_lock);
   if (result != LR_SUCCESS) {
     return result;
   }
 
+  queue_lock.unlock();
   lock.unlock();
   wait_for_queue_destruction(&destruction);
   lock.lock();
+  queue_lock.lock();
 
   DeviceState &device = g_devices[queue->device.index];
-  result = finish_queue_destruction_locked(&queue->state, destruction, &lock);
+  result = finish_queue_destruction_locked(&queue->state, destruction, &lock,
+                                           &queue_lock);
   release_queue_pools_locked(&queue->state, &result);
   if (result != LR_SUCCESS) {
     queue->state.destroying = false;
@@ -835,6 +863,7 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
     device.queues.erase(device_queue);
   }
   g_queues.erase(queue_entry);
+  queue_lock.unlock();
   delete queue;
   return LR_SUCCESS;
 #else
@@ -856,18 +885,21 @@ lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
   }
 
   QueueState &state = queue->state;
+  std::unique_lock<std::mutex> queue_lock(state.mutex);
   hsa_signal_t completion_signal{};
-  lr_status_t status =
-      enqueue_queue_synchronization_locked(&state, &completion_signal, &lock);
+  lr_status_t status = enqueue_queue_synchronization_locked(
+      &state, &completion_signal, &lock, &queue_lock);
   if (status != LR_SUCCESS || completion_signal.handle == 0) {
     return status;
   }
 
+  queue_lock.unlock();
   lock.unlock();
   hsa_signal_value_t value =
       hsa_signal_wait_scacquire(completion_signal, HSA_SIGNAL_CONDITION_LT, 1,
                                 UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
   lock.lock();
+  queue_lock.lock();
 
   return finish_queue_synchronization_locked(&state, completion_signal, value);
 #else

@@ -682,6 +682,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   std::vector<hsa_signal_t> dependencies;
   if (use_implicit_dependencies) {
     QueueState &default_queue = state.default_queue->state;
+    std::lock_guard<std::mutex> queue_lock(default_queue.mutex);
     lr_status_t reap_status = reap_completed_queue_work_locked(&default_queue);
     if (reap_status != LR_SUCCESS) {
       if (event->locked_host_ptr) {

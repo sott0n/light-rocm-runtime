@@ -81,6 +81,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &queue = execution_queue->state;
+  std::unique_lock<std::mutex> queue_lock(queue.mutex);
   LaunchSubmissionPins submission_pins(kernel->module, &queue);
   std::vector<lr_event_t *> event_dependencies;
   while (true) {
@@ -100,7 +101,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
                                     1;
     bool lock_released = false;
     lr_status_t capacity_status = ensure_queue_capacity_locked(
-        &lock, &queue, required_packets, &lock_released);
+        &lock, &queue_lock, &queue, required_packets, &lock_released);
     if (capacity_status != LR_SUCCESS) {
       return capacity_status;
     }
@@ -129,7 +130,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   const std::vector<lr_event_t *> *dependencies =
       use_implicit_dependencies ? nullptr : &event_dependencies;
   lr_status_t dependency_status = enqueue_event_dependencies_locked(
-      &lock, &state, &queue, signal, dependencies);
+      &lock, &state, &queue_lock, &queue, signal, dependencies);
   if (dependency_status != LR_SUCCESS) {
     queue.signal_pool.push_back(signal);
     queue.kernarg_pool.push_back(kernarg);

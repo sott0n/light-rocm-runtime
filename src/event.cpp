@@ -17,7 +17,8 @@ bool valid_event_locked(lr_event_t *event) {
 }
 
 lr_status_t finish_event_wait_locked(lr_event_t *event,
-                                     hsa_signal_value_t value) {
+                                     hsa_signal_value_t value,
+                                     QueueState *locked_queue) {
   if (!event->pending) {
     return LR_SUCCESS;
   }
@@ -30,6 +31,11 @@ lr_status_t finish_event_wait_locked(lr_event_t *event,
     device.pending_events.pop_back();
   }
   if (event->recorded_queue) {
+    std::unique_lock<std::mutex> recorded_queue_lock;
+    if (event->recorded_queue != locked_queue) {
+      recorded_queue_lock =
+          std::unique_lock<std::mutex>(event->recorded_queue->mutex);
+    }
     if (value == 0) {
       // A marker signal may also retire copy-dependency barriers submitted
       // immediately before that marker. Release those references before the
@@ -90,7 +96,7 @@ lr_status_t finish_event_wait_locked(lr_event_t *event,
   return result;
 }
 
-lr_status_t event_wait_locked(lr_event_t *event) {
+lr_status_t event_wait_locked(lr_event_t *event, QueueState *locked_queue) {
   if (!event->pending) {
     return LR_SUCCESS;
   }
@@ -98,7 +104,7 @@ lr_status_t event_wait_locked(lr_event_t *event) {
   hsa_signal_value_t value =
       hsa_signal_wait_scacquire(event->signal, HSA_SIGNAL_CONDITION_LT, 1,
                                 UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
-  return finish_event_wait_locked(event, value);
+  return finish_event_wait_locked(event, value, locked_queue);
 }
 
 void wait_for_event_synchronizers_locked(
@@ -121,6 +127,7 @@ void reap_completed_event_dependencies_locked(lr_event_t *event) {
   std::vector<QueueState *> queues(event->dependency_queues.begin(),
                                    event->dependency_queues.end());
   for (QueueState *queue : queues) {
+    std::lock_guard<std::mutex> queue_lock(queue->mutex);
     reap_completed_barriers_locked(queue);
   }
 }
@@ -176,9 +183,10 @@ wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
     if (!event->dependency_queues.empty()) {
       QueueState *queue = *event->dependency_queues.begin();
       ++queue->active_synchronizers;
+      std::unique_lock<std::mutex> queue_lock(queue->mutex);
       hsa_signal_t completion_signal{};
       lr_status_t status = enqueue_queue_tail_marker_locked(
-          queue, &completion_signal, devices_lock);
+          queue, &completion_signal, devices_lock, &queue_lock);
       if (status != LR_SUCCESS) {
         --queue->active_synchronizers;
         g_queue_state_changed.notify_all();
@@ -186,11 +194,13 @@ wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
         break;
       }
 
+      queue_lock.unlock();
       devices_lock->unlock();
       hsa_signal_value_t value =
           hsa_signal_wait_scacquire(completion_signal, HSA_SIGNAL_CONDITION_LT,
                                     1, UINT64_MAX, HSA_WAIT_STATE_BLOCKED);
       devices_lock->lock();
+      queue_lock.lock();
 
       status =
           finish_queue_synchronization_locked(queue, completion_signal, value);
@@ -386,11 +396,13 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &state = queue->state;
+  std::unique_lock<std::mutex> queue_lock(state.mutex);
   ++event->active_synchronizers;
   lr_status_t capacity_status =
-      use_default_queue ? enqueue_event_dependencies_locked(
-                              &lock, &device, &state, event->signal, nullptr)
-                        : ensure_queue_capacity_locked(&lock, &state, 1);
+      use_default_queue
+          ? enqueue_event_dependencies_locked(&lock, &device, &queue_lock,
+                                              &state, event->signal, nullptr)
+          : ensure_queue_capacity_locked(&lock, &queue_lock, &state, 1);
   --event->active_synchronizers;
   g_event_state_changed.notify_all();
   if (capacity_status != LR_SUCCESS) {

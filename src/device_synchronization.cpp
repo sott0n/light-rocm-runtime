@@ -54,9 +54,10 @@ DeviceSynchronization prepare_device_synchronization_locked(
     queues.push_back(&queue->state);
   }
   for (QueueState *queue : queues) {
+    std::unique_lock<std::mutex> queue_lock(queue->mutex);
     hsa_signal_t signal{};
-    lr_status_t status =
-        enqueue_queue_synchronization_locked(queue, &signal, devices_lock);
+    lr_status_t status = enqueue_queue_synchronization_locked(
+        queue, &signal, devices_lock, &queue_lock);
     if (status != LR_SUCCESS) {
       synchronization.preparation_status = status;
       break;
@@ -103,6 +104,7 @@ finish_device_synchronization_locked(DeviceSynchronization *synchronization) {
     }
   }
   for (DeviceQueueSynchronization &queue : synchronization->queues) {
+    std::lock_guard<std::mutex> queue_lock(queue.queue->mutex);
     lr_status_t status = finish_queue_synchronization_locked(
         queue.queue, queue.signal, queue.wait_value);
     if (result == LR_SUCCESS && status != LR_SUCCESS) {

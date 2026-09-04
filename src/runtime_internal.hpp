@@ -42,6 +42,10 @@ struct PendingSynchronization {
 };
 
 struct QueueState {
+  // Queue-local packet and retirement state is protected independently from
+  // the runtime registry. When both locks are needed, acquire
+  // g_devices_mutex before this mutex.
+  std::mutex mutex;
   hsa_queue_t *queue;
   std::vector<PendingDispatch> pending_dispatches;
   std::vector<PendingDispatch> deferred_dispatches;
@@ -51,6 +55,8 @@ struct QueueState {
   std::vector<KernargBuffer> kernarg_pool;
   std::vector<PendingSynchronization> pending_synchronizations;
   std::vector<hsa_signal_t> progress_wait_signals;
+  // Lifetime coordination remains part of the global registry state and is
+  // protected by g_devices_mutex.
   size_t active_submissions;
   size_t active_synchronizers;
   bool destroying;
@@ -149,9 +155,11 @@ uint16_t dispatch_dimensions(const lr_launch_config_t *config);
 hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal);
 hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
                                     size_t size, KernargBuffer *kernarg);
-lr_status_t event_wait_locked(lr_event_t *event);
+lr_status_t event_wait_locked(lr_event_t *event,
+                              QueueState *locked_queue = nullptr);
 lr_status_t finish_event_wait_locked(lr_event_t *event,
-                                     hsa_signal_value_t value);
+                                     hsa_signal_value_t value,
+                                     QueueState *locked_queue = nullptr);
 void wait_for_event_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock, lr_event_t *event);
 void wait_for_all_event_synchronizers_locked(
@@ -170,10 +178,12 @@ size_t event_dependency_packet_count_locked(
     const std::vector<lr_event_t *> *explicit_dependencies);
 lr_status_t enqueue_event_dependencies_locked(
     std::unique_lock<std::mutex> *devices_lock, DeviceState *device,
-    QueueState *queue, hsa_signal_t retirement_signal,
+    std::unique_lock<std::mutex> *queue_lock, QueueState *queue,
+    hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies);
 lr_status_t
 ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
+                             std::unique_lock<std::mutex> *queue_lock,
                              QueueState *queue, size_t required_packets,
                              bool *lock_released = nullptr,
                              bool allow_destroying = false);
@@ -188,12 +198,15 @@ void wait_for_queue_submissions_locked(
     std::unique_lock<std::mutex> *devices_lock);
 void wait_for_queue_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock);
-lr_status_t enqueue_queue_synchronization_locked(
-    QueueState *queue, hsa_signal_t *completion_signal,
-    std::unique_lock<std::mutex> *devices_lock);
+lr_status_t
+enqueue_queue_synchronization_locked(QueueState *queue,
+                                     hsa_signal_t *completion_signal,
+                                     std::unique_lock<std::mutex> *devices_lock,
+                                     std::unique_lock<std::mutex> *queue_lock);
 lr_status_t enqueue_queue_tail_marker_locked(
     QueueState *queue, hsa_signal_t *completion_signal,
-    std::unique_lock<std::mutex> *devices_lock, bool allow_destroying = false);
+    std::unique_lock<std::mutex> *devices_lock,
+    std::unique_lock<std::mutex> *queue_lock, bool allow_destroying = false);
 lr_status_t finish_queue_synchronization_locked(QueueState *queue,
                                                 hsa_signal_t completion_signal,
                                                 hsa_signal_value_t wait_value);
