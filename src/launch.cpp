@@ -32,6 +32,37 @@ private:
   QueueState *queue_;
 };
 
+class QueueLocalSubmissionScope {
+public:
+  QueueLocalSubmissionScope(std::unique_lock<std::mutex> *devices_lock,
+                            std::unique_lock<std::mutex> *queue_lock,
+                            bool enabled)
+      : devices_lock_(devices_lock), queue_lock_(queue_lock),
+        enabled_(enabled) {
+    if (enabled_) {
+      devices_lock_->unlock();
+    }
+  }
+
+  QueueLocalSubmissionScope(const QueueLocalSubmissionScope &) = delete;
+  QueueLocalSubmissionScope &
+  operator=(const QueueLocalSubmissionScope &) = delete;
+
+  ~QueueLocalSubmissionScope() {
+    if (enabled_) {
+      // Restore the global-before-queue lock order before lifetime pins are
+      // released by their enclosing scope.
+      queue_lock_->unlock();
+      devices_lock_->lock();
+    }
+  }
+
+private:
+  std::unique_lock<std::mutex> *devices_lock_;
+  std::unique_lock<std::mutex> *queue_lock_;
+  bool enabled_;
+};
+
 } // namespace
 #endif
 
@@ -83,6 +114,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   QueueState &queue = execution_queue->state;
   std::unique_lock<std::mutex> queue_lock(queue.mutex);
   LaunchSubmissionPins submission_pins(kernel->module, &queue);
+  const bool use_queue_local_submission =
+      !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
   std::vector<lr_event_t *> event_dependencies;
   while (true) {
     event_dependencies.clear();
@@ -96,9 +129,18 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     }
     const std::vector<lr_event_t *> *capacity_dependencies =
         use_implicit_dependencies ? nullptr : &event_dependencies;
-    const size_t required_packets = event_dependency_packet_count_locked(
-                                        &state, &queue, capacity_dependencies) +
-                                    1;
+    const size_t required_packets =
+        use_queue_local_submission
+            ? 1
+            : event_dependency_packet_count_locked(&state, &queue,
+                                                   capacity_dependencies) +
+                  1;
+    if (use_queue_local_submission) {
+      reap_completed_dispatches_locally_locked(&queue);
+      if (has_queue_capacity_locked(&queue, required_packets)) {
+        break;
+      }
+    }
     bool lock_released = false;
     lr_status_t capacity_status = ensure_queue_capacity_locked(
         &lock, &queue_lock, &queue, required_packets, &lock_released);
@@ -112,8 +154,13 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
       return LR_ERROR_INVALID_ARGUMENT;
     }
   }
+  const hsa_region_t kernarg_region = state.kernarg_region;
+  const std::vector<lr_event_t *> *dependencies =
+      use_implicit_dependencies ? nullptr : &event_dependencies;
+  QueueLocalSubmissionScope queue_local_scope(&lock, &queue_lock,
+                                              use_queue_local_submission);
   KernargBuffer kernarg{};
-  hsa_status_t status = acquire_kernarg_locked(&queue, state.kernarg_region,
+  hsa_status_t status = acquire_kernarg_locked(&queue, kernarg_region,
                                                kernel->kernarg_size, &kernarg);
   if (status != HSA_STATUS_SUCCESS) {
     return to_lr_status(status);
@@ -127,14 +174,14 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     queue.kernarg_pool.push_back(kernarg);
     return to_lr_status(status);
   }
-  const std::vector<lr_event_t *> *dependencies =
-      use_implicit_dependencies ? nullptr : &event_dependencies;
-  lr_status_t dependency_status = enqueue_event_dependencies_locked(
-      &lock, &state, &queue_lock, &queue, signal, dependencies);
-  if (dependency_status != LR_SUCCESS) {
-    queue.signal_pool.push_back(signal);
-    queue.kernarg_pool.push_back(kernarg);
-    return dependency_status;
+  if (!use_queue_local_submission) {
+    lr_status_t dependency_status = enqueue_event_dependencies_locked(
+        &lock, &state, &queue_lock, &queue, signal, dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      queue.signal_pool.push_back(signal);
+      queue.kernarg_pool.push_back(kernarg);
+      return dependency_status;
+    }
   }
   // Keep packets on the same lrrt queue completion-ordered. Several executor
   // pipelines pass one kernel's output directly to the next kernel.

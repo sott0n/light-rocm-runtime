@@ -187,6 +187,9 @@ ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
                              QueueState *queue, size_t required_packets,
                              bool *lock_released = nullptr,
                              bool allow_destroying = false);
+bool has_queue_capacity_locked(const QueueState *queue,
+                               size_t required_packets);
+void reap_completed_dispatches_locally_locked(QueueState *queue);
 void reap_completed_barriers_locked(QueueState *queue);
 bool valid_queue_locked(lr_queue_t *queue);
 bool valid_event_locked(lr_event_t *event);

@@ -289,6 +289,14 @@ void reap_completed_dispatches_locked(QueueState *queue) {
   }
 }
 
+void reap_completed_dispatches_locally_locked(QueueState *queue) {
+  // Barrier and event retirement also updates globally protected event state.
+  // A dispatch-only queue can recycle its completed resources independently.
+  if (queue->pending_barriers.empty() && queue->pending_events.empty()) {
+    reap_completed_dispatches_locked(queue);
+  }
+}
+
 lr_status_t reap_completed_queue_events_locked(QueueState *queue) {
   lr_status_t result = LR_SUCCESS;
   size_t index = 0;
@@ -318,6 +326,13 @@ lr_status_t reap_completed_queue_work_locked(QueueState *queue) {
 size_t pending_queue_packet_count(const QueueState *queue) {
   return queue->pending_dispatches.size() + queue->pending_barriers.size() +
          queue->pending_events.size();
+}
+
+bool has_queue_capacity_locked(const QueueState *queue,
+                               size_t required_packets) {
+  return required_packets != 0 && required_packets <= queue->queue->size &&
+         pending_queue_packet_count(queue) + required_packets <=
+             queue->queue->size;
 }
 
 lr_status_t
@@ -404,8 +419,7 @@ ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
     if (reap_status != LR_SUCCESS) {
       return reap_status;
     }
-    if (pending_queue_packet_count(queue) + required_packets <=
-        queue->queue->size) {
+    if (has_queue_capacity_locked(queue, required_packets)) {
       return LR_SUCCESS;
     }
 
