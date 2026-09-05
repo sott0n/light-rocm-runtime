@@ -307,10 +307,9 @@ void print_measurements(const std::vector<Measurement> &measurements) {
 void print_launch_profiles(const std::vector<Measurement> &measurements) {
   using lrrt_internal::LaunchProfilePhase;
   std::printf("\nPending Event phase profile, per-thread queues (us/launch)\n");
-  std::printf("%-7s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n",
-              "Threads", "Global", "Queue", "Collect", "Capacity", "Resource",
-              "Register", "Publish", "Reacquire", "EventPin", "SubmitPin",
-              "Other", "Total");
+  std::printf("%-7s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n", "Threads",
+              "Global", "Queue", "Collect", "Capacity", "Resource", "Register",
+              "Publish", "EventPin", "SubmitPin", "Other", "Total");
   for (const Measurement &measurement : measurements) {
     const auto &profile = measurement.launch_profile;
     const double divisor = static_cast<double>(profile.launch_count) * 1.0e3;
@@ -326,7 +325,7 @@ void print_launch_profiles(const std::vector<Measurement> &measurements) {
              divisor;
     };
     std::printf("%-7u %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f "
-                "%9.3f %9.3f %9.3f\n",
+                "%9.3f %9.3f\n",
                 measurement.thread_count,
                 phase_us(LaunchProfilePhase::GlobalLockWait),
                 phase_us(LaunchProfilePhase::QueueLockWait),
@@ -335,7 +334,6 @@ void print_launch_profiles(const std::vector<Measurement> &measurements) {
                 phase_us(LaunchProfilePhase::ResourceAcquisition),
                 phase_us(LaunchProfilePhase::DependencyRegistration),
                 phase_us(LaunchProfilePhase::PacketPublication),
-                phase_us(LaunchProfilePhase::GlobalLockReacquisition),
                 phase_us(LaunchProfilePhase::EventPinRelease),
                 phase_us(LaunchProfilePhase::SubmissionPinRelease),
                 static_cast<double>(other_ns) / divisor,
@@ -423,9 +421,9 @@ int main(int argc, char **argv) {
         "runtime submission contention.\n");
     std::printf(
         "The phase profile is a separate instrumented pass. Global and Queue "
-        "are initial\nlock waits; Reacquire is the global lock wait after "
-        "queue-local work. EventPin and\nSubmitPin cover lifetime-pin release. "
-        "Other is validation, control flow, and\nprofiling overhead.\n");
+        "are initial\nlock waits; EventPin and SubmitPin cover lifetime-pin "
+        "release. Other is\nvalidation, control flow, and profiling "
+        "overhead.\n");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

@@ -5,7 +5,6 @@
 #include <cstdint>
 #include <cstring>
 #include <mutex>
-#include <optional>
 #include <vector>
 
 using namespace lrrt_internal;
@@ -85,8 +84,8 @@ class LaunchSubmissionPins {
 public:
   LaunchSubmissionPins(lr_module_t *module, QueueState *queue)
       : module_(module), queue_(queue) {
-    ++module_->active_submissions;
-    ++queue_->active_submissions;
+    module_->active_submissions.retain();
+    queue_->active_submissions.retain();
   }
 
   LaunchSubmissionPins(const LaunchSubmissionPins &) = delete;
@@ -94,9 +93,10 @@ public:
 
   ~LaunchSubmissionPins() {
     ScopedLaunchPhase phase(LaunchProfilePhase::SubmissionPinRelease);
-    --queue_->active_submissions;
-    --module_->active_submissions;
-    g_launch_state_changed.notify_all();
+    // Queue release is last so runtime shutdown cannot delete modules or
+    // events while this submission is still releasing their pins.
+    module_->active_submissions.release();
+    queue_->active_submissions.release();
   }
 
 private:
@@ -111,7 +111,7 @@ public:
       : dependencies_(enabled ? &dependencies : nullptr) {
     if (dependencies_) {
       for (lr_event_t *event : *dependencies_) {
-        ++event->active_synchronizers;
+        event->active_launch_dependencies.retain();
       }
     }
   }
@@ -123,46 +123,13 @@ public:
     if (dependencies_) {
       ScopedLaunchPhase phase(LaunchProfilePhase::EventPinRelease);
       for (lr_event_t *event : *dependencies_) {
-        --event->active_synchronizers;
+        event->active_launch_dependencies.release();
       }
-      g_event_state_changed.notify_all();
     }
   }
 
 private:
   const std::vector<lr_event_t *> *dependencies_;
-};
-
-class QueueLocalSubmissionScope {
-public:
-  QueueLocalSubmissionScope(std::unique_lock<std::mutex> *devices_lock,
-                            std::unique_lock<std::mutex> *queue_lock,
-                            bool enabled)
-      : devices_lock_(devices_lock), queue_lock_(queue_lock),
-        enabled_(enabled) {
-    if (enabled_) {
-      devices_lock_->unlock();
-    }
-  }
-
-  QueueLocalSubmissionScope(const QueueLocalSubmissionScope &) = delete;
-  QueueLocalSubmissionScope &
-  operator=(const QueueLocalSubmissionScope &) = delete;
-
-  ~QueueLocalSubmissionScope() {
-    if (enabled_) {
-      // Restore the global-before-queue lock order before lifetime pins are
-      // released by their enclosing scope.
-      queue_lock_->unlock();
-      ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockReacquisition);
-      devices_lock_->lock();
-    }
-  }
-
-private:
-  std::unique_lock<std::mutex> *devices_lock_;
-  std::unique_lock<std::mutex> *queue_lock_;
-  bool enabled_;
 };
 
 } // namespace
@@ -325,9 +292,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_SUCCESS;
   };
 
-  std::optional<QueueLocalSubmissionScope> queue_local_scope;
   if (use_queue_local_submission || use_explicit_queue_dependencies) {
-    queue_local_scope.emplace(&lock, &queue_lock, true);
+    lock.unlock();
   }
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::ResourceAcquisition);

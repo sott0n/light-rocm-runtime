@@ -13,7 +13,6 @@ std::atomic<bool> g_initialized{false};
 
 #if LRRT_ENABLE_HSA
 std::mutex g_devices_mutex;
-std::condition_variable g_launch_state_changed;
 std::condition_variable g_queue_state_changed;
 std::condition_variable g_event_state_changed;
 std::vector<DeviceState> g_devices;

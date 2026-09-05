@@ -145,9 +145,20 @@ lr_status_t event_wait_locked(lr_event_t *event, QueueState *locked_queue) {
 
 void wait_for_event_synchronizers_locked(
     std::unique_lock<std::mutex> *devices_lock, lr_event_t *event) {
-  g_event_state_changed.wait(*devices_lock, [event] {
-    return !valid_event_locked(event) || event->active_synchronizers == 0;
-  });
+  while (valid_event_locked(event)) {
+    if (!event->active_launch_dependencies.empty()) {
+      devices_lock->unlock();
+      event->active_launch_dependencies.wait_until_empty();
+      devices_lock->lock();
+      continue;
+    }
+    if (event->active_synchronizers == 0) {
+      return;
+    }
+    g_event_state_changed.wait(*devices_lock, [event] {
+      return !valid_event_locked(event) || event->active_synchronizers == 0;
+    });
+  }
 }
 
 void wait_for_all_event_synchronizers_locked(

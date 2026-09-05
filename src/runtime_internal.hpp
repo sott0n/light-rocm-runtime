@@ -18,6 +18,30 @@
 #endif
 
 #if LRRT_ENABLE_HSA
+class LifetimePinCount {
+public:
+  void retain() { count_.fetch_add(1, std::memory_order_relaxed); }
+
+  void release() {
+    if (count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+      std::lock_guard<std::mutex> lock(wait_mutex_);
+      state_changed_.notify_all();
+    }
+  }
+
+  bool empty() const { return count_.load(std::memory_order_acquire) == 0; }
+
+  void wait_until_empty() {
+    std::unique_lock<std::mutex> lock(wait_mutex_);
+    state_changed_.wait(lock, [this] { return empty(); });
+  }
+
+private:
+  std::atomic<size_t> count_{0};
+  std::mutex wait_mutex_;
+  std::condition_variable state_changed_;
+};
+
 struct KernargBuffer {
   void *ptr;
   size_t size;
@@ -55,9 +79,7 @@ struct QueueState {
   std::vector<KernargBuffer> kernarg_pool;
   std::vector<PendingSynchronization> pending_synchronizations;
   std::vector<hsa_signal_t> progress_wait_signals;
-  // Lifetime coordination remains part of the global registry state and is
-  // protected by g_devices_mutex.
-  size_t active_submissions;
+  LifetimePinCount active_submissions;
   size_t active_synchronizers;
   bool destroying;
 };
@@ -79,6 +101,7 @@ struct lr_event_t {
   // Queue-consumer tracking can be updated while the runtime registry lock is
   // released. Never acquire a QueueState mutex while holding this mutex.
   mutable std::mutex dependency_mutex;
+  LifetimePinCount active_launch_dependencies;
   size_t active_synchronizers;
   bool destroying;
   std::unordered_set<QueueState *> dependency_queues;
@@ -103,7 +126,7 @@ struct lr_module_t {
   lr_device_t device;
   std::vector<lr_kernel_t *> kernels;
 #if LRRT_ENABLE_HSA
-  size_t active_submissions;
+  LifetimePinCount active_submissions;
   bool destroying;
   hsa_code_object_reader_t reader;
   hsa_executable_t executable;
@@ -140,7 +163,6 @@ struct DeviceState {
 };
 
 extern std::mutex g_devices_mutex;
-extern std::condition_variable g_launch_state_changed;
 extern std::condition_variable g_queue_state_changed;
 extern std::condition_variable g_event_state_changed;
 extern std::vector<DeviceState> g_devices;

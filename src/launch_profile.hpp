@@ -17,7 +17,6 @@ enum class LaunchProfilePhase : size_t {
   ResourceAcquisition,
   DependencyRegistration,
   PacketPublication,
-  GlobalLockReacquisition,
   EventPinRelease,
   SubmissionPinRelease,
   Count,
