@@ -135,9 +135,9 @@ class QueueLocalSubmissionScope {
 public:
   QueueLocalSubmissionScope(std::unique_lock<std::mutex> *devices_lock,
                             std::unique_lock<std::mutex> *queue_lock,
-                            bool enabled, bool restore_queue_lock = false)
-      : devices_lock_(devices_lock), queue_lock_(queue_lock), enabled_(enabled),
-        restore_queue_lock_(restore_queue_lock) {
+                            bool enabled)
+      : devices_lock_(devices_lock), queue_lock_(queue_lock),
+        enabled_(enabled) {
     if (enabled_) {
       devices_lock_->unlock();
     }
@@ -154,9 +154,6 @@ public:
       // released by their enclosing scope.
       queue_lock_->unlock();
       devices_lock_->lock();
-      if (restore_queue_lock_) {
-        queue_lock_->lock();
-      }
     }
   }
 
@@ -164,7 +161,6 @@ private:
   std::unique_lock<std::mutex> *devices_lock_;
   std::unique_lock<std::mutex> *queue_lock_;
   bool enabled_;
-  bool restore_queue_lock_;
 };
 
 } // namespace
@@ -327,28 +323,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_SUCCESS;
   };
 
-  if (use_explicit_queue_dependencies) {
-    // Dependency pins keep the event handles and signals alive while resource
-    // acquisition runs without the global registry lock. Restore both locks
-    // before updating event-to-queue dependency tracking.
-    {
-      QueueLocalSubmissionScope resource_scope(&lock, &queue_lock, true, true);
-      lr_status_t resource_status;
-      {
-        ScopedLaunchPhase phase(LaunchProfilePhase::ResourceAcquisition);
-        resource_status = acquire_submission_resources();
-      }
-      if (resource_status != LR_SUCCESS) {
-        return resource_status;
-      }
-    }
-  }
-
   std::optional<QueueLocalSubmissionScope> queue_local_scope;
   if (use_queue_local_submission || use_explicit_queue_dependencies) {
     queue_local_scope.emplace(&lock, &queue_lock, true);
   }
-  if (!use_explicit_queue_dependencies) {
+  {
     ScopedLaunchPhase phase(LaunchProfilePhase::ResourceAcquisition);
     lr_status_t resource_status = acquire_submission_resources();
     if (resource_status != LR_SUCCESS) {
