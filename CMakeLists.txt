@@ -95,6 +95,15 @@ if(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)
   target_include_directories(lrrt PRIVATE "${HSA_INCLUDE_DIR}")
   target_link_libraries(lrrt PRIVATE "${HSA_RUNTIME_LIBRARY}")
+
+  add_executable(
+    lrrt_rocr_baseline
+    EXCLUDE_FROM_ALL
+    tools/rocr_baseline.cpp
+  )
+  target_compile_features(lrrt_rocr_baseline PRIVATE cxx_std_17)
+  target_include_directories(lrrt_rocr_baseline PRIVATE "${HSA_INCLUDE_DIR}")
+  target_link_libraries(lrrt_rocr_baseline PRIVATE "${HSA_RUNTIME_LIBRARY}")
   message(STATUS "HSA runtime enabled: ${HSA_RUNTIME_LIBRARY}")
 elseif(NOT LRRT_ENABLE_HSA)
   message(STATUS "HSA runtime disabled; building stub runtime")

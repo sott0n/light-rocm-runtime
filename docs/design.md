@@ -22,6 +22,13 @@ compiler or model layer
   -> AMDGPU kernel driver and GPU
 ```
 
+The currently supported backend is ROCr/HSA. Project scope also includes an
+experimental native backend that will first replace `libhsa-runtime64` while
+using `libhsakmt`, and then replace the thunk with direct use of the public KFD
+UAPI. The ROCr backend remains the correctness oracle. The dependency contract,
+measured baseline, and native-backend gates are tracked in
+[ROCr Dependency Inventory and Baseline](rocr-dependency-inventory.md).
+
 ## Design Goals
 
 ### Keep the runtime boundary small
@@ -289,14 +296,15 @@ changing the core design.
 
 ## Intentional Non-Goals
 
-Unless the project scope changes explicitly, the runtime should not:
+The runtime should not:
 
 - implement a compiler, graph optimizer, or operator library
 - replace rocBLAS, hipBLASLt, MIOpen, RCCL, or other ROCm libraries
 - become a general tensor or model runtime
 - own model weights, KV cache policy, token scheduling, or tensor arenas
 - reproduce the full HIP API
-- bypass ROCr with a direct `/dev/kfd` ioctl backend
+- reproduce the complete HSA API merely to provide drop-in compatibility
+- implement anything below the public KFD UAPI
 - infer workload scheduling policy from kernel names or argument contents
 
 These exclusions preserve a small boundary that can be used by different
