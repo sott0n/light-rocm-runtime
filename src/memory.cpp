@@ -655,7 +655,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::AsyncCopy;
   event->completed = false;
-  event->dependency_queues.clear();
+  clear_event_dependency_queues(event);
   event->start_tick = 0;
   event->completion_tick = 0;
   event->recorded_queue = nullptr;
@@ -718,7 +718,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   record_memcpy(&state, kind, size);
   event->dependencies = std::move(event_dependencies);
   for (lr_event_t *dependency : event->dependencies) {
-    ++dependency->dependency_count;
+    retain_event_dependency(dependency);
   }
   event->pending = true;
   state.pending_events.push_back(event);

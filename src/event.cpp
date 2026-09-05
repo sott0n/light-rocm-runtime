@@ -16,6 +16,42 @@ bool valid_event_locked(lr_event_t *event) {
   return g_events.find(event) != g_events.end();
 }
 
+bool event_has_queue_dependency(lr_event_t *event, QueueState *queue) {
+  std::lock_guard<std::mutex> lock(event->dependency_mutex);
+  return event->dependency_queues.count(queue) != 0;
+}
+
+void retain_event_dependency(lr_event_t *event, QueueState *queue) {
+  std::lock_guard<std::mutex> lock(event->dependency_mutex);
+  ++event->dependency_count;
+  if (queue) {
+    event->dependency_queues.insert(queue);
+  }
+}
+
+void release_event_dependency(lr_event_t *event, QueueState *queue) {
+  std::lock_guard<std::mutex> lock(event->dependency_mutex);
+  --event->dependency_count;
+  if (queue) {
+    event->dependency_queues.erase(queue);
+  }
+}
+
+size_t event_dependency_count(lr_event_t *event) {
+  std::lock_guard<std::mutex> lock(event->dependency_mutex);
+  return event->dependency_count;
+}
+
+std::vector<QueueState *> event_dependency_queues(lr_event_t *event) {
+  std::lock_guard<std::mutex> lock(event->dependency_mutex);
+  return {event->dependency_queues.begin(), event->dependency_queues.end()};
+}
+
+void clear_event_dependency_queues(lr_event_t *event) {
+  std::lock_guard<std::mutex> lock(event->dependency_mutex);
+  event->dependency_queues.clear();
+}
+
 lr_status_t finish_event_wait_locked(lr_event_t *event,
                                      hsa_signal_value_t value,
                                      QueueState *locked_queue) {
@@ -88,7 +124,7 @@ lr_status_t finish_event_wait_locked(lr_event_t *event,
   }
 
   for (lr_event_t *dependency : event->dependencies) {
-    --dependency->dependency_count;
+    release_event_dependency(dependency);
   }
   event->dependencies.clear();
   event->kind = lr_event_t::Kind::None;
@@ -124,8 +160,7 @@ void wait_for_all_event_synchronizers_locked(
 }
 
 void reap_completed_event_dependencies_locked(lr_event_t *event) {
-  std::vector<QueueState *> queues(event->dependency_queues.begin(),
-                                   event->dependency_queues.end());
+  std::vector<QueueState *> queues = event_dependency_queues(event);
   for (QueueState *queue : queues) {
     std::lock_guard<std::mutex> queue_lock(queue->mutex);
     reap_completed_barriers_locked(queue);
@@ -137,9 +172,9 @@ wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
                                 DeviceState *device, lr_event_t *event) {
   ++event->active_synchronizers;
   lr_status_t result = LR_SUCCESS;
-  while (event->dependency_count != 0) {
+  while (event_dependency_count(event) != 0) {
     reap_completed_event_dependencies_locked(event);
-    if (event->dependency_count == 0) {
+    if (event_dependency_count(event) == 0) {
       break;
     }
 
@@ -180,8 +215,10 @@ wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
       continue;
     }
 
-    if (!event->dependency_queues.empty()) {
-      QueueState *queue = *event->dependency_queues.begin();
+    std::vector<QueueState *> dependency_queues =
+        event_dependency_queues(event);
+    if (!dependency_queues.empty()) {
+      QueueState *queue = dependency_queues.front();
       ++queue->active_synchronizers;
       std::unique_lock<std::mutex> queue_lock(queue->mutex);
       hsa_signal_t completion_signal{};
@@ -412,7 +449,7 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
-  event->dependency_queues.clear();
+  clear_event_dependency_queues(event);
   event->start_tick = 0;
   event->completion_tick = 0;
   event->recorded_queue = &state;

@@ -225,7 +225,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
 
   std::optional<QueueLocalSubmissionScope> queue_local_scope;
-  if (use_queue_local_submission) {
+  if (use_queue_local_submission || use_explicit_queue_dependencies) {
     queue_local_scope.emplace(&lock, &queue_lock, true);
   }
   if (!use_explicit_queue_dependencies) {
@@ -235,16 +235,17 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     }
   }
   if (!use_queue_local_submission) {
-    lr_status_t dependency_status = enqueue_event_dependencies_locked(
-        &lock, &state, &queue_lock, &queue, signal, dependencies);
+    lr_status_t dependency_status =
+        use_explicit_queue_dependencies
+            ? enqueue_explicit_event_dependencies_locally_locked(
+                  &queue, signal, event_dependencies)
+            : enqueue_event_dependencies_locked(&lock, &state, &queue_lock,
+                                                &queue, signal, dependencies);
     if (dependency_status != LR_SUCCESS) {
       queue.signal_pool.push_back(signal);
       queue.kernarg_pool.push_back(kernarg);
       return dependency_status;
     }
-  }
-  if (use_explicit_queue_dependencies) {
-    queue_local_scope.emplace(&lock, &queue_lock, true);
   }
   std::memset(kernarg.ptr, 0, kernel->kernarg_size);
   std::memcpy(kernarg.ptr, args, args_size);

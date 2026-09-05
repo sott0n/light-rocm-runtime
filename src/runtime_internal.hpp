@@ -76,6 +76,9 @@ struct lr_event_t {
   Kind kind;
   bool pending;
   bool completed;
+  // Queue-consumer tracking can be updated while the runtime registry lock is
+  // released. Never acquire a QueueState mutex while holding this mutex.
+  mutable std::mutex dependency_mutex;
   size_t active_synchronizers;
   bool destroying;
   std::unordered_set<QueueState *> dependency_queues;
@@ -173,6 +176,12 @@ lr_status_t collect_event_dependencies_locked(
     lr_device_t device, lr_event_t *const *dependencies,
     size_t dependency_count, const lr_event_t *completion_event,
     std::vector<lr_event_t *> *pending_dependencies);
+bool event_has_queue_dependency(lr_event_t *event, QueueState *queue);
+void retain_event_dependency(lr_event_t *event, QueueState *queue = nullptr);
+void release_event_dependency(lr_event_t *event, QueueState *queue = nullptr);
+size_t event_dependency_count(lr_event_t *event);
+std::vector<QueueState *> event_dependency_queues(lr_event_t *event);
+void clear_event_dependency_queues(lr_event_t *event);
 size_t event_dependency_packet_count_locked(
     DeviceState *device, QueueState *queue,
     const std::vector<lr_event_t *> *explicit_dependencies);
@@ -181,6 +190,9 @@ lr_status_t enqueue_event_dependencies_locked(
     std::unique_lock<std::mutex> *queue_lock, QueueState *queue,
     hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies);
+lr_status_t enqueue_explicit_event_dependencies_locally_locked(
+    QueueState *queue, hsa_signal_t retirement_signal,
+    const std::vector<lr_event_t *> &dependencies);
 lr_status_t
 ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
                              std::unique_lock<std::mutex> *queue_lock,

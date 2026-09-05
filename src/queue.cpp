@@ -116,8 +116,7 @@ lr_status_t drain_queue_work_locked(QueueState *queue) {
       result = LR_ERROR_RUNTIME;
     }
     for (lr_event_t *event : barrier.dependencies) {
-      --event->dependency_count;
-      event->dependency_queues.erase(queue);
+      release_event_dependency(event, queue);
     }
   }
   queue->pending_barriers.clear();
@@ -232,8 +231,7 @@ void reap_completed_barriers_locked(QueueState *queue) {
     }
 
     for (lr_event_t *event : barrier.dependencies) {
-      --event->dependency_count;
-      event->dependency_queues.erase(queue);
+      release_event_dependency(event, queue);
     }
     if (index + 1 != queue->pending_barriers.size()) {
       barrier = std::move(queue->pending_barriers.back());
@@ -448,7 +446,7 @@ lr_status_t enqueue_event_dependencies_locked(
     std::vector<lr_event_t *> dependencies;
     if (explicit_dependencies) {
       for (lr_event_t *event : *explicit_dependencies) {
-        if (event->pending && event->dependency_queues.count(queue) == 0 &&
+        if (event->pending && !event_has_queue_dependency(event, queue) &&
             hsa_signal_load_scacquire(event->signal) != 0) {
           dependencies.push_back(event);
         }
@@ -456,7 +454,7 @@ lr_status_t enqueue_event_dependencies_locked(
     } else {
       for (lr_event_t *event : device->pending_events) {
         if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy &&
-            event->dependency_queues.count(queue) == 0 &&
+            !event_has_queue_dependency(event, queue) &&
             hsa_signal_load_scacquire(event->signal) != 0) {
           dependencies.push_back(event);
         }
@@ -491,8 +489,7 @@ lr_status_t enqueue_event_dependencies_locked(
       packet_dependencies.reserve(end - offset);
       for (size_t i = offset; i < end; ++i) {
         packet->dep_signal[i - offset] = dependencies[i]->signal;
-        ++dependencies[i]->dependency_count;
-        dependencies[i]->dependency_queues.insert(queue);
+        retain_event_dependency(dependencies[i], queue);
         packet_dependencies.push_back(dependencies[i]);
       }
       publish_packet_header(&packet->header,
@@ -511,6 +508,55 @@ lr_status_t enqueue_event_dependencies_locked(
   }
 }
 
+lr_status_t enqueue_explicit_event_dependencies_locally_locked(
+    QueueState *queue, hsa_signal_t retirement_signal,
+    const std::vector<lr_event_t *> &explicit_dependencies) {
+  // The caller holds the queue lock and pins every event against re-record and
+  // destruction. Event completion may race with this path, but a completed
+  // signal can simply be omitted (or safely consumed as an already-satisfied
+  // barrier dependency).
+  std::vector<lr_event_t *> dependencies;
+  dependencies.reserve(explicit_dependencies.size());
+  for (lr_event_t *event : explicit_dependencies) {
+    if (!event_has_queue_dependency(event, queue) &&
+        hsa_signal_load_scacquire(event->signal) != 0) {
+      dependencies.push_back(event);
+    }
+  }
+
+  const size_t barrier_count = (dependencies.size() + 4) / 5;
+  if (!has_queue_capacity_locked(queue, barrier_count + 1)) {
+    // Capacity was reserved while the registry lock was held. Since the queue
+    // remains locked, the required packet count cannot increase here.
+    return LR_ERROR_RUNTIME;
+  }
+
+  for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
+    const uint64_t index =
+        hsa_queue_add_write_index_scacq_screl(queue->queue, 1);
+    auto *packets =
+        static_cast<hsa_barrier_and_packet_t *>(queue->queue->base_address);
+    hsa_barrier_and_packet_t *packet =
+        &packets[index & (queue->queue->size - 1)];
+    std::memset(packet, 0, sizeof(*packet));
+
+    std::vector<lr_event_t *> packet_dependencies;
+    const size_t end = std::min(offset + 5, dependencies.size());
+    packet_dependencies.reserve(end - offset);
+    for (size_t i = offset; i < end; ++i) {
+      packet->dep_signal[i - offset] = dependencies[i]->signal;
+      retain_event_dependency(dependencies[i], queue);
+      packet_dependencies.push_back(dependencies[i]);
+    }
+    publish_packet_header(&packet->header,
+                          barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+    queue->pending_barriers.push_back(
+        PendingBarrier{retirement_signal, std::move(packet_dependencies)});
+    hsa_signal_store_screlease(queue->queue->doorbell_signal, index);
+  }
+  return LR_SUCCESS;
+}
+
 size_t event_dependency_packet_count_locked(
     DeviceState *device, QueueState *queue,
     const std::vector<lr_event_t *> *explicit_dependencies) {
@@ -521,7 +567,7 @@ size_t event_dependency_packet_count_locked(
     const bool eligible_kind =
         explicit_dependencies || event->kind == lr_event_t::Kind::AsyncCopy;
     if (eligible_kind && event->pending &&
-        event->dependency_queues.count(queue) == 0 &&
+        !event_has_queue_dependency(event, queue) &&
         hsa_signal_load_scacquire(event->signal) != 0) {
       ++dependency_count;
     }
@@ -655,8 +701,7 @@ enqueue_queue_synchronization_locked(QueueState *queue,
     std::vector<lr_event_t *> event_dependencies;
     for (size_t i = offset; i < end; ++i) {
       if (dependencies[i].event) {
-        ++dependencies[i].event->dependency_count;
-        dependencies[i].event->dependency_queues.insert(queue);
+        retain_event_dependency(dependencies[i].event, queue);
         event_dependencies.push_back(dependencies[i].event);
       }
     }
