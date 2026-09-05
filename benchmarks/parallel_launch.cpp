@@ -1,3 +1,4 @@
+#include "launch_profile.hpp"
 #include "lrrt/lrrt.hpp"
 
 #include <algorithm>
@@ -57,6 +58,7 @@ struct Measurement {
   uint64_t p50_ns;
   uint64_t p95_ns;
   uint64_t p99_ns;
+  lrrt_internal::LaunchProfile launch_profile;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -114,7 +116,7 @@ Measurement measure_parallel_launches(
     const lrrt::Kernel &delay_kernel, const lr_launch_config_t &config,
     const LaunchArgs &args, lrrt::DeviceBuffer &delay_output,
     DependencyMode dependency_mode, QueueLayout layout, uint32_t thread_count,
-    uint32_t launch_count) {
+    uint32_t launch_count, bool profile_launches = false) {
   const uint32_t queue_count = layout == QueueLayout::Shared ? 1 : thread_count;
   std::vector<lrrt::Queue> queues;
   queues.reserve(queue_count);
@@ -160,6 +162,7 @@ Measurement measure_parallel_launches(
   std::atomic<bool> start{false};
   std::atomic<lr_status_t> launch_status{LR_SUCCESS};
   std::vector<std::vector<uint64_t>> thread_samples(thread_count);
+  std::vector<lrrt_internal::LaunchProfile> thread_profiles(thread_count);
   std::vector<std::thread> workers;
   workers.reserve(thread_count);
 
@@ -172,6 +175,8 @@ Measurement measure_parallel_launches(
     lr_queue_t *queue =
         queues[layout == QueueLayout::Shared ? 0 : thread_index].get();
     workers.emplace_back([&, thread_index, local_launches, queue] {
+      lrrt_internal::reset_thread_launch_profile();
+      lrrt_internal::set_thread_launch_profiling(profile_launches);
       ready.fetch_add(1, std::memory_order_release);
       while (!start.load(std::memory_order_acquire)) {
         std::this_thread::yield();
@@ -195,6 +200,8 @@ Measurement measure_parallel_launches(
           break;
         }
       }
+      lrrt_internal::set_thread_launch_profiling(false);
+      thread_profiles[thread_index] = lrrt_internal::thread_launch_profile();
     });
   }
 
@@ -227,9 +234,18 @@ Measurement measure_parallel_launches(
     throw std::runtime_error("parallel-launch sample count mismatch");
   }
   const std::array<uint64_t, 3> percentiles = calculate_percentiles(&samples);
+  lrrt_internal::LaunchProfile launch_profile;
+  for (const lrrt_internal::LaunchProfile &thread_profile : thread_profiles) {
+    launch_profile.launch_count += thread_profile.launch_count;
+    launch_profile.total_ns += thread_profile.total_ns;
+    for (size_t phase = 0; phase < launch_profile.phase_ns.size(); ++phase) {
+      launch_profile.phase_ns[phase] += thread_profile.phase_ns[phase];
+    }
+  }
   return {dependency_mode, layout,         thread_count,
           launch_count,    wall_ns,        total_ns / launch_count,
-          percentiles[0],  percentiles[1], percentiles[2]};
+          percentiles[0],  percentiles[1], percentiles[2],
+          launch_profile};
 }
 
 const char *layout_name(QueueLayout layout) {
@@ -288,6 +304,42 @@ void print_measurements(const std::vector<Measurement> &measurements) {
   }
 }
 
+void print_launch_profiles(const std::vector<Measurement> &measurements) {
+  using lrrt_internal::LaunchProfilePhase;
+  std::printf("\nPending Event phase profile, per-thread queues (us/launch)\n");
+  std::printf("%-7s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n", "Threads",
+              "Global", "Queue", "Collect", "Capacity", "Resource", "Register",
+              "Publish", "Restore", "Other", "Total");
+  for (const Measurement &measurement : measurements) {
+    const auto &profile = measurement.launch_profile;
+    const double divisor = static_cast<double>(profile.launch_count) * 1.0e3;
+    uint64_t categorized_ns = 0;
+    for (uint64_t phase_ns : profile.phase_ns) {
+      categorized_ns += phase_ns;
+    }
+    const uint64_t other_ns = profile.total_ns > categorized_ns
+                                  ? profile.total_ns - categorized_ns
+                                  : 0;
+    const auto phase_us = [&](LaunchProfilePhase phase) {
+      return static_cast<double>(profile.phase_ns[static_cast<size_t>(phase)]) /
+             divisor;
+    };
+    std::printf("%-7u %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f "
+                "%9.3f\n",
+                measurement.thread_count,
+                phase_us(LaunchProfilePhase::GlobalLockWait),
+                phase_us(LaunchProfilePhase::QueueLockWait),
+                phase_us(LaunchProfilePhase::DependencyCollection),
+                phase_us(LaunchProfilePhase::QueueCapacity),
+                phase_us(LaunchProfilePhase::ResourceAcquisition),
+                phase_us(LaunchProfilePhase::DependencyRegistration),
+                phase_us(LaunchProfilePhase::PacketPublication),
+                phase_us(LaunchProfilePhase::LockRestoration),
+                static_cast<double>(other_ns) / divisor,
+                static_cast<double>(profile.total_ns) / divisor);
+  }
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -334,6 +386,19 @@ int main(int argc, char **argv) {
       }
     }
 
+    std::vector<Measurement> launch_profiles;
+    for (uint32_t thread_count : kThreadCounts) {
+      const uint32_t measured_launch_count =
+          std::min(launch_count, kMaximumPendingEventLaunches);
+      if (thread_count > measured_launch_count) {
+        continue;
+      }
+      launch_profiles.push_back(measure_parallel_launches(
+          device, kernel, delay_kernel, config, args, delay_output,
+          DependencyMode::PendingEvent, QueueLayout::PerThread, thread_count,
+          measured_launch_count, true));
+    }
+
     std::printf("\nLRRT Parallel Launch Scalability Benchmark\n");
     std::printf("==========================================\n");
     std::printf("Device index:          %u\n", device.index());
@@ -341,6 +406,7 @@ int main(int argc, char **argv) {
     std::printf("Launches per row:      %u\n", launch_count);
     std::printf("Synchronization:       excluded from timed region\n\n");
     print_measurements(measurements);
+    print_launch_profiles(launch_profiles);
     std::printf(
         "\nvs None compares throughput with the same queue layout and thread "
         "count.\nSpeedup is relative to one thread for each layout and Event "
@@ -352,6 +418,11 @@ int main(int argc, char **argv) {
         "the "
         "timed region. Low scaling\nwith per-thread queues indicates shared "
         "runtime submission contention.\n");
+    std::printf(
+        "The phase profile is a separate instrumented pass. Global and Queue "
+        "are initial\nlock waits; Restore includes lock reacquisition after "
+        "queue-local work. Other is\nvalidation, lifetime pinning, control "
+        "flow, and profiling overhead.\n");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

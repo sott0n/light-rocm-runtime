@@ -102,6 +102,10 @@ else()
   message(STATUS "HSA runtime not found; building stub runtime")
 endif()
 
+if(LRRT_BUILD_BENCHMARKS)
+  target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LAUNCH_PROFILING=1)
+endif()
+
 enable_testing()
 
 if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)

@@ -1,5 +1,7 @@
+#include "launch_profile.hpp"
 #include "runtime_internal.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -8,8 +10,76 @@
 
 using namespace lrrt_internal;
 
+#ifndef LRRT_ENABLE_LAUNCH_PROFILING
+#define LRRT_ENABLE_LAUNCH_PROFILING 0
+#endif
+
 #if LRRT_ENABLE_HSA
 namespace {
+
+#if LRRT_ENABLE_LAUNCH_PROFILING
+using ProfileClock = std::chrono::steady_clock;
+
+thread_local bool g_launch_profiling_enabled = false;
+thread_local LaunchProfile g_thread_launch_profile;
+
+class ScopedLaunchProfile {
+public:
+  ScopedLaunchProfile()
+      : enabled_(g_launch_profiling_enabled), begin_(now_if_enabled()) {}
+
+  ~ScopedLaunchProfile() {
+    if (enabled_) {
+      ++g_thread_launch_profile.launch_count;
+      g_thread_launch_profile.total_ns += elapsed_ns(begin_);
+    }
+  }
+
+private:
+  ProfileClock::time_point now_if_enabled() const {
+    return enabled_ ? ProfileClock::now() : ProfileClock::time_point{};
+  }
+
+  static uint64_t elapsed_ns(ProfileClock::time_point begin) {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            ProfileClock::now() - begin)
+            .count());
+  }
+
+  bool enabled_;
+  ProfileClock::time_point begin_;
+};
+
+class ScopedLaunchPhase {
+public:
+  explicit ScopedLaunchPhase(LaunchProfilePhase phase)
+      : enabled_(g_launch_profiling_enabled), phase_(phase),
+        begin_(enabled_ ? ProfileClock::now() : ProfileClock::time_point{}) {}
+
+  ~ScopedLaunchPhase() {
+    if (enabled_) {
+      const auto duration =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              ProfileClock::now() - begin_);
+      g_thread_launch_profile.phase_ns[static_cast<size_t>(phase_)] +=
+          static_cast<uint64_t>(duration.count());
+    }
+  }
+
+private:
+  bool enabled_;
+  LaunchProfilePhase phase_;
+  ProfileClock::time_point begin_;
+};
+#else
+class ScopedLaunchProfile {};
+
+class ScopedLaunchPhase {
+public:
+  explicit ScopedLaunchPhase(LaunchProfilePhase) {}
+};
+#endif
 
 class LaunchSubmissionPins {
 public:
@@ -79,6 +149,7 @@ public:
 
   ~QueueLocalSubmissionScope() {
     if (enabled_) {
+      ScopedLaunchPhase phase(LaunchProfilePhase::LockRestoration);
       // Restore the global-before-queue lock order before lifetime pins are
       // released by their enclosing scope.
       queue_lock_->unlock();
@@ -99,6 +170,32 @@ private:
 } // namespace
 #endif
 
+namespace lrrt_internal {
+
+void set_thread_launch_profiling(bool enabled) {
+#if LRRT_ENABLE_HSA && LRRT_ENABLE_LAUNCH_PROFILING
+  g_launch_profiling_enabled = enabled;
+#else
+  (void)enabled;
+#endif
+}
+
+void reset_thread_launch_profile() {
+#if LRRT_ENABLE_HSA && LRRT_ENABLE_LAUNCH_PROFILING
+  g_thread_launch_profile = LaunchProfile{};
+#endif
+}
+
+LaunchProfile thread_launch_profile() {
+#if LRRT_ENABLE_HSA && LRRT_ENABLE_LAUNCH_PROFILING
+  return g_thread_launch_profile;
+#else
+  return LaunchProfile{};
+#endif
+}
+
+} // namespace lrrt_internal
+
 extern "C" {
 
 static lr_status_t
@@ -106,6 +203,9 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
             const void *args, size_t args_size, lr_queue_t *execution_queue,
             bool use_default_queue, lr_event_t *const *explicit_dependencies,
             size_t dependency_count, bool use_implicit_dependencies) {
+#if LRRT_ENABLE_HSA
+  ScopedLaunchProfile launch_profile;
+#endif
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
@@ -126,7 +226,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  std::unique_lock<std::mutex> lock(g_devices_mutex, std::defer_lock);
+  {
+    ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
+    lock.lock();
+  }
   if (!valid_kernel_locked(kernel)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -145,7 +249,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &queue = execution_queue->state;
-  std::unique_lock<std::mutex> queue_lock(queue.mutex);
+  std::unique_lock<std::mutex> queue_lock(queue.mutex, std::defer_lock);
+  {
+    ScopedLaunchPhase phase(LaunchProfilePhase::QueueLockWait);
+    queue_lock.lock();
+  }
   LaunchSubmissionPins submission_pins(kernel->module, &queue);
   const bool use_queue_local_submission =
       !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
@@ -155,9 +263,13 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   while (true) {
     event_dependencies.clear();
     if (!use_implicit_dependencies) {
-      lr_status_t dependency_status = collect_event_dependencies_locked(
-          device, explicit_dependencies, dependency_count, nullptr,
-          &event_dependencies);
+      lr_status_t dependency_status;
+      {
+        ScopedLaunchPhase phase(LaunchProfilePhase::DependencyCollection);
+        dependency_status = collect_event_dependencies_locked(
+            device, explicit_dependencies, dependency_count, nullptr,
+            &event_dependencies);
+      }
       if (dependency_status != LR_SUCCESS) {
         return dependency_status;
       }
@@ -170,15 +282,19 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
             : event_dependency_packet_count_locked(&state, &queue,
                                                    capacity_dependencies) +
                   1;
-    if (use_queue_local_submission) {
-      reap_completed_dispatches_locally_locked(&queue);
-      if (has_queue_capacity_locked(&queue, required_packets)) {
-        break;
-      }
-    }
     bool lock_released = false;
-    lr_status_t capacity_status = ensure_queue_capacity_locked(
-        &lock, &queue_lock, &queue, required_packets, &lock_released);
+    lr_status_t capacity_status;
+    {
+      ScopedLaunchPhase phase(LaunchProfilePhase::QueueCapacity);
+      if (use_queue_local_submission) {
+        reap_completed_dispatches_locally_locked(&queue);
+        if (has_queue_capacity_locked(&queue, required_packets)) {
+          break;
+        }
+      }
+      capacity_status = ensure_queue_capacity_locked(
+          &lock, &queue_lock, &queue, required_packets, &lock_released);
+    }
     if (capacity_status != LR_SUCCESS) {
       return capacity_status;
     }
@@ -217,7 +333,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     // before updating event-to-queue dependency tracking.
     {
       QueueLocalSubmissionScope resource_scope(&lock, &queue_lock, true, true);
-      lr_status_t resource_status = acquire_submission_resources();
+      lr_status_t resource_status;
+      {
+        ScopedLaunchPhase phase(LaunchProfilePhase::ResourceAcquisition);
+        resource_status = acquire_submission_resources();
+      }
       if (resource_status != LR_SUCCESS) {
         return resource_status;
       }
@@ -229,59 +349,69 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     queue_local_scope.emplace(&lock, &queue_lock, true);
   }
   if (!use_explicit_queue_dependencies) {
+    ScopedLaunchPhase phase(LaunchProfilePhase::ResourceAcquisition);
     lr_status_t resource_status = acquire_submission_resources();
     if (resource_status != LR_SUCCESS) {
       return resource_status;
     }
   }
   if (!use_queue_local_submission) {
-    lr_status_t dependency_status =
-        use_explicit_queue_dependencies
-            ? enqueue_explicit_event_dependencies_locally_locked(
-                  &queue, signal, event_dependencies)
-            : enqueue_event_dependencies_locked(&lock, &state, &queue_lock,
-                                                &queue, signal, dependencies);
+    lr_status_t dependency_status;
+    {
+      ScopedLaunchPhase phase(LaunchProfilePhase::DependencyRegistration);
+      dependency_status =
+          use_explicit_queue_dependencies
+              ? enqueue_explicit_event_dependencies_locally_locked(
+                    &queue, signal, event_dependencies)
+              : enqueue_event_dependencies_locked(&lock, &state, &queue_lock,
+                                                  &queue, signal, dependencies);
+    }
     if (dependency_status != LR_SUCCESS) {
       queue.signal_pool.push_back(signal);
       queue.kernarg_pool.push_back(kernarg);
       return dependency_status;
     }
   }
-  std::memset(kernarg.ptr, 0, kernel->kernarg_size);
-  std::memcpy(kernarg.ptr, args, args_size);
-  // Keep packets on the same lrrt queue completion-ordered. Several executor
-  // pipelines pass one kernel's output directly to the next kernel.
-  const bool wait_for_dependencies =
-      !queue.pending_dispatches.empty() ||
-      (use_implicit_dependencies ? !queue.pending_barriers.empty()
-                                 : !event_dependencies.empty());
+  {
+    ScopedLaunchPhase phase(LaunchProfilePhase::PacketPublication);
+    std::memset(kernarg.ptr, 0, kernel->kernarg_size);
+    std::memcpy(kernarg.ptr, args, args_size);
+    // Keep packets on the same lrrt queue completion-ordered. Several executor
+    // pipelines pass one kernel's output directly to the next kernel.
+    const bool wait_for_dependencies =
+        !queue.pending_dispatches.empty() ||
+        (use_implicit_dependencies ? !queue.pending_barriers.empty()
+                                   : !event_dependencies.empty());
 
-  const uint64_t index = hsa_queue_add_write_index_scacq_screl(queue.queue, 1);
-  auto *packets =
-      static_cast<hsa_kernel_dispatch_packet_t *>(queue.queue->base_address);
-  hsa_kernel_dispatch_packet_t *packet =
-      &packets[index & (queue.queue->size - 1)];
-  std::memset(packet, 0, sizeof(*packet));
-  packet->setup = packet_setup(dispatch_dimensions(config));
-  packet->workgroup_size_x = static_cast<uint16_t>(config->block.x);
-  packet->workgroup_size_y = static_cast<uint16_t>(config->block.y);
-  packet->workgroup_size_z = static_cast<uint16_t>(config->block.z);
-  packet->grid_size_x = config->grid.x;
-  packet->grid_size_y = config->grid.y;
-  packet->grid_size_z = config->grid.z;
-  packet->private_segment_size = kernel->private_segment_size;
-  packet->group_segment_size =
-      kernel->group_segment_size + config->shared_memory_bytes;
-  packet->kernel_object = kernel->object;
-  packet->kernarg_address = kernarg.ptr;
-  packet->completion_signal = signal;
-  uint16_t header = wait_for_dependencies
-                        ? barrier_packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH)
-                        : packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
-  publish_packet_header(&packet->header, header);
+    const uint64_t index =
+        hsa_queue_add_write_index_scacq_screl(queue.queue, 1);
+    auto *packets =
+        static_cast<hsa_kernel_dispatch_packet_t *>(queue.queue->base_address);
+    hsa_kernel_dispatch_packet_t *packet =
+        &packets[index & (queue.queue->size - 1)];
+    std::memset(packet, 0, sizeof(*packet));
+    packet->setup = packet_setup(dispatch_dimensions(config));
+    packet->workgroup_size_x = static_cast<uint16_t>(config->block.x);
+    packet->workgroup_size_y = static_cast<uint16_t>(config->block.y);
+    packet->workgroup_size_z = static_cast<uint16_t>(config->block.z);
+    packet->grid_size_x = config->grid.x;
+    packet->grid_size_y = config->grid.y;
+    packet->grid_size_z = config->grid.z;
+    packet->private_segment_size = kernel->private_segment_size;
+    packet->group_segment_size =
+        kernel->group_segment_size + config->shared_memory_bytes;
+    packet->kernel_object = kernel->object;
+    packet->kernarg_address = kernarg.ptr;
+    packet->completion_signal = signal;
+    uint16_t header =
+        wait_for_dependencies
+            ? barrier_packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH)
+            : packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
+    publish_packet_header(&packet->header, header);
 
-  hsa_signal_store_screlease(queue.queue->doorbell_signal, index);
-  queue.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
+    hsa_signal_store_screlease(queue.queue->doorbell_signal, index);
+    queue.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
+  }
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;

@@ -3,6 +3,9 @@ target_link_libraries(lrrt_launch_overhead_benchmark PRIVATE lrrt::lrrt)
 
 add_executable(lrrt_parallel_launch_benchmark parallel_launch.cpp)
 target_link_libraries(lrrt_parallel_launch_benchmark PRIVATE lrrt::lrrt)
+target_include_directories(
+  lrrt_parallel_launch_benchmark PRIVATE "${PROJECT_SOURCE_DIR}/src"
+)
 
 add_executable(lrrt_mutex_contention_benchmark mutex_contention.cpp)
 target_link_libraries(lrrt_mutex_contention_benchmark PRIVATE lrrt::lrrt)
