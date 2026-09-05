@@ -93,6 +93,7 @@ public:
   LaunchSubmissionPins &operator=(const LaunchSubmissionPins &) = delete;
 
   ~LaunchSubmissionPins() {
+    ScopedLaunchPhase phase(LaunchProfilePhase::SubmissionPinRelease);
     --queue_->active_submissions;
     --module_->active_submissions;
     g_launch_state_changed.notify_all();
@@ -120,6 +121,7 @@ public:
 
   ~EventDependencyPins() {
     if (dependencies_) {
+      ScopedLaunchPhase phase(LaunchProfilePhase::EventPinRelease);
       for (lr_event_t *event : *dependencies_) {
         --event->active_synchronizers;
       }
@@ -149,10 +151,10 @@ public:
 
   ~QueueLocalSubmissionScope() {
     if (enabled_) {
-      ScopedLaunchPhase phase(LaunchProfilePhase::LockRestoration);
       // Restore the global-before-queue lock order before lifetime pins are
       // released by their enclosing scope.
       queue_lock_->unlock();
+      ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockReacquisition);
       devices_lock_->lock();
     }
   }
