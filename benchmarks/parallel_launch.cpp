@@ -238,6 +238,8 @@ Measurement measure_parallel_launches(
   for (const lrrt_internal::LaunchProfile &thread_profile : thread_profiles) {
     launch_profile.launch_count += thread_profile.launch_count;
     launch_profile.total_ns += thread_profile.total_ns;
+    launch_profile.initial_global_lock_hold_ns +=
+        thread_profile.initial_global_lock_hold_ns;
     for (size_t phase = 0; phase < launch_profile.phase_ns.size(); ++phase) {
       launch_profile.phase_ns[phase] += thread_profile.phase_ns[phase];
     }
@@ -307,9 +309,10 @@ void print_measurements(const std::vector<Measurement> &measurements) {
 void print_launch_profiles(const std::vector<Measurement> &measurements) {
   using lrrt_internal::LaunchProfilePhase;
   std::printf("\nPending Event phase profile, per-thread queues (us/launch)\n");
-  std::printf("%-7s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n", "Threads",
-              "Global", "Queue", "Collect", "Capacity", "Resource", "Register",
-              "Publish", "EventPin", "SubmitPin", "Other", "Total");
+  std::printf("%-7s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s %9s\n",
+              "Threads", "GlobalWait", "GlobalHold", "Queue", "Collect",
+              "Capacity", "Resource", "Register", "Publish", "EventPin",
+              "SubmitPin", "Other", "Total");
   for (const Measurement &measurement : measurements) {
     const auto &profile = measurement.launch_profile;
     const double divisor = static_cast<double>(profile.launch_count) * 1.0e3;
@@ -324,20 +327,21 @@ void print_launch_profiles(const std::vector<Measurement> &measurements) {
       return static_cast<double>(profile.phase_ns[static_cast<size_t>(phase)]) /
              divisor;
     };
-    std::printf("%-7u %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f "
-                "%9.3f %9.3f\n",
-                measurement.thread_count,
-                phase_us(LaunchProfilePhase::GlobalLockWait),
-                phase_us(LaunchProfilePhase::QueueLockWait),
-                phase_us(LaunchProfilePhase::DependencyCollection),
-                phase_us(LaunchProfilePhase::QueueCapacity),
-                phase_us(LaunchProfilePhase::ResourceAcquisition),
-                phase_us(LaunchProfilePhase::DependencyRegistration),
-                phase_us(LaunchProfilePhase::PacketPublication),
-                phase_us(LaunchProfilePhase::EventPinRelease),
-                phase_us(LaunchProfilePhase::SubmissionPinRelease),
-                static_cast<double>(other_ns) / divisor,
-                static_cast<double>(profile.total_ns) / divisor);
+    std::printf(
+        "%-7u %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f %9.3f "
+        "%9.3f %9.3f %9.3f\n",
+        measurement.thread_count, phase_us(LaunchProfilePhase::GlobalLockWait),
+        static_cast<double>(profile.initial_global_lock_hold_ns) / divisor,
+        phase_us(LaunchProfilePhase::QueueLockWait),
+        phase_us(LaunchProfilePhase::DependencyCollection),
+        phase_us(LaunchProfilePhase::QueueCapacity),
+        phase_us(LaunchProfilePhase::ResourceAcquisition),
+        phase_us(LaunchProfilePhase::DependencyRegistration),
+        phase_us(LaunchProfilePhase::PacketPublication),
+        phase_us(LaunchProfilePhase::EventPinRelease),
+        phase_us(LaunchProfilePhase::SubmissionPinRelease),
+        static_cast<double>(other_ns) / divisor,
+        static_cast<double>(profile.total_ns) / divisor);
   }
 }
 
@@ -420,8 +424,11 @@ int main(int argc, char **argv) {
         "timed region. Low scaling\nwith per-thread queues indicates shared "
         "runtime submission contention.\n");
     std::printf(
-        "The phase profile is a separate instrumented pass. Global and Queue "
-        "are initial\nlock waits; EventPin and SubmitPin cover lifetime-pin "
+        "The phase profile is a separate instrumented pass. GlobalWait and "
+        "Queue are initial\nlock waits; GlobalHold is an overlapping "
+        "diagnostic "
+        "from initial Global lock\nacquisition to release and is excluded from "
+        "Other. EventPin and SubmitPin cover lifetime-pin "
         "release. Other is\nvalidation, control flow, and profiling "
         "overhead.\n");
     return 0;

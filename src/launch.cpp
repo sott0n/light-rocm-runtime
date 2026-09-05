@@ -71,12 +71,43 @@ private:
   LaunchProfilePhase phase_;
   ProfileClock::time_point begin_;
 };
+
+class InitialGlobalLockHoldProfile {
+public:
+  InitialGlobalLockHoldProfile()
+      : enabled_(g_launch_profiling_enabled), finished_(false),
+        begin_(enabled_ ? ProfileClock::now() : ProfileClock::time_point{}) {}
+
+  ~InitialGlobalLockHoldProfile() { finish(); }
+
+  void finish() {
+    if (!enabled_ || finished_) {
+      return;
+    }
+    finished_ = true;
+    g_thread_launch_profile.initial_global_lock_hold_ns +=
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                ProfileClock::now() - begin_)
+                .count());
+  }
+
+private:
+  bool enabled_;
+  bool finished_;
+  ProfileClock::time_point begin_;
+};
 #else
 class ScopedLaunchProfile {};
 
 class ScopedLaunchPhase {
 public:
   explicit ScopedLaunchPhase(LaunchProfilePhase) {}
+};
+
+class InitialGlobalLockHoldProfile {
+public:
+  void finish() {}
 };
 #endif
 
@@ -196,6 +227,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
     lock.lock();
   }
+  InitialGlobalLockHoldProfile global_lock_hold_profile;
   if (!valid_kernel_locked(kernel)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -214,67 +246,105 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &queue = execution_queue->state;
+  const bool use_queue_local_submission =
+      !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
+  const bool use_explicit_queue_dependencies =
+      !use_default_queue && !use_implicit_dependencies && dependency_count != 0;
+  const bool use_queue_local_locking =
+      use_queue_local_submission || use_explicit_queue_dependencies;
+  std::vector<lr_event_t *> event_dependencies;
+  if (use_explicit_queue_dependencies) {
+    ScopedLaunchPhase phase(LaunchProfilePhase::DependencyCollection);
+    lr_status_t dependency_status = collect_event_dependencies_locked(
+        device, explicit_dependencies, dependency_count, nullptr,
+        &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
+    }
+  }
+  LaunchSubmissionPins submission_pins(kernel->module, &queue);
+  EventDependencyPins dependency_pins(event_dependencies,
+                                      use_explicit_queue_dependencies);
+  if (use_queue_local_locking) {
+    global_lock_hold_profile.finish();
+    lock.unlock();
+  }
+
   std::unique_lock<std::mutex> queue_lock(queue.mutex, std::defer_lock);
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::QueueLockWait);
     queue_lock.lock();
   }
-  LaunchSubmissionPins submission_pins(kernel->module, &queue);
-  const bool use_queue_local_submission =
-      !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
-  const bool use_explicit_queue_dependencies =
-      !use_default_queue && !use_implicit_dependencies && dependency_count != 0;
-  std::vector<lr_event_t *> event_dependencies;
-  while (true) {
-    event_dependencies.clear();
-    if (!use_implicit_dependencies) {
-      lr_status_t dependency_status;
-      {
-        ScopedLaunchPhase phase(LaunchProfilePhase::DependencyCollection);
-        dependency_status = collect_event_dependencies_locked(
-            device, explicit_dependencies, dependency_count, nullptr,
-            &event_dependencies);
-      }
-      if (dependency_status != LR_SUCCESS) {
-        return dependency_status;
-      }
-    }
-    const std::vector<lr_event_t *> *capacity_dependencies =
-        use_implicit_dependencies ? nullptr : &event_dependencies;
+  if (use_queue_local_locking) {
     const size_t required_packets =
-        use_queue_local_submission
-            ? 1
-            : event_dependency_packet_count_locked(&state, &queue,
-                                                   capacity_dependencies) +
-                  1;
-    bool lock_released = false;
-    lr_status_t capacity_status;
+        use_queue_local_submission ? 1
+                                   : event_dependency_packet_count_locked(
+                                         &state, &queue, &event_dependencies) +
+                                         1;
     {
       ScopedLaunchPhase phase(LaunchProfilePhase::QueueCapacity);
-      if (use_queue_local_submission) {
-        reap_completed_dispatches_locally_locked(&queue);
-        if (has_queue_capacity_locked(&queue, required_packets)) {
-          break;
+      reap_completed_dispatches_locally_locked(&queue);
+      if (!has_queue_capacity_locked(&queue, required_packets)) {
+        // Queue and resource lifetime pins keep every validated handle alive
+        // while restoring the registry -> queue lock order for backpressure.
+        queue_lock.unlock();
+        lock.lock();
+        queue_lock.lock();
+        if (!valid_kernel_locked(kernel) ||
+            !valid_queue_locked(execution_queue)) {
+          return LR_ERROR_INVALID_ARGUMENT;
+        }
+        lr_status_t capacity_status = ensure_queue_capacity_locked(
+            &lock, &queue_lock, &queue, required_packets);
+        if (capacity_status != LR_SUCCESS) {
+          return capacity_status;
+        }
+        lock.unlock();
+      }
+    }
+  } else {
+    while (true) {
+      event_dependencies.clear();
+      if (!use_implicit_dependencies) {
+        lr_status_t dependency_status;
+        {
+          ScopedLaunchPhase phase(LaunchProfilePhase::DependencyCollection);
+          dependency_status = collect_event_dependencies_locked(
+              device, explicit_dependencies, dependency_count, nullptr,
+              &event_dependencies);
+        }
+        if (dependency_status != LR_SUCCESS) {
+          return dependency_status;
         }
       }
-      capacity_status = ensure_queue_capacity_locked(
-          &lock, &queue_lock, &queue, required_packets, &lock_released);
-    }
-    if (capacity_status != LR_SUCCESS) {
-      return capacity_status;
-    }
-    if (!lock_released) {
-      break;
-    }
-    if (!valid_kernel_locked(kernel) || !valid_queue_locked(execution_queue)) {
-      return LR_ERROR_INVALID_ARGUMENT;
+      const std::vector<lr_event_t *> *capacity_dependencies =
+          use_implicit_dependencies ? nullptr : &event_dependencies;
+      const size_t required_packets =
+          event_dependency_packet_count_locked(&state, &queue,
+                                               capacity_dependencies) +
+          1;
+      bool lock_released = false;
+      lr_status_t capacity_status;
+      {
+        ScopedLaunchPhase phase(LaunchProfilePhase::QueueCapacity);
+        capacity_status = ensure_queue_capacity_locked(
+            &lock, &queue_lock, &queue, required_packets, &lock_released);
+      }
+      if (capacity_status != LR_SUCCESS) {
+        return capacity_status;
+      }
+      if (!lock_released) {
+        break;
+      }
+      if (!valid_kernel_locked(kernel) ||
+          !valid_queue_locked(execution_queue)) {
+        return LR_ERROR_INVALID_ARGUMENT;
+      }
     }
   }
   const hsa_region_t kernarg_region = state.kernarg_region;
   const std::vector<lr_event_t *> *dependencies =
       use_implicit_dependencies ? nullptr : &event_dependencies;
-  EventDependencyPins dependency_pins(event_dependencies,
-                                      use_explicit_queue_dependencies);
   KernargBuffer kernarg{};
   hsa_signal_t signal{};
   auto acquire_submission_resources = [&]() -> lr_status_t {
@@ -292,9 +362,6 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_SUCCESS;
   };
 
-  if (use_queue_local_submission || use_explicit_queue_dependencies) {
-    lock.unlock();
-  }
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::ResourceAcquisition);
     lr_status_t resource_status = acquire_submission_resources();

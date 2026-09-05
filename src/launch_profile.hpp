@@ -25,6 +25,10 @@ enum class LaunchProfilePhase : size_t {
 struct LaunchProfile {
   uint64_t launch_count = 0;
   uint64_t total_ns = 0;
+  // Diagnostic wall time from the initial registry-lock acquisition until its
+  // first release. This overlaps the phase timings and is not part of their
+  // categorized total.
+  uint64_t initial_global_lock_hold_ns = 0;
   std::array<uint64_t, static_cast<size_t>(LaunchProfilePhase::Count)>
       phase_ns{};
 };
