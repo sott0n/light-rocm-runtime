@@ -23,10 +23,18 @@ using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kDefaultLaunches = 512;
 constexpr uint32_t kWarmupLaunches = 512;
+constexpr uint32_t kMaximumPendingEventLaunches = 512;
+constexpr uint64_t kDependencyDelayIterations = 5000;
+constexpr uint64_t kDependencyWarmupDelayIterations = 20000;
 constexpr std::array<uint32_t, 4> kThreadCounts = {1, 2, 4, 8};
 
 struct LaunchArgs {
   int32_t token;
+};
+
+struct DelayArgs {
+  uint64_t iterations;
+  uint64_t *output;
 };
 
 enum class QueueLayout {
@@ -34,7 +42,13 @@ enum class QueueLayout {
   PerThread,
 };
 
+enum class DependencyMode {
+  None,
+  PendingEvent,
+};
+
 struct Measurement {
+  DependencyMode dependency_mode;
   QueueLayout layout;
   uint32_t thread_count;
   uint32_t launch_count;
@@ -95,17 +109,51 @@ std::array<uint64_t, 3> calculate_percentiles(std::vector<uint64_t> *samples) {
   return {percentile(50), percentile(95), percentile(99)};
 }
 
-Measurement measure_parallel_launches(lrrt::Device device,
-                                      const lrrt::Kernel &kernel,
-                                      const lr_launch_config_t &config,
-                                      const LaunchArgs &args,
-                                      QueueLayout layout, uint32_t thread_count,
-                                      uint32_t launch_count) {
+Measurement measure_parallel_launches(
+    lrrt::Device device, const lrrt::Kernel &kernel,
+    const lrrt::Kernel &delay_kernel, const lr_launch_config_t &config,
+    const LaunchArgs &args, lrrt::DeviceBuffer &delay_output,
+    DependencyMode dependency_mode, QueueLayout layout, uint32_t thread_count,
+    uint32_t launch_count) {
   const uint32_t queue_count = layout == QueueLayout::Shared ? 1 : thread_count;
   std::vector<lrrt::Queue> queues;
   queues.reserve(queue_count);
   for (uint32_t i = 0; i < queue_count; ++i) {
     queues.emplace_back(device);
+  }
+
+  lrrt::Event dependency(device);
+  const auto record_delayed_event = [&](uint64_t iterations) {
+    const DelayArgs delay_args = {
+        iterations,
+        static_cast<uint64_t *>(delay_output.data()),
+    };
+    lrrt::launch(queues[0], delay_kernel, config, delay_args);
+    dependency.record(queues[0]);
+  };
+
+  // Populate each queue's signal and kernarg pools before timing. Otherwise
+  // blocking GPU execution behind the Event would turn pool expansion into
+  // part of the dependency-registration measurement.
+  record_delayed_event(kDependencyWarmupDelayIterations);
+  lr_event_t *dependency_handle = dependency.get();
+  const uint32_t launches_per_queue = launch_count / queue_count;
+  const uint32_t queue_remainder = launch_count % queue_count;
+  for (uint32_t queue_index = 0; queue_index < queue_count; ++queue_index) {
+    const uint32_t queue_launches =
+        launches_per_queue + (queue_index < queue_remainder ? 1 : 0);
+    for (uint32_t i = 0; i < queue_launches; ++i) {
+      lrrt::check(lr_launch_on_queue_with_dependencies(
+                      queues[queue_index].get(), kernel.get(), &config, &args,
+                      sizeof(args), &dependency_handle, 1),
+                  "lr_launch_on_queue_with_dependencies warmup");
+    }
+  }
+  for (const lrrt::Queue &queue : queues) {
+    queue.synchronize();
+  }
+  if (dependency_mode == DependencyMode::PendingEvent) {
+    record_delayed_event(kDependencyDelayIterations);
   }
 
   std::atomic<uint32_t> ready{0};
@@ -130,8 +178,16 @@ Measurement measure_parallel_launches(lrrt::Device device,
       }
       for (uint32_t i = 0; i < local_launches; ++i) {
         const auto begin = Clock::now();
-        lr_status_t status = lr_launch_on_queue(queue, kernel.get(), &config,
-                                                &args, sizeof(args));
+        lr_status_t status = LR_SUCCESS;
+        if (dependency_mode == DependencyMode::PendingEvent) {
+          lr_event_t *dependency_handle = dependency.get();
+          status = lr_launch_on_queue_with_dependencies(
+              queue, kernel.get(), &config, &args, sizeof(args),
+              &dependency_handle, 1);
+        } else {
+          status = lr_launch_on_queue(queue, kernel.get(), &config, &args,
+                                      sizeof(args));
+        }
         thread_samples[thread_index].push_back(elapsed_ns(begin, Clock::now()));
         if (status != LR_SUCCESS) {
           lr_status_t expected = LR_SUCCESS;
@@ -171,44 +227,60 @@ Measurement measure_parallel_launches(lrrt::Device device,
     throw std::runtime_error("parallel-launch sample count mismatch");
   }
   const std::array<uint64_t, 3> percentiles = calculate_percentiles(&samples);
-  return {layout,
-          thread_count,
-          launch_count,
-          wall_ns,
-          total_ns / launch_count,
-          percentiles[0],
-          percentiles[1],
-          percentiles[2]};
+  return {dependency_mode, layout,         thread_count,
+          launch_count,    wall_ns,        total_ns / launch_count,
+          percentiles[0],  percentiles[1], percentiles[2]};
 }
 
 const char *layout_name(QueueLayout layout) {
   return layout == QueueLayout::Shared ? "Shared" : "Per-thread";
 }
 
-void print_measurements(const std::vector<Measurement> &measurements) {
-  std::printf("%-11s %7s %9s %12s %8s %8s %10s %10s %10s %10s\n", "Queues",
-              "Threads", "Launches", "Launches/s", "Speedup", "Eff.", "Avg us",
-              "p50 us", "p95 us", "p99 us");
-  std::printf("%-11s %7s %9s %12s %8s %8s %10s %10s %10s %10s\n", "-----------",
-              "-------", "---------", "------------", "--------", "--------",
-              "----------", "----------", "----------", "----------");
+const char *dependency_name(DependencyMode mode) {
+  return mode == DependencyMode::None ? "None" : "Pending";
+}
 
-  std::array<double, 2> baseline_throughput{};
+void print_measurements(const std::vector<Measurement> &measurements) {
+  std::printf("%-8s %-11s %7s %9s %12s %8s %8s %8s %10s %10s %10s %10s\n",
+              "Event", "Queues", "Threads", "Launches", "Launches/s", "vs None",
+              "Speedup", "Eff.", "Avg us", "p50 us", "p95 us", "p99 us");
+  std::printf("%-8s %-11s %7s %9s %12s %8s %8s %8s %10s %10s %10s %10s\n",
+              "--------", "-----------", "-------", "---------", "------------",
+              "--------", "--------", "--------", "----------", "----------",
+              "----------", "----------");
+
+  std::array<std::array<double, 2>, 2> baseline_throughput{};
   for (const Measurement &measurement : measurements) {
+    const size_t dependency_index =
+        measurement.dependency_mode == DependencyMode::None ? 0 : 1;
     const size_t layout_index =
         measurement.layout == QueueLayout::Shared ? 0 : 1;
     const double throughput = static_cast<double>(measurement.launch_count) *
                               1.0e9 / static_cast<double>(measurement.wall_ns);
     if (measurement.thread_count == 1) {
-      baseline_throughput[layout_index] = throughput;
+      baseline_throughput[dependency_index][layout_index] = throughput;
     }
-    const double speedup = throughput / baseline_throughput[layout_index];
+    const double speedup =
+        throughput / baseline_throughput[dependency_index][layout_index];
     const double efficiency =
         speedup / static_cast<double>(measurement.thread_count) * 100.0;
-    std::printf("%-11s %7u %9u %12.0f %7.2fx %7.1f%% %10.3f %10.3f "
-                "%10.3f %10.3f\n",
+    const auto no_dependency = std::find_if(
+        measurements.begin(), measurements.end(), [&](const Measurement &item) {
+          return item.dependency_mode == DependencyMode::None &&
+                 item.layout == measurement.layout &&
+                 item.thread_count == measurement.thread_count;
+        });
+    const double no_dependency_throughput =
+        static_cast<double>(no_dependency->launch_count) * 1.0e9 /
+        static_cast<double>(no_dependency->wall_ns);
+    const double relative_to_no_dependency =
+        throughput / no_dependency_throughput;
+    std::printf("%-8s %-11s %7u %9u %12.0f %7.2fx %7.2fx %7.1f%% %10.3f "
+                "%10.3f %10.3f %10.3f\n",
+                dependency_name(measurement.dependency_mode),
                 layout_name(measurement.layout), measurement.thread_count,
-                measurement.launch_count, throughput, speedup, efficiency,
+                measurement.launch_count, throughput, relative_to_no_dependency,
+                speedup, efficiency,
                 static_cast<double>(measurement.average_ns) / 1.0e3,
                 static_cast<double>(measurement.p50_ns) / 1.0e3,
                 static_cast<double>(measurement.p95_ns) / 1.0e3,
@@ -230,8 +302,10 @@ int main(int argc, char **argv) {
     std::vector<unsigned char> hsaco = read_file(LRRT_LAUNCH_BENCHMARK_HSACO);
     lrrt::Module module(device, hsaco);
     lrrt::Kernel kernel = module.kernel("launch_benchmark_kernel");
+    lrrt::Kernel delay_kernel = module.kernel("launch_benchmark_delay");
     const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
     const LaunchArgs args = {0};
+    lrrt::DeviceBuffer delay_output(device, sizeof(uint64_t));
 
     {
       lrrt::Queue warmup_queue(device);
@@ -242,13 +316,21 @@ int main(int argc, char **argv) {
     }
 
     std::vector<Measurement> measurements;
-    for (QueueLayout layout : {QueueLayout::Shared, QueueLayout::PerThread}) {
-      for (uint32_t thread_count : kThreadCounts) {
-        if (thread_count > launch_count) {
-          continue;
+    for (DependencyMode dependency_mode :
+         {DependencyMode::None, DependencyMode::PendingEvent}) {
+      for (QueueLayout layout : {QueueLayout::Shared, QueueLayout::PerThread}) {
+        for (uint32_t thread_count : kThreadCounts) {
+          const uint32_t measured_launch_count =
+              dependency_mode == DependencyMode::PendingEvent
+                  ? std::min(launch_count, kMaximumPendingEventLaunches)
+                  : launch_count;
+          if (thread_count > measured_launch_count) {
+            continue;
+          }
+          measurements.push_back(measure_parallel_launches(
+              device, kernel, delay_kernel, config, args, delay_output,
+              dependency_mode, layout, thread_count, measured_launch_count));
         }
-        measurements.push_back(measure_parallel_launches(
-            device, kernel, config, args, layout, thread_count, launch_count));
       }
     }
 
@@ -260,9 +342,16 @@ int main(int argc, char **argv) {
     std::printf("Synchronization:       excluded from timed region\n\n");
     print_measurements(measurements);
     std::printf(
-        "\nSpeedup is relative to the one-thread result for each queue "
-        "layout.\nLow scaling with per-thread queues indicates shared runtime "
-        "submission\ncontention rather than contention on one queue.\n");
+        "\nvs None compares throughput with the same queue layout and thread "
+        "count.\nSpeedup is relative to one thread for each layout and Event "
+        "mode.\nPending uses one delayed producer Event shared by all "
+        "launches. "
+        "Pending rows\nare capped at 512 launches to avoid queue-capacity "
+        "waits. "
+        "Resource-pool warmup,\nsetup, and synchronization are excluded from "
+        "the "
+        "timed region. Low scaling\nwith per-thread queues indicates shared "
+        "runtime submission contention.\n");
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());
