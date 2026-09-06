@@ -210,6 +210,36 @@ The target, wavefront size, and selected node agree with the ROCr oracle. KFD
 interface version 1.14 and ROCr's reported HSA system version 1.15 describe
 different interfaces and must not be compared as the same version field.
 
+## Native KMT GTT allocation diagnostic
+
+`light-rocr-check-memory` extends the native path through the first complete
+memory lifetime without loading ROCr:
+
+```text
+hsaKmtOpenKFD
+  -> hsaKmtAcquireSystemProperties
+  -> hsaKmtAllocMemory(system, non-pageable, host-accessible)
+  -> hsaKmtMapMemoryToGPUNodes(selected GPU)
+  -> hsaKmtUnmapMemoryToGPU
+  -> hsaKmtFreeMemory
+  -> hsaKmtReleaseSystemProperties
+  -> hsaKmtCloseKFD
+```
+
+The system-property snapshot must remain acquired while using the libhsakmt
+memory APIs. Opening KFD alone after the earlier topology snapshot had been
+released caused `hsaKmtAllocMemory` to return
+`HSAKMT_STATUS_INVALID_NODE_UNIT`; retaining the snapshot for the session made
+the same request succeed.
+
+The diagnostic was run with direct `/dev/kfd` access on 2026-09-06. It selected
+node 1 / `gfx1101`, allocated and mapped 4,096 bytes of GTT, obtained an
+identity CPU/GPU virtual address mapping, verified CPU writes across the page,
+and completed unmap/free successfully. Fake-KMT host tests additionally cover
+allocation and mapping failures, retryable unmap/free failures, identity and
+alternate GPU addresses, and the rule that a live allocation keeps its KFD
+session open. VRAM is deliberately left for the next allocation unit.
+
 The code-object metadata declares an 8-byte kernarg alignment, while ROCr's
 `HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_ALIGNMENT` query returned
 16 bytes for the loaded kernel. The loader work must explain and reproduce this

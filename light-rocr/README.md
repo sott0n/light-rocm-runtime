@@ -7,8 +7,8 @@ primitives, and interchangeable libhsakmt and direct-KFD transports.
 The loader is a host-only ELF, AMDHSA metadata, and load-plan parser. It has no
 dependency on ROCr, libhsakmt, KFD, a GPU, libelf, or LLVM libraries. The
 runtime now also has a small transport-independent topology model and an
-optional libhsakmt transport that discovers KFD nodes and their memory banks
-without loading `libhsa-runtime64.so`.
+optional libhsakmt transport that discovers KFD nodes, allocates mapped GTT
+memory, and manages their lifetimes without loading `libhsa-runtime64.so`.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -34,6 +34,12 @@ Inspect the live KFD topology and select the unique `gfx1101` node:
 ./build-light-rocr/light-rocr-inspect-topology
 ```
 
+Exercise one live GTT allocation and GPU mapping:
+
+```sh
+./build-light-rocr/light-rocr-check-memory
+```
+
 The topology tool is built when the public `hsakmt` headers, library, and its
 DRM/NUMA dependencies are available. `LIGHT_ROCR_ENABLE_HSAKMT=OFF` keeps the
 standalone loader and host-only topology tests buildable without them. Live
@@ -44,6 +50,15 @@ full AMDHSA target string and deliberately rejects zero or multiple matching
 nodes in the initial single-GPU runtime. Host tests replace the seven KMT entry
 points used by discovery, so conversion, call ordering, and every cleanup path
 remain testable without a GPU.
+
+The memory transport opens KFD and retains a system-property snapshot for the
+whole session. `allocate_gtt` creates 4 KiB-aligned, non-pageable system memory,
+maps it only to the selected GPU node, and returns both its CPU and GPU virtual
+addresses. An allocation shares ownership of the session, so KFD cannot close
+while mapped memory remains alive. Explicit or RAII cleanup orders unmap before
+free; explicit cleanup failures retain enough state to retry. The live memory
+diagnostic writes and reads a full page through its CPU mapping before checking
+unmap/free. VRAM allocation is the next memory class and is not yet exposed.
 
 The inspector reports checked `PT_LOAD` records and, when an AMDGPU metadata
 note is present, the metadata version, target ISA, kernel inventory, ELF

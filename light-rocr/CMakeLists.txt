@@ -77,6 +77,8 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
     set(LIGHT_ROCR_HSAKMT_AVAILABLE ON)
     add_library(
       light_rocr_transport_hsakmt
+      transport/hsakmt/memory.cpp
+      transport/hsakmt/status.cpp
       transport/hsakmt/topology.cpp
     )
     add_library(
@@ -126,6 +128,17 @@ if(LIGHT_ROCR_BUILD_TOOLS)
   )
 
   if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(light_rocr_check_memory tools/check_memory.cpp)
+    target_link_libraries(
+      light_rocr_check_memory
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_check_memory)
+    set_target_properties(
+      light_rocr_check_memory
+      PROPERTIES OUTPUT_NAME light-rocr-check-memory
+    )
+
     add_executable(light_rocr_inspect_topology tools/inspect_topology.cpp)
     target_link_libraries(
       light_rocr_inspect_topology
@@ -171,6 +184,24 @@ if(LIGHT_ROCR_BUILD_TESTS)
   add_test(NAME light_rocr_topology_tests COMMAND light_rocr_topology_tests)
 
   if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(
+      light_rocr_hsakmt_memory_tests
+      tests/hsakmt/memory_test.cpp
+    )
+    target_include_directories(
+      light_rocr_hsakmt_memory_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_hsakmt_memory_tests
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_hsakmt_memory_tests)
+    add_test(
+      NAME light_rocr_hsakmt_memory_tests
+      COMMAND light_rocr_hsakmt_memory_tests
+    )
+
     add_executable(
       light_rocr_hsakmt_topology_tests
       tests/hsakmt/topology_test.cpp
