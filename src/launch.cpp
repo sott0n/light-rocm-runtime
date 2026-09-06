@@ -224,11 +224,17 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
 #if LRRT_ENABLE_HSA
   const bool use_queue_local_submission =
       !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
+  const bool use_explicit_queue_dependencies =
+      !use_default_queue && !use_implicit_dependencies && dependency_count != 0;
+  const bool use_queue_local_locking =
+      use_queue_local_submission || use_explicit_queue_dependencies;
   RuntimeLock lock(g_devices_mutex, std::defer_lock);
   RuntimeReadLock read_lock(g_devices_mutex, std::defer_lock);
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
-    if (use_queue_local_submission) {
+    // Explicit-queue submissions only inspect the registries here. Their
+    // lifetime pins keep every validated resource alive after this lock ends.
+    if (use_queue_local_locking) {
       read_lock.lock();
     } else {
       lock.lock();
@@ -253,10 +259,6 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &queue = execution_queue->state;
-  const bool use_explicit_queue_dependencies =
-      !use_default_queue && !use_implicit_dependencies && dependency_count != 0;
-  const bool use_queue_local_locking =
-      use_queue_local_submission || use_explicit_queue_dependencies;
   std::vector<lr_event_t *> event_dependencies;
   if (use_explicit_queue_dependencies) {
     ScopedLaunchPhase phase(LaunchProfilePhase::DependencyCollection);
@@ -272,11 +274,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
                                       use_explicit_queue_dependencies);
   if (use_queue_local_locking) {
     global_lock_hold_profile.finish();
-    if (use_queue_local_submission) {
-      read_lock.unlock();
-    } else {
-      lock.unlock();
-    }
+    read_lock.unlock();
   }
 
   std::unique_lock<std::mutex> queue_lock(queue.mutex, std::defer_lock);

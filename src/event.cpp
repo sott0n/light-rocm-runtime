@@ -286,7 +286,7 @@ lr_status_t collect_event_dependencies_locked(
     lr_event_t *dependency = dependencies[i];
     if (!dependency || dependency == completion_event ||
         g_events.find(dependency) == g_events.end() ||
-        dependency->device.index != device.index ||
+        dependency->device.index != device.index || dependency->destroying ||
         (!dependency->pending && !dependency->completed) ||
         !unique_dependencies.insert(dependency).second) {
       return LR_ERROR_INVALID_ARGUMENT;
