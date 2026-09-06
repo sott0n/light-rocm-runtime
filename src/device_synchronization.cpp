@@ -28,8 +28,9 @@ struct DeviceSynchronization {
   lr_status_t preparation_status;
 };
 
-DeviceSynchronization prepare_device_synchronization_locked(
-    DeviceState *device, std::unique_lock<std::mutex> *devices_lock) {
+DeviceSynchronization
+prepare_device_synchronization_locked(DeviceState *device,
+                                      RuntimeLock *devices_lock) {
   DeviceSynchronization synchronization{};
   synchronization.preparation_status = LR_SUCCESS;
   synchronization.events.reserve(device->pending_events.size());
@@ -116,8 +117,7 @@ finish_device_synchronization_locked(DeviceSynchronization *synchronization) {
 
 } // namespace
 
-lr_status_t synchronize_device(DeviceState *device,
-                               std::unique_lock<std::mutex> *devices_lock) {
+lr_status_t synchronize_device(DeviceState *device, RuntimeLock *devices_lock) {
   DeviceSynchronization synchronization =
       prepare_device_synchronization_locked(device, devices_lock);
 

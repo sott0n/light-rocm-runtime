@@ -222,10 +222,17 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex, std::defer_lock);
+  const bool use_queue_local_submission =
+      !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
+  RuntimeLock lock(g_devices_mutex, std::defer_lock);
+  RuntimeReadLock read_lock(g_devices_mutex, std::defer_lock);
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
-    lock.lock();
+    if (use_queue_local_submission) {
+      read_lock.lock();
+    } else {
+      lock.lock();
+    }
   }
   InitialGlobalLockHoldProfile global_lock_hold_profile;
   if (!valid_kernel_locked(kernel)) {
@@ -246,8 +253,6 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_INVALID_ARGUMENT;
   }
   QueueState &queue = execution_queue->state;
-  const bool use_queue_local_submission =
-      !use_default_queue && !use_implicit_dependencies && dependency_count == 0;
   const bool use_explicit_queue_dependencies =
       !use_default_queue && !use_implicit_dependencies && dependency_count != 0;
   const bool use_queue_local_locking =
@@ -267,7 +272,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
                                       use_explicit_queue_dependencies);
   if (use_queue_local_locking) {
     global_lock_hold_profile.finish();
-    lock.unlock();
+    if (use_queue_local_submission) {
+      read_lock.unlock();
+    } else {
+      lock.unlock();
+    }
   }
 
   std::unique_lock<std::mutex> queue_lock(queue.mutex, std::defer_lock);

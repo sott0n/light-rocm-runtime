@@ -28,7 +28,7 @@ struct HostAllocationInfo {
 
 std::unordered_map<void *, AllocationInfo> g_allocations;
 std::unordered_map<void *, HostAllocationInfo> g_host_allocations;
-std::condition_variable g_memory_state_changed;
+std::condition_variable_any g_memory_state_changed;
 
 void *find_allocation_base(void *ptr, lr_device_t device, size_t size) {
   if (!ptr || size == 0) {
@@ -190,8 +190,7 @@ void record_memcpy(DeviceState *device, lr_memcpy_kind_t kind, size_t size) {
 
 } // namespace
 
-void wait_for_memory_operations_locked(
-    std::unique_lock<std::mutex> *devices_lock) {
+void wait_for_memory_operations_locked(RuntimeLock *devices_lock) {
   g_memory_state_changed.wait(*devices_lock, [] {
     for (const auto &allocation : g_allocations) {
       if (allocation.second.active_operations != 0) {
@@ -239,7 +238,7 @@ lr_status_t lr_get_memory_stats(lr_device_t device, lr_memory_stats_t *stats) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -259,7 +258,7 @@ lr_status_t lr_reset_memory_stats(lr_device_t device) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -286,7 +285,7 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
 
   *ptr = nullptr;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -326,7 +325,7 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   auto allocation = g_allocations.find(ptr);
   if (allocation == g_allocations.end() ||
       allocation->second.device_index != device.index ||
@@ -378,7 +377,7 @@ lr_status_t lr_host_malloc(lr_device_t device, size_t size, void **ptr) {
 
   *ptr = nullptr;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -419,7 +418,7 @@ lr_status_t lr_host_free(lr_device_t device, void *ptr) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   auto allocation = g_host_allocations.find(ptr);
   if (allocation == g_host_allocations.end() ||
       allocation->second.device_index != device.index ||
@@ -477,7 +476,7 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -558,7 +557,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !valid_event_locked(event) ||
       event->device.index != device.index || event->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;

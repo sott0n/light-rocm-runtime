@@ -12,9 +12,9 @@ namespace lrrt_internal {
 std::atomic<bool> g_initialized{false};
 
 #if LRRT_ENABLE_HSA
-std::mutex g_devices_mutex;
-std::condition_variable g_queue_state_changed;
-std::condition_variable g_event_state_changed;
+RuntimeMutex g_devices_mutex;
+std::condition_variable_any g_queue_state_changed;
+std::condition_variable_any g_event_state_changed;
 std::vector<DeviceState> g_devices;
 hsa_agent_t g_host_agent{};
 bool g_has_host_agent = false;
@@ -106,7 +106,7 @@ hsa_status_t populate_device_regions() {
 
 bool valid_device(lr_device_t device) {
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   return device.index < g_devices.size();
 #else
   return device.index == 0;
@@ -151,7 +151,7 @@ lr_status_t lr_init(void) {
   }
 
   {
-    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
     g_devices.clear();
     g_host_agent = {};
     g_has_host_agent = false;
@@ -178,7 +178,7 @@ lr_status_t lr_shutdown(void) {
 
 #if LRRT_ENABLE_HSA
   {
-    std::unique_lock<std::mutex> lock(g_devices_mutex);
+    RuntimeLock lock(g_devices_mutex);
     wait_for_queue_submissions_locked(&lock);
     wait_for_queue_synchronizers_locked(&lock);
     wait_for_all_event_synchronizers_locked(&lock);
@@ -226,7 +226,7 @@ lr_status_t lr_device_count(uint32_t *count) {
 
   *count = 0;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   *count = static_cast<uint32_t>(g_devices.size());
   return LR_SUCCESS;
 #else
@@ -244,7 +244,7 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
 
 #if LRRT_ENABLE_HSA
   {
-    std::lock_guard<std::mutex> lock(g_devices_mutex);
+    std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
     if (index >= g_devices.size()) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
@@ -277,7 +277,7 @@ lr_status_t lr_device_name(lr_device_t device, char *name, size_t name_size) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -301,7 +301,7 @@ lr_status_t lr_synchronize(lr_device_t device) {
     return LR_ERROR_NOT_INITIALIZED;
   }
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (device.index >= g_devices.size() ||
       !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;

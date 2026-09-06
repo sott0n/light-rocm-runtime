@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -146,6 +147,10 @@ struct lr_kernel_t {
 
 namespace lrrt_internal {
 
+using RuntimeMutex = std::shared_mutex;
+using RuntimeLock = std::unique_lock<RuntimeMutex>;
+using RuntimeReadLock = std::shared_lock<RuntimeMutex>;
+
 extern std::atomic<bool> g_initialized;
 
 #if LRRT_ENABLE_HSA
@@ -162,9 +167,9 @@ struct DeviceState {
   lr_memory_stats_t memory_stats;
 };
 
-extern std::mutex g_devices_mutex;
-extern std::condition_variable g_queue_state_changed;
-extern std::condition_variable g_event_state_changed;
+extern RuntimeMutex g_devices_mutex;
+extern std::condition_variable_any g_queue_state_changed;
+extern std::condition_variable_any g_event_state_changed;
 extern std::vector<DeviceState> g_devices;
 extern hsa_agent_t g_host_agent;
 extern bool g_has_host_agent;
@@ -185,13 +190,12 @@ lr_status_t event_wait_locked(lr_event_t *event,
 lr_status_t finish_event_wait_locked(lr_event_t *event,
                                      hsa_signal_value_t value,
                                      QueueState *locked_queue = nullptr);
-void wait_for_event_synchronizers_locked(
-    std::unique_lock<std::mutex> *devices_lock, lr_event_t *event);
-void wait_for_all_event_synchronizers_locked(
-    std::unique_lock<std::mutex> *devices_lock);
-lr_status_t
-wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
-                                DeviceState *device, lr_event_t *event);
+void wait_for_event_synchronizers_locked(RuntimeLock *devices_lock,
+                                         lr_event_t *event);
+void wait_for_all_event_synchronizers_locked(RuntimeLock *devices_lock);
+lr_status_t wait_for_event_consumers_locked(RuntimeLock *devices_lock,
+                                            DeviceState *device,
+                                            lr_event_t *event);
 lr_status_t drain_device_locked(DeviceState *device);
 lr_status_t reap_completed_queue_work_locked(QueueState *queue);
 lr_status_t collect_event_dependencies_locked(
@@ -208,19 +212,17 @@ size_t event_dependency_packet_count_locked(
     DeviceState *device, QueueState *queue,
     const std::vector<lr_event_t *> *explicit_dependencies);
 lr_status_t enqueue_event_dependencies_locked(
-    std::unique_lock<std::mutex> *devices_lock, DeviceState *device,
+    RuntimeLock *devices_lock, DeviceState *device,
     std::unique_lock<std::mutex> *queue_lock, QueueState *queue,
     hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> *explicit_dependencies);
 lr_status_t enqueue_explicit_event_dependencies_locally_locked(
     QueueState *queue, hsa_signal_t retirement_signal,
     const std::vector<lr_event_t *> &dependencies);
-lr_status_t
-ensure_queue_capacity_locked(std::unique_lock<std::mutex> *devices_lock,
-                             std::unique_lock<std::mutex> *queue_lock,
-                             QueueState *queue, size_t required_packets,
-                             bool *lock_released = nullptr,
-                             bool allow_destroying = false);
+lr_status_t ensure_queue_capacity_locked(
+    RuntimeLock *devices_lock, std::unique_lock<std::mutex> *queue_lock,
+    QueueState *queue, size_t required_packets, bool *lock_released = nullptr,
+    bool allow_destroying = false);
 bool has_queue_capacity_locked(const QueueState *queue,
                                size_t required_packets);
 void reap_completed_dispatches_locally_locked(QueueState *queue);
@@ -231,28 +233,22 @@ bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_device_queue_pools_locked(DeviceState *device,
                                        lr_status_t *result);
 void destroy_all_queues_locked();
-void wait_for_queue_submissions_locked(
-    std::unique_lock<std::mutex> *devices_lock);
-void wait_for_queue_synchronizers_locked(
-    std::unique_lock<std::mutex> *devices_lock);
-lr_status_t
-enqueue_queue_synchronization_locked(QueueState *queue,
-                                     hsa_signal_t *completion_signal,
-                                     std::unique_lock<std::mutex> *devices_lock,
-                                     std::unique_lock<std::mutex> *queue_lock);
+void wait_for_queue_submissions_locked(RuntimeLock *devices_lock);
+void wait_for_queue_synchronizers_locked(RuntimeLock *devices_lock);
+lr_status_t enqueue_queue_synchronization_locked(
+    QueueState *queue, hsa_signal_t *completion_signal,
+    RuntimeLock *devices_lock, std::unique_lock<std::mutex> *queue_lock);
 lr_status_t enqueue_queue_tail_marker_locked(
     QueueState *queue, hsa_signal_t *completion_signal,
-    std::unique_lock<std::mutex> *devices_lock,
-    std::unique_lock<std::mutex> *queue_lock, bool allow_destroying = false);
+    RuntimeLock *devices_lock, std::unique_lock<std::mutex> *queue_lock,
+    bool allow_destroying = false);
 lr_status_t finish_queue_synchronization_locked(QueueState *queue,
                                                 hsa_signal_t completion_signal,
                                                 hsa_signal_value_t wait_value);
-lr_status_t synchronize_device(DeviceState *device,
-                               std::unique_lock<std::mutex> *devices_lock);
+lr_status_t synchronize_device(DeviceState *device, RuntimeLock *devices_lock);
 void release_events_locked();
 void release_modules_locked();
-void wait_for_memory_operations_locked(
-    std::unique_lock<std::mutex> *devices_lock);
+void wait_for_memory_operations_locked(RuntimeLock *devices_lock);
 void release_memory_allocations_locked(lr_status_t *result);
 #endif
 

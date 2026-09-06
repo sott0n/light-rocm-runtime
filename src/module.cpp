@@ -102,7 +102,7 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
 
   *module = nullptr;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -170,7 +170,7 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   auto module_entry = g_modules.find(module);
   if (module_entry == g_modules.end() || module->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -208,7 +208,7 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
 
   *kernel = nullptr;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (g_modules.find(module) == g_modules.end() || module->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }

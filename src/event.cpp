@@ -143,8 +143,8 @@ lr_status_t event_wait_locked(lr_event_t *event, QueueState *locked_queue) {
   return finish_event_wait_locked(event, value, locked_queue);
 }
 
-void wait_for_event_synchronizers_locked(
-    std::unique_lock<std::mutex> *devices_lock, lr_event_t *event) {
+void wait_for_event_synchronizers_locked(RuntimeLock *devices_lock,
+                                         lr_event_t *event) {
   while (valid_event_locked(event)) {
     if (!event->active_launch_dependencies.empty()) {
       devices_lock->unlock();
@@ -161,8 +161,7 @@ void wait_for_event_synchronizers_locked(
   }
 }
 
-void wait_for_all_event_synchronizers_locked(
-    std::unique_lock<std::mutex> *devices_lock) {
+void wait_for_all_event_synchronizers_locked(RuntimeLock *devices_lock) {
   g_event_state_changed.wait(*devices_lock, [] {
     return std::all_of(g_events.begin(), g_events.end(), [](lr_event_t *event) {
       return event->active_synchronizers == 0;
@@ -178,9 +177,9 @@ void reap_completed_event_dependencies_locked(lr_event_t *event) {
   }
 }
 
-lr_status_t
-wait_for_event_consumers_locked(std::unique_lock<std::mutex> *devices_lock,
-                                DeviceState *device, lr_event_t *event) {
+lr_status_t wait_for_event_consumers_locked(RuntimeLock *devices_lock,
+                                            DeviceState *device,
+                                            lr_event_t *event) {
   ++event->active_synchronizers;
   lr_status_t result = LR_SUCCESS;
   while (event_dependency_count(event) != 0) {
@@ -325,7 +324,7 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
 
   *event = nullptr;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() ||
       !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -367,7 +366,7 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   auto event_entry = g_events.find(event);
   if (event_entry == g_events.end() ||
       event->device.index >= g_devices.size() || event->destroying) {
@@ -412,7 +411,7 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (g_events.find(event) == g_events.end() ||
       event->device.index >= g_devices.size() || event->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -501,7 +500,7 @@ lr_status_t lr_event_synchronize(lr_event_t *event) {
   }
 
 #if LRRT_ENABLE_HSA
-  std::unique_lock<std::mutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (!valid_event_locked(event) || event->device.index >= g_devices.size() ||
       event->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -547,7 +546,7 @@ lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
 
   *elapsed_ns = 0;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (g_events.find(const_cast<lr_event_t *>(start)) == g_events.end() ||
       g_events.find(const_cast<lr_event_t *>(end)) == g_events.end() ||
       start->device.index != end->device.index || start->pending ||
@@ -585,7 +584,7 @@ lr_status_t lr_event_duration_ns(const lr_event_t *event,
 
   *duration_ns = 0;
 #if LRRT_ENABLE_HSA
-  std::lock_guard<std::mutex> lock(g_devices_mutex);
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (g_events.find(const_cast<lr_event_t *>(event)) == g_events.end() ||
       event->device.index >= g_devices.size() || event->pending ||
       !event->completed || event->completion_tick < event->start_tick) {
