@@ -59,9 +59,15 @@ enum class ParseErrorCode {
   InvalidKernelDescriptor,
   KernelMetadataMismatch,
   KernelEntryOutOfBounds,
+  InvalidRelocationTable,
+  UnsupportedRelocationFormat,
+  UnsupportedRelocationType,
+  RelocationSymbolOutOfBounds,
+  RelocationTargetOutOfBounds,
 };
 
 const char *parse_error_code_name(ParseErrorCode code);
+const char *amdgpu_relocation_type_name(uint32_t type);
 
 struct ParseError {
   ParseErrorCode code = ParseErrorCode::None;
@@ -107,6 +113,46 @@ struct KernelInfo {
   uint16_t kernarg_preload = 0;
 };
 
+enum class RelocationEncoding {
+  Rel,
+  Rela,
+};
+
+struct LoadCopy {
+  uint64_t file_offset = 0;
+  uint64_t virtual_address = 0;
+  uint64_t size = 0;
+};
+
+struct LoadZeroFill {
+  uint64_t virtual_address = 0;
+  uint64_t size = 0;
+};
+
+struct LoadProtection {
+  uint64_t virtual_address = 0;
+  uint64_t size = 0;
+  uint32_t flags = 0;
+};
+
+struct Relocation {
+  RelocationEncoding encoding = RelocationEncoding::Rela;
+  uint64_t target_virtual_address = 0;
+  uint32_t type = 0;
+  uint32_t symbol_index = 0;
+  int64_t addend = 0;
+};
+
+struct LoadPlan {
+  uint64_t image_virtual_address = 0;
+  uint64_t image_size = 0;
+  uint64_t alignment = 1;
+  std::vector<LoadCopy> copies;
+  std::vector<LoadZeroFill> zero_fills;
+  std::vector<LoadProtection> protections;
+  std::vector<Relocation> relocations;
+};
+
 struct CodeObject {
   uint8_t abi_version = 0;
   uint32_t elf_flags = 0;
@@ -116,6 +162,7 @@ struct CodeObject {
   MetadataVersion metadata_version;
   std::string target_isa;
   std::vector<KernelInfo> kernels;
+  LoadPlan load_plan;
 };
 
 struct ParseResult {

@@ -212,6 +212,22 @@ to omit relocation support from the loader. The loader test corpus must include
 every relocation form observed in Clang, Triton, and IREE artifacts used by the
 project.
 
+### Native relocation inventory
+
+On 2026-09-06, both `llvm-readelf --relocations` and the native load-plan
+parser were run across all 208 HSACOs then present under `build`,
+`build-triton`, and `build-iree-probe`. None contained `REL`, `RELA`, PLT, or
+RELR relocation records or corresponding dynamic relocation tags.
+
+This observed empty set is now explicit in `LoadPlan`: the current corpus
+produces zero relocation operations, while synthetic tests cover bounded
+ELF64 `REL` and `RELA` parsing, AMDGPU type decoding, `DT_HASH` symbol bounds,
+target bounds, malformed tables, and rejection of unknown or unobserved
+formats. Relocation records are planned but not yet applied. The initial GPU
+loader may therefore require an empty relocation list; adding relocation
+application is triggered by a real supported artifact that needs it rather
+than by speculative ABI coverage.
+
 ### Native metadata comparison
 
 `light-rocr-inspect-hsaco` now decodes AMDHSA metadata 1.2, resolves each

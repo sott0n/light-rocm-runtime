@@ -85,6 +85,19 @@ int main(int argc, char **argv) {
             << '\n';
   std::cout << "load_segment_count=" << object.load_segments.size() << '\n';
   std::cout << "metadata_present=" << (object.has_metadata ? 1 : 0) << '\n';
+  std::cout << "load_plan.image_virtual_address=0x" << std::hex
+            << object.load_plan.image_virtual_address << '\n';
+  std::cout << "load_plan.image_size=0x" << object.load_plan.image_size << '\n';
+  std::cout << "load_plan.alignment=0x" << object.load_plan.alignment
+            << std::dec << '\n';
+  std::cout << "load_plan.copy_count=" << object.load_plan.copies.size()
+            << '\n';
+  std::cout << "load_plan.zero_fill_count="
+            << object.load_plan.zero_fills.size() << '\n';
+  std::cout << "load_plan.protection_count="
+            << object.load_plan.protections.size() << '\n';
+  std::cout << "load_plan.relocation_count="
+            << object.load_plan.relocations.size() << '\n';
 
   if (object.has_metadata) {
     std::cout << "metadata_version=" << object.metadata_version.major << '.'
@@ -149,6 +162,30 @@ int main(int argc, char **argv) {
               << kernel.kernel_code_properties << '\n';
     std::cout << "kernel." << index << ".kernarg_preload=0x"
               << kernel.kernarg_preload << std::dec << '\n';
+  }
+
+  for (size_t index = 0; index < object.load_plan.relocations.size(); ++index) {
+    const light_rocr::loader::Relocation &relocation =
+        object.load_plan.relocations[index];
+    std::cout << "relocation." << index << ".encoding="
+              << (relocation.encoding ==
+                          light_rocr::loader::RelocationEncoding::Rela
+                      ? "RELA"
+                      : "REL")
+              << '\n';
+    std::cout << "relocation." << index << ".target_virtual_address=0x"
+              << std::hex << relocation.target_virtual_address << std::dec
+              << '\n';
+    std::cout << "relocation." << index << ".type="
+              << light_rocr::loader::amdgpu_relocation_type_name(
+                     relocation.type)
+              << '\n';
+    std::cout << "relocation." << index
+              << ".symbol_index=" << relocation.symbol_index << '\n';
+    if (relocation.encoding == light_rocr::loader::RelocationEncoding::Rela) {
+      std::cout << "relocation." << index << ".addend=" << relocation.addend
+                << '\n';
+    }
   }
   return 0;
 }

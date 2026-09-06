@@ -1,5 +1,6 @@
 #include "light_rocr/loader/code_object.hpp"
 
+#include "load_plan_reader.hpp"
 #include "metadata_reader.hpp"
 
 #include <algorithm>
@@ -271,6 +272,16 @@ const char *parse_error_code_name(ParseErrorCode code) {
     return "kernel_metadata_mismatch";
   case ParseErrorCode::KernelEntryOutOfBounds:
     return "kernel_entry_out_of_bounds";
+  case ParseErrorCode::InvalidRelocationTable:
+    return "invalid_relocation_table";
+  case ParseErrorCode::UnsupportedRelocationFormat:
+    return "unsupported_relocation_format";
+  case ParseErrorCode::UnsupportedRelocationType:
+    return "unsupported_relocation_type";
+  case ParseErrorCode::RelocationSymbolOutOfBounds:
+    return "relocation_symbol_out_of_bounds";
+  case ParseErrorCode::RelocationTargetOutOfBounds:
+    return "relocation_target_out_of_bounds";
   }
   return "unknown";
 }
@@ -427,6 +438,10 @@ ParseResult parse_code_object(const uint8_t *data, size_t size) {
 
   result.error =
       internal::decode_amdhsa_metadata(data, size, &result.code_object);
+  if (!result) {
+    return result;
+  }
+  result.error = internal::build_load_plan(data, size, &result.code_object);
 
   return result;
 }
