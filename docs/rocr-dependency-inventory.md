@@ -238,7 +238,21 @@ identity CPU/GPU virtual address mapping, verified CPU writes across the page,
 and completed unmap/free successfully. Fake-KMT host tests additionally cover
 allocation and mapping failures, retryable unmap/free failures, identity and
 alternate GPU addresses, and the rule that a live allocation keeps its KFD
-session open. VRAM is deliberately left for the next allocation unit.
+session open.
+
+The same diagnostic now allocates VRAM from the selected GPU node with
+`NonPaged`, 4 KiB pages, `NoSubstitute`, and `CoarseGrain`. CPU visibility is
+derived from the topology heap instead of requested independently: a public
+frame-buffer heap sets `HostAccess`, while a private heap does not expose a host
+pointer. This matches ROCr's local-memory policy and prevents a private GPU VA
+from being accidentally dereferenced by the CPU.
+
+On the measured `gfx1101`, topology reports a private frame-buffer heap. An
+unsandboxed run allocated and mapped one 4 KiB page on node 1, returned a valid
+GPU VA, correctly reported host access as unavailable, and completed
+unmap/free. `NoSubstitute` makes a successful allocation evidence that KMT did
+not silently fall back to system memory. This proves VRAM residency and GPU-VA
+mapping, but actual GPU reads and writes remain a queue/dispatch gate.
 
 The code-object metadata declares an 8-byte kernarg alignment, while ROCr's
 `HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_ALIGNMENT` query returned

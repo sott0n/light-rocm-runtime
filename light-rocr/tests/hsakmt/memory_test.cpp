@@ -23,6 +23,9 @@ struct FakeKmt {
   HSAKMT_STATUS free_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS close_status = HSAKMT_STATUS_SUCCESS;
   uint64_t alternate_gpu_address = kAlternateGpuAddress;
+  uint32_t preferred_node = 0;
+  HsaMemFlags allocation_flags{};
+  HsaMemMapFlags map_flags{};
   std::vector<std::string> calls;
 };
 
@@ -55,13 +58,32 @@ void successful_round_trip(TestContext *context) {
     context->expect(static_cast<bool>(opened), opened.status.message);
     auto allocated = opened.session.allocate_gtt(7, 8192);
     context->expect(static_cast<bool>(allocated), allocated.status.message);
-    context->expect(allocated.allocation.cpu_address() ==
+    context->expect(allocated.allocation.kind() ==
+                        light_rocr::transport::hsakmt::MemoryKind::Gtt,
+                    "allocation kind was not retained");
+    context->expect(allocated.allocation.host_accessible(),
+                    "GTT was not marked host-accessible");
+    context->expect(allocated.allocation.host_address() ==
                         reinterpret_cast<void *>(kCpuAddress),
-                    "CPU address was not retained");
+                    "host address was not retained");
     context->expect(allocated.allocation.gpu_address() == kAlternateGpuAddress,
                     "alternate GPU address was not retained");
     context->expect(allocated.allocation.size() == 8192,
                     "allocation size was not retained");
+    HsaMemFlags expected_allocation_flags{};
+    expected_allocation_flags.ui32.NonPaged = 1;
+    expected_allocation_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+    expected_allocation_flags.ui32.HostAccess = 1;
+    expected_allocation_flags.ui32.NoNUMABind = 1;
+    context->expect(fake.preferred_node == 0 &&
+                        fake.allocation_flags.Value ==
+                            expected_allocation_flags.Value,
+                    "unexpected GTT allocation policy");
+    HsaMemMapFlags expected_map_flags{};
+    expected_map_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+    expected_map_flags.ui32.HostAccess = 1;
+    context->expect(fake.map_flags.Value == expected_map_flags.Value,
+                    "unexpected GTT mapping policy");
     const auto released = allocated.allocation.release();
     context->expect(static_cast<bool>(released), released.message);
     expect_calls(context, {"open", "acquire", "allocate:0:8192", "map:7:8192",
@@ -69,6 +91,64 @@ void successful_round_trip(TestContext *context) {
   }
   expect_calls(context, {"open", "acquire", "allocate:0:8192", "map:7:8192",
                          "unmap", "free:8192", "release", "close"});
+}
+
+void public_vram_is_host_accessible(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto allocated = opened.session.allocate_vram(
+      7, light_rocr::runtime::MemoryHeapType::FrameBufferPublic, 8192);
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(allocated.allocation.kind() ==
+                      light_rocr::transport::hsakmt::MemoryKind::Vram,
+                  "public VRAM has the wrong allocation kind");
+  context->expect(allocated.allocation.host_accessible() &&
+                      allocated.allocation.host_address() ==
+                          reinterpret_cast<void *>(kCpuAddress),
+                  "public VRAM did not expose its host address");
+
+  HsaMemFlags expected_allocation_flags{};
+  expected_allocation_flags.ui32.NonPaged = 1;
+  expected_allocation_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+  expected_allocation_flags.ui32.HostAccess = 1;
+  expected_allocation_flags.ui32.NoSubstitute = 1;
+  expected_allocation_flags.ui32.CoarseGrain = 1;
+  context->expect(fake.preferred_node == 7 &&
+                      fake.allocation_flags.Value ==
+                          expected_allocation_flags.Value,
+                  "unexpected public VRAM allocation policy");
+  HsaMemMapFlags expected_map_flags{};
+  expected_map_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+  expected_map_flags.ui32.HostAccess = 1;
+  context->expect(fake.map_flags.Value == expected_map_flags.Value,
+                  "unexpected public VRAM mapping policy");
+}
+
+void private_vram_hides_host_address(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto allocated = opened.session.allocate_vram(
+      9, light_rocr::runtime::MemoryHeapType::FrameBufferPrivate, 4096);
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(!allocated.allocation.host_accessible() &&
+                      allocated.allocation.host_address() == nullptr,
+                  "private VRAM exposed a host address");
+  context->expect(allocated.allocation.gpu_address() == kAlternateGpuAddress,
+                  "private VRAM did not retain its GPU address");
+
+  HsaMemFlags expected_allocation_flags{};
+  expected_allocation_flags.ui32.NonPaged = 1;
+  expected_allocation_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+  expected_allocation_flags.ui32.NoSubstitute = 1;
+  expected_allocation_flags.ui32.CoarseGrain = 1;
+  context->expect(fake.preferred_node == 9 &&
+                      fake.allocation_flags.Value ==
+                          expected_allocation_flags.Value,
+                  "unexpected private VRAM allocation policy");
+  HsaMemMapFlags expected_map_flags{};
+  expected_map_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+  context->expect(fake.map_flags.Value == expected_map_flags.Value,
+                  "unexpected private VRAM mapping policy");
 }
 
 void identity_mapping_uses_cpu_address(TestContext *context) {
@@ -98,6 +178,17 @@ void invalid_inputs_do_not_allocate(TestContext *context) {
               light_rocr::transport::hsakmt::MemoryError::InvalidSize,
           "invalid size was accepted");
     }
+    allocated = opened.session.allocate_vram(
+        1, light_rocr::runtime::MemoryHeapType::System, 4096);
+    context->expect(
+        allocated.status.error ==
+            light_rocr::transport::hsakmt::MemoryError::InvalidVramHeap,
+        "non-frame-buffer heap was accepted as VRAM");
+    allocated = opened.session.allocate_vram(
+        1, light_rocr::runtime::MemoryHeapType::FrameBufferPrivate, 4095);
+    context->expect(allocated.status.error ==
+                        light_rocr::transport::hsakmt::MemoryError::InvalidSize,
+                    "invalid VRAM size was accepted");
     expect_calls(context, {"open", "acquire"});
   }
   expect_calls(context, {"open", "acquire", "release", "close"});
@@ -139,6 +230,24 @@ void allocation_failure_closes_session(TestContext *context) {
   }
   expect_calls(context,
                {"open", "acquire", "allocate:0:4096", "release", "close"});
+}
+
+void vram_allocation_failure_is_distinct(TestContext *context) {
+  reset_fake();
+  fake.allocate_status = HSAKMT_STATUS_NO_MEMORY;
+  {
+    auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+    const auto allocated = opened.session.allocate_vram(
+        3, light_rocr::runtime::MemoryHeapType::FrameBufferPrivate, 4096);
+    context->expect(!allocated,
+                    "VRAM allocation failure unexpectedly succeeded");
+    context->expect(
+        allocated.status.error ==
+            light_rocr::transport::hsakmt::MemoryError::AllocateVram,
+        "wrong VRAM allocation failure");
+  }
+  expect_calls(context,
+               {"open", "acquire", "allocate:3:4096", "release", "close"});
 }
 
 void map_failure_frees_allocation(TestContext *context) {
@@ -184,7 +293,7 @@ void cleanup_failures_can_be_retried(TestContext *context) {
 
 void allocation_keeps_kfd_open(TestContext *context) {
   reset_fake();
-  light_rocr::transport::hsakmt::GttAllocation allocation;
+  light_rocr::transport::hsakmt::MemoryAllocation allocation;
   {
     auto opened = light_rocr::transport::hsakmt::KfdSession::open();
     auto allocated = opened.session.allocate_gtt(1, 4096);
@@ -228,10 +337,8 @@ extern "C" HSAKMT_STATUS hsaKmtAllocMemory(HSAuint32 preferred_node,
                                            void **address) {
   fake.calls.push_back("allocate:" + std::to_string(preferred_node) + ":" +
                        std::to_string(size));
-  if (flags.ui32.NonPaged != 1 || flags.ui32.HostAccess != 1 ||
-      flags.ui32.PageSize != HSA_PAGE_SIZE_4KB || flags.ui32.NoNUMABind != 1) {
-    return HSAKMT_STATUS_INVALID_PARAMETER;
-  }
+  fake.preferred_node = preferred_node;
+  fake.allocation_flags = flags;
   if (fake.allocate_status == HSAKMT_STATUS_SUCCESS) {
     *address = reinterpret_cast<void *>(kCpuAddress);
   }
@@ -244,8 +351,9 @@ extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPUNodes(
   const uint32_t node = node_count == 1 ? nodes[0] : 0;
   fake.calls.push_back("map:" + std::to_string(node) + ":" +
                        std::to_string(size));
+  fake.map_flags = flags;
   if (address != reinterpret_cast<void *>(kCpuAddress) || node_count != 1 ||
-      flags.ui32.HostAccess != 1 || flags.ui32.PageSize != HSA_PAGE_SIZE_4KB) {
+      flags.ui32.PageSize != HSA_PAGE_SIZE_4KB) {
     return HSAKMT_STATUS_INVALID_PARAMETER;
   }
   if (fake.map_status == HSAKMT_STATUS_SUCCESS) {
@@ -273,11 +381,15 @@ extern "C" HSAKMT_STATUS hsaKmtFreeMemory(void *address, HSAuint64 size) {
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"successful_round_trip", successful_round_trip},
+      {"public_vram_is_host_accessible", public_vram_is_host_accessible},
+      {"private_vram_hides_host_address", private_vram_hides_host_address},
       {"identity_mapping_uses_cpu_address", identity_mapping_uses_cpu_address},
       {"invalid_inputs_do_not_allocate", invalid_inputs_do_not_allocate},
       {"open_failure_has_no_cleanup", open_failure_has_no_cleanup},
       {"acquire_failure_closes_kfd", acquire_failure_closes_kfd},
       {"allocation_failure_closes_session", allocation_failure_closes_session},
+      {"vram_allocation_failure_is_distinct",
+       vram_allocation_failure_is_distinct},
       {"map_failure_frees_allocation", map_failure_frees_allocation},
       {"cleanup_failures_can_be_retried", cleanup_failures_can_be_retried},
       {"allocation_keeps_kfd_open", allocation_keeps_kfd_open},

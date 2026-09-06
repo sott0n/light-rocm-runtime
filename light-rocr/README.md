@@ -8,7 +8,8 @@ The loader is a host-only ELF, AMDHSA metadata, and load-plan parser. It has no
 dependency on ROCr, libhsakmt, KFD, a GPU, libelf, or LLVM libraries. The
 runtime now also has a small transport-independent topology model and an
 optional libhsakmt transport that discovers KFD nodes, allocates mapped GTT
-memory, and manages their lifetimes without loading `libhsa-runtime64.so`.
+and VRAM memory, and manages their lifetimes without loading
+`libhsa-runtime64.so`.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -34,7 +35,7 @@ Inspect the live KFD topology and select the unique `gfx1101` node:
 ./build-light-rocr/light-rocr-inspect-topology
 ```
 
-Exercise one live GTT allocation and GPU mapping:
+Exercise live GTT and topology-selected VRAM allocations and GPU mappings:
 
 ```sh
 ./build-light-rocr/light-rocr-check-memory
@@ -52,13 +53,16 @@ points used by discovery, so conversion, call ordering, and every cleanup path
 remain testable without a GPU.
 
 The memory transport opens KFD and retains a system-property snapshot for the
-whole session. `allocate_gtt` creates 4 KiB-aligned, non-pageable system memory,
-maps it only to the selected GPU node, and returns both its CPU and GPU virtual
-addresses. An allocation shares ownership of the session, so KFD cannot close
-while mapped memory remains alive. Explicit or RAII cleanup orders unmap before
-free; explicit cleanup failures retain enough state to retry. The live memory
-diagnostic writes and reads a full page through its CPU mapping before checking
-unmap/free. VRAM allocation is the next memory class and is not yet exposed.
+whole session. `allocate_gtt` creates 4 KiB-aligned, non-pageable system memory
+and maps it only to the selected GPU node. `allocate_vram` requires a topology
+frame-buffer heap, prevents substitution with system memory, and follows the
+heap's CPU-visibility contract: public frame buffers expose a host address,
+while private frame buffers expose only their GPU address. Both return a
+move-only `MemoryAllocation`. An allocation shares ownership of the session,
+so KFD cannot close while mapped memory remains alive. Explicit or RAII cleanup
+orders unmap before free; explicit cleanup failures retain enough state to
+retry. The live diagnostic writes and reads GTT (and public VRAM when present),
+then checks VRAM mapping and cleanup without dereferencing private VRAM.
 
 The inspector reports checked `PT_LOAD` records and, when an AMDGPU metadata
 note is present, the metadata version, target ISA, kernel inventory, ELF

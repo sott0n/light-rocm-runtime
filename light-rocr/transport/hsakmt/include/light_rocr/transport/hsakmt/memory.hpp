@@ -1,6 +1,8 @@
 #ifndef LIGHT_ROCR_TRANSPORT_HSAKMT_MEMORY_HPP
 #define LIGHT_ROCR_TRANSPORT_HSAKMT_MEMORY_HPP
 
+#include "light_rocr/runtime/topology.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -8,7 +10,12 @@
 
 namespace light_rocr::transport::hsakmt {
 
-inline constexpr uint64_t kGttPageSize = 4096;
+inline constexpr uint64_t kMemoryPageSize = 4096;
+
+enum class MemoryKind {
+  Gtt,
+  Vram,
+};
 
 enum class MemoryError {
   None,
@@ -16,7 +23,9 @@ enum class MemoryError {
   InvalidSize,
   OpenKfd,
   AcquireSystemProperties,
+  InvalidVramHeap,
   AllocateGtt,
+  AllocateVram,
   MapToGpu,
   UnmapFromGpu,
   FreeMemory,
@@ -46,43 +55,59 @@ public:
   [[nodiscard]] static SessionResult open();
   [[nodiscard]] AllocationResult allocate_gtt(uint32_t gpu_node_id,
                                               uint64_t size) const;
+  [[nodiscard]] AllocationResult
+  allocate_vram(uint32_t gpu_node_id, runtime::MemoryHeapType heap_type,
+                uint64_t size) const;
   explicit operator bool() const { return state_ != nullptr; }
 
 private:
   explicit KfdSession(std::shared_ptr<KfdState> state)
       : state_(std::move(state)) {}
+  [[nodiscard]] AllocationResult allocate(uint32_t preferred_node,
+                                          uint32_t gpu_node_id, uint64_t size,
+                                          MemoryKind kind, bool host_accessible,
+                                          MemoryError allocation_error,
+                                          const char *memory_name) const;
 
   std::shared_ptr<KfdState> state_;
 };
 
-class GttAllocation {
+class MemoryAllocation {
 public:
-  GttAllocation() = default;
-  GttAllocation(const GttAllocation &) = delete;
-  GttAllocation &operator=(const GttAllocation &) = delete;
-  GttAllocation(GttAllocation &&other) noexcept;
-  GttAllocation &operator=(GttAllocation &&other) noexcept;
-  ~GttAllocation();
+  MemoryAllocation() = default;
+  MemoryAllocation(const MemoryAllocation &) = delete;
+  MemoryAllocation &operator=(const MemoryAllocation &) = delete;
+  MemoryAllocation(MemoryAllocation &&other) noexcept;
+  MemoryAllocation &operator=(MemoryAllocation &&other) noexcept;
+  ~MemoryAllocation();
 
-  [[nodiscard]] void *cpu_address() const { return cpu_address_; }
+  [[nodiscard]] MemoryKind kind() const { return kind_; }
+  [[nodiscard]] bool host_accessible() const { return host_accessible_; }
+  [[nodiscard]] void *host_address() const {
+    return host_accessible_ ? allocation_address_ : nullptr;
+  }
   [[nodiscard]] uint64_t gpu_address() const { return gpu_address_; }
   [[nodiscard]] uint64_t size() const { return size_; }
-  explicit operator bool() const { return cpu_address_ != nullptr; }
+  explicit operator bool() const { return allocation_address_ != nullptr; }
 
   [[nodiscard]] MemoryStatus release();
 
 private:
   friend class KfdSession;
-  GttAllocation(std::shared_ptr<KfdState> state, void *cpu_address,
-                uint64_t gpu_address, uint64_t size)
-      : state_(std::move(state)), cpu_address_(cpu_address),
-        gpu_address_(gpu_address), size_(size), mapped_(true) {}
+  MemoryAllocation(std::shared_ptr<KfdState> state, void *allocation_address,
+                   uint64_t gpu_address, uint64_t size, MemoryKind kind,
+                   bool host_accessible)
+      : state_(std::move(state)), allocation_address_(allocation_address),
+        gpu_address_(gpu_address), size_(size), kind_(kind),
+        host_accessible_(host_accessible), mapped_(true) {}
   void reset();
 
   std::shared_ptr<KfdState> state_;
-  void *cpu_address_ = nullptr;
+  void *allocation_address_ = nullptr;
   uint64_t gpu_address_ = 0;
   uint64_t size_ = 0;
+  MemoryKind kind_ = MemoryKind::Gtt;
+  bool host_accessible_ = false;
   bool mapped_ = false;
 };
 
@@ -95,7 +120,7 @@ struct SessionResult {
 
 struct AllocationResult {
   MemoryStatus status;
-  GttAllocation allocation;
+  MemoryAllocation allocation;
 
   explicit operator bool() const { return static_cast<bool>(status); }
 };

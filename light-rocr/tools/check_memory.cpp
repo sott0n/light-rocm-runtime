@@ -46,18 +46,30 @@ int main(int argc, char **argv) {
     return 1;
   }
   const auto &node = discovered.topology.nodes[selected.node_index];
+  const auto vram_bank = std::find_if(
+      node.memory_banks.begin(), node.memory_banks.end(),
+      [](const light_rocr::runtime::MemoryBank &bank) {
+        return bank.heap_type ==
+                   light_rocr::runtime::MemoryHeapType::FrameBufferPublic ||
+               bank.heap_type ==
+                   light_rocr::runtime::MemoryHeapType::FrameBufferPrivate;
+      });
+  if (vram_bank == node.memory_banks.end()) {
+    std::cerr << "message=selected GPU has no frame-buffer heap\n";
+    return 1;
+  }
 
   auto opened = light_rocr::transport::hsakmt::KfdSession::open();
   if (!opened) {
     return fail(opened.status);
   }
   auto allocated = opened.session.allocate_gtt(
-      node.node_id, light_rocr::transport::hsakmt::kGttPageSize);
+      node.node_id, light_rocr::transport::hsakmt::kMemoryPageSize);
   if (!allocated) {
     return fail(allocated.status);
   }
 
-  auto *bytes = static_cast<uint8_t *>(allocated.allocation.cpu_address());
+  auto *bytes = static_cast<uint8_t *>(allocated.allocation.host_address());
   std::fill_n(bytes, allocated.allocation.size(), uint8_t{0xa5});
   const bool host_access_ok =
       std::all_of(bytes, bytes + allocated.allocation.size(),
@@ -66,17 +78,55 @@ int main(int argc, char **argv) {
   std::cout << "node_id=" << node.node_id << '\n';
   std::cout << "target="
             << light_rocr::runtime::gfx_target_name(node.architecture) << '\n';
-  std::cout << "size=" << allocated.allocation.size() << '\n';
-  std::cout << "cpu_address=0x" << std::hex
-            << reinterpret_cast<uintptr_t>(allocated.allocation.cpu_address())
+  std::cout << "gtt.size=" << allocated.allocation.size() << '\n';
+  std::cout << "gtt.host_address=0x" << std::hex
+            << reinterpret_cast<uintptr_t>(allocated.allocation.host_address())
             << '\n';
-  std::cout << "gpu_address=0x" << allocated.allocation.gpu_address() << '\n';
-  std::cout << "host_access=" << (host_access_ok ? "ok" : "failed") << '\n';
+  std::cout << "gtt.gpu_address=0x" << allocated.allocation.gpu_address()
+            << '\n';
+  std::cout << "gtt.host_access=" << (host_access_ok ? "ok" : "failed") << '\n';
 
   const auto released = allocated.allocation.release();
   if (!released) {
     return fail(released);
   }
-  std::cout << "cleanup=ok\n";
-  return host_access_ok ? 0 : 1;
+  std::cout << "gtt.cleanup=ok\n";
+  if (!host_access_ok) {
+    return 1;
+  }
+
+  auto vram = opened.session.allocate_vram(
+      node.node_id, vram_bank->heap_type,
+      light_rocr::transport::hsakmt::kMemoryPageSize);
+  if (!vram) {
+    return fail(vram.status);
+  }
+
+  bool vram_host_access_ok = true;
+  if (vram.allocation.host_accessible()) {
+    auto *vram_bytes = static_cast<uint8_t *>(vram.allocation.host_address());
+    std::fill_n(vram_bytes, vram.allocation.size(), uint8_t{0x5a});
+    vram_host_access_ok =
+        std::all_of(vram_bytes, vram_bytes + vram.allocation.size(),
+                    [](uint8_t value) { return value == uint8_t{0x5a}; });
+  }
+
+  std::cout << "vram.heap="
+            << light_rocr::runtime::memory_heap_type_name(vram_bank->heap_type)
+            << '\n';
+  std::cout << "vram.size=" << std::dec << vram.allocation.size() << '\n';
+  std::cout << "vram.gpu_address=0x" << std::hex
+            << vram.allocation.gpu_address() << '\n';
+  std::cout << "vram.host_access="
+            << (vram.allocation.host_accessible()
+                    ? (vram_host_access_ok ? "ok" : "failed")
+                    : "not_available")
+            << '\n';
+
+  const auto vram_released = vram.allocation.release();
+  if (!vram_released) {
+    return fail(vram_released);
+  }
+  std::cout << "vram.cleanup=ok\n";
+  return vram_host_access_ok ? 0 : 1;
 }
