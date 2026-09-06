@@ -8,8 +8,8 @@ The loader is a host-only ELF, AMDHSA metadata, and load-plan parser. It has no
 dependency on ROCr, libhsakmt, KFD, a GPU, libelf, or LLVM libraries. The
 runtime now also has a small transport-independent topology model and an
 optional libhsakmt transport that discovers KFD nodes, allocates mapped GTT
-and VRAM memory, and manages their lifetimes without loading
-`libhsa-runtime64.so`.
+and VRAM memory, creates compute AQL queues, and manages their lifetimes
+without loading `libhsa-runtime64.so`.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -41,6 +41,13 @@ Exercise live GTT and topology-selected VRAM allocations and GPU mappings:
 ./build-light-rocr/light-rocr-check-memory
 ```
 
+Create and immediately destroy a live compute AQL queue without publishing a
+packet or writing its doorbell:
+
+```sh
+./build-light-rocr/light-rocr-check-queue
+```
+
 The topology tool is built when the public `hsakmt` headers, library, and its
 DRM/NUMA dependencies are available. `LIGHT_ROCR_ENABLE_HSAKMT=OFF` keeps the
 standalone loader and host-only topology tests buildable without them. Live
@@ -63,6 +70,17 @@ so KFD cannot close while mapped memory remains alive. Explicit or RAII cleanup
 orders unmap before free; explicit cleanup failures retain enough state to
 retry. The live diagnostic writes and reads GTT (and public VRAM when present),
 then checks VRAM mapping and cleanup without dereferencing private VRAM.
+
+The queue transport allocates a 64 KiB default ring as executable AQL queue
+memory and initializes every 64-byte packet header to the invalid type. A
+separate mapped GTT page holds cache-line-separated read and write indexes.
+`hsaKmtCreateQueue` registers those GPU addresses, creates the compute AQL
+queue, and returns its mapped 64-bit doorbell. The move-only `AqlQueue` owns
+both allocations and always destroys the queue before unmapping them; an
+explicit destroy failure leaves the queue and mappings live so cleanup can be
+retried. In this libhsakmt phase, libhsakmt itself owns the EOP buffer, CWSR
+storage, and doorbell mapping. Those resources become light-rocr's explicit
+responsibility only in the later direct-KFD transport.
 
 The inspector reports checked `PT_LOAD` records and, when an AMDGPU metadata
 note is present, the metadata version, target ISA, kernel inventory, ELF

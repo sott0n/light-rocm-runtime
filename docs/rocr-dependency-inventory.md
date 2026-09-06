@@ -45,7 +45,7 @@ the ownership boundary to preserve during backend extraction.
 | Host pinning | `hsa_amd_memory_lock`, `hsa_amd_memory_unlock` | `src/memory.cpp`, `src/event.cpp` | KMT user-pointer memory registration and mapping | KFD USERPTR allocation/map/unmap/free |
 | Synchronous copy | `hsa_memory_copy` | `src/memory.cpp` | CPU mapping or native copy kernel | CPU mapping or native copy kernel |
 | Async copy | `hsa_amd_memory_async_copy` | `src/memory.cpp` | copy kernel first; SDMA is a later feature | copy kernel first; direct SDMA queue later |
-| Queue lifecycle | `hsa_queue_create`, `hsa_queue_destroy` | `src/queue.cpp` | ring/EOP allocation and `hsaKmtCreateQueue`/destroy | queue create/destroy ioctls and doorbell mmap |
+| Queue lifecycle | `hsa_queue_create`, `hsa_queue_destroy` | `src/queue.cpp` | ring/index allocation and `hsaKmtCreateQueue`/destroy; libhsakmt owns EOP/CWSR and doorbell mapping | explicit EOP/CWSR allocation, queue create/destroy ioctls, and doorbell mmap |
 | Queue publication | `hsa_queue_add_write_index_scacq_screl`, `hsa_signal_store_screlease` | `src/queue.cpp`, `src/event.cpp`, `src/launch.cpp` | native atomic write index and mapped doorbell store | same; transport only creates the queue and mapping |
 | Signal lifecycle | `hsa_signal_create`, `hsa_signal_destroy` | `src/event.cpp`, `src/queue.cpp` | aligned native signal storage; KMT event only for blocking waits | aligned native signal storage; KFD event ioctl only for blocking waits |
 | Signal operations | `hsa_signal_load_scacquire`, `hsa_signal_store_relaxed`, `hsa_signal_store_screlease`, `hsa_signal_wait_scacquire` | `src/device_synchronization.cpp`, `src/event.cpp`, `src/queue.cpp` | native atomics and active polling initially | same |
@@ -163,6 +163,29 @@ The baseline tool was run on 2026-09-06 against
 The absolute queue ID, mappings, doorbell handle, memory capacities, and kernel
 object address are deliberately not recorded as invariants. They vary with
 process state or available host/device memory.
+
+## Native KMT queue diagnostic
+
+`light-rocr-check-queue` creates a 64 KiB compute AQL queue through libhsakmt
+and immediately destroys it. The ring is non-pageable, executable,
+host-accessible AQL queue memory mapped only to the selected GPU. A separate
+GTT page provides GPU-visible, cache-line-separated read and write indexes.
+Every ring slot starts with the architected invalid packet type before the
+queue becomes visible to KFD.
+
+In this phase, `hsaKmtCreateQueue` internally allocates the generation-specific
+EOP and CWSR resources and establishes the process doorbell mapping. The
+returned 64-bit doorbell is recorded but not written until packet publication
+is implemented. Queue destruction precedes index and ring unmapping on every
+successful cleanup path, and a failed destroy can be retried without releasing
+memory still referenced by KFD.
+
+An unsandboxed run on 2026-09-06 selected node 1 / `gfx1101`, created the queue
+with identity CPU/GPU ring address `0x743de47c0000`, obtained queue handle
+`0x743de4bbd000` and doorbell address `0x743de4bb8000`, then completed queue
+destroy, unmap, and free. These addresses are diagnostic observations, not
+stable invariants. The executable links DRM/NUMA but not
+`libhsa-runtime64.so`.
 
 ## Native KMT topology diagnostic
 

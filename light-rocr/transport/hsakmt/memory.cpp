@@ -128,11 +128,14 @@ AllocationResult KfdSession::allocate(uint32_t preferred_node,
                                       uint32_t gpu_node_id, uint64_t size,
                                       MemoryKind kind, bool host_accessible,
                                       MemoryError allocation_error,
-                                      const char *memory_name) const {
+                                      const char *memory_name, bool executable,
+                                      bool aql_queue_memory) const {
   HsaMemFlags allocation_flags{};
   allocation_flags.ui32.NonPaged = 1;
   allocation_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
   allocation_flags.ui32.HostAccess = host_accessible ? 1U : 0U;
+  allocation_flags.ui32.ExecuteAccess = executable ? 1U : 0U;
+  allocation_flags.ui32.AQLQueueMemory = aql_queue_memory ? 1U : 0U;
   if (kind == MemoryKind::Gtt) {
     allocation_flags.ui32.NoNUMABind = 1;
   } else {

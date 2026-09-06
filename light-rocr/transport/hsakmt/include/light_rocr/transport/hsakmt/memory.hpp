@@ -42,6 +42,7 @@ struct MemoryStatus {
 struct KfdState;
 struct SessionResult;
 struct AllocationResult;
+struct AqlQueueResult;
 
 class KfdSession {
 public:
@@ -58,16 +59,18 @@ public:
   [[nodiscard]] AllocationResult
   allocate_vram(uint32_t gpu_node_id, runtime::MemoryHeapType heap_type,
                 uint64_t size) const;
+  [[nodiscard]] AqlQueueResult create_aql_queue(uint32_t gpu_node_id,
+                                                uint64_t ring_size) const;
   explicit operator bool() const { return state_ != nullptr; }
 
 private:
   explicit KfdSession(std::shared_ptr<KfdState> state)
       : state_(std::move(state)) {}
-  [[nodiscard]] AllocationResult allocate(uint32_t preferred_node,
-                                          uint32_t gpu_node_id, uint64_t size,
-                                          MemoryKind kind, bool host_accessible,
-                                          MemoryError allocation_error,
-                                          const char *memory_name) const;
+  [[nodiscard]] AllocationResult
+  allocate(uint32_t preferred_node, uint32_t gpu_node_id, uint64_t size,
+           MemoryKind kind, bool host_accessible, MemoryError allocation_error,
+           const char *memory_name, bool executable = false,
+           bool aql_queue_memory = false) const;
 
   std::shared_ptr<KfdState> state_;
 };
