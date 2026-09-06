@@ -12,6 +12,11 @@ option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
 option(LRRT_ENABLE_SPARSEWAVE_EXECUTOR "Build the SparseWave executor" OFF)
 option(LRRT_ENABLE_IREE_ADAPTER "Build the experimental IREE HAL adapter" OFF)
 option(LRRT_ENABLE_HSA "Build with HSA/ROCr support when available" ON)
+option(
+  LRRT_ENABLE_LIGHT_ROCR
+  "Build the experimental self-authored light-rocr stack"
+  OFF
+)
 option(LRRT_BUILD_BENCHMARKS "Build runtime benchmarks" OFF)
 option(LRRT_BUILD_TRITON_BENCHMARKS "Build Triton runtime benchmarks" OFF)
 set(
@@ -116,6 +121,10 @@ if(LRRT_BUILD_BENCHMARKS)
 endif()
 
 enable_testing()
+
+if(LRRT_ENABLE_LIGHT_ROCR)
+  add_subdirectory(light-rocr)
+endif()
 
 if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)
   add_subdirectory(executor/sparsewave)

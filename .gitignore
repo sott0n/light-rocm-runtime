@@ -6,6 +6,7 @@ build-iree/
 build-iree-tools/
 build-iree-probe/
 build-hsa-snoop/
+build-light-rocr/
 build-sparsewave/
 __pycache__/
 *.o

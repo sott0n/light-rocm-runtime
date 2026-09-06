@@ -201,6 +201,12 @@ vector-add artifact had the following properties:
 - 0-byte fixed group segment and 272-byte fixed private segment
 - wavefront size 32
 
+The current artifact corpus spans two AMDGPU-HSA ELF ABI versions. Clang and
+Triton artifacts use ABI version 4, while the current IREE raw-HSACO probe uses
+ABI version 3. The initial light-rocr loader therefore accepts both versions
+and retains the version in its parsed code-object model for later
+version-specific metadata handling.
+
 The absence of relocations is a property of this smoke artifact, not permission
 to omit relocation support from the loader. The loader test corpus must include
 every relocation form observed in Clang, Triton, and IREE artifacts used by the

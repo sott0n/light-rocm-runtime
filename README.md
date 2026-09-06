@@ -100,6 +100,19 @@ cmake --build build
 The runtime uses the HSA/ROCr API directly for device memory, code object
 loading, and kernel dispatch.
 
+The experimental self-authored low-level stack lives in `light-rocr/`. Its
+host-only loader can be built and tested without ROCr or a GPU:
+
+```sh
+cmake -S light-rocr -B build-light-rocr
+cmake --build build-light-rocr
+ctest --test-dir build-light-rocr --output-on-failure
+```
+
+It can also be included in the main build with
+`-DLRRT_ENABLE_LIGHT_ROCR=ON`. The existing ROCr path remains the default and
+the correctness oracle while the loader and runtime are developed.
+
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton
 kernels with Python 3.13 by default:
