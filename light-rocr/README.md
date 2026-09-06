@@ -4,9 +4,11 @@
 `light-rocm-runtime`. It will contain the AMDHSA code-object loader, runtime
 primitives, and interchangeable libhsakmt and direct-KFD transports.
 
-The first component is a host-only ELF, AMDHSA metadata, and load-plan parser.
-It has no dependency on ROCr, libhsakmt, KFD, a GPU, libelf, or LLVM
-libraries.
+The loader is a host-only ELF, AMDHSA metadata, and load-plan parser. It has no
+dependency on ROCr, libhsakmt, KFD, a GPU, libelf, or LLVM libraries. The
+runtime now also has a small transport-independent topology model and an
+optional libhsakmt transport that discovers KFD nodes and their memory banks
+without loading `libhsa-runtime64.so`.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -25,6 +27,23 @@ Inspect an AMDHSA code object:
 ./build-light-rocr/light-rocr-inspect-hsaco \
   ./build/vector_add_kernel.hsaco
 ```
+
+Inspect the live KFD topology and select the unique `gfx1101` node:
+
+```sh
+./build-light-rocr/light-rocr-inspect-topology
+```
+
+The topology tool is built when the public `hsakmt` headers, library, and its
+DRM/NUMA dependencies are available. `LIGHT_ROCR_ENABLE_HSAKMT=OFF` keeps the
+standalone loader and host-only topology tests buildable without them. Live
+topology discovery opens `/dev/kfd`, takes and releases a KMT system-property
+snapshot, records CPU/GPU nodes and memory-bank properties, and closes KFD on
+every successful or failed path. GPU selection accepts either `gfx1101` or a
+full AMDHSA target string and deliberately rejects zero or multiple matching
+nodes in the initial single-GPU runtime. Host tests replace the seven KMT entry
+points used by discovery, so conversion, call ordering, and every cleanup path
+remain testable without a GPU.
 
 The inspector reports checked `PT_LOAD` records and, when an AMDGPU metadata
 note is present, the metadata version, target ISA, kernel inventory, ELF
@@ -68,5 +87,6 @@ transport/    libhsakmt and direct public-KFD implementations
 arch/         GPU-generation-specific layouts and operations
 ```
 
-Only `loader/` exists in the first implementation unit. Empty component
+`runtime/` owns transport-independent topology and selection semantics.
+`transport/hsakmt/` is the first concrete KFD transport; additional component
 directories are added when they receive their first implementation.

@@ -4,6 +4,11 @@ project(light_rocr VERSION 0.1.0 LANGUAGES CXX)
 
 option(LIGHT_ROCR_BUILD_TESTS "Build light-rocr host tests" ON)
 option(LIGHT_ROCR_BUILD_TOOLS "Build light-rocr inspection tools" ON)
+option(
+  LIGHT_ROCR_ENABLE_HSAKMT
+  "Build the libhsakmt transport when its development files are available"
+  ON
+)
 
 function(light_rocr_enable_warnings target)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -32,6 +37,85 @@ target_include_directories(
 set_target_properties(light_rocr_loader PROPERTIES POSITION_INDEPENDENT_CODE ON)
 light_rocr_enable_warnings(light_rocr_loader)
 
+add_library(light_rocr_core runtime/topology.cpp)
+add_library(light_rocr::core ALIAS light_rocr_core)
+target_compile_features(light_rocr_core PUBLIC cxx_std_17)
+target_include_directories(
+  light_rocr_core
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/runtime/include>
+    $<INSTALL_INTERFACE:include>
+)
+set_target_properties(light_rocr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+light_rocr_enable_warnings(light_rocr_core)
+
+set(LIGHT_ROCR_HSAKMT_AVAILABLE OFF)
+if(LIGHT_ROCR_ENABLE_HSAKMT)
+  find_path(
+    LIGHT_ROCR_HSAKMT_INCLUDE_DIR
+    NAMES hsakmt/hsakmt.h
+    HINTS /opt/rocm/include
+  )
+  find_library(
+    LIGHT_ROCR_HSAKMT_LIBRARY
+    NAMES hsakmt
+    HINTS /opt/rocm/lib /opt/rocm/lib64
+  )
+  find_library(LIGHT_ROCR_DRM_LIBRARY NAMES drm)
+  find_library(LIGHT_ROCR_DRM_AMDGPU_LIBRARY NAMES drm_amdgpu)
+  find_library(LIGHT_ROCR_NUMA_LIBRARY NAMES numa)
+  find_package(Threads QUIET)
+
+  if(
+    LIGHT_ROCR_HSAKMT_INCLUDE_DIR
+    AND LIGHT_ROCR_HSAKMT_LIBRARY
+    AND LIGHT_ROCR_DRM_LIBRARY
+    AND LIGHT_ROCR_DRM_AMDGPU_LIBRARY
+    AND LIGHT_ROCR_NUMA_LIBRARY
+    AND Threads_FOUND
+  )
+    set(LIGHT_ROCR_HSAKMT_AVAILABLE ON)
+    add_library(
+      light_rocr_transport_hsakmt
+      transport/hsakmt/topology.cpp
+    )
+    add_library(
+      light_rocr::transport_hsakmt
+      ALIAS light_rocr_transport_hsakmt
+    )
+    target_compile_features(light_rocr_transport_hsakmt PUBLIC cxx_std_17)
+    target_include_directories(
+      light_rocr_transport_hsakmt
+      PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/transport/hsakmt/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    target_include_directories(
+      light_rocr_transport_hsakmt
+      SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_transport_hsakmt
+      PUBLIC light_rocr::core
+      PRIVATE
+        "${LIGHT_ROCR_HSAKMT_LIBRARY}"
+        "${LIGHT_ROCR_DRM_AMDGPU_LIBRARY}"
+        "${LIGHT_ROCR_DRM_LIBRARY}"
+        "${LIGHT_ROCR_NUMA_LIBRARY}"
+        Threads::Threads
+        "${CMAKE_DL_LIBS}"
+    )
+    set_target_properties(
+      light_rocr_transport_hsakmt
+      PROPERTIES POSITION_INDEPENDENT_CODE ON
+    )
+    light_rocr_enable_warnings(light_rocr_transport_hsakmt)
+    message(STATUS "light-rocr libhsakmt transport enabled")
+  else()
+    message(STATUS "light-rocr libhsakmt transport unavailable")
+  endif()
+endif()
+
 if(LIGHT_ROCR_BUILD_TOOLS)
   add_executable(light_rocr_inspect_hsaco tools/inspect_hsaco.cpp)
   target_link_libraries(light_rocr_inspect_hsaco PRIVATE light_rocr::loader)
@@ -40,6 +124,19 @@ if(LIGHT_ROCR_BUILD_TOOLS)
     light_rocr_inspect_hsaco
     PROPERTIES OUTPUT_NAME light-rocr-inspect-hsaco
   )
+
+  if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(light_rocr_inspect_topology tools/inspect_topology.cpp)
+    target_link_libraries(
+      light_rocr_inspect_topology
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_inspect_topology)
+    set_target_properties(
+      light_rocr_inspect_topology
+      PROPERTIES OUTPUT_NAME light-rocr-inspect-topology
+    )
+  endif()
 endif()
 
 if(LIGHT_ROCR_BUILD_TESTS)
@@ -64,4 +161,32 @@ if(LIGHT_ROCR_BUILD_TESTS)
   target_link_libraries(light_rocr_load_plan_tests PRIVATE light_rocr::loader)
   light_rocr_enable_warnings(light_rocr_load_plan_tests)
   add_test(NAME light_rocr_load_plan_tests COMMAND light_rocr_load_plan_tests)
+
+  add_executable(
+    light_rocr_topology_tests
+    tests/runtime/topology_test.cpp
+  )
+  target_link_libraries(light_rocr_topology_tests PRIVATE light_rocr::core)
+  light_rocr_enable_warnings(light_rocr_topology_tests)
+  add_test(NAME light_rocr_topology_tests COMMAND light_rocr_topology_tests)
+
+  if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(
+      light_rocr_hsakmt_topology_tests
+      tests/hsakmt/topology_test.cpp
+    )
+    target_include_directories(
+      light_rocr_hsakmt_topology_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_hsakmt_topology_tests
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_hsakmt_topology_tests)
+    add_test(
+      NAME light_rocr_hsakmt_topology_tests
+      COMMAND light_rocr_hsakmt_topology_tests
+    )
+  endif()
 endif()

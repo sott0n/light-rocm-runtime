@@ -164,6 +164,52 @@ The absolute queue ID, mappings, doorbell handle, memory capacities, and kernel
 object address are deliberately not recorded as invariants. They vary with
 process state or available host/device memory.
 
+## Native KMT topology diagnostic
+
+`light-rocr-inspect-topology` is the first runtime-side diagnostic that bypasses
+ROCr. It links the installed `libhsakmt.a` and its DRM/NUMA dependencies, opens
+KFD, takes a system-property snapshot, records every node and memory bank, and
+selects exactly one GPU matching the requested AMDGPU target. Its dynamic
+dependency table contains no `libhsa-runtime64.so`.
+
+The transport-specific KMT structures are converted into a small
+transport-independent model owned by `light_rocr_core`. Target matching accepts
+both the short `gfx1101` spelling and the full AMDHSA metadata spelling. The
+initial single-GPU contract rejects missing and ambiguous matches instead of
+silently choosing the first device.
+
+```sh
+cmake -S light-rocr -B build-light-rocr
+cmake --build build-light-rocr -j2
+./build-light-rocr/light-rocr-inspect-topology --target gfx1101
+```
+
+The command emits line-oriented KFD version, node, architecture, SIMD/CU,
+wavefront, PCI/DRM, local-memory, and memory-bank fields for comparison with
+the ROCr oracle. A host without a visible `/dev/kfd` fails at `open_kfd` with
+the symbolic KMT status rather than returning an empty topology.
+
+### Measured native topology
+
+The diagnostic was run with direct `/dev/kfd` access on 2026-09-06. It selected
+the expected GPU and produced the following stable comparison values:
+
+| Property | Native KMT result |
+| --- | --- |
+| KFD interface version | 1.14 |
+| Nodes | 2: CPU node 0, GPU node 1 |
+| Selected GPU | node 1 / `gfx1101` |
+| SIMD / compute units | 120 / 60 |
+| Wavefront size | 32 |
+| PCI location / DRM render minor | `0x2300` / 128 |
+| Framebuffer bank | private, 17,163,091,968 bytes, 256-bit width |
+| Other GPU banks | LDS, scratch, device SVM, MMIO remap |
+
+The 60-CU result is derived from 120 KFD FCompute cores and two SIMDs per CU.
+The target, wavefront size, and selected node agree with the ROCr oracle. KFD
+interface version 1.14 and ROCr's reported HSA system version 1.15 describe
+different interfaces and must not be compared as the same version field.
+
 The code-object metadata declares an 8-byte kernarg alignment, while ROCr's
 `HSA_EXECUTABLE_SYMBOL_INFO_KERNEL_KERNARG_SEGMENT_ALIGNMENT` query returned
 16 bytes for the loaded kernel. The loader work must explain and reproduce this
