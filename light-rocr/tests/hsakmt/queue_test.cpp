@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -45,6 +46,8 @@ struct FakeKmt {
   HSAKMT_STATUS create_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS destroy_status = HSAKMT_STATUS_SUCCESS;
   size_t fail_allocation_call = 0;
+  size_t fail_unmap_call = 0;
+  size_t unmap_calls = 0;
   HsaQueueResource queue_resource_input{};
   uint32_t queue_node = 0;
   HSA_QUEUE_TYPE queue_type = HSA_QUEUE_TYPE_SIZE;
@@ -64,7 +67,7 @@ void reset_fake() {
   fake = {};
   std::fill(ring_memory.begin(), ring_memory.end(), uint8_t{0xa5});
   std::fill(control_memory.begin(), control_memory.end(), uint8_t{0xa5});
-  doorbell = 0;
+  doorbell = UINT64_MAX;
 }
 
 const char *allocation_name(void *address) {
@@ -305,6 +308,29 @@ void destroy_failure_is_retryable(TestContext *context) {
                          "unmap:ring", "free:ring", "release", "close"});
 }
 
+void partial_cleanup_keeps_index_accessors_safe(TestContext *context) {
+  reset_fake();
+  {
+    auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+    auto created = opened.session.create_aql_queue(2, kAqlRingDefaultSize);
+    fake.fail_unmap_call = 2;
+    auto released = created.queue.release();
+    context->expect(
+        released.error ==
+            light_rocr::transport::hsakmt::AqlQueueError::ReleaseRing,
+        "ring cleanup failure was not reported");
+    context->expect(!static_cast<bool>(created.queue),
+                    "partially released queue remained active");
+    context->expect(created.queue.read_index_acquire() == 0 &&
+                        created.queue.write_index_relaxed() == 0,
+                    "index accessors touched released control storage");
+
+    fake.fail_unmap_call = 0;
+    released = created.queue.release();
+    context->expect(static_cast<bool>(released), released.message);
+  }
+}
+
 void queue_keeps_session_open(TestContext *context) {
   reset_fake();
   light_rocr::transport::hsakmt::AqlQueue queue;
@@ -337,6 +363,97 @@ void destructor_cleans_up_in_order(TestContext *context) {
                          "allocate:control", "map:control:6", "create:6:65536",
                          "destroy", "unmap:control", "free:control",
                          "unmap:ring", "free:ring", "release", "close"});
+}
+
+light_rocr::runtime::AqlKernelDispatchPacket valid_packet() {
+  light_rocr::runtime::KernelDispatchSpec spec;
+  spec.kernel_object = 0x500000;
+  spec.kernarg_address = 0x600000;
+  spec.completion_signal = 0x700000;
+  return light_rocr::runtime::make_kernel_dispatch_packet(spec).packet;
+}
+
+void publishes_packet_and_rings_doorbell(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto created = opened.session.create_aql_queue(7, kAqlRingDefaultSize);
+  const auto packet = valid_packet();
+  const auto submitted = created.queue.submit_kernel_dispatch(packet);
+  context->expect(static_cast<bool>(submitted), submitted.message);
+  context->expect(submitted.packet_id == 0 && submitted.read_index == 0 &&
+                      submitted.write_index == 1,
+                  "first submission returned incorrect queue indexes");
+
+  uint64_t observed_write_index = 0;
+  std::memcpy(&observed_write_index, control_memory.data() + 64,
+              sizeof(observed_write_index));
+  context->expect(observed_write_index == 1,
+                  "queue write index was not advanced");
+  context->expect(doorbell == 0,
+                  "first submission did not ring packet ID zero");
+
+  light_rocr::runtime::AqlKernelDispatchPacket observed{};
+  std::memcpy(&observed, ring_memory.data(), sizeof(observed));
+  context->expect(observed.header == packet.header &&
+                      observed.setup == packet.setup &&
+                      observed.kernel_object == packet.kernel_object &&
+                      observed.kernarg_address == packet.kernarg_address &&
+                      observed.completion_signal == packet.completion_signal,
+                  "published ring packet does not match the source packet");
+  context->expect(created.queue.read_index_acquire() == 0 &&
+                      created.queue.write_index_relaxed() == 1,
+                  "queue index accessors returned incorrect values");
+}
+
+void rejects_invalid_packet_without_publication(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto created = opened.session.create_aql_queue(7, kAqlRingDefaultSize);
+  auto packet = valid_packet();
+  packet.reserved2 = 1;
+  doorbell = UINT64_MAX;
+  const auto submitted = created.queue.submit_kernel_dispatch(packet);
+  context->expect(
+      submitted.error ==
+          light_rocr::transport::hsakmt::AqlSubmitError::InvalidPacket,
+      "invalid packet was accepted");
+  context->expect(created.queue.write_index_relaxed() == 0 &&
+                      doorbell == UINT64_MAX && ring_memory[0] == 1,
+                  "invalid packet changed the ring, index, or doorbell");
+}
+
+void reports_full_queue_without_publication(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto created = opened.session.create_aql_queue(7, kAqlRingDefaultSize);
+  const uint64_t packet_count = kAqlRingDefaultSize / kAqlPacketSize;
+  std::memcpy(control_memory.data() + 64, &packet_count, sizeof(packet_count));
+  doorbell = UINT64_MAX;
+  const auto submitted = created.queue.submit_kernel_dispatch(valid_packet());
+  context->expect(submitted.error ==
+                      light_rocr::transport::hsakmt::AqlSubmitError::QueueFull,
+                  "full queue accepted a packet");
+  context->expect(submitted.read_index == 0 &&
+                      submitted.write_index == packet_count &&
+                      doorbell == UINT64_MAX && ring_memory[0] == 1,
+                  "full queue changed the ring or doorbell");
+}
+
+void submit_error_names(TestContext *context) {
+  context->expect(
+      std::string(light_rocr::transport::hsakmt::aql_submit_error_name(
+          light_rocr::transport::hsakmt::AqlSubmitError::QueueFull)) ==
+          "queue_full",
+      "unexpected submit error name");
+}
+
+void inactive_queue_rejects_submission(TestContext *context) {
+  light_rocr::transport::hsakmt::AqlQueue queue;
+  const auto submitted = queue.submit_kernel_dispatch(valid_packet());
+  context->expect(
+      submitted.error ==
+          light_rocr::transport::hsakmt::AqlSubmitError::InvalidQueue,
+      "inactive queue accepted a packet");
 }
 
 } // namespace
@@ -397,6 +514,10 @@ extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPUNodes(
 
 extern "C" HSAKMT_STATUS hsaKmtUnmapMemoryToGPU(void *address) {
   fake.calls.push_back(std::string("unmap:") + allocation_name(address));
+  ++fake.unmap_calls;
+  if (fake.fail_unmap_call == fake.unmap_calls) {
+    return HSAKMT_STATUS_ERROR;
+  }
   return HSAKMT_STATUS_SUCCESS;
 }
 
@@ -446,8 +567,18 @@ int main() {
       {"create_failure_releases_both_allocations",
        create_failure_releases_both_allocations},
       {"destroy_failure_is_retryable", destroy_failure_is_retryable},
+      {"partial_cleanup_keeps_index_accessors_safe",
+       partial_cleanup_keeps_index_accessors_safe},
       {"queue_keeps_session_open", queue_keeps_session_open},
       {"destructor_cleans_up_in_order", destructor_cleans_up_in_order},
+      {"publishes_packet_and_rings_doorbell",
+       publishes_packet_and_rings_doorbell},
+      {"rejects_invalid_packet_without_publication",
+       rejects_invalid_packet_without_publication},
+      {"reports_full_queue_without_publication",
+       reports_full_queue_without_publication},
+      {"submit_error_names", submit_error_names},
+      {"inactive_queue_rejects_submission", inactive_queue_rejects_submission},
   };
 
   TestContext context;

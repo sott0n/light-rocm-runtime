@@ -8,13 +8,16 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <new>
 #include <string>
 #include <utility>
 
+#if defined(__x86_64__)
+#include <emmintrin.h>
+#endif
+
 namespace light_rocr::transport::hsakmt {
 namespace {
-
-constexpr uint16_t kInvalidPacketHeader = 1;
 
 struct alignas(64) AqlQueueControl {
   alignas(64) uint64_t read_index = 0;
@@ -25,6 +28,8 @@ static_assert(sizeof(AqlQueueControl) <= kMemoryPageSize);
 static_assert(offsetof(AqlQueueControl, read_index) == 0);
 static_assert(offsetof(AqlQueueControl, write_index) == 64);
 static_assert(sizeof(uintptr_t) == sizeof(uint64_t));
+static_assert(__atomic_always_lock_free(sizeof(uint16_t), nullptr));
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr));
 
 AqlQueueStatus failure(AqlQueueError error, HSAKMT_STATUS status,
                        const std::string &operation) {
@@ -46,12 +51,26 @@ bool is_power_of_two(uint64_t value) {
   return value != 0 && (value & (value - 1)) == 0;
 }
 
+void fence_before_doorbell_store() {
+#if defined(__x86_64__)
+  // The doorbell mapping is write-combined/uncached. A C++ release store does
+  // not emit the hardware store fence needed to order ordinary packet writes
+  // before this MMIO write on x86.
+  _mm_sfence();
+#elif defined(__aarch64__)
+  // Order normal-memory packet writes before the outer-shareable MMIO store.
+  __asm__ __volatile__("dmb oshst" ::: "memory");
+#else
+#error "light-rocr needs an audited host MMIO store fence for this architecture"
+#endif
+}
+
 void initialize_ring(MemoryAllocation &ring) {
   auto *bytes = static_cast<uint8_t *>(ring.host_address());
   std::memset(bytes, 0, static_cast<size_t>(ring.size()));
   for (uint64_t offset = 0; offset < ring.size(); offset += kAqlPacketSize) {
-    std::memcpy(bytes + offset, &kInvalidPacketHeader,
-                sizeof(kInvalidPacketHeader));
+    ::new (static_cast<void *>(bytes + offset))
+        runtime::AqlKernelDispatchPacket;
   }
 }
 
@@ -65,6 +84,20 @@ struct AqlQueueState {
   MemoryAllocation ring;
   MemoryAllocation control;
 };
+
+const char *aql_submit_error_name(AqlSubmitError error) {
+  switch (error) {
+  case AqlSubmitError::None:
+    return "none";
+  case AqlSubmitError::InvalidQueue:
+    return "invalid_queue";
+  case AqlSubmitError::InvalidPacket:
+    return "invalid_packet";
+  case AqlSubmitError::QueueFull:
+    return "queue_full";
+  }
+  return "unknown";
+}
 
 const char *aql_queue_error_name(AqlQueueError error) {
   switch (error) {
@@ -120,6 +153,7 @@ AqlQueueResult KfdSession::create_aql_queue(uint32_t gpu_node_id,
   }
   std::memset(control.allocation.host_address(), 0,
               static_cast<size_t>(control.allocation.size()));
+  ::new (control.allocation.host_address()) AqlQueueControl;
 
   // Allocate all host bookkeeping before the KMT call. Once KMT creates the
   // queue, no throwing operation may occur before its handle is owned.
@@ -188,6 +222,72 @@ uint64_t AqlQueue::ring_gpu_address() const {
 
 uint64_t AqlQueue::ring_size() const {
   return state_ != nullptr ? state_->ring_size : 0;
+}
+
+uint64_t AqlQueue::read_index_acquire() const {
+  if (state_ == nullptr || state_->control.host_address() == nullptr) {
+    return 0;
+  }
+  const auto *control =
+      static_cast<const AqlQueueControl *>(state_->control.host_address());
+  return __atomic_load_n(&control->read_index, __ATOMIC_ACQUIRE);
+}
+
+uint64_t AqlQueue::write_index_relaxed() const {
+  if (state_ == nullptr || state_->control.host_address() == nullptr) {
+    return 0;
+  }
+  const auto *control =
+      static_cast<const AqlQueueControl *>(state_->control.host_address());
+  return __atomic_load_n(&control->write_index, __ATOMIC_RELAXED);
+}
+
+AqlSubmitResult AqlQueue::submit_kernel_dispatch(
+    const runtime::AqlKernelDispatchPacket &packet) {
+  if (state_ == nullptr || !state_->active || state_->doorbell_address == 0 ||
+      state_->ring.host_address() == nullptr ||
+      state_->control.host_address() == nullptr) {
+    return {AqlSubmitError::InvalidQueue, 0, 0, 0, "AQL queue is not active"};
+  }
+  const runtime::AqlPacketStatus packet_status =
+      runtime::validate_kernel_dispatch_packet(packet);
+  if (!packet_status) {
+    return {AqlSubmitError::InvalidPacket, 0, read_index_acquire(),
+            write_index_relaxed(), packet_status.message};
+  }
+
+  auto *control =
+      static_cast<AqlQueueControl *>(state_->control.host_address());
+  const uint64_t read_index =
+      __atomic_load_n(&control->read_index, __ATOMIC_ACQUIRE);
+  const uint64_t write_index =
+      __atomic_load_n(&control->write_index, __ATOMIC_RELAXED);
+  const uint64_t packet_count = state_->ring_size / kAqlPacketSize;
+  if (write_index - read_index >= packet_count) {
+    return {AqlSubmitError::QueueFull, write_index, read_index, write_index,
+            "AQL queue has no free packet slot"};
+  }
+
+  const uint64_t slot_index = write_index & (packet_count - 1);
+  auto *slot = static_cast<uint8_t *>(state_->ring.host_address()) +
+               static_cast<size_t>(slot_index * kAqlPacketSize);
+  auto *slot_header = reinterpret_cast<uint16_t *>(slot);
+  __atomic_store_n(slot_header, runtime::kAqlPacketTypeInvalid,
+                   __ATOMIC_RELAXED);
+  const auto *packet_bytes = reinterpret_cast<const uint8_t *>(&packet);
+  std::memcpy(slot + sizeof(packet.header),
+              packet_bytes + sizeof(packet.header),
+              sizeof(packet) - sizeof(packet.header));
+
+  // Header publication makes the complete packet visible. The write index and
+  // MMIO doorbell are updated only after that release point.
+  __atomic_store_n(slot_header, packet.header, __ATOMIC_RELEASE);
+  __atomic_store_n(&control->write_index, write_index + 1, __ATOMIC_RELEASE);
+  fence_before_doorbell_store();
+  auto *doorbell = reinterpret_cast<uint64_t *>(state_->doorbell_address);
+  __atomic_store_n(doorbell, write_index, __ATOMIC_RELAXED);
+
+  return {AqlSubmitError::None, write_index, read_index, write_index + 1, {}};
 }
 
 AqlQueue::operator bool() const { return state_ != nullptr && state_->active; }

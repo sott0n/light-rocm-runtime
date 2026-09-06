@@ -1,6 +1,7 @@
 #ifndef LIGHT_ROCR_TRANSPORT_HSAKMT_QUEUE_HPP
 #define LIGHT_ROCR_TRANSPORT_HSAKMT_QUEUE_HPP
 
+#include "light_rocr/runtime/aql.hpp"
 #include "light_rocr/transport/hsakmt/memory.hpp"
 
 #include <cstdint>
@@ -36,6 +37,23 @@ struct AqlQueueStatus {
 
 struct AqlQueueState;
 
+enum class AqlSubmitError {
+  None,
+  InvalidQueue,
+  InvalidPacket,
+  QueueFull,
+};
+
+struct AqlSubmitResult {
+  AqlSubmitError error = AqlSubmitError::None;
+  uint64_t packet_id = 0;
+  uint64_t read_index = 0;
+  uint64_t write_index = 0;
+  std::string message;
+
+  explicit operator bool() const { return error == AqlSubmitError::None; }
+};
+
 class AqlQueue {
 public:
   AqlQueue();
@@ -50,6 +68,13 @@ public:
   [[nodiscard]] void *ring_host_address() const;
   [[nodiscard]] uint64_t ring_gpu_address() const;
   [[nodiscard]] uint64_t ring_size() const;
+  // Index accessors return zero after their control allocation is released.
+  [[nodiscard]] uint64_t read_index_acquire() const;
+  [[nodiscard]] uint64_t write_index_relaxed() const;
+  // The initial implementation is deliberately single-producer. A successful
+  // submission publishes one validated packet and rings the 64-bit doorbell.
+  [[nodiscard]] AqlSubmitResult
+  submit_kernel_dispatch(const runtime::AqlKernelDispatchPacket &packet);
   explicit operator bool() const;
 
   [[nodiscard]] AqlQueueStatus release();
@@ -70,6 +95,7 @@ struct AqlQueueResult {
 };
 
 [[nodiscard]] const char *aql_queue_error_name(AqlQueueError error);
+[[nodiscard]] const char *aql_submit_error_name(AqlSubmitError error);
 
 } // namespace light_rocr::transport::hsakmt
 

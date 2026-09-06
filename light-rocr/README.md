@@ -12,6 +12,9 @@ and VRAM memory, creates compute AQL queues, and manages their lifetimes
 without loading `libhsa-runtime64.so`. It also provides the hardware-visible
 AMD user-signal ABI, CPU atomic operations, bounded active waits, and mapped
 GTT-backed signal ownership.
+The first fixed `gfx1101` AQL dispatch now runs without ROCr: light-rocr writes
+the packet, advances its queue index, rings the KMT-mapped doorbell, observes a
+GPU completion-signal decrement, and verifies a GPU-written canary value.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -58,6 +61,13 @@ doorbell:
 ./build-light-rocr/light-rocr-check-signal
 ```
 
+Publish one fixed, scratch-free `gfx1101` kernel-dispatch packet and verify its
+GPU store and native completion signal with bounded waits:
+
+```sh
+./build-light-rocr/light-rocr-check-dispatch
+```
+
 The topology tool is built when the public `hsakmt` headers, library, and its
 DRM/NUMA dependencies are available. `LIGHT_ROCR_ENABLE_HSAKMT=OFF` keeps the
 standalone loader and host-only topology tests buildable without them. Live
@@ -69,10 +79,11 @@ nodes in the initial single-GPU runtime. Host tests replace the seven KMT entry
 points used by discovery, so conversion, call ordering, and every cleanup path
 remain testable without a GPU.
 
-When an installed `hsa/amd_hsa_signal.h` is available, the test build adds an
-optional compile-time ABI oracle comparing the self-authored signal definition
-with ROCr's definition. Neither the runtime nor the libhsakmt signal tests
-require that ROCr header, and the oracle does not link `libhsa-runtime64.so`.
+When installed HSA headers are available, the test build adds optional
+compile-time ABI oracles comparing the self-authored signal and 64-byte AQL
+kernel-dispatch packet definitions with the public definitions used by ROCr.
+The runtime and libhsakmt tests do not require those ROCr headers, and the
+oracles do not link `libhsa-runtime64.so`.
 
 The memory transport opens KFD and retains a system-property snapshot for the
 whole session. `allocate_gtt` creates 4 KiB-aligned, non-pageable system memory
@@ -85,6 +96,8 @@ so KFD cannot close while mapped memory remains alive. Explicit or RAII cleanup
 orders unmap before free; explicit cleanup failures retain enough state to
 retry. The live diagnostic writes and reads GTT (and public VRAM when present),
 then checks VRAM mapping and cleanup without dereferencing private VRAM.
+`allocate_executable_gtt` uses the same ownership rules while requesting KFD's
+execute page attribute for the initial fixed kernel image.
 
 The queue transport allocates a 64 KiB default ring as executable AQL queue
 memory and initializes every 64-byte packet header to the invalid type. A
@@ -97,6 +110,16 @@ retried. In this libhsakmt phase, libhsakmt itself owns the EOP buffer, CWSR
 storage, and doorbell mapping. Those resources become light-rocr's explicit
 responsibility only in the later direct-KFD transport.
 
+The transport-independent AQL definition validates the initial narrow policy:
+one-, two-, or three-dimensional dispatch geometry, 64-byte-aligned AMD kernel
+descriptors and completion signals, at least 16-byte-aligned kernarg, zeroed
+reserved fields, the gfx1101 limit of 1,024 total work-items per workgroup, and
+system-scope acquire/release fences. The current queue is single-producer.
+Submission rejects an invalid packet or a full queue before mutation, writes
+the payload into an invalid ring slot, publishes its 16-bit header with release
+ordering, advances the 64-bit write index, executes the host-architecture MMIO
+store fence, and finally writes the packet ID to the mapped 64-bit doorbell.
+
 The native user signal is the AMD hardware ABI object itself: a 64-byte object
 on a 64-byte boundary, with the user kind at offset 0 and its 64-bit atomic
 value at offset 8. Its AQL handle is the GPU virtual address of the complete
@@ -106,6 +129,19 @@ lock-free relaxed/release stores, relaxed/acquire loads, and a deadline-bounded
 active wait. The KMT transport places one signal in a mapped GTT page and keeps
 the KFD session alive for the mapping's lifetime. Interrupt-backed waits and
 signal pooling are intentionally deferred.
+
+The fixed dispatch diagnostic deliberately bypasses normal ELF loading. It
+places a self-contained AMDHSA descriptor and the audited 48-byte instruction
+sequence from `tools/fixed_gfx1101_store.s` in executable GTT. A 16-byte
+kernarg supplies a GTT output address and canary. One work-item stores that
+canary, while packet completion decrements the native signal from one to zero.
+Both observations, queue-index progress, a two-second signal deadline, and
+ordered queue-before-memory cleanup are checked. This isolates AQL
+queue/packet/doorbell/signal behavior; ordinary HSACO segment materialization
+and relocation remain the next Loader unit. When AMDGPU Clang and
+`llvm-objcopy` are available, an additional host test reassembles and links the
+checked-in source at the fixed layout, then compares both its descriptor and
+instruction bytes with the embedded image.
 
 The inspector reports checked `PT_LOAD` records and, when an AMDGPU metadata
 note is present, the metadata version, target ISA, kernel inventory, ELF

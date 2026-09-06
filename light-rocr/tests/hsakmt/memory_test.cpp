@@ -124,6 +124,27 @@ void public_vram_is_host_accessible(TestContext *context) {
                   "unexpected public VRAM mapping policy");
 }
 
+void executable_gtt_sets_execute_access(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto allocated = opened.session.allocate_executable_gtt(7, 4096);
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(allocated.allocation.kind() ==
+                          light_rocr::transport::hsakmt::MemoryKind::Gtt &&
+                      allocated.allocation.host_accessible(),
+                  "executable GTT has incorrect retained properties");
+
+  HsaMemFlags expected_flags{};
+  expected_flags.ui32.NonPaged = 1;
+  expected_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+  expected_flags.ui32.HostAccess = 1;
+  expected_flags.ui32.ExecuteAccess = 1;
+  expected_flags.ui32.NoNUMABind = 1;
+  context->expect(fake.preferred_node == 0 &&
+                      fake.allocation_flags.Value == expected_flags.Value,
+                  "executable GTT allocation omitted execute access");
+}
+
 void private_vram_hides_host_address(TestContext *context) {
   reset_fake();
   auto opened = light_rocr::transport::hsakmt::KfdSession::open();
@@ -381,6 +402,8 @@ extern "C" HSAKMT_STATUS hsaKmtFreeMemory(void *address, HSAuint64 size) {
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"successful_round_trip", successful_round_trip},
+      {"executable_gtt_sets_execute_access",
+       executable_gtt_sets_execute_access},
       {"public_vram_is_host_accessible", public_vram_is_host_accessible},
       {"private_vram_hides_host_address", private_vram_hides_host_address},
       {"identity_mapping_uses_cpu_address", identity_mapping_uses_cpu_address},

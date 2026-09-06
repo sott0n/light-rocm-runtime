@@ -25,6 +25,7 @@ enum class MemoryError {
   AcquireSystemProperties,
   InvalidVramHeap,
   AllocateGtt,
+  AllocateExecutableGtt,
   AllocateVram,
   MapToGpu,
   UnmapFromGpu,
@@ -57,6 +58,8 @@ public:
   [[nodiscard]] static SessionResult open();
   [[nodiscard]] AllocationResult allocate_gtt(uint32_t gpu_node_id,
                                               uint64_t size) const;
+  [[nodiscard]] AllocationResult allocate_executable_gtt(uint32_t gpu_node_id,
+                                                         uint64_t size) const;
   [[nodiscard]] AllocationResult
   allocate_vram(uint32_t gpu_node_id, runtime::MemoryHeapType heap_type,
                 uint64_t size) const;

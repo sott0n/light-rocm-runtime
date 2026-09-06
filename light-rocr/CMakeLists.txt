@@ -39,7 +39,12 @@ target_include_directories(
 set_target_properties(light_rocr_loader PROPERTIES POSITION_INDEPENDENT_CODE ON)
 light_rocr_enable_warnings(light_rocr_loader)
 
-add_library(light_rocr_core runtime/signal.cpp runtime/topology.cpp)
+add_library(
+  light_rocr_core
+  runtime/aql.cpp
+  runtime/signal.cpp
+  runtime/topology.cpp
+)
 add_library(light_rocr::core ALIAS light_rocr_core)
 target_compile_features(light_rocr_core PUBLIC cxx_std_17)
 target_include_directories(
@@ -164,6 +169,17 @@ if(LIGHT_ROCR_BUILD_TOOLS)
       PROPERTIES OUTPUT_NAME light-rocr-check-signal
     )
 
+    add_executable(light_rocr_check_dispatch tools/check_dispatch.cpp)
+    target_link_libraries(
+      light_rocr_check_dispatch
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_check_dispatch)
+    set_target_properties(
+      light_rocr_check_dispatch
+      PROPERTIES OUTPUT_NAME light-rocr-check-dispatch
+    )
+
     add_executable(light_rocr_inspect_topology tools/inspect_topology.cpp)
     target_link_libraries(
       light_rocr_inspect_topology
@@ -213,6 +229,111 @@ if(LIGHT_ROCR_BUILD_TESTS)
   light_rocr_enable_warnings(light_rocr_signal_tests)
   add_test(NAME light_rocr_signal_tests COMMAND light_rocr_signal_tests)
 
+  add_executable(light_rocr_aql_tests tests/runtime/aql_test.cpp)
+  target_link_libraries(light_rocr_aql_tests PRIVATE light_rocr::core)
+  light_rocr_enable_warnings(light_rocr_aql_tests)
+  add_test(NAME light_rocr_aql_tests COMMAND light_rocr_aql_tests)
+
+  find_program(
+    LIGHT_ROCR_AMDGPU_CLANG
+    NAMES clang
+    HINTS /opt/rocm/llvm/bin
+  )
+  find_program(
+    LIGHT_ROCR_LLVM_OBJCOPY
+    NAMES llvm-objcopy
+    HINTS /opt/rocm/llvm/bin
+  )
+  if(LIGHT_ROCR_AMDGPU_CLANG AND LIGHT_ROCR_LLVM_OBJCOPY)
+    set(
+      LIGHT_ROCR_FIXED_GFX1101_BUILD_DIR
+      "${CMAKE_CURRENT_BINARY_DIR}/fixed-gfx1101-store"
+    )
+    set(
+      LIGHT_ROCR_FIXED_GFX1101_OBJECT
+      "${LIGHT_ROCR_FIXED_GFX1101_BUILD_DIR}/fixed_gfx1101_store.o"
+    )
+    set(
+      LIGHT_ROCR_FIXED_GFX1101_IMAGE
+      "${LIGHT_ROCR_FIXED_GFX1101_BUILD_DIR}/fixed_gfx1101_store.co"
+    )
+    set(
+      LIGHT_ROCR_FIXED_GFX1101_DESCRIPTOR
+      "${LIGHT_ROCR_FIXED_GFX1101_BUILD_DIR}/fixed_gfx1101_store.rodata"
+    )
+    set(
+      LIGHT_ROCR_FIXED_GFX1101_TEXT
+      "${LIGHT_ROCR_FIXED_GFX1101_BUILD_DIR}/fixed_gfx1101_store.text"
+    )
+    add_custom_command(
+      OUTPUT
+        "${LIGHT_ROCR_FIXED_GFX1101_DESCRIPTOR}"
+        "${LIGHT_ROCR_FIXED_GFX1101_TEXT}"
+      BYPRODUCTS
+        "${LIGHT_ROCR_FIXED_GFX1101_OBJECT}"
+        "${LIGHT_ROCR_FIXED_GFX1101_IMAGE}"
+      COMMAND
+        "${CMAKE_COMMAND}" -E make_directory
+        "${LIGHT_ROCR_FIXED_GFX1101_BUILD_DIR}"
+      COMMAND
+        "${LIGHT_ROCR_AMDGPU_CLANG}" -target amdgcn-amd-amdhsa -mcpu=gfx1101
+        -c "${CMAKE_CURRENT_SOURCE_DIR}/tools/fixed_gfx1101_store.s"
+        -o "${LIGHT_ROCR_FIXED_GFX1101_OBJECT}"
+      COMMAND
+        "${LIGHT_ROCR_AMDGPU_CLANG}" -target amdgcn-amd-amdhsa -mcpu=gfx1101
+        -nostdlib -Wl,--section-start=.rodata=0x1000
+        -Wl,--section-start=.text=0x1100
+        "${LIGHT_ROCR_FIXED_GFX1101_OBJECT}"
+        -o "${LIGHT_ROCR_FIXED_GFX1101_IMAGE}"
+      COMMAND
+        "${LIGHT_ROCR_LLVM_OBJCOPY}"
+        "--dump-section=.rodata=${LIGHT_ROCR_FIXED_GFX1101_DESCRIPTOR}"
+        "${LIGHT_ROCR_FIXED_GFX1101_IMAGE}"
+      COMMAND
+        "${LIGHT_ROCR_LLVM_OBJCOPY}"
+        "--dump-section=.text=${LIGHT_ROCR_FIXED_GFX1101_TEXT}"
+        "${LIGHT_ROCR_FIXED_GFX1101_IMAGE}"
+      DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/tools/fixed_gfx1101_store.s"
+      COMMENT "Reassembling the fixed gfx1101 dispatch image"
+      VERBATIM
+    )
+    add_custom_target(
+      light_rocr_fixed_gfx1101_store_artifact
+      DEPENDS
+        "${LIGHT_ROCR_FIXED_GFX1101_DESCRIPTOR}"
+        "${LIGHT_ROCR_FIXED_GFX1101_TEXT}"
+    )
+    add_executable(
+      light_rocr_fixed_gfx1101_store_tests
+      tests/runtime/fixed_gfx1101_store_test.cpp
+    )
+    target_compile_features(
+      light_rocr_fixed_gfx1101_store_tests
+      PRIVATE cxx_std_17
+    )
+    target_include_directories(
+      light_rocr_fixed_gfx1101_store_tests
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools"
+    )
+    add_dependencies(
+      light_rocr_fixed_gfx1101_store_tests
+      light_rocr_fixed_gfx1101_store_artifact
+    )
+    light_rocr_enable_warnings(light_rocr_fixed_gfx1101_store_tests)
+    add_test(
+      NAME light_rocr_fixed_gfx1101_store_tests
+      COMMAND
+        light_rocr_fixed_gfx1101_store_tests
+        "${LIGHT_ROCR_FIXED_GFX1101_DESCRIPTOR}"
+        "${LIGHT_ROCR_FIXED_GFX1101_TEXT}"
+    )
+  else()
+    message(
+      STATUS
+      "light-rocr fixed gfx1101 reassembly oracle unavailable"
+    )
+  endif()
+
   find_path(
     LIGHT_ROCR_ROCR_SIGNAL_ABI_INCLUDE_DIR
     NAMES hsa/amd_hsa_signal.h
@@ -235,6 +356,24 @@ if(LIGHT_ROCR_BUILD_TESTS)
     add_test(
       NAME light_rocr_rocr_signal_abi_tests
       COMMAND light_rocr_rocr_signal_abi_tests
+    )
+
+    add_executable(
+      light_rocr_rocr_aql_abi_tests
+      tests/runtime/rocr_aql_abi_test.cpp
+    )
+    target_include_directories(
+      light_rocr_rocr_aql_abi_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_ROCR_SIGNAL_ABI_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_rocr_aql_abi_tests
+      PRIVATE light_rocr::core
+    )
+    light_rocr_enable_warnings(light_rocr_rocr_aql_abi_tests)
+    add_test(
+      NAME light_rocr_rocr_aql_abi_tests
+      COMMAND light_rocr_rocr_aql_abi_tests
     )
   endif()
 

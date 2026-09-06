@@ -52,6 +52,8 @@ const char *memory_error_name(MemoryError error) {
     return "invalid_vram_heap";
   case MemoryError::AllocateGtt:
     return "allocate_gtt";
+  case MemoryError::AllocateExecutableGtt:
+    return "allocate_executable_gtt";
   case MemoryError::AllocateVram:
     return "allocate_vram";
   case MemoryError::MapToGpu:
@@ -97,6 +99,22 @@ AllocationResult KfdSession::allocate_gtt(uint32_t gpu_node_id,
 
   return allocate(0, gpu_node_id, size, MemoryKind::Gtt, true,
                   MemoryError::AllocateGtt, "GTT");
+}
+
+AllocationResult KfdSession::allocate_executable_gtt(uint32_t gpu_node_id,
+                                                     uint64_t size) const {
+  if (state_ == nullptr) {
+    return {{MemoryError::InvalidSession, 0, "KFD session is not open"}, {}};
+  }
+  if (size == 0 || size % kMemoryPageSize != 0) {
+    return {{MemoryError::InvalidSize, 0,
+             "executable GTT allocation size must be a non-zero multiple of "
+             "4096 bytes"},
+            {}};
+  }
+
+  return allocate(0, gpu_node_id, size, MemoryKind::Gtt, true,
+                  MemoryError::AllocateExecutableGtt, "executable GTT", true);
 }
 
 AllocationResult KfdSession::allocate_vram(uint32_t gpu_node_id,
