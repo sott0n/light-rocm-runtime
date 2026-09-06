@@ -41,6 +41,24 @@ enum class ParseErrorCode {
   OverlappingSegmentFileRanges,
   OverlappingSegmentVirtualRanges,
   MissingLoadSegments,
+  MalformedNote,
+  DuplicateMetadataNote,
+  UnsupportedMetadataEncoding,
+  InvalidMetadata,
+  UnsupportedMetadataVersion,
+  MetadataTargetMismatch,
+  MissingDynamicSegment,
+  DuplicateDynamicSegment,
+  InvalidDynamicTable,
+  MissingDynamicEntry,
+  InvalidSymbolTable,
+  InvalidStringTable,
+  MissingKernelSymbol,
+  InvalidKernelSymbol,
+  KernelDescriptorOutOfBounds,
+  InvalidKernelDescriptor,
+  KernelMetadataMismatch,
+  KernelEntryOutOfBounds,
 };
 
 const char *parse_error_code_name(ParseErrorCode code);
@@ -60,11 +78,44 @@ struct LoadSegment {
   uint32_t flags = 0;
 };
 
+struct MetadataVersion {
+  uint32_t major = 0;
+  uint32_t minor = 0;
+};
+
+struct KernelInfo {
+  // Source-level kernel name and ELF kernel-descriptor symbol name.
+  std::string name;
+  std::string symbol_name;
+
+  uint64_t descriptor_virtual_address = 0;
+  int64_t code_entry_byte_offset = 0;
+  uint64_t code_entry_virtual_address = 0;
+
+  uint32_t kernarg_size = 0;
+  uint32_t metadata_kernarg_alignment = 0;
+  uint32_t kernarg_alignment = 0;
+  uint32_t group_segment_size = 0;
+  uint32_t private_segment_size = 0;
+  uint32_t wavefront_size = 0;
+  bool uses_dynamic_stack = false;
+
+  uint32_t compute_pgm_rsrc1 = 0;
+  uint32_t compute_pgm_rsrc2 = 0;
+  uint32_t compute_pgm_rsrc3 = 0;
+  uint16_t kernel_code_properties = 0;
+  uint16_t kernarg_preload = 0;
+};
+
 struct CodeObject {
   uint8_t abi_version = 0;
   uint32_t elf_flags = 0;
   uint32_t target_machine = 0;
   std::vector<LoadSegment> load_segments;
+  bool has_metadata = false;
+  MetadataVersion metadata_version;
+  std::string target_isa;
+  std::vector<KernelInfo> kernels;
 };
 
 struct ParseResult {

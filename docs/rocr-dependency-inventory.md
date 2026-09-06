@@ -212,6 +212,30 @@ to omit relocation support from the loader. The loader test corpus must include
 every relocation form observed in Clang, Triton, and IREE artifacts used by the
 project.
 
+### Native metadata comparison
+
+`light-rocr-inspect-hsaco` now decodes AMDHSA metadata 1.2, resolves each
+metadata kernel to its 64-byte `.kd` dynamic symbol through `PT_DYNAMIC`, and
+validates the descriptor against the metadata without requiring ELF section
+headers. On 2026-09-06 its stable output was compared with
+`lrrt_rocr_baseline` for Clang, Triton, and IREE artifacts. The comparison uses
+symbol names rather than iteration order because ROCr's symbol iteration order
+is not metadata order.
+
+| Artifact | Kernels | kernarg size | public alignment | group/private | dynamic stack |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Clang `vector_add_kernel.hsaco` | 1 | 288 | 16 | 0 / 272 | false |
+| Triton `triton_rmsnorm_bundle/kernels.hsaco` | 1 | 56 | 16 | 0 / 0 | false |
+| IREE `minimal_mul_gfx1101.hsaco` | 1 | 24 | 16 | 0 / 0 | false |
+| Clang `async_copy_launch_kernel.hsaco` | 3 | 280, 272, 264 | 16 | 0 / 140, 0 / 140, 0 / 92 | false |
+
+All stable executable properties matched ROCr. Descriptor virtual addresses
+are pre-load ELF addresses in the native inspector, whereas ROCr reports
+process-specific relocated kernel-object addresses, so those absolute values
+are deliberately not compared. A corpus scan also parsed all 208 HSACO files
+then present under the repository's `build`, `build-triton`, and
+`build-iree-probe` trees without GPU access.
+
 ## Executable dependency baseline
 
 The current dependency edge can be verified with:

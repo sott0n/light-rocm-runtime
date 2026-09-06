@@ -1,5 +1,7 @@
 #include "light_rocr/loader/code_object.hpp"
 
+#include "metadata_reader.hpp"
+
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -233,6 +235,42 @@ const char *parse_error_code_name(ParseErrorCode code) {
     return "overlapping_segment_virtual_ranges";
   case ParseErrorCode::MissingLoadSegments:
     return "missing_load_segments";
+  case ParseErrorCode::MalformedNote:
+    return "malformed_note";
+  case ParseErrorCode::DuplicateMetadataNote:
+    return "duplicate_metadata_note";
+  case ParseErrorCode::UnsupportedMetadataEncoding:
+    return "unsupported_metadata_encoding";
+  case ParseErrorCode::InvalidMetadata:
+    return "invalid_metadata";
+  case ParseErrorCode::UnsupportedMetadataVersion:
+    return "unsupported_metadata_version";
+  case ParseErrorCode::MetadataTargetMismatch:
+    return "metadata_target_mismatch";
+  case ParseErrorCode::MissingDynamicSegment:
+    return "missing_dynamic_segment";
+  case ParseErrorCode::DuplicateDynamicSegment:
+    return "duplicate_dynamic_segment";
+  case ParseErrorCode::InvalidDynamicTable:
+    return "invalid_dynamic_table";
+  case ParseErrorCode::MissingDynamicEntry:
+    return "missing_dynamic_entry";
+  case ParseErrorCode::InvalidSymbolTable:
+    return "invalid_symbol_table";
+  case ParseErrorCode::InvalidStringTable:
+    return "invalid_string_table";
+  case ParseErrorCode::MissingKernelSymbol:
+    return "missing_kernel_symbol";
+  case ParseErrorCode::InvalidKernelSymbol:
+    return "invalid_kernel_symbol";
+  case ParseErrorCode::KernelDescriptorOutOfBounds:
+    return "kernel_descriptor_out_of_bounds";
+  case ParseErrorCode::InvalidKernelDescriptor:
+    return "invalid_kernel_descriptor";
+  case ParseErrorCode::KernelMetadataMismatch:
+    return "kernel_metadata_mismatch";
+  case ParseErrorCode::KernelEntryOutOfBounds:
+    return "kernel_entry_out_of_bounds";
   }
   return "unknown";
 }
@@ -386,6 +424,9 @@ ParseResult parse_code_object(const uint8_t *data, size_t size) {
                        kProgramHeaderVirtualAddressOffset,
                    "PT_LOAD segments have overlapping virtual ranges");
   }
+
+  result.error =
+      internal::decode_amdhsa_metadata(data, size, &result.code_object);
 
   return result;
 }

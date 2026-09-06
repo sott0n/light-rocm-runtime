@@ -14,7 +14,11 @@ function(light_rocr_enable_warnings target)
   endif()
 endfunction()
 
-add_library(light_rocr_loader loader/elf_reader.cpp)
+add_library(
+  light_rocr_loader
+  loader/elf_reader.cpp
+  loader/metadata_reader.cpp
+)
 add_library(light_rocr::loader ALIAS light_rocr_loader)
 
 target_compile_features(light_rocr_loader PUBLIC cxx_std_17)
@@ -43,4 +47,12 @@ if(LIGHT_ROCR_BUILD_TESTS)
   target_link_libraries(light_rocr_loader_tests PRIVATE light_rocr::loader)
   light_rocr_enable_warnings(light_rocr_loader_tests)
   add_test(NAME light_rocr_loader_tests COMMAND light_rocr_loader_tests)
+
+  add_executable(
+    light_rocr_metadata_tests
+    tests/loader/metadata_reader_test.cpp
+  )
+  target_link_libraries(light_rocr_metadata_tests PRIVATE light_rocr::loader)
+  light_rocr_enable_warnings(light_rocr_metadata_tests)
+  add_test(NAME light_rocr_metadata_tests COMMAND light_rocr_metadata_tests)
 endif()

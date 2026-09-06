@@ -84,6 +84,14 @@ int main(int argc, char **argv) {
   std::cout << "elf_flags=0x" << std::hex << object.elf_flags << std::dec
             << '\n';
   std::cout << "load_segment_count=" << object.load_segments.size() << '\n';
+  std::cout << "metadata_present=" << (object.has_metadata ? 1 : 0) << '\n';
+
+  if (object.has_metadata) {
+    std::cout << "metadata_version=" << object.metadata_version.major << '.'
+              << object.metadata_version.minor << '\n';
+    std::cout << "target_isa=" << std::quoted(object.target_isa) << '\n';
+    std::cout << "kernel_count=" << object.kernels.size() << '\n';
+  }
 
   for (size_t index = 0; index < object.load_segments.size(); ++index) {
     const light_rocr::loader::LoadSegment &segment =
@@ -100,6 +108,47 @@ int main(int argc, char **argv) {
               << std::dec << '\n';
     std::cout << "segment." << index
               << ".permissions=" << permissions(segment.flags) << '\n';
+  }
+
+  for (size_t index = 0; index < object.kernels.size(); ++index) {
+    const light_rocr::loader::KernelInfo &kernel = object.kernels[index];
+    std::cout << "kernel." << index << ".name=" << std::quoted(kernel.name)
+              << '\n';
+    std::cout << "kernel." << index
+              << ".symbol=" << std::quoted(kernel.symbol_name) << '\n';
+    std::cout << "kernel." << index << ".descriptor_virtual_address=0x"
+              << std::hex << kernel.descriptor_virtual_address << '\n';
+    std::cout << "kernel." << index << ".code_entry_byte_offset=" << std::dec
+              << kernel.code_entry_byte_offset << '\n';
+    std::cout << "kernel." << index << ".code_entry_virtual_address=0x"
+              << std::hex << kernel.code_entry_virtual_address << std::dec
+              << '\n';
+    std::cout << "kernel." << index << ".kernarg_size=" << kernel.kernarg_size
+              << '\n';
+    std::cout << "kernel." << index << ".metadata_kernarg_alignment="
+              << kernel.metadata_kernarg_alignment << '\n';
+    std::cout << "kernel." << index
+              << ".kernarg_alignment=" << kernel.kernarg_alignment << '\n';
+    std::cout << "kernel." << index
+              << ".group_segment_size=" << kernel.group_segment_size << '\n';
+    std::cout << "kernel." << index
+              << ".private_segment_size=" << kernel.private_segment_size
+              << '\n';
+    std::cout << "kernel." << index
+              << ".wavefront_size=" << kernel.wavefront_size << '\n';
+    std::cout << "kernel." << index
+              << ".uses_dynamic_stack=" << (kernel.uses_dynamic_stack ? 1 : 0)
+              << '\n';
+    std::cout << "kernel." << index << ".compute_pgm_rsrc1=0x" << std::hex
+              << kernel.compute_pgm_rsrc1 << '\n';
+    std::cout << "kernel." << index << ".compute_pgm_rsrc2=0x"
+              << kernel.compute_pgm_rsrc2 << '\n';
+    std::cout << "kernel." << index << ".compute_pgm_rsrc3=0x"
+              << kernel.compute_pgm_rsrc3 << '\n';
+    std::cout << "kernel." << index << ".kernel_code_properties=0x"
+              << kernel.kernel_code_properties << '\n';
+    std::cout << "kernel." << index << ".kernarg_preload=0x"
+              << kernel.kernarg_preload << std::dec << '\n';
   }
   return 0;
 }
