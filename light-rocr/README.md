@@ -18,6 +18,9 @@ GPU completion-signal decrement, and verifies a GPU-written canary value.
 The normal Loader `LoadPlan` can now be materialized into an executable GTT
 image as well: file-backed ranges are copied, BSS and allocation padding are
 zeroed, and kernel descriptor virtual addresses are resolved to GPU addresses.
+The common runtime can also materialize caller-provided kernarg bytes into a
+metadata-sized logical buffer and build an AQL dispatch packet directly from a
+loaded kernel's resolved descriptor and supported segment sizes.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -131,8 +134,30 @@ address while retaining enough allocation state to retry the free. Explicit
 cleanup remains retryable through the underlying allocation. Segment-specific
 page protections and relocation application are deliberately deferred; the
 current artifact corpus uses at most 4 KiB load alignment and contains no
-dynamic relocations. The next unit will build a normal-HSACO kernarg buffer and
-connect this image to the existing AQL dispatch path.
+dynamic relocations.
+
+The transport-independent launch layer validates the metadata-declared kernarg
+size and normalized alignment before writing memory. It accepts the same
+prefix contract as LRRT: caller bytes may be shorter than the complete kernarg
+segment, while only the remaining metadata-declared hidden-argument area is
+zeroed. Bytes beyond that logical segment remain untouched, allowing a later
+transport to suballocate multiple kernargs from larger backing storage.
+Zero-sized kernarg segments use a canonical allocation-free representation.
+The libhsakmt wrapper currently rounds each non-empty buffer to a dedicated
+ordinary mapped GTT page and rejects alignments above that page alignment. It
+uses the same move-only ownership, retryable cleanup, and stale-GPU-address
+invalidation rules as executable images. If validation fails after mapping and
+cleanup also fails, the failed result retains unpublished allocation ownership
+so cleanup can be retried explicitly.
+
+`make_kernel_launch_packet` combines caller geometry with the selected loaded
+kernel's descriptor GPU address, fixed and dynamic group segment sizes, kernarg
+address, and completion signal. It rejects a mismatched kernarg layout,
+non-zero private segments until scratch backing exists, dynamic-stack kernels,
+and group-size arithmetic overflow before delegating final packet ABI checks to
+the AQL layer. This unit constructs but does not submit the packet. The normal
+Clang vector-add kernel requires a private segment, so scratch backing must be
+implemented before connecting it to the queue and doorbell path.
 
 The queue transport allocates a 64 KiB default ring as executable AQL queue
 memory and initializes every 64-byte packet header to the invalid type. A
@@ -148,8 +173,9 @@ responsibility only in the later direct-KFD transport.
 The transport-independent AQL definition validates the initial narrow policy:
 one-, two-, or three-dimensional dispatch geometry, 64-byte-aligned AMD kernel
 descriptors and completion signals, at least 16-byte-aligned kernarg, zeroed
-reserved fields, the gfx1101 limit of 1,024 total work-items per workgroup, and
-system-scope acquire/release fences. The current queue is single-producer.
+reserved fields, the gfx1101 limits of 1,024 total work-items per workgroup and
+64 KiB of group-segment LDS, and system-scope acquire/release fences. The
+current queue is single-producer.
 Submission rejects an invalid packet or a full queue before mutation, writes
 the payload into an invalid ring slot, publishes its 16-bit header with release
 ordering, advances the 64-bit write index, executes the host-architecture MMIO
@@ -222,6 +248,7 @@ arch/         GPU-generation-specific layouts and operations
 ```
 
 `runtime/` owns transport-independent topology, selection, executable-image
-validation, realization, and address-translation semantics.
+validation, realization, address translation, kernarg materialization, and
+launch-packet construction semantics.
 `transport/hsakmt/` is the first concrete KFD transport; additional component
 directories are added when they receive their first implementation.

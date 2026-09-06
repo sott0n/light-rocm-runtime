@@ -26,6 +26,7 @@ inline constexpr uint64_t kAmdSignalAlignment = 64;
 // topology discovery grows a transport-independent ISA-limit model.
 inline constexpr uint16_t kGfx1101WorkgroupMaximumDimension = 1024;
 inline constexpr uint32_t kGfx1101WorkgroupMaximumSize = 1024;
+inline constexpr uint32_t kGfx1101GroupSegmentMaximumSize = 64 * 1024;
 
 // Self-authored HSA AQL kernel-dispatch packet ABI. The queue transport
 // publishes header last with release ordering after writing the remaining 62
@@ -82,6 +83,7 @@ enum class AqlPacketError {
   InvalidDimensions,
   InvalidWorkgroupSize,
   InvalidGridSize,
+  InvalidGroupSegmentSize,
   InvalidKernelObject,
   InvalidKernargAddress,
   InvalidCompletionSignal,

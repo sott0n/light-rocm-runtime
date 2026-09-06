@@ -43,6 +43,7 @@ add_library(
   light_rocr_core
   runtime/aql.cpp
   runtime/executable_image.cpp
+  runtime/launch.cpp
   runtime/signal.cpp
   runtime/topology.cpp
 )
@@ -85,6 +86,7 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
     add_library(
       light_rocr_transport_hsakmt
       transport/hsakmt/executable_image.cpp
+      transport/hsakmt/kernarg.cpp
       transport/hsakmt/memory.cpp
       transport/hsakmt/queue.cpp
       transport/hsakmt/signal.cpp
@@ -261,6 +263,11 @@ if(LIGHT_ROCR_BUILD_TESTS)
     COMMAND light_rocr_executable_image_tests
   )
 
+  add_executable(light_rocr_launch_tests tests/runtime/launch_test.cpp)
+  target_link_libraries(light_rocr_launch_tests PRIVATE light_rocr::core)
+  light_rocr_enable_warnings(light_rocr_launch_tests)
+  add_test(NAME light_rocr_launch_tests COMMAND light_rocr_launch_tests)
+
   find_program(
     LIGHT_ROCR_AMDGPU_CLANG
     NAMES clang
@@ -405,6 +412,24 @@ if(LIGHT_ROCR_BUILD_TESTS)
   endif()
 
   if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(
+      light_rocr_hsakmt_kernarg_tests
+      tests/hsakmt/kernarg_test.cpp
+    )
+    target_include_directories(
+      light_rocr_hsakmt_kernarg_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_hsakmt_kernarg_tests
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_hsakmt_kernarg_tests)
+    add_test(
+      NAME light_rocr_hsakmt_kernarg_tests
+      COMMAND light_rocr_hsakmt_kernarg_tests
+    )
+
     add_executable(
       light_rocr_hsakmt_executable_image_tests
       tests/hsakmt/executable_image_test.cpp

@@ -126,6 +126,22 @@ void enforces_gfx1101_workgroup_limits(TestContext *context) {
                   "maximum valid gfx1101 workgroup was rejected");
 }
 
+void enforces_gfx1101_group_segment_limit(TestContext *context) {
+  KernelDispatchSpec spec = valid_spec();
+  spec.group_segment_size =
+      light_rocr::runtime::kGfx1101GroupSegmentMaximumSize;
+  auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
+  context->expect(static_cast<bool>(result),
+                  "maximum valid gfx1101 group segment was rejected");
+
+  spec.group_segment_size =
+      light_rocr::runtime::kGfx1101GroupSegmentMaximumSize + 1U;
+  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
+  context->expect(result.status.error ==
+                      AqlPacketError::InvalidGroupSegmentSize,
+                  "oversized gfx1101 group segment was accepted");
+}
+
 void rejects_misaligned_handles(TestContext *context) {
   KernelDispatchSpec spec = valid_spec();
   spec.kernel_object += 1;
@@ -185,6 +201,8 @@ int main() {
       {"builds_valid_packet", builds_valid_packet},
       {"rejects_invalid_geometry", rejects_invalid_geometry},
       {"enforces_gfx1101_workgroup_limits", enforces_gfx1101_workgroup_limits},
+      {"enforces_gfx1101_group_segment_limit",
+       enforces_gfx1101_group_segment_limit},
       {"rejects_misaligned_handles", rejects_misaligned_handles},
       {"permits_optional_zero_handles", permits_optional_zero_handles},
       {"validates_packet_before_publication",

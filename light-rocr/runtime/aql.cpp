@@ -23,6 +23,8 @@ const char *aql_packet_error_name(AqlPacketError error) {
     return "invalid_workgroup_size";
   case AqlPacketError::InvalidGridSize:
     return "invalid_grid_size";
+  case AqlPacketError::InvalidGroupSegmentSize:
+    return "invalid_group_segment_size";
   case AqlPacketError::InvalidKernelObject:
     return "invalid_kernel_object";
   case AqlPacketError::InvalidKernargAddress:
@@ -87,6 +89,11 @@ validate_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet) {
       (dimensions < 3 && packet.grid_size_z != 1)) {
     return failure(AqlPacketError::InvalidGridSize,
                    "unused grid dimensions must equal one");
+  }
+  if (packet.group_segment_size > kGfx1101GroupSegmentMaximumSize) {
+    return failure(AqlPacketError::InvalidGroupSegmentSize,
+                   "group segment size exceeds the gfx1101 64 KiB LDS "
+                   "limit");
   }
   if (packet.kernel_object == 0 ||
       packet.kernel_object % kAmdKernelDescriptorAlignment != 0) {
