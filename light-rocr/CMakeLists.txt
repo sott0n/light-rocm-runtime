@@ -42,6 +42,7 @@ light_rocr_enable_warnings(light_rocr_loader)
 add_library(
   light_rocr_core
   runtime/aql.cpp
+  runtime/executable_image.cpp
   runtime/signal.cpp
   runtime/topology.cpp
 )
@@ -54,7 +55,7 @@ target_include_directories(
     $<INSTALL_INTERFACE:include>
 )
 set_target_properties(light_rocr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(light_rocr_core PUBLIC Threads::Threads)
+target_link_libraries(light_rocr_core PUBLIC light_rocr::loader Threads::Threads)
 light_rocr_enable_warnings(light_rocr_core)
 
 set(LIGHT_ROCR_HSAKMT_AVAILABLE OFF)
@@ -83,6 +84,7 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
     set(LIGHT_ROCR_HSAKMT_AVAILABLE ON)
     add_library(
       light_rocr_transport_hsakmt
+      transport/hsakmt/executable_image.cpp
       transport/hsakmt/memory.cpp
       transport/hsakmt/queue.cpp
       transport/hsakmt/signal.cpp
@@ -136,6 +138,17 @@ if(LIGHT_ROCR_BUILD_TOOLS)
   )
 
   if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(light_rocr_check_image tools/check_image.cpp)
+    target_link_libraries(
+      light_rocr_check_image
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_check_image)
+    set_target_properties(
+      light_rocr_check_image
+      PROPERTIES OUTPUT_NAME light-rocr-check-image
+    )
+
     add_executable(light_rocr_check_memory tools/check_memory.cpp)
     target_link_libraries(
       light_rocr_check_memory
@@ -233,6 +246,20 @@ if(LIGHT_ROCR_BUILD_TESTS)
   target_link_libraries(light_rocr_aql_tests PRIVATE light_rocr::core)
   light_rocr_enable_warnings(light_rocr_aql_tests)
   add_test(NAME light_rocr_aql_tests COMMAND light_rocr_aql_tests)
+
+  add_executable(
+    light_rocr_executable_image_tests
+    tests/runtime/executable_image_test.cpp
+  )
+  target_link_libraries(
+    light_rocr_executable_image_tests
+    PRIVATE light_rocr::core
+  )
+  light_rocr_enable_warnings(light_rocr_executable_image_tests)
+  add_test(
+    NAME light_rocr_executable_image_tests
+    COMMAND light_rocr_executable_image_tests
+  )
 
   find_program(
     LIGHT_ROCR_AMDGPU_CLANG
@@ -378,6 +405,24 @@ if(LIGHT_ROCR_BUILD_TESTS)
   endif()
 
   if(LIGHT_ROCR_HSAKMT_AVAILABLE)
+    add_executable(
+      light_rocr_hsakmt_executable_image_tests
+      tests/hsakmt/executable_image_test.cpp
+    )
+    target_include_directories(
+      light_rocr_hsakmt_executable_image_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_hsakmt_executable_image_tests
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_hsakmt_executable_image_tests)
+    add_test(
+      NAME light_rocr_hsakmt_executable_image_tests
+      COMMAND light_rocr_hsakmt_executable_image_tests
+    )
+
     add_executable(
       light_rocr_hsakmt_memory_tests
       tests/hsakmt/memory_test.cpp

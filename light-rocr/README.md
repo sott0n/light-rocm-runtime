@@ -15,6 +15,9 @@ GTT-backed signal ownership.
 The first fixed `gfx1101` AQL dispatch now runs without ROCr: light-rocr writes
 the packet, advances its queue index, rings the KMT-mapped doorbell, observes a
 GPU completion-signal decrement, and verifies a GPU-written canary value.
+The normal Loader `LoadPlan` can now be materialized into an executable GTT
+image as well: file-backed ranges are copied, BSS and allocation padding are
+zeroed, and kernel descriptor virtual addresses are resolved to GPU addresses.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -68,6 +71,15 @@ GPU store and native completion signal with bounded waits:
 ./build-light-rocr/light-rocr-check-dispatch
 ```
 
+Materialize a normal HSACO in executable GPU-visible memory and verify its
+copies, zero fills, address translation, and cleanup without creating a queue
+or ringing a doorbell:
+
+```sh
+./build-light-rocr/light-rocr-check-image \
+  ./build/vector_add_kernel.hsaco
+```
+
 The topology tool is built when the public `hsakmt` headers, library, and its
 DRM/NUMA dependencies are available. `LIGHT_ROCR_ENABLE_HSAKMT=OFF` keeps the
 standalone loader and host-only topology tests buildable without them. Live
@@ -98,6 +110,29 @@ retry. The live diagnostic writes and reads GTT (and public VRAM when present),
 then checks VRAM mapping and cleanup without dereferencing private VRAM.
 `allocate_executable_gtt` uses the same ownership rules while requesting KFD's
 execute page attribute for the initial fixed kernel image.
+
+The transport-independent executable-image runtime consumes the Loader's
+already-checked `CodeObject` and original HSACO bytes. Before a transport
+allocates memory it revalidates the complete `LoadPlan`, rejects relocations in
+the initial materialization subset, checks ordered and non-overlapping copy,
+zero-fill, and protection ranges, and validates file-backed kernel descriptors
+and executable code entries. It also owns checked image realization and
+virtual-to-GPU address translation, so libhsakmt and a later direct-KFD
+transport share the same rules and host-only tests.
+
+The common runtime rounds the validated image span to 4 KiB. The libhsakmt
+wrapper requests an allocation of that size and delegates writes and
+GPU-address resolution back to the common runtime. Its move-only
+`ExecutableImage` retains an independent copy of the
+parsed code object and the resolved descriptor/code-entry GPU addresses. A
+truthy image is GPU-usable; cleanup ownership is reported separately because a
+successful unmap followed by a failed free must invalidate every published GPU
+address while retaining enough allocation state to retry the free. Explicit
+cleanup remains retryable through the underlying allocation. Segment-specific
+page protections and relocation application are deliberately deferred; the
+current artifact corpus uses at most 4 KiB load alignment and contains no
+dynamic relocations. The next unit will build a normal-HSACO kernarg buffer and
+connect this image to the existing AQL dispatch path.
 
 The queue transport allocates a 64 KiB default ring as executable AQL queue
 memory and initializes every 64-byte packet header to the invalid type. A
@@ -138,7 +173,8 @@ canary, while packet completion decrements the native signal from one to zero.
 Both observations, queue-index progress, a two-second signal deadline, and
 ordered queue-before-memory cleanup are checked. This isolates AQL
 queue/packet/doorbell/signal behavior; ordinary HSACO segment materialization
-and relocation remain the next Loader unit. When AMDGPU Clang and
+now uses a separate diagnostic and relocation remains deferred. When AMDGPU
+Clang and
 `llvm-objcopy` are available, an additional host test reassembles and links the
 checked-in source at the fixed layout, then compares both its descriptor and
 instruction bytes with the embedded image.
@@ -185,6 +221,7 @@ transport/    libhsakmt and direct public-KFD implementations
 arch/         GPU-generation-specific layouts and operations
 ```
 
-`runtime/` owns transport-independent topology and selection semantics.
+`runtime/` owns transport-independent topology, selection, executable-image
+validation, realization, and address-translation semantics.
 `transport/hsakmt/` is the first concrete KFD transport; additional component
 directories are added when they receive their first implementation.
