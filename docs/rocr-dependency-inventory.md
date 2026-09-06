@@ -187,6 +187,30 @@ destroy, unmap, and free. These addresses are diagnostic observations, not
 stable invariants. The executable links DRM/NUMA but not
 `libhsa-runtime64.so`.
 
+## Native user-signal diagnostic
+
+`light-rocr-check-signal` creates the AMD hardware-visible user-signal object
+without calling any HSA signal API. The ABI object is exactly 64 bytes and is
+64-byte aligned. Its `kind` field is at offset 0, its atomic 64-bit `value` is
+at offset 8, and all mailbox, timestamp, queue, and reserved fields are
+initialized to zero. An AQL completion-signal handle is the GPU virtual address
+of this complete object, not a pointer to the value field.
+
+The transport stores the object in one host-accessible GTT page mapped only to
+the selected GPU. The runtime layer supplies lock-free CPU relaxed/release
+stores, relaxed/acquire loads, and a deadline-bounded active wait returning
+either `satisfied` or `timed_out` with the last observed value. The first
+implementation deliberately leaves `event_mailbox_ptr` zero: it is a busy-wait
+signal and does not use a KMT event or interrupt.
+
+An unsandboxed run on 2026-09-07 selected node 1 / `gfx1101`, mapped the signal
+at identity CPU/GPU VA `0x72a4ead79000`, observed ABI kind 1 and initial value
+1, completed a CPU release-store-to-zero/acquire-wait round trip, then unmapped
+and freed the page. The address is an observation rather than an invariant.
+The diagnostic links DRM/NUMA but not `libhsa-runtime64.so`. No AQL packet was
+published and the queue doorbell was not written; the next dispatch unit will
+establish the first GPU-side signal update.
+
 ## Native KMT topology diagnostic
 
 `light-rocr-inspect-topology` is the first runtime-side diagnostic that bypasses

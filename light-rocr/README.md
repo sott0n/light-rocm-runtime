@@ -9,7 +9,9 @@ dependency on ROCr, libhsakmt, KFD, a GPU, libelf, or LLVM libraries. The
 runtime now also has a small transport-independent topology model and an
 optional libhsakmt transport that discovers KFD nodes, allocates mapped GTT
 and VRAM memory, creates compute AQL queues, and manages their lifetimes
-without loading `libhsa-runtime64.so`.
+without loading `libhsa-runtime64.so`. It also provides the hardware-visible
+AMD user-signal ABI, CPU atomic operations, bounded active waits, and mapped
+GTT-backed signal ownership.
 
 The initial parser accepts the AMDGPU-HSA ABI versions observed in the current
 artifact corpus: version 4 from Clang/Triton and version 3 from IREE.
@@ -48,6 +50,14 @@ packet or writing its doorbell:
 ./build-light-rocr/light-rocr-check-queue
 ```
 
+Create a GPU-visible native user signal, exercise its CPU atomics and bounded
+wait, and release its mapping without publishing a packet or writing a
+doorbell:
+
+```sh
+./build-light-rocr/light-rocr-check-signal
+```
+
 The topology tool is built when the public `hsakmt` headers, library, and its
 DRM/NUMA dependencies are available. `LIGHT_ROCR_ENABLE_HSAKMT=OFF` keeps the
 standalone loader and host-only topology tests buildable without them. Live
@@ -58,6 +68,11 @@ full AMDHSA target string and deliberately rejects zero or multiple matching
 nodes in the initial single-GPU runtime. Host tests replace the seven KMT entry
 points used by discovery, so conversion, call ordering, and every cleanup path
 remain testable without a GPU.
+
+When an installed `hsa/amd_hsa_signal.h` is available, the test build adds an
+optional compile-time ABI oracle comparing the self-authored signal definition
+with ROCr's definition. Neither the runtime nor the libhsakmt signal tests
+require that ROCr header, and the oracle does not link `libhsa-runtime64.so`.
 
 The memory transport opens KFD and retains a system-property snapshot for the
 whole session. `allocate_gtt` creates 4 KiB-aligned, non-pageable system memory
@@ -81,6 +96,16 @@ explicit destroy failure leaves the queue and mappings live so cleanup can be
 retried. In this libhsakmt phase, libhsakmt itself owns the EOP buffer, CWSR
 storage, and doorbell mapping. Those resources become light-rocr's explicit
 responsibility only in the later direct-KFD transport.
+
+The native user signal is the AMD hardware ABI object itself: a 64-byte object
+on a 64-byte boundary, with the user kind at offset 0 and its 64-bit atomic
+value at offset 8. Its AQL handle is the GPU virtual address of the complete
+object rather than the address of the value field. The remaining mailbox,
+timestamp, queue, and reserved fields start at zero. `light_rocr_core` provides
+lock-free relaxed/release stores, relaxed/acquire loads, and a deadline-bounded
+active wait. The KMT transport places one signal in a mapped GTT page and keeps
+the KFD session alive for the mapping's lifetime. Interrupt-backed waits and
+signal pooling are intentionally deferred.
 
 The inspector reports checked `PT_LOAD` records and, when an AMDGPU metadata
 note is present, the metadata version, target ISA, kernel inventory, ELF

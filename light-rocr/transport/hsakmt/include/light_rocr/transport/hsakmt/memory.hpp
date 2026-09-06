@@ -43,6 +43,7 @@ struct KfdState;
 struct SessionResult;
 struct AllocationResult;
 struct AqlQueueResult;
+struct UserSignalResult;
 
 class KfdSession {
 public:
@@ -61,6 +62,8 @@ public:
                 uint64_t size) const;
   [[nodiscard]] AqlQueueResult create_aql_queue(uint32_t gpu_node_id,
                                                 uint64_t ring_size) const;
+  [[nodiscard]] UserSignalResult
+  create_user_signal(uint32_t gpu_node_id, int64_t initial_value) const;
   explicit operator bool() const { return state_ != nullptr; }
 
 private:

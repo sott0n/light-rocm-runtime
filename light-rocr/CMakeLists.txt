@@ -2,6 +2,8 @@ cmake_minimum_required(VERSION 3.18)
 
 project(light_rocr VERSION 0.1.0 LANGUAGES CXX)
 
+find_package(Threads REQUIRED)
+
 option(LIGHT_ROCR_BUILD_TESTS "Build light-rocr host tests" ON)
 option(LIGHT_ROCR_BUILD_TOOLS "Build light-rocr inspection tools" ON)
 option(
@@ -37,7 +39,7 @@ target_include_directories(
 set_target_properties(light_rocr_loader PROPERTIES POSITION_INDEPENDENT_CODE ON)
 light_rocr_enable_warnings(light_rocr_loader)
 
-add_library(light_rocr_core runtime/topology.cpp)
+add_library(light_rocr_core runtime/signal.cpp runtime/topology.cpp)
 add_library(light_rocr::core ALIAS light_rocr_core)
 target_compile_features(light_rocr_core PUBLIC cxx_std_17)
 target_include_directories(
@@ -47,6 +49,7 @@ target_include_directories(
     $<INSTALL_INTERFACE:include>
 )
 set_target_properties(light_rocr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(light_rocr_core PUBLIC Threads::Threads)
 light_rocr_enable_warnings(light_rocr_core)
 
 set(LIGHT_ROCR_HSAKMT_AVAILABLE OFF)
@@ -64,7 +67,6 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
   find_library(LIGHT_ROCR_DRM_LIBRARY NAMES drm)
   find_library(LIGHT_ROCR_DRM_AMDGPU_LIBRARY NAMES drm_amdgpu)
   find_library(LIGHT_ROCR_NUMA_LIBRARY NAMES numa)
-  find_package(Threads QUIET)
 
   if(
     LIGHT_ROCR_HSAKMT_INCLUDE_DIR
@@ -72,13 +74,13 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
     AND LIGHT_ROCR_DRM_LIBRARY
     AND LIGHT_ROCR_DRM_AMDGPU_LIBRARY
     AND LIGHT_ROCR_NUMA_LIBRARY
-    AND Threads_FOUND
   )
     set(LIGHT_ROCR_HSAKMT_AVAILABLE ON)
     add_library(
       light_rocr_transport_hsakmt
       transport/hsakmt/memory.cpp
       transport/hsakmt/queue.cpp
+      transport/hsakmt/signal.cpp
       transport/hsakmt/status.cpp
       transport/hsakmt/topology.cpp
     )
@@ -151,6 +153,17 @@ if(LIGHT_ROCR_BUILD_TOOLS)
       PROPERTIES OUTPUT_NAME light-rocr-check-queue
     )
 
+    add_executable(light_rocr_check_signal tools/check_signal.cpp)
+    target_link_libraries(
+      light_rocr_check_signal
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_check_signal)
+    set_target_properties(
+      light_rocr_check_signal
+      PROPERTIES OUTPUT_NAME light-rocr-check-signal
+    )
+
     add_executable(light_rocr_inspect_topology tools/inspect_topology.cpp)
     target_link_libraries(
       light_rocr_inspect_topology
@@ -195,6 +208,36 @@ if(LIGHT_ROCR_BUILD_TESTS)
   light_rocr_enable_warnings(light_rocr_topology_tests)
   add_test(NAME light_rocr_topology_tests COMMAND light_rocr_topology_tests)
 
+  add_executable(light_rocr_signal_tests tests/runtime/signal_test.cpp)
+  target_link_libraries(light_rocr_signal_tests PRIVATE light_rocr::core)
+  light_rocr_enable_warnings(light_rocr_signal_tests)
+  add_test(NAME light_rocr_signal_tests COMMAND light_rocr_signal_tests)
+
+  find_path(
+    LIGHT_ROCR_ROCR_SIGNAL_ABI_INCLUDE_DIR
+    NAMES hsa/amd_hsa_signal.h
+    HINTS /opt/rocm/include
+  )
+  if(LIGHT_ROCR_ROCR_SIGNAL_ABI_INCLUDE_DIR)
+    add_executable(
+      light_rocr_rocr_signal_abi_tests
+      tests/runtime/rocr_signal_abi_test.cpp
+    )
+    target_include_directories(
+      light_rocr_rocr_signal_abi_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_ROCR_SIGNAL_ABI_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_rocr_signal_abi_tests
+      PRIVATE light_rocr::core
+    )
+    light_rocr_enable_warnings(light_rocr_rocr_signal_abi_tests)
+    add_test(
+      NAME light_rocr_rocr_signal_abi_tests
+      COMMAND light_rocr_rocr_signal_abi_tests
+    )
+  endif()
+
   if(LIGHT_ROCR_HSAKMT_AVAILABLE)
     add_executable(
       light_rocr_hsakmt_memory_tests
@@ -230,6 +273,24 @@ if(LIGHT_ROCR_BUILD_TESTS)
     add_test(
       NAME light_rocr_hsakmt_queue_tests
       COMMAND light_rocr_hsakmt_queue_tests
+    )
+
+    add_executable(
+      light_rocr_hsakmt_signal_tests
+      tests/hsakmt/signal_test.cpp
+    )
+    target_include_directories(
+      light_rocr_hsakmt_signal_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_hsakmt_signal_tests
+      PRIVATE light_rocr::transport_hsakmt
+    )
+    light_rocr_enable_warnings(light_rocr_hsakmt_signal_tests)
+    add_test(
+      NAME light_rocr_hsakmt_signal_tests
+      COMMAND light_rocr_hsakmt_signal_tests
     )
 
     add_executable(
