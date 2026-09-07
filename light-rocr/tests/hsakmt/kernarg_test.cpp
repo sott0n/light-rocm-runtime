@@ -408,6 +408,10 @@ extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPUNodes(
   return fake.map_status;
 }
 
+extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPU(void *, HSAuint64, HSAuint64 *) {
+  return HSAKMT_STATUS_NOT_IMPLEMENTED;
+}
+
 extern "C" HSAKMT_STATUS hsaKmtUnmapMemoryToGPU(void *address) {
   fake.calls.emplace_back("unmap");
   if (address != fake.storage.data()) {

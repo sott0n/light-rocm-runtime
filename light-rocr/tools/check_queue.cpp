@@ -58,7 +58,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   auto created = opened.session.create_aql_queue(
-      node.node_id, light_rocr::transport::hsakmt::kAqlRingDefaultSize);
+      node, light_rocr::transport::hsakmt::kAqlRingDefaultSize, 272);
   if (!created) {
     return fail(created.status);
   }
@@ -76,6 +76,11 @@ int main(int argc, char **argv) {
             << '\n';
   std::cout << "queue.doorbell_address=0x" << created.queue.doorbell_address()
             << '\n';
+  std::cout << "queue.scratch_private_segment_size=" << std::dec
+            << created.queue.scratch_private_segment_size() << '\n';
+  std::cout << "queue.scratch_size=" << created.queue.scratch_size() << '\n';
+  std::cout << "queue.scratch_gpu_address=0x" << std::hex
+            << created.queue.scratch_gpu_address() << '\n';
 
   const auto released = created.queue.release();
   if (!released) {

@@ -41,6 +41,7 @@ light_rocr_enable_warnings(light_rocr_loader)
 
 add_library(
   light_rocr_core
+  arch/gfx11/scratch.cpp
   runtime/aql.cpp
   runtime/executable_image.cpp
   runtime/launch.cpp
@@ -52,6 +53,7 @@ target_compile_features(light_rocr_core PUBLIC cxx_std_17)
 target_include_directories(
   light_rocr_core
   PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/arch/gfx11/include>
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/runtime/include>
     $<INSTALL_INTERFACE:include>
 )
@@ -268,6 +270,20 @@ if(LIGHT_ROCR_BUILD_TESTS)
   light_rocr_enable_warnings(light_rocr_launch_tests)
   add_test(NAME light_rocr_launch_tests COMMAND light_rocr_launch_tests)
 
+  add_executable(
+    light_rocr_gfx11_scratch_tests
+    tests/runtime/gfx11_scratch_test.cpp
+  )
+  target_link_libraries(
+    light_rocr_gfx11_scratch_tests
+    PRIVATE light_rocr::core
+  )
+  light_rocr_enable_warnings(light_rocr_gfx11_scratch_tests)
+  add_test(
+    NAME light_rocr_gfx11_scratch_tests
+    COMMAND light_rocr_gfx11_scratch_tests
+  )
+
   find_program(
     LIGHT_ROCR_AMDGPU_CLANG
     NAMES clang
@@ -408,6 +424,31 @@ if(LIGHT_ROCR_BUILD_TESTS)
     add_test(
       NAME light_rocr_rocr_aql_abi_tests
       COMMAND light_rocr_rocr_aql_abi_tests
+    )
+  endif()
+
+  find_path(
+    LIGHT_ROCR_ROCR_QUEUE_ABI_INCLUDE_DIR
+    NAMES hsa/amd_hsa_queue.h
+    HINTS /opt/rocm/include
+  )
+  if(LIGHT_ROCR_ROCR_QUEUE_ABI_INCLUDE_DIR)
+    add_executable(
+      light_rocr_rocr_queue_abi_tests
+      tests/runtime/rocr_queue_abi_test.cpp
+    )
+    target_include_directories(
+      light_rocr_rocr_queue_abi_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_ROCR_QUEUE_ABI_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_rocr_queue_abi_tests
+      PRIVATE light_rocr::core
+    )
+    light_rocr_enable_warnings(light_rocr_rocr_queue_abi_tests)
+    add_test(
+      NAME light_rocr_rocr_queue_abi_tests
+      COMMAND light_rocr_rocr_queue_abi_tests
     )
   endif()
 

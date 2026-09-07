@@ -48,6 +48,14 @@ int main(int argc, char **argv) {
     std::cout << prefix << "compute_unit_count=" << node.compute_unit_count()
               << '\n';
     std::cout << prefix << "wavefront_size=" << node.wavefront_size << '\n';
+    std::cout << prefix
+              << "maximum_waves_per_simd=" << node.maximum_waves_per_simd
+              << '\n';
+    std::cout << prefix << "shader_engine_count=" << node.shader_engine_count
+              << '\n';
+    std::cout << prefix << "maximum_scratch_waves_per_compute_unit="
+              << node.maximum_scratch_waves_per_compute_unit << '\n';
+    std::cout << prefix << "xcc_count=" << node.xcc_count << '\n';
     std::cout << prefix << "local_memory_size=" << node.local_memory_size
               << '\n';
     std::cout << prefix << "integrated=" << (node.integrated ? 1 : 0) << '\n';

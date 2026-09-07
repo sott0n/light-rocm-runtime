@@ -172,6 +172,59 @@ void private_vram_hides_host_address(TestContext *context) {
                   "unexpected private VRAM mapping policy");
 }
 
+void scratch_uses_dedicated_kmt_mapping(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto allocated = opened.session.allocate_scratch(7, 8192);
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(allocated.allocation.kind() ==
+                          light_rocr::transport::hsakmt::MemoryKind::Scratch &&
+                      !allocated.allocation.host_accessible() &&
+                      allocated.allocation.host_address() == nullptr &&
+                      allocated.allocation.gpu_address() == kCpuAddress,
+                  "scratch allocation exposed the wrong retained properties");
+
+  HsaMemFlags expected_flags{};
+  expected_flags.ui32.Scratch = 1;
+  expected_flags.ui32.HostAccess = 1;
+  context->expect(fake.preferred_node == 7 &&
+                      fake.allocation_flags.Value == expected_flags.Value,
+                  "scratch allocation did not match the ROCr KMT policy");
+  expect_calls(context,
+               {"open", "acquire", "allocate:7:8192", "map-scratch:8192"});
+
+  const auto released = allocated.allocation.release();
+  context->expect(static_cast<bool>(released), released.message);
+  expect_calls(context, {"open", "acquire", "allocate:7:8192",
+                         "map-scratch:8192", "unmap", "free:8192"});
+}
+
+void scratch_reservation_is_process_wide(TestContext *context) {
+  reset_fake();
+  auto first_session = light_rocr::transport::hsakmt::KfdSession::open();
+  auto second_session = light_rocr::transport::hsakmt::KfdSession::open();
+  auto first = first_session.session.allocate_scratch(7, 4096);
+  context->expect(static_cast<bool>(first), first.status.message);
+
+  auto blocked = second_session.session.allocate_scratch(7, 4096);
+  context->expect(
+      blocked.status.error ==
+          light_rocr::transport::hsakmt::MemoryError::ScratchAlreadyReserved,
+      "a second scratch reservation for the same GPU was accepted");
+  context->expect(std::string(light_rocr::transport::hsakmt::memory_error_name(
+                      blocked.status.error)) == "scratch_already_reserved",
+                  "unexpected scratch reservation error name");
+  expect_calls(context, {"open", "acquire", "open", "acquire",
+                         "allocate:7:4096", "map-scratch:4096"});
+
+  auto released = first.allocation.release();
+  context->expect(static_cast<bool>(released), released.message);
+  auto retried = second_session.session.allocate_scratch(7, 4096);
+  context->expect(static_cast<bool>(retried), retried.status.message);
+  released = retried.allocation.release();
+  context->expect(static_cast<bool>(released), released.message);
+}
+
 void identity_mapping_uses_cpu_address(TestContext *context) {
   reset_fake();
   fake.alternate_gpu_address = 0;
@@ -210,6 +263,10 @@ void invalid_inputs_do_not_allocate(TestContext *context) {
     context->expect(allocated.status.error ==
                         light_rocr::transport::hsakmt::MemoryError::InvalidSize,
                     "invalid VRAM size was accepted");
+    allocated = opened.session.allocate_scratch(1, 4095);
+    context->expect(allocated.status.error ==
+                        light_rocr::transport::hsakmt::MemoryError::InvalidSize,
+                    "invalid scratch size was accepted");
     expect_calls(context, {"open", "acquire"});
   }
   expect_calls(context, {"open", "acquire", "release", "close"});
@@ -284,6 +341,38 @@ void map_failure_frees_allocation(TestContext *context) {
   }
   expect_calls(context, {"open", "acquire", "allocate:0:4096", "map:9:4096",
                          "free:4096", "release", "close"});
+}
+
+void scratch_map_cleanup_failure_returns_ownership(TestContext *context) {
+  reset_fake();
+  fake.map_status = HSAKMT_STATUS_INVALID_NODE_UNIT;
+  fake.free_status = HSAKMT_STATUS_ERROR;
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto allocated = opened.session.allocate_scratch(9, 4096);
+  context->expect(!allocated, "scratch map failure unexpectedly succeeded");
+  context->expect(
+      allocated.status.error ==
+              light_rocr::transport::hsakmt::MemoryError::MapToGpu &&
+          static_cast<bool>(allocated.allocation) &&
+          allocated.allocation.kind() ==
+              light_rocr::transport::hsakmt::MemoryKind::Scratch,
+      "scratch cleanup failure did not return allocation ownership");
+  expect_calls(context, {"open", "acquire", "allocate:9:4096",
+                         "map-scratch:4096", "free:4096"});
+
+  const auto blocked = opened.session.allocate_scratch(9, 4096);
+  context->expect(
+      blocked.status.error ==
+          light_rocr::transport::hsakmt::MemoryError::ScratchAlreadyReserved,
+      "failed scratch cleanup released the process reservation");
+  expect_calls(context, {"open", "acquire", "allocate:9:4096",
+                         "map-scratch:4096", "free:4096"});
+
+  fake.free_status = HSAKMT_STATUS_SUCCESS;
+  const auto released = allocated.allocation.release();
+  context->expect(static_cast<bool>(released), released.message);
+  expect_calls(context, {"open", "acquire", "allocate:9:4096",
+                         "map-scratch:4096", "free:4096", "free:4096"});
 }
 
 void cleanup_failures_can_be_retried(TestContext *context) {
@@ -383,6 +472,19 @@ extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPUNodes(
   return fake.map_status;
 }
 
+extern "C" HSAKMT_STATUS
+hsaKmtMapMemoryToGPU(void *address, HSAuint64 size,
+                     HSAuint64 *alternate_gpu_address) {
+  fake.calls.push_back("map-scratch:" + std::to_string(size));
+  if (address != reinterpret_cast<void *>(kCpuAddress)) {
+    return HSAKMT_STATUS_INVALID_PARAMETER;
+  }
+  if (fake.map_status == HSAKMT_STATUS_SUCCESS) {
+    *alternate_gpu_address = fake.alternate_gpu_address;
+  }
+  return fake.map_status;
+}
+
 extern "C" HSAKMT_STATUS hsaKmtUnmapMemoryToGPU(void *address) {
   fake.calls.emplace_back("unmap");
   if (address != reinterpret_cast<void *>(kCpuAddress)) {
@@ -406,6 +508,10 @@ int main() {
        executable_gtt_sets_execute_access},
       {"public_vram_is_host_accessible", public_vram_is_host_accessible},
       {"private_vram_hides_host_address", private_vram_hides_host_address},
+      {"scratch_uses_dedicated_kmt_mapping",
+       scratch_uses_dedicated_kmt_mapping},
+      {"scratch_reservation_is_process_wide",
+       scratch_reservation_is_process_wide},
       {"identity_mapping_uses_cpu_address", identity_mapping_uses_cpu_address},
       {"invalid_inputs_do_not_allocate", invalid_inputs_do_not_allocate},
       {"open_failure_has_no_cleanup", open_failure_has_no_cleanup},
@@ -414,6 +520,8 @@ int main() {
       {"vram_allocation_failure_is_distinct",
        vram_allocation_failure_is_distinct},
       {"map_failure_frees_allocation", map_failure_frees_allocation},
+      {"scratch_map_cleanup_failure_returns_ownership",
+       scratch_map_cleanup_failure_returns_ownership},
       {"cleanup_failures_can_be_retried", cleanup_failures_can_be_retried},
       {"allocation_keeps_kfd_open", allocation_keeps_kfd_open},
   };

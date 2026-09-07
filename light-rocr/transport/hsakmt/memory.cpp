@@ -5,7 +5,9 @@
 #include <hsakmt/hsakmt.h>
 
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace light_rocr::transport::hsakmt {
@@ -25,6 +27,28 @@ struct KfdState {
 };
 
 namespace {
+
+struct ScratchReservationRegistry {
+  std::mutex mutex;
+  std::unordered_set<uint32_t> gpu_node_ids;
+};
+
+ScratchReservationRegistry &scratch_reservations() {
+  static ScratchReservationRegistry registry;
+  return registry;
+}
+
+bool acquire_scratch_reservation(uint32_t gpu_node_id) {
+  ScratchReservationRegistry &registry = scratch_reservations();
+  const std::lock_guard<std::mutex> lock(registry.mutex);
+  return registry.gpu_node_ids.insert(gpu_node_id).second;
+}
+
+void release_scratch_reservation(uint32_t gpu_node_id) {
+  ScratchReservationRegistry &registry = scratch_reservations();
+  const std::lock_guard<std::mutex> lock(registry.mutex);
+  registry.gpu_node_ids.erase(gpu_node_id);
+}
 
 MemoryStatus failure(MemoryError error, HSAKMT_STATUS status,
                      const std::string &operation) {
@@ -56,6 +80,10 @@ const char *memory_error_name(MemoryError error) {
     return "allocate_executable_gtt";
   case MemoryError::AllocateVram:
     return "allocate_vram";
+  case MemoryError::AllocateScratch:
+    return "allocate_scratch";
+  case MemoryError::ScratchAlreadyReserved:
+    return "scratch_already_reserved";
   case MemoryError::MapToGpu:
     return "map_to_gpu";
   case MemoryError::UnmapFromGpu:
@@ -96,7 +124,6 @@ AllocationResult KfdSession::allocate_gtt(uint32_t gpu_node_id,
              "GTT allocation size must be a non-zero multiple of 4096 bytes"},
             {}};
   }
-
   return allocate(0, gpu_node_id, size, MemoryKind::Gtt, true,
                   MemoryError::AllocateGtt, "GTT");
 }
@@ -140,6 +167,71 @@ AllocationResult KfdSession::allocate_vram(uint32_t gpu_node_id,
 
   return allocate(gpu_node_id, gpu_node_id, size, MemoryKind::Vram,
                   host_accessible, MemoryError::AllocateVram, "VRAM");
+}
+
+AllocationResult KfdSession::allocate_scratch(uint32_t gpu_node_id,
+                                              uint64_t size) const {
+  if (state_ == nullptr) {
+    return {{MemoryError::InvalidSession, 0, "KFD session is not open"}, {}};
+  }
+  if (size == 0 || size % kMemoryPageSize != 0) {
+    return {{MemoryError::InvalidSize, 0,
+             "scratch allocation size must be a non-zero multiple of 4096 "
+             "bytes"},
+            {}};
+  }
+  if (!acquire_scratch_reservation(gpu_node_id)) {
+    return {{MemoryError::ScratchAlreadyReserved, 0,
+             "scratch backing is already reserved for this GPU node"},
+            {}};
+  }
+
+  // Match ROCr's scratch-pool reservation contract. libhsakmt interprets
+  // this allocation specially: it reserves a 64 KiB-aligned backing VA and
+  // programs the process hidden-private base before any physical pages are
+  // mapped.
+  HsaMemFlags allocation_flags{};
+  allocation_flags.ui32.Scratch = 1;
+  allocation_flags.ui32.HostAccess = 1;
+  void *allocation_address = nullptr;
+  HSAKMT_STATUS status = hsaKmtAllocMemory(gpu_node_id, size, allocation_flags,
+                                           &allocation_address);
+  if (status != HSAKMT_STATUS_SUCCESS) {
+    release_scratch_reservation(gpu_node_id);
+    return {failure(MemoryError::AllocateScratch, status,
+                    "hsaKmtAllocMemory(scratch)"),
+            {}};
+  }
+
+  uint64_t unused_alternate_gpu_address = 0;
+  status = hsaKmtMapMemoryToGPU(allocation_address, size,
+                                &unused_alternate_gpu_address);
+  if (status != HSAKMT_STATUS_SUCCESS) {
+    MemoryStatus result =
+        failure(MemoryError::MapToGpu, status, "hsaKmtMapMemoryToGPU(scratch)");
+    const HSAKMT_STATUS free_status =
+        hsaKmtFreeMemory(allocation_address, size);
+    if (free_status == HSAKMT_STATUS_SUCCESS) {
+      release_scratch_reservation(gpu_node_id);
+      return {std::move(result), {}};
+    }
+    result.message += "; cleanup hsaKmtFreeMemory failed with ";
+    result.message += hsakmt_status_name(static_cast<uint32_t>(free_status));
+    return {
+        std::move(result),
+        MemoryAllocation(state_, allocation_address,
+                         static_cast<uint64_t>(
+                             reinterpret_cast<uintptr_t>(allocation_address)),
+                         size, MemoryKind::Scratch, false, false, gpu_node_id)};
+  }
+
+  // gfx9+ queue fields carry the backing VA itself, not an offset within the
+  // public scratch aperture. ROCr likewise ignores AlternateVAGPU here.
+  const uint64_t gpu_address =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(allocation_address));
+  return {{},
+          MemoryAllocation(state_, allocation_address, gpu_address, size,
+                           MemoryKind::Scratch, false, true, gpu_node_id)};
 }
 
 AllocationResult KfdSession::allocate(uint32_t preferred_node,
@@ -204,11 +296,13 @@ MemoryAllocation::MemoryAllocation(MemoryAllocation &&other) noexcept
     : state_(std::move(other.state_)),
       allocation_address_(other.allocation_address_),
       gpu_address_(other.gpu_address_), size_(other.size_), kind_(other.kind_),
+      scratch_gpu_node_id_(other.scratch_gpu_node_id_),
       host_accessible_(other.host_accessible_), mapped_(other.mapped_) {
   other.allocation_address_ = nullptr;
   other.gpu_address_ = 0;
   other.size_ = 0;
   other.kind_ = MemoryKind::Gtt;
+  other.scratch_gpu_node_id_ = 0;
   other.host_accessible_ = false;
   other.mapped_ = false;
 }
@@ -224,12 +318,14 @@ MemoryAllocation::operator=(MemoryAllocation &&other) noexcept {
   gpu_address_ = other.gpu_address_;
   size_ = other.size_;
   kind_ = other.kind_;
+  scratch_gpu_node_id_ = other.scratch_gpu_node_id_;
   host_accessible_ = other.host_accessible_;
   mapped_ = other.mapped_;
   other.allocation_address_ = nullptr;
   other.gpu_address_ = 0;
   other.size_ = 0;
   other.kind_ = MemoryKind::Gtt;
+  other.scratch_gpu_node_id_ = 0;
   other.host_accessible_ = false;
   other.mapped_ = false;
   return *this;
@@ -254,6 +350,9 @@ MemoryStatus MemoryAllocation::release() {
   if (status != HSAKMT_STATUS_SUCCESS) {
     return failure(MemoryError::FreeMemory, status, "hsaKmtFreeMemory");
   }
+  if (kind_ == MemoryKind::Scratch) {
+    release_scratch_reservation(scratch_gpu_node_id_);
+  }
   reset();
   return {};
 }
@@ -264,6 +363,7 @@ void MemoryAllocation::reset() {
   gpu_address_ = 0;
   size_ = 0;
   kind_ = MemoryKind::Gtt;
+  scratch_gpu_node_id_ = 0;
   host_accessible_ = false;
   mapped_ = false;
 }

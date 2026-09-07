@@ -19,10 +19,14 @@ enum class AqlQueueError {
   None,
   InvalidSession,
   InvalidRingSize,
+  InvalidNode,
+  ConfigureScratch,
   AllocateRing,
   AllocateControl,
+  AllocateScratch,
   CreateQueue,
   DestroyQueue,
+  ReleaseScratch,
   ReleaseControl,
   ReleaseRing,
 };
@@ -41,6 +45,7 @@ enum class AqlSubmitError {
   None,
   InvalidQueue,
   InvalidPacket,
+  InsufficientScratch,
   QueueFull,
 };
 
@@ -68,6 +73,9 @@ public:
   [[nodiscard]] void *ring_host_address() const;
   [[nodiscard]] uint64_t ring_gpu_address() const;
   [[nodiscard]] uint64_t ring_size() const;
+  [[nodiscard]] uint32_t scratch_private_segment_size() const;
+  [[nodiscard]] uint64_t scratch_gpu_address() const;
+  [[nodiscard]] uint64_t scratch_size() const;
   // Index accessors return zero after their control allocation is released.
   [[nodiscard]] uint64_t read_index_acquire() const;
   [[nodiscard]] uint64_t write_index_relaxed() const;

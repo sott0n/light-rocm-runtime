@@ -115,7 +115,6 @@ enum class KernelLaunchError {
   InvalidKernelIndex,
   InvalidKernargBuffer,
   IncompatibleKernargBuffer,
-  UnsupportedPrivateSegment,
   UnsupportedDynamicStack,
   GroupSegmentSizeOverflow,
   InvalidDispatchPacket,

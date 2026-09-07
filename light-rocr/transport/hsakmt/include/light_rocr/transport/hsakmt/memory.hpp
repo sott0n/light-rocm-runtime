@@ -15,6 +15,7 @@ inline constexpr uint64_t kMemoryPageSize = 4096;
 enum class MemoryKind {
   Gtt,
   Vram,
+  Scratch,
 };
 
 enum class MemoryError {
@@ -27,6 +28,8 @@ enum class MemoryError {
   AllocateGtt,
   AllocateExecutableGtt,
   AllocateVram,
+  AllocateScratch,
+  ScratchAlreadyReserved,
   MapToGpu,
   UnmapFromGpu,
   FreeMemory,
@@ -63,8 +66,11 @@ public:
   [[nodiscard]] AllocationResult
   allocate_vram(uint32_t gpu_node_id, runtime::MemoryHeapType heap_type,
                 uint64_t size) const;
-  [[nodiscard]] AqlQueueResult create_aql_queue(uint32_t gpu_node_id,
-                                                uint64_t ring_size) const;
+  [[nodiscard]] AllocationResult allocate_scratch(uint32_t gpu_node_id,
+                                                  uint64_t size) const;
+  [[nodiscard]] AqlQueueResult
+  create_aql_queue(const runtime::Node &node, uint64_t ring_size,
+                   uint32_t private_segment_size = 0) const;
   [[nodiscard]] UserSignalResult
   create_user_signal(uint32_t gpu_node_id, int64_t initial_value) const;
   explicit operator bool() const { return state_ != nullptr; }
@@ -105,10 +111,12 @@ private:
   friend class KfdSession;
   MemoryAllocation(std::shared_ptr<KfdState> state, void *allocation_address,
                    uint64_t gpu_address, uint64_t size, MemoryKind kind,
-                   bool host_accessible)
+                   bool host_accessible, bool mapped = true,
+                   uint32_t scratch_gpu_node_id = 0)
       : state_(std::move(state)), allocation_address_(allocation_address),
         gpu_address_(gpu_address), size_(size), kind_(kind),
-        host_accessible_(host_accessible), mapped_(true) {}
+        scratch_gpu_node_id_(scratch_gpu_node_id),
+        host_accessible_(host_accessible), mapped_(mapped) {}
   void reset();
 
   std::shared_ptr<KfdState> state_;
@@ -116,6 +124,7 @@ private:
   uint64_t gpu_address_ = 0;
   uint64_t size_ = 0;
   MemoryKind kind_ = MemoryKind::Gtt;
+  uint32_t scratch_gpu_node_id_ = 0;
   bool host_accessible_ = false;
   bool mapped_ = false;
 };

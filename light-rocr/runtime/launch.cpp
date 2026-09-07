@@ -197,13 +197,6 @@ make_kernel_launch_packet(const ExecutableImageInfo &image, size_t kernel_index,
                        "kernarg buffer does not match the selected kernel ABI"),
         {}};
   }
-  if (kernel.private_segment_size != 0) {
-    return {launch_failure(
-                KernelLaunchError::UnsupportedPrivateSegment,
-                "kernels with a private segment require scratch backing, "
-                "which is not implemented by the initial launch path"),
-            {}};
-  }
   if (kernel.uses_dynamic_stack) {
     return {
         launch_failure(KernelLaunchError::UnsupportedDynamicStack,
@@ -254,8 +247,6 @@ const char *kernel_launch_error_name(KernelLaunchError error) {
     return "invalid_kernarg_buffer";
   case KernelLaunchError::IncompatibleKernargBuffer:
     return "incompatible_kernarg_buffer";
-  case KernelLaunchError::UnsupportedPrivateSegment:
-    return "unsupported_private_segment";
   case KernelLaunchError::UnsupportedDynamicStack:
     return "unsupported_dynamic_stack";
   case KernelLaunchError::GroupSegmentSizeOverflow:

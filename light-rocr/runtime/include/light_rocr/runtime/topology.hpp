@@ -49,6 +49,9 @@ struct Node {
   uint32_t simd_per_compute_unit = 0;
   uint32_t wavefront_size = 0;
   uint32_t maximum_waves_per_simd = 0;
+  uint32_t shader_engine_count = 0;
+  uint32_t maximum_scratch_waves_per_compute_unit = 0;
+  uint32_t xcc_count = 0;
   uint16_t vendor_id = 0;
   uint16_t device_id = 0;
   uint32_t domain = 0;

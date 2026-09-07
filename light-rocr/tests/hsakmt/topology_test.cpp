@@ -75,6 +75,10 @@ void successful_discovery(TestContext *context) {
                   "GPU node was not converted");
   context->expect(gpu.compute_unit_count() == 60,
                   "GPU compute units were not derived");
+  context->expect(gpu.shader_engine_count == 3 &&
+                      gpu.maximum_scratch_waves_per_compute_unit == 32 &&
+                      gpu.xcc_count == 1,
+                  "GPU scratch topology was not converted");
   context->expect(light_rocr::runtime::gfx_target_name(gpu.architecture) ==
                       "gfx1101",
                   "GPU architecture was not converted");
@@ -223,6 +227,9 @@ hsaKmtGetNodeProperties(HSAuint32 node_id, HsaNodeProperties *properties) {
   properties->NumSIMDPerCU = 2;
   properties->WaveFrontSize = 32;
   properties->MaxWavesPerSIMD = 16;
+  properties->NumShaderBanks = 3;
+  properties->MaxSlotsScratchCU = 32;
+  properties->NumXcc = 1;
   properties->EngineId.ui32.Major = 11;
   properties->EngineId.ui32.Minor = 0;
   properties->EngineId.ui32.Stepping = 1;

@@ -350,10 +350,8 @@ void rejects_unsupported_kernel_requirements(TestContext *context) {
   auto launch = light_rocr::runtime::make_kernel_launch_packet(
       private_image.image, 0, private_kernarg.buffer, configuration,
       kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::UnsupportedPrivateSegment,
-      "private-segment kernel was accepted without scratch backing");
+  context->expect(launch && launch.packet.private_segment_size == 24,
+                  "fixed private segment was not copied to the launch packet");
 
   ImageFixture dynamic_fixture;
   dynamic_fixture.code_object.kernels[0].uses_dynamic_stack = true;
@@ -413,8 +411,8 @@ void enum_names(TestContext *context) {
       "unexpected kernarg error name");
   context->expect(
       std::string(light_rocr::runtime::kernel_launch_error_name(
-          light_rocr::runtime::KernelLaunchError::UnsupportedPrivateSegment)) ==
-          "unsupported_private_segment",
+          light_rocr::runtime::KernelLaunchError::UnsupportedDynamicStack)) ==
+          "unsupported_dynamic_stack",
       "unexpected launch error name");
 }
 

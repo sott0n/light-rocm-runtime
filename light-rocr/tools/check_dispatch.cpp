@@ -156,7 +156,7 @@ int main(int argc, char **argv) {
     return fail_signal(signal.status);
   }
   auto queue = opened.session.create_aql_queue(
-      node.node_id, light_rocr::transport::hsakmt::kAqlRingDefaultSize);
+      node, light_rocr::transport::hsakmt::kAqlRingDefaultSize);
   if (!queue) {
     return fail_queue(queue.status);
   }
