@@ -16,16 +16,11 @@ bool valid_event_locked(lr_event_t *event) {
   return g_events.find(event) != g_events.end();
 }
 
-bool event_has_queue_dependency(lr_event_t *event, QueueState *queue) {
-  std::lock_guard<std::mutex> lock(event->dependency_mutex);
-  return event->dependency_queues.count(queue) != 0;
-}
-
 void retain_event_dependency(lr_event_t *event, QueueState *queue) {
   std::lock_guard<std::mutex> lock(event->dependency_mutex);
   ++event->dependency_count;
   if (queue) {
-    event->dependency_queues.insert(queue);
+    ++event->dependency_queues[queue];
   }
 }
 
@@ -33,7 +28,10 @@ void release_event_dependency(lr_event_t *event, QueueState *queue) {
   std::lock_guard<std::mutex> lock(event->dependency_mutex);
   --event->dependency_count;
   if (queue) {
-    event->dependency_queues.erase(queue);
+    auto dependency = event->dependency_queues.find(queue);
+    if (--dependency->second == 0) {
+      event->dependency_queues.erase(dependency);
+    }
   }
 }
 
@@ -44,7 +42,12 @@ size_t event_dependency_count(lr_event_t *event) {
 
 std::vector<QueueState *> event_dependency_queues(lr_event_t *event) {
   std::lock_guard<std::mutex> lock(event->dependency_mutex);
-  return {event->dependency_queues.begin(), event->dependency_queues.end()};
+  std::vector<QueueState *> queues;
+  queues.reserve(event->dependency_queues.size());
+  for (const auto &dependency : event->dependency_queues) {
+    queues.push_back(dependency.first);
+  }
+  return queues;
 }
 
 void clear_event_dependency_queues(lr_event_t *event) {

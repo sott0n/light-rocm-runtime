@@ -10,6 +10,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -80,6 +81,9 @@ struct QueueState {
   std::vector<KernargBuffer> kernarg_pool;
   std::vector<PendingSynchronization> pending_synchronizations;
   std::vector<hsa_signal_t> progress_wait_signals;
+  // The queue mutex protects this fast-path index. Counts preserve multiple
+  // synchronization barriers that may temporarily reference the same Event.
+  std::unordered_map<lr_event_t *, size_t> active_event_dependencies;
   LifetimePinCount active_submissions;
   size_t active_synchronizers;
   bool destroying;
@@ -105,7 +109,7 @@ struct lr_event_t {
   LifetimePinCount active_launch_dependencies;
   size_t active_synchronizers;
   bool destroying;
-  std::unordered_set<QueueState *> dependency_queues;
+  std::unordered_map<QueueState *, size_t> dependency_queues;
   size_t dependency_count;
   uint64_t start_tick;
   uint64_t completion_tick;
@@ -202,7 +206,6 @@ lr_status_t collect_event_dependencies_locked(
     lr_device_t device, lr_event_t *const *dependencies,
     size_t dependency_count, const lr_event_t *completion_event,
     std::vector<lr_event_t *> *pending_dependencies);
-bool event_has_queue_dependency(lr_event_t *event, QueueState *queue);
 void retain_event_dependency(lr_event_t *event, QueueState *queue = nullptr);
 void release_event_dependency(lr_event_t *event, QueueState *queue = nullptr);
 size_t event_dependency_count(lr_event_t *event);

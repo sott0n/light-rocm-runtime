@@ -24,6 +24,25 @@ struct QueueDestruction {
   size_t destruction_pin_count;
 };
 
+bool queue_has_event_dependency_locked(QueueState *queue, lr_event_t *event) {
+  return queue->active_event_dependencies.count(event) != 0;
+}
+
+void retain_queue_event_dependency_locked(QueueState *queue,
+                                          lr_event_t *event) {
+  ++queue->active_event_dependencies[event];
+  retain_event_dependency(event, queue);
+}
+
+void release_queue_event_dependency_locked(QueueState *queue,
+                                           lr_event_t *event) {
+  auto dependency = queue->active_event_dependencies.find(event);
+  if (--dependency->second == 0) {
+    queue->active_event_dependencies.erase(dependency);
+  }
+  release_event_dependency(event, queue);
+}
+
 bool valid_queue_locked(lr_queue_t *queue) {
   return g_queues.find(queue) != g_queues.end() && !queue->state.destroying;
 }
@@ -115,7 +134,7 @@ lr_status_t drain_queue_work_locked(QueueState *queue) {
       result = LR_ERROR_RUNTIME;
     }
     for (lr_event_t *event : barrier.dependencies) {
-      release_event_dependency(event, queue);
+      release_queue_event_dependency_locked(queue, event);
     }
   }
   queue->pending_barriers.clear();
@@ -230,7 +249,7 @@ void reap_completed_barriers_locked(QueueState *queue) {
     }
 
     for (lr_event_t *event : barrier.dependencies) {
-      release_event_dependency(event, queue);
+      release_queue_event_dependency_locked(queue, event);
     }
     if (index + 1 != queue->pending_barriers.size()) {
       barrier = std::move(queue->pending_barriers.back());
@@ -445,7 +464,8 @@ lr_status_t enqueue_event_dependencies_locked(
     std::vector<lr_event_t *> dependencies;
     if (explicit_dependencies) {
       for (lr_event_t *event : *explicit_dependencies) {
-        if (event->pending && !event_has_queue_dependency(event, queue) &&
+        if (event->pending &&
+            !queue_has_event_dependency_locked(queue, event) &&
             hsa_signal_load_scacquire(event->signal) != 0) {
           dependencies.push_back(event);
         }
@@ -453,7 +473,7 @@ lr_status_t enqueue_event_dependencies_locked(
     } else {
       for (lr_event_t *event : device->pending_events) {
         if (event->pending && event->kind == lr_event_t::Kind::AsyncCopy &&
-            !event_has_queue_dependency(event, queue) &&
+            !queue_has_event_dependency_locked(queue, event) &&
             hsa_signal_load_scacquire(event->signal) != 0) {
           dependencies.push_back(event);
         }
@@ -488,7 +508,7 @@ lr_status_t enqueue_event_dependencies_locked(
       packet_dependencies.reserve(end - offset);
       for (size_t i = offset; i < end; ++i) {
         packet->dep_signal[i - offset] = dependencies[i]->signal;
-        retain_event_dependency(dependencies[i], queue);
+        retain_queue_event_dependency_locked(queue, dependencies[i]);
         packet_dependencies.push_back(dependencies[i]);
       }
       publish_packet_header(&packet->header,
@@ -517,7 +537,7 @@ lr_status_t enqueue_explicit_event_dependencies_locally_locked(
   std::vector<lr_event_t *> dependencies;
   dependencies.reserve(explicit_dependencies.size());
   for (lr_event_t *event : explicit_dependencies) {
-    if (!event_has_queue_dependency(event, queue) &&
+    if (!queue_has_event_dependency_locked(queue, event) &&
         hsa_signal_load_scacquire(event->signal) != 0) {
       dependencies.push_back(event);
     }
@@ -544,7 +564,7 @@ lr_status_t enqueue_explicit_event_dependencies_locally_locked(
     packet_dependencies.reserve(end - offset);
     for (size_t i = offset; i < end; ++i) {
       packet->dep_signal[i - offset] = dependencies[i]->signal;
-      retain_event_dependency(dependencies[i], queue);
+      retain_queue_event_dependency_locked(queue, dependencies[i]);
       packet_dependencies.push_back(dependencies[i]);
     }
     publish_packet_header(&packet->header,
@@ -566,7 +586,7 @@ size_t event_dependency_packet_count_locked(
     const bool eligible_kind =
         explicit_dependencies || event->kind == lr_event_t::Kind::AsyncCopy;
     if (eligible_kind && event->pending &&
-        !event_has_queue_dependency(event, queue) &&
+        !queue_has_event_dependency_locked(queue, event) &&
         hsa_signal_load_scacquire(event->signal) != 0) {
       ++dependency_count;
     }
@@ -697,7 +717,7 @@ lr_status_t enqueue_queue_synchronization_locked(
     std::vector<lr_event_t *> event_dependencies;
     for (size_t i = offset; i < end; ++i) {
       if (dependencies[i].event) {
-        retain_event_dependency(dependencies[i].event, queue);
+        retain_queue_event_dependency_locked(queue, dependencies[i].event);
         event_dependencies.push_back(dependencies[i].event);
       }
     }
