@@ -149,6 +149,14 @@ lr_status_t event_wait_locked(lr_event_t *event, QueueState *locked_queue) {
 void wait_for_event_synchronizers_locked(RuntimeLock *devices_lock,
                                          lr_event_t *event) {
   while (valid_event_locked(event)) {
+    // Explicit dependency launches acquire their queue lock before releasing
+    // the registry read lock, then keep it until they stop dereferencing their
+    // Events or retain a slow-path pin. Acquire every queue lock before
+    // checking those pins so a launch cannot add one after this check.
+    DeviceState &device = g_devices[event->device.index];
+    for (lr_queue_t *queue : device.queues) {
+      std::lock_guard<std::mutex> queue_lock(queue->state.mutex);
+    }
     if (!event->active_launch_dependencies.empty()) {
       devices_lock->unlock();
       event->active_launch_dependencies.wait_until_empty();

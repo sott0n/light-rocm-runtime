@@ -106,6 +106,8 @@ struct lr_event_t {
   // Queue-consumer tracking can be updated while the runtime registry lock is
   // released. Never acquire a QueueState mutex while holding this mutex.
   mutable std::mutex dependency_mutex;
+  // Used only when an explicit launch cannot continuously hand Event lifetime
+  // protection from the registry read lock to its queue lock.
   LifetimePinCount active_launch_dependencies;
   size_t active_synchronizers;
   bool destroying;

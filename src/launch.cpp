@@ -135,32 +135,38 @@ private:
   QueueState *queue_;
 };
 
-class EventDependencyPins {
+class FallbackEventDependencyPins {
 public:
-  EventDependencyPins(const std::vector<lr_event_t *> &dependencies,
-                      bool enabled)
-      : dependencies_(enabled ? &dependencies : nullptr) {
-    if (dependencies_) {
-      for (lr_event_t *event : *dependencies_) {
-        event->active_launch_dependencies.retain();
-      }
+  explicit FallbackEventDependencyPins(
+      const std::vector<lr_event_t *> &dependencies)
+      : dependencies_(dependencies), retained_(false) {}
+
+  void retain() {
+    if (retained_) {
+      return;
     }
+    for (lr_event_t *event : dependencies_) {
+      event->active_launch_dependencies.retain();
+    }
+    retained_ = true;
   }
 
-  EventDependencyPins(const EventDependencyPins &) = delete;
-  EventDependencyPins &operator=(const EventDependencyPins &) = delete;
+  FallbackEventDependencyPins(const FallbackEventDependencyPins &) = delete;
+  FallbackEventDependencyPins &
+  operator=(const FallbackEventDependencyPins &) = delete;
 
-  ~EventDependencyPins() {
-    if (dependencies_) {
+  ~FallbackEventDependencyPins() {
+    if (retained_) {
       ScopedLaunchPhase phase(LaunchProfilePhase::EventPinRelease);
-      for (lr_event_t *event : *dependencies_) {
+      for (lr_event_t *event : dependencies_) {
         event->active_launch_dependencies.release();
       }
     }
   }
 
 private:
-  const std::vector<lr_event_t *> *dependencies_;
+  const std::vector<lr_event_t *> &dependencies_;
+  bool retained_;
 };
 
 } // namespace
@@ -232,8 +238,9 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   RuntimeReadLock read_lock(g_devices_mutex, std::defer_lock);
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
-    // Explicit-queue submissions only inspect the registries here. Their
-    // lifetime pins keep every validated resource alive after this lock ends.
+    // Explicit-queue submissions only inspect the registries here. Queue and
+    // module pins keep those resources alive after this lock ends. Event
+    // dependencies stay protected by the queue lock on the common path.
     if (use_queue_local_locking) {
       read_lock.lock();
     } else {
@@ -270,15 +277,32 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     }
   }
   LaunchSubmissionPins submission_pins(kernel->module, &queue);
-  EventDependencyPins dependency_pins(event_dependencies,
-                                      use_explicit_queue_dependencies);
-  if (use_queue_local_locking) {
+  FallbackEventDependencyPins dependency_pins(event_dependencies);
+  std::unique_lock<std::mutex> queue_lock(queue.mutex, std::defer_lock);
+  if (use_explicit_queue_dependencies) {
+    // Hand Event lifetime protection directly from the registry read lock to
+    // an uncontended queue lock. If another producer owns the queue, retain
+    // the Event pins before dropping the registry lock so shared-queue
+    // contention does not extend the global read-side critical section.
+    {
+      ScopedLaunchPhase phase(LaunchProfilePhase::QueueLockWait);
+      if (!queue_lock.try_lock()) {
+        dependency_pins.retain();
+        global_lock_hold_profile.finish();
+        read_lock.unlock();
+        queue_lock.lock();
+      }
+    }
+    if (read_lock.owns_lock()) {
+      global_lock_hold_profile.finish();
+      read_lock.unlock();
+    }
+  } else if (use_queue_local_locking) {
     global_lock_hold_profile.finish();
     read_lock.unlock();
   }
 
-  std::unique_lock<std::mutex> queue_lock(queue.mutex, std::defer_lock);
-  {
+  if (!queue_lock.owns_lock()) {
     ScopedLaunchPhase phase(LaunchProfilePhase::QueueLockWait);
     queue_lock.lock();
   }
@@ -292,8 +316,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
       ScopedLaunchPhase phase(LaunchProfilePhase::QueueCapacity);
       reap_completed_dispatches_locally_locked(&queue);
       if (!has_queue_capacity_locked(&queue, required_packets)) {
-        // Queue and resource lifetime pins keep every validated handle alive
-        // while restoring the registry -> queue lock order for backpressure.
+        // Backpressure requires dropping the queue before reacquiring the
+        // registry exclusively. Retain Event pins only on this slow path.
+        if (use_explicit_queue_dependencies) {
+          dependency_pins.retain();
+        }
         queue_lock.unlock();
         lock.lock();
         queue_lock.lock();
