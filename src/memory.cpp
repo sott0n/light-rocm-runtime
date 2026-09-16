@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <unordered_map>
 #include <utility>
@@ -233,6 +234,31 @@ struct LightRocrAllocationInfo {
 
 std::unordered_map<void *, LightRocrAllocationInfo> g_light_rocr_allocations;
 
+void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
+                                          size_t size) {
+  const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+  for (const auto &entry : g_light_rocr_allocations) {
+    const LightRocrAllocationInfo &info = entry.second;
+    if (info.device_index != device.index) {
+      continue;
+    }
+
+    const uintptr_t gpu_base = reinterpret_cast<uintptr_t>(entry.first);
+    if (address < gpu_base) {
+      continue;
+    }
+    const uintptr_t offset = address - gpu_base;
+    if (offset >= info.requested_size || size > info.requested_size - offset) {
+      continue;
+    }
+
+    auto *host_base =
+        static_cast<unsigned char *>(info.allocation.host_address());
+    return host_base == nullptr ? nullptr : host_base + offset;
+  }
+  return nullptr;
+}
+
 void record_allocation(DeviceState *device, size_t size) {
   lr_memory_stats_t &stats = device->memory_stats;
   stats.live_bytes += size;
@@ -248,6 +274,18 @@ void record_free(DeviceState *device, size_t size) {
   stats.live_bytes = size > stats.live_bytes ? 0 : stats.live_bytes - size;
   stats.total_freed_bytes += size;
   ++stats.free_count;
+}
+
+void record_memcpy(DeviceState *device, lr_memcpy_kind_t kind, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    stats.h2d_copy_bytes += size;
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    stats.d2h_copy_bytes += size;
+  } else if (kind == LR_MEMCPY_DEVICE_TO_DEVICE) {
+    stats.d2d_copy_bytes += size;
+  }
+  ++stats.memcpy_count;
 }
 
 } // namespace
@@ -640,6 +678,36 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     record_memcpy(&g_devices[device.index], kind, size);
   }
   return to_lr_status(status);
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  void *copy_dst = dst;
+  const void *copy_src = src;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    copy_dst = translate_light_rocr_device_pointer(dst, device, size);
+    if (!copy_dst) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    copy_src = translate_light_rocr_device_pointer(src, device, size);
+    if (!copy_src) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  } else {
+    copy_dst = translate_light_rocr_device_pointer(dst, device, size);
+    copy_src = translate_light_rocr_device_pointer(src, device, size);
+    if (!copy_dst || !copy_src) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  }
+
+  std::memmove(copy_dst, copy_src, size);
+  record_memcpy(&g_devices[device.index], kind, size);
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif

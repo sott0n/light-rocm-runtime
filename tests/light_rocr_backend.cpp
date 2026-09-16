@@ -70,10 +70,27 @@ bool run_allocation_checks(lr_device_t device) {
     return false;
   }
 
-  uint8_t host_byte = 0;
+  uint8_t host_byte = 0x5a;
   if (!expect_status(lr_memcpy(device, allocation, &host_byte, 1,
                                LR_MEMCPY_HOST_TO_DEVICE),
-                     LR_ERROR_NOT_SUPPORTED, "lr_memcpy unsupported")) {
+                     LR_SUCCESS, "lr_memcpy host to device")) {
+    (void)lr_free(device, allocation);
+    return false;
+  }
+  host_byte = 0;
+  if (!expect_status(lr_memcpy(device, &host_byte, allocation, 1,
+                               LR_MEMCPY_DEVICE_TO_HOST),
+                     LR_SUCCESS, "lr_memcpy device to host") ||
+      host_byte != 0x5a) {
+    std::fprintf(stderr, "lr_memcpy round trip did not preserve data\n");
+    (void)lr_free(device, allocation);
+    return false;
+  }
+  if (!expect_status(lr_get_memory_stats(device, &stats), LR_SUCCESS,
+                     "lr_get_memory_stats after copies") ||
+      stats.h2d_copy_bytes != 1 || stats.d2h_copy_bytes != 1 ||
+      stats.d2d_copy_bytes != 0 || stats.memcpy_count != 2) {
+    std::fprintf(stderr, "copy statistics did not record successful copies\n");
     (void)lr_free(device, allocation);
     return false;
   }
@@ -121,10 +138,15 @@ bool run_allocation_checks(lr_device_t device) {
                      "lr_free allocation") ||
       !expect_status(lr_free(device, allocation), LR_ERROR_INVALID_ARGUMENT,
                      "lr_free stale allocation") ||
+      !expect_status(lr_memcpy(device, allocation, &host_byte, 1,
+                               LR_MEMCPY_HOST_TO_DEVICE),
+                     LR_ERROR_INVALID_ARGUMENT, "lr_memcpy stale allocation") ||
       !expect_status(lr_get_memory_stats(device, &stats), LR_SUCCESS,
                      "lr_get_memory_stats after free") ||
       stats.live_bytes != 0 || stats.total_freed_bytes != 1 ||
-      stats.free_count != 1) {
+      stats.free_count != 1 || stats.h2d_copy_bytes != 1 ||
+      stats.d2h_copy_bytes != 1 || stats.d2d_copy_bytes != 0 ||
+      stats.memcpy_count != 2) {
     return false;
   }
 

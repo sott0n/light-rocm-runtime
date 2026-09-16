@@ -15,8 +15,20 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     light_rocr_backend.cpp
     lrrt::lrrt
   )
+  lrrt_add_test_executable(
+    lrrt_memory_bounds_tests
+    memory_bounds.cpp
+    lrrt::lrrt
+  )
+  lrrt_add_test_executable(
+    lrrt_allocation_registry_tests
+    allocation_registry.cpp
+    lrrt::lrrt
+  )
   set_tests_properties(
     lrrt_light_rocr_backend_tests
+    lrrt_memory_bounds_tests
+    lrrt_allocation_registry_tests
     PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
   )
   return()
