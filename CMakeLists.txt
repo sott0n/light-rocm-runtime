@@ -12,6 +12,12 @@ option(LRRT_ENABLE_TRITON_EXAMPLES "Build Triton examples" OFF)
 option(LRRT_ENABLE_SPARSEWAVE_EXECUTOR "Build the SparseWave executor" OFF)
 option(LRRT_ENABLE_IREE_ADAPTER "Build the experimental IREE HAL adapter" OFF)
 option(LRRT_ENABLE_HSA "Build with HSA/ROCr support when available" ON)
+set(
+  LRRT_BACKEND
+  "rocr"
+  CACHE STRING "LRRT runtime backend (rocr or light-rocr)"
+)
+set_property(CACHE LRRT_BACKEND PROPERTY STRINGS rocr light-rocr)
 option(
   LRRT_ENABLE_LIGHT_ROCR
   "Build the experimental self-authored light-rocr stack"
@@ -69,6 +75,20 @@ include(cmake/Hsaco.cmake)
 include(cmake/TritonBundle.cmake)
 include(cmake/IreeAdapter.cmake)
 
+string(TOLOWER "${LRRT_BACKEND}" LRRT_SELECTED_BACKEND)
+if(
+  NOT LRRT_SELECTED_BACKEND STREQUAL "rocr"
+  AND NOT LRRT_SELECTED_BACKEND STREQUAL "light-rocr"
+)
+  message(FATAL_ERROR "LRRT_BACKEND must be rocr or light-rocr")
+endif()
+
+enable_testing()
+
+if(LRRT_ENABLE_LIGHT_ROCR OR LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
+  add_subdirectory(light-rocr)
+endif()
+
 add_library(
   lrrt
   src/device_synchronization.cpp
@@ -97,10 +117,6 @@ target_include_directories(
 target_compile_features(lrrt PUBLIC cxx_std_17)
 
 if(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
-  target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)
-  target_include_directories(lrrt PRIVATE "${HSA_INCLUDE_DIR}")
-  target_link_libraries(lrrt PRIVATE "${HSA_RUNTIME_LIBRARY}")
-
   add_executable(
     lrrt_rocr_baseline
     EXCLUDE_FROM_ALL
@@ -109,21 +125,32 @@ if(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
   target_compile_features(lrrt_rocr_baseline PRIVATE cxx_std_17)
   target_include_directories(lrrt_rocr_baseline PRIVATE "${HSA_INCLUDE_DIR}")
   target_link_libraries(lrrt_rocr_baseline PRIVATE "${HSA_RUNTIME_LIBRARY}")
-  message(STATUS "HSA runtime enabled: ${HSA_RUNTIME_LIBRARY}")
+endif()
+
+if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
+  if(NOT LRRT_AMDGPU_TARGET STREQUAL "gfx1101")
+    message(FATAL_ERROR "The light-rocr LRRT backend currently requires gfx1101")
+  endif()
+  if(NOT TARGET light_rocr::transport_hsakmt)
+    message(FATAL_ERROR "The light-rocr LRRT backend requires libhsakmt")
+  endif()
+
+  target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR=1)
+  target_link_libraries(lrrt PRIVATE light_rocr::transport_hsakmt)
+  message(STATUS "LRRT backend: light-rocr")
+elseif(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
+  target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)
+  target_include_directories(lrrt PRIVATE "${HSA_INCLUDE_DIR}")
+  target_link_libraries(lrrt PRIVATE "${HSA_RUNTIME_LIBRARY}")
+  message(STATUS "LRRT backend: ROCr (${HSA_RUNTIME_LIBRARY})")
 elseif(NOT LRRT_ENABLE_HSA)
-  message(STATUS "HSA runtime disabled; building stub runtime")
+  message(STATUS "LRRT ROCr backend disabled; building stub runtime")
 else()
-  message(STATUS "HSA runtime not found; building stub runtime")
+  message(STATUS "LRRT ROCr backend unavailable; building stub runtime")
 endif()
 
 if(LRRT_BUILD_BENCHMARKS)
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LAUNCH_PROFILING=1)
-endif()
-
-enable_testing()
-
-if(LRRT_ENABLE_LIGHT_ROCR)
-  add_subdirectory(light-rocr)
 endif()
 
 if(LRRT_ENABLE_SPARSEWAVE_EXECUTOR)

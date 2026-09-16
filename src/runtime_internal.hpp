@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <string>
@@ -17,6 +18,9 @@
 #if LRRT_ENABLE_HSA
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
+#elif LRRT_ENABLE_LIGHT_ROCR
+#include "light_rocr/runtime/topology.hpp"
+#include "light_rocr/transport/hsakmt/memory.hpp"
 #endif
 
 #if LRRT_ENABLE_HSA
@@ -159,8 +163,9 @@ using RuntimeReadLock = std::shared_lock<RuntimeMutex>;
 
 extern std::atomic<bool> g_initialized;
 
-#if LRRT_ENABLE_HSA
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
 struct DeviceState {
+#if LRRT_ENABLE_HSA
   hsa_agent_t agent;
   std::string name;
   hsa_region_t global_region;
@@ -170,13 +175,24 @@ struct DeviceState {
   lr_queue_t *default_queue;
   std::vector<lr_queue_t *> queues;
   std::vector<lr_event_t *> pending_events;
+#else
+  light_rocr::runtime::Node node;
+  bool opened;
+#endif
   lr_memory_stats_t memory_stats;
 };
 
 extern RuntimeMutex g_devices_mutex;
+extern std::vector<DeviceState> g_devices;
+
+#if LRRT_ENABLE_LIGHT_ROCR
+extern std::unique_ptr<light_rocr::transport::hsakmt::KfdSession> g_kfd_session;
+void release_memory_allocations_locked(lr_status_t *result);
+#endif
+
+#if LRRT_ENABLE_HSA
 extern std::condition_variable_any g_queue_state_changed;
 extern std::condition_variable_any g_event_state_changed;
-extern std::vector<DeviceState> g_devices;
 extern hsa_agent_t g_host_agent;
 extern bool g_has_host_agent;
 
@@ -255,6 +271,7 @@ void release_events_locked();
 void release_modules_locked();
 void wait_for_memory_operations_locked(RuntimeLock *devices_lock);
 void release_memory_allocations_locked(lr_status_t *result);
+#endif
 #endif
 
 bool valid_device(lr_device_t device);

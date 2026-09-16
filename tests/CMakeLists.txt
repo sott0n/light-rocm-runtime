@@ -9,6 +9,19 @@ function(lrrt_bind_hsaco target dependency define path)
   target_compile_definitions(${target} PRIVATE ${define}="${path}")
 endfunction()
 
+if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
+  lrrt_add_test_executable(
+    lrrt_light_rocr_backend_tests
+    light_rocr_backend.cpp
+    lrrt::lrrt
+  )
+  set_tests_properties(
+    lrrt_light_rocr_backend_tests
+    PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
+  )
+  return()
+endif()
+
 set(
   LRRT_CORE_TESTS
   lrrt_memory_bounds_tests memory_bounds.cpp

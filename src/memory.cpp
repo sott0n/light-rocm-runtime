@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <limits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -221,6 +222,54 @@ void release_memory_allocations_locked(lr_status_t *result) {
   }
   g_host_allocations.clear();
 }
+#elif LRRT_ENABLE_LIGHT_ROCR
+namespace {
+
+struct LightRocrAllocationInfo {
+  uint32_t device_index;
+  size_t requested_size;
+  light_rocr::transport::hsakmt::MemoryAllocation allocation;
+};
+
+std::unordered_map<void *, LightRocrAllocationInfo> g_light_rocr_allocations;
+
+void record_allocation(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.live_bytes += size;
+  stats.total_allocated_bytes += size;
+  ++stats.allocation_count;
+  if (stats.live_bytes > stats.peak_live_bytes) {
+    stats.peak_live_bytes = stats.live_bytes;
+  }
+}
+
+void record_free(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.live_bytes = size > stats.live_bytes ? 0 : stats.live_bytes - size;
+  stats.total_freed_bytes += size;
+  ++stats.free_count;
+}
+
+} // namespace
+
+void release_memory_allocations_locked(lr_status_t *result) {
+  for (auto allocation = g_light_rocr_allocations.begin();
+       allocation != g_light_rocr_allocations.end();) {
+    const auto status = allocation->second.allocation.release();
+    if (!status) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      ++allocation;
+      continue;
+    }
+    const LightRocrAllocationInfo &info = allocation->second;
+    if (info.device_index < g_devices.size()) {
+      record_free(&g_devices[info.device_index], info.requested_size);
+    }
+    allocation = g_light_rocr_allocations.erase(allocation);
+  }
+}
 #endif
 
 } // namespace lrrt_internal
@@ -237,7 +286,7 @@ lr_status_t lr_get_memory_stats(lr_device_t device, lr_memory_stats_t *stats) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-#if LRRT_ENABLE_HSA
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -257,7 +306,7 @@ lr_status_t lr_reset_memory_stats(lr_device_t device) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-#if LRRT_ENABLE_HSA
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -311,6 +360,44 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
   g_allocations[*ptr] = AllocationInfo{device.index, size, 0, false};
   record_allocation(&state, size);
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (size > std::numeric_limits<uint64_t>::max() -
+                 (light_rocr::transport::hsakmt::kMemoryPageSize - 1)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const uint64_t allocation_size =
+      (static_cast<uint64_t>(size) +
+       light_rocr::transport::hsakmt::kMemoryPageSize - 1) &
+      ~(light_rocr::transport::hsakmt::kMemoryPageSize - 1);
+  auto allocated = g_kfd_session->allocate_gtt(
+      g_devices[device.index].node.node_id, allocation_size);
+  if (!allocated) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  const uint64_t gpu_address = allocated.allocation.gpu_address();
+  if (gpu_address == 0 || gpu_address > std::numeric_limits<uintptr_t>::max()) {
+    return LR_ERROR_RUNTIME;
+  }
+  void *device_ptr =
+      reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address));
+  if (g_light_rocr_allocations.find(device_ptr) !=
+      g_light_rocr_allocations.end()) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  g_light_rocr_allocations.emplace(
+      device_ptr, LightRocrAllocationInfo{device.index, size,
+                                          std::move(allocated.allocation)});
+  record_allocation(&g_devices[device.index], size);
+  *ptr = device_ptr;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -361,6 +448,25 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
   record_free(&g_devices[device.index], size);
   g_allocations.erase(allocation);
   g_memory_state_changed.notify_all();
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  auto allocation = g_light_rocr_allocations.find(ptr);
+  if (allocation == g_light_rocr_allocations.end() ||
+      allocation->second.device_index != device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const auto status = allocation->second.allocation.release();
+  if (!status) {
+    return LR_ERROR_RUNTIME;
+  }
+  const size_t requested_size = allocation->second.requested_size;
+  g_light_rocr_allocations.erase(allocation);
+  record_free(&g_devices[device.index], requested_size);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;

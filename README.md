@@ -97,7 +97,7 @@ cmake -S . -B build
 cmake --build build
 ```
 
-The runtime uses the HSA/ROCr API directly for device memory, code object
+The default runtime backend uses HSA/ROCr for device memory, code object
 loading, and kernel dispatch.
 
 The experimental self-authored low-level stack lives in `light-rocr/`. Its
@@ -112,6 +112,10 @@ ctest --test-dir build-light-rocr --output-on-failure
 It can also be included in the main build with
 `-DLRRT_ENABLE_LIGHT_ROCR=ON`. The existing ROCr path remains the default and
 the correctness oracle while the loader and runtime are developed.
+
+The initial LRRT integration can be selected with
+`-DLRRT_BACKEND=light-rocr`. It currently supports lifecycle, `gfx1101`
+discovery, and device allocation through the public LRRT API.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton
