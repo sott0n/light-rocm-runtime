@@ -5,12 +5,26 @@ project(light_rocr VERSION 0.1.0 LANGUAGES CXX)
 find_package(Threads REQUIRED)
 
 option(LIGHT_ROCR_BUILD_TESTS "Build light-rocr host tests" ON)
+option(
+  LIGHT_ROCR_BUILD_GPU_TESTS
+  "Build light-rocr tests that require GPU access"
+  OFF
+)
 option(LIGHT_ROCR_BUILD_TOOLS "Build light-rocr inspection tools" ON)
 option(
   LIGHT_ROCR_ENABLE_HSAKMT
   "Build the libhsakmt transport when its development files are available"
   ON
 )
+set(
+  LIGHT_ROCR_VECTOR_ADD_HSACO
+  ""
+  CACHE FILEPATH "Clang vector-add HSACO used by the GPU E2E test"
+)
+
+if(LIGHT_ROCR_BUILD_GPU_TESTS AND NOT LIGHT_ROCR_BUILD_TESTS)
+  message(FATAL_ERROR "GPU tests require LIGHT_ROCR_BUILD_TESTS=ON")
+endif()
 
 function(light_rocr_enable_warnings target)
   if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
@@ -212,6 +226,11 @@ endif()
 
 if(LIGHT_ROCR_BUILD_TESTS)
   enable_testing()
+
+  if(LIGHT_ROCR_BUILD_GPU_TESTS AND NOT LIGHT_ROCR_HSAKMT_AVAILABLE)
+    message(FATAL_ERROR "GPU tests require the libhsakmt transport")
+  endif()
+
   add_executable(light_rocr_loader_tests tests/loader/elf_reader_test.cpp)
   target_link_libraries(light_rocr_loader_tests PRIVATE light_rocr::loader)
   light_rocr_enable_warnings(light_rocr_loader_tests)
@@ -560,5 +579,49 @@ if(LIGHT_ROCR_BUILD_TESTS)
       NAME light_rocr_hsakmt_topology_tests
       COMMAND light_rocr_hsakmt_topology_tests
     )
+
+    if(LIGHT_ROCR_BUILD_GPU_TESTS)
+      if(NOT LIGHT_ROCR_VECTOR_ADD_HSACO)
+        message(
+          FATAL_ERROR
+          "GPU tests require LIGHT_ROCR_VECTOR_ADD_HSACO"
+        )
+      endif()
+      get_filename_component(
+        LIGHT_ROCR_VECTOR_ADD_HSACO_ABSOLUTE
+        "${LIGHT_ROCR_VECTOR_ADD_HSACO}"
+        ABSOLUTE
+        BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}"
+      )
+      if(NOT EXISTS "${LIGHT_ROCR_VECTOR_ADD_HSACO_ABSOLUTE}")
+        message(
+          FATAL_ERROR
+          "vector-add HSACO does not exist: "
+          "${LIGHT_ROCR_VECTOR_ADD_HSACO_ABSOLUTE}"
+        )
+      endif()
+
+      add_executable(
+        light_rocr_vector_add_e2e_tests
+        tests/e2e/vector_add_test.cpp
+      )
+      target_link_libraries(
+        light_rocr_vector_add_e2e_tests
+        PRIVATE light_rocr::transport_hsakmt
+      )
+      light_rocr_enable_warnings(light_rocr_vector_add_e2e_tests)
+      add_test(
+        NAME light_rocr_vector_add_e2e_tests
+        COMMAND
+          light_rocr_vector_add_e2e_tests
+          "${LIGHT_ROCR_VECTOR_ADD_HSACO_ABSOLUTE}"
+      )
+      set_tests_properties(
+        light_rocr_vector_add_e2e_tests
+        PROPERTIES
+          RESOURCE_LOCK light_rocr_gpu
+          TIMEOUT 20
+      )
+    endif()
   endif()
 endif()

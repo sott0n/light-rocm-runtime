@@ -9,9 +9,9 @@ It does not use `libhsa-runtime64.so`. GPU access currently goes through
 
 ## Status
 
-The current target is `gfx1101`. A built-in kernel can run end to end through a
-self-authored AQL queue and signal. Normal HSACO files can be parsed and mapped
-into GPU memory, but executing a loaded HSACO end to end is not yet supported.
+The current target is `gfx1101`. The repository's normal Clang vector-add
+HSACO can be loaded and run end to end through a self-authored AQL queue,
+scratch backing, and signal.
 
 ## Build
 
@@ -40,15 +40,13 @@ Inspect an HSACO without a GPU:
 ./build-light-rocr/light-rocr-inspect-hsaco PATH_TO_HSACO
 ```
 
-On a `gfx1101` machine with access to `/dev/kfd`, materialize a normal HSACO in
-GPU-visible memory:
+On a `gfx1101` machine with access to `/dev/kfd`, enable and run the GPU E2E
+test against the repository's normal Clang vector-add HSACO:
 
 ```sh
-./build-light-rocr/light-rocr-check-image PATH_TO_HSACO
-```
-
-Run the built-in kernel through the current AQL dispatch path:
-
-```sh
-./build-light-rocr/light-rocr-check-dispatch
+cmake -S light-rocr -B build-light-rocr-gpu \
+  -DLIGHT_ROCR_BUILD_GPU_TESTS=ON \
+  -DLIGHT_ROCR_VECTOR_ADD_HSACO="$PWD/build/vector_add_kernel.hsaco"
+cmake --build build-light-rocr-gpu
+ctest --test-dir build-light-rocr-gpu --output-on-failure
 ```
