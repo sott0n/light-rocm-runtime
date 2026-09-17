@@ -104,15 +104,6 @@ bool run_allocation_checks(lr_device_t device) {
     return false;
   }
 
-  lr_queue_t *queue = reinterpret_cast<lr_queue_t *>(uintptr_t{1});
-  if (!expect_status(lr_queue_create(device, &queue), LR_ERROR_NOT_SUPPORTED,
-                     "lr_queue_create unsupported") ||
-      queue != nullptr) {
-    std::fprintf(stderr, "unsupported lr_queue_create wrote a queue\n");
-    (void)lr_free(device, allocation);
-    return false;
-  }
-
   lr_event_t *event = reinterpret_cast<lr_event_t *>(uintptr_t{1});
   if (!expect_status(lr_event_create(device, &event), LR_ERROR_NOT_SUPPORTED,
                      "lr_event_create unsupported") ||
@@ -153,6 +144,48 @@ bool run_allocation_checks(lr_device_t device) {
   return true;
 }
 
+bool run_queue_checks(lr_device_t device, lr_queue_t **shutdown_owned_queue) {
+  if (!expect_status(lr_queue_create(device, nullptr),
+                     LR_ERROR_INVALID_ARGUMENT, "lr_queue_create null")) {
+    return false;
+  }
+
+  lr_queue_t *first = nullptr;
+  lr_queue_t *second = nullptr;
+  if (!expect_status(lr_queue_create(device, &first), LR_SUCCESS,
+                     "lr_queue_create first") ||
+      first == nullptr ||
+      !expect_status(lr_queue_create(device, &second), LR_SUCCESS,
+                     "lr_queue_create second") ||
+      second == nullptr || first == second) {
+    std::fprintf(stderr, "light-rocr did not create independent queues\n");
+    return false;
+  }
+
+  if (!expect_status(lr_queue_synchronize(first), LR_ERROR_NOT_SUPPORTED,
+                     "lr_queue_synchronize live") ||
+      !expect_status(lr_queue_destroy(first), LR_SUCCESS,
+                     "lr_queue_destroy first") ||
+      !expect_status(lr_queue_synchronize(first), LR_ERROR_INVALID_ARGUMENT,
+                     "lr_queue_synchronize stale") ||
+      !expect_status(lr_queue_destroy(first), LR_ERROR_INVALID_ARGUMENT,
+                     "lr_queue_destroy stale") ||
+      !expect_status(lr_queue_synchronize(second), LR_ERROR_NOT_SUPPORTED,
+                     "lr_queue_synchronize independent") ||
+      !expect_status(lr_queue_destroy(second), LR_SUCCESS,
+                     "lr_queue_destroy second")) {
+    return false;
+  }
+
+  *shutdown_owned_queue = nullptr;
+  if (!expect_status(lr_queue_create(device, shutdown_owned_queue), LR_SUCCESS,
+                     "lr_queue_create before shutdown") ||
+      *shutdown_owned_queue == nullptr) {
+    return false;
+  }
+  return true;
+}
+
 bool open_only_device(lr_device_t *device, char *name, size_t name_size) {
   uint32_t count = 0;
   if (!expect_status(lr_device_count(&count), LR_SUCCESS, "lr_device_count") ||
@@ -185,10 +218,22 @@ int main() {
     return 1;
   }
 
+  lr_queue_t *unopened_queue = reinterpret_cast<lr_queue_t *>(uintptr_t{1});
+  if (!expect_status(lr_queue_create(lr_device_t{0}, &unopened_queue),
+                     LR_ERROR_INVALID_ARGUMENT,
+                     "lr_queue_create before device open") ||
+      unopened_queue != nullptr) {
+    std::fprintf(stderr, "failed queue creation wrote a queue handle\n");
+    (void)lr_shutdown();
+    return 1;
+  }
+
   lr_device_t device{};
   char name[128] = {};
+  lr_queue_t *shutdown_owned_queue = nullptr;
   if (!open_only_device(&device, name, sizeof(name)) ||
-      !run_allocation_checks(device)) {
+      !run_allocation_checks(device) ||
+      !run_queue_checks(device, &shutdown_owned_queue)) {
     (void)lr_shutdown();
     return 1;
   }
@@ -219,6 +264,7 @@ int main() {
     return 1;
   }
 
-  std::printf("light_rocr_backend: device=%s lifecycle=ok memory=ok\n", name);
+  std::printf(
+      "light_rocr_backend: device=%s lifecycle=ok memory=ok queues=ok\n", name);
   return 0;
 }

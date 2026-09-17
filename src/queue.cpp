@@ -10,8 +10,11 @@
 
 namespace lrrt_internal {
 
-#if LRRT_ENABLE_HSA
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
 std::unordered_set<lr_queue_t *> g_queues;
+#endif
+
+#if LRRT_ENABLE_HSA
 
 struct SynchronizationDependency {
   hsa_signal_t signal;
@@ -857,6 +860,55 @@ lr_status_t finish_queue_destruction_locked(
   }
   return result;
 }
+#elif LRRT_ENABLE_LIGHT_ROCR
+lr_status_t create_light_rocr_queue(lr_device_t device_handle,
+                                    DeviceState *device, bool is_default,
+                                    lr_queue_t **queue) {
+  if (!g_kfd_session) {
+    return LR_ERROR_RUNTIME;
+  }
+  auto created = g_kfd_session->create_aql_queue(
+      device->node, light_rocr::transport::hsakmt::kAqlRingDefaultSize);
+  if (!created) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  auto *created_queue =
+      new lr_queue_t{device_handle, is_default, std::move(created.queue)};
+  device->queues.push_back(created_queue);
+  g_queues.insert(created_queue);
+  *queue = created_queue;
+  return LR_SUCCESS;
+}
+
+bool valid_light_rocr_queue_locked(lr_queue_t *queue) {
+  return g_queues.find(queue) != g_queues.end();
+}
+
+void release_light_rocr_queues_locked(lr_status_t *result) {
+  for (DeviceState &device : g_devices) {
+    size_t index = 0;
+    while (index < device.queues.size()) {
+      lr_queue_t *queue = device.queues[index];
+      const auto status = queue->queue.release();
+      if (!status) {
+        if (*result == LR_SUCCESS) {
+          *result = LR_ERROR_RUNTIME;
+        }
+        ++index;
+        continue;
+      }
+
+      if (device.default_queue == queue) {
+        device.default_queue = nullptr;
+      }
+      g_queues.erase(queue);
+      delete queue;
+      device.queues.erase(device.queues.begin() +
+                          static_cast<std::ptrdiff_t>(index));
+    }
+  }
+}
 #endif
 
 } // namespace lrrt_internal
@@ -882,6 +934,14 @@ lr_status_t lr_queue_create(lr_device_t device, lr_queue_t **queue) {
   hsa_status_t status =
       create_queue(device, &g_devices[device.index], false, queue);
   return to_lr_status(status);
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_devices[device.index].default_queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return create_light_rocr_queue(device, &g_devices[device.index], false,
+                                 queue);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -938,6 +998,28 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
   queue_lock.unlock();
   delete queue;
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  auto queue_entry = g_queues.find(queue);
+  if (queue_entry == g_queues.end() || queue->is_default ||
+      queue->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  DeviceState &device = g_devices[queue->device.index];
+  auto device_queue =
+      std::find(device.queues.begin(), device.queues.end(), queue);
+  if (device_queue == device.queues.end()) {
+    return LR_ERROR_RUNTIME;
+  }
+  const auto status = queue->queue.release();
+  if (!status) {
+    return LR_ERROR_RUNTIME;
+  }
+  device.queues.erase(device_queue);
+  g_queues.erase(queue_entry);
+  delete queue;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -974,6 +1056,12 @@ lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
   queue_lock.lock();
 
   return finish_queue_synchronization_locked(&state, completion_signal, value);
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_light_rocr_queue_locked(queue)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return LR_ERROR_NOT_SUPPORTED;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif

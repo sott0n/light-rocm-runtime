@@ -196,8 +196,12 @@ lr_status_t lr_init(void) {
   {
     std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
     g_devices.clear();
-    g_devices.push_back(DeviceState{
-        std::move(discovered.topology.nodes[selected.node_index]), false, {}});
+    g_devices.push_back(
+        DeviceState{std::move(discovered.topology.nodes[selected.node_index]),
+                    false,
+                    nullptr,
+                    {},
+                    {}});
     g_kfd_session = std::make_unique<light_rocr::transport::hsakmt::KfdSession>(
         std::move(opened.session));
   }
@@ -251,6 +255,11 @@ lr_status_t lr_shutdown(void) {
   {
     RuntimeLock lock(g_devices_mutex);
     lr_status_t release_status = LR_SUCCESS;
+    release_light_rocr_queues_locked(&release_status);
+    if (release_status != LR_SUCCESS) {
+      g_initialized.store(true);
+      return release_status;
+    }
     release_modules_locked(&release_status);
     release_memory_allocations_locked(&release_status);
     if (release_status != LR_SUCCESS) {
@@ -312,7 +321,16 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
     if (index >= g_devices.size()) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
-    g_devices[index].opened = true;
+    DeviceState &state = g_devices[index];
+    if (!state.default_queue) {
+      lr_device_t opened_device = {index};
+      lr_status_t status = create_light_rocr_queue(opened_device, &state, true,
+                                                   &state.default_queue);
+      if (status != LR_SUCCESS) {
+        return status;
+      }
+    }
+    state.opened = true;
   }
 #else
   if (index != 0) {
