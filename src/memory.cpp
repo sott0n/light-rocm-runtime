@@ -498,6 +498,11 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+  const lr_status_t synchronization_status =
+      synchronize_light_rocr_device_locked(&g_devices[device.index]);
+  if (synchronization_status != LR_SUCCESS) {
+    return synchronization_status;
+  }
   const auto status = allocation->second.allocation.release();
   if (!status) {
     return LR_ERROR_RUNTIME;
@@ -705,6 +710,11 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     }
   }
 
+  const lr_status_t synchronization_status =
+      synchronize_light_rocr_device_locked(&g_devices[device.index]);
+  if (synchronization_status != LR_SUCCESS) {
+    return synchronization_status;
+  }
   std::memmove(copy_dst, copy_src, size);
   record_memcpy(&g_devices[device.index], kind, size);
   return LR_SUCCESS;

@@ -308,6 +308,12 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
   }
 
   module->destroying = true;
+  const lr_status_t synchronization_status =
+      synchronize_light_rocr_device_locked(&g_devices[module->device.index]);
+  if (synchronization_status != LR_SUCCESS) {
+    module->destroying = false;
+    return synchronization_status;
+  }
   const auto status = module->executable_image.release();
   if (!status) {
     module->destroying = false;

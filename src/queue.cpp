@@ -1,6 +1,7 @@
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -885,11 +886,97 @@ bool valid_light_rocr_queue_locked(lr_queue_t *queue) {
   return g_queues.find(queue) != g_queues.end();
 }
 
+lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
+                                                   lr_queue_t *queue,
+                                                   uint32_t private_size) {
+  if (!g_kfd_session || !queue->queue) {
+    return LR_ERROR_RUNTIME;
+  }
+  if (private_size <= queue->queue.scratch_private_segment_size()) {
+    return LR_SUCCESS;
+  }
+
+  const lr_status_t synchronization_status =
+      synchronize_light_rocr_queue_locked(queue);
+  if (synchronization_status != LR_SUCCESS) {
+    return synchronization_status;
+  }
+
+  const uint32_t old_private_size = queue->queue.scratch_private_segment_size();
+  if (!queue->queue.release()) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  auto replacement = g_kfd_session->create_aql_queue(
+      device->node, light_rocr::transport::hsakmt::kAqlRingDefaultSize,
+      private_size);
+  if (replacement) {
+    queue->queue = std::move(replacement.queue);
+    return LR_SUCCESS;
+  }
+
+  if (!replacement.queue.release()) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  // Queue scratch uses a process-wide reservation for the GPU node. Restore
+  // a usable queue if growing that reservation was not possible.
+  auto restored = g_kfd_session->create_aql_queue(
+      device->node, light_rocr::transport::hsakmt::kAqlRingDefaultSize,
+      old_private_size);
+  if (restored) {
+    queue->queue = std::move(restored.queue);
+  }
+  return replacement.status.error ==
+                 light_rocr::transport::hsakmt::AqlQueueError::ConfigureScratch
+             ? LR_ERROR_NOT_SUPPORTED
+             : LR_ERROR_RUNTIME;
+}
+
+lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue) {
+  while (!queue->pending_dispatches.empty()) {
+    lr_queue_t::PendingDispatch &dispatch = *queue->pending_dispatches.front();
+    const auto waited = dispatch.completion_signal.wait_until_equal(
+        0, std::chrono::steady_clock::time_point::max());
+    if (!waited) {
+      return LR_ERROR_RUNTIME;
+    }
+
+    if (!dispatch.kernarg.release()) {
+      return LR_ERROR_RUNTIME;
+    }
+    if (!dispatch.completion_signal.release()) {
+      return LR_ERROR_RUNTIME;
+    }
+    queue->pending_dispatches.erase(queue->pending_dispatches.begin());
+  }
+  return LR_SUCCESS;
+}
+
+lr_status_t synchronize_light_rocr_device_locked(DeviceState *device) {
+  for (lr_queue_t *queue : device->queues) {
+    const lr_status_t status = synchronize_light_rocr_queue_locked(queue);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+  }
+  return LR_SUCCESS;
+}
+
 void release_light_rocr_queues_locked(lr_status_t *result) {
   for (DeviceState &device : g_devices) {
     size_t index = 0;
     while (index < device.queues.size()) {
       lr_queue_t *queue = device.queues[index];
+      const lr_status_t synchronization_status =
+          synchronize_light_rocr_queue_locked(queue);
+      if (synchronization_status != LR_SUCCESS) {
+        if (*result == LR_SUCCESS) {
+          *result = synchronization_status;
+        }
+        ++index;
+        continue;
+      }
       const auto status = queue->queue.release();
       if (!status) {
         if (*result == LR_SUCCESS) {
@@ -1012,6 +1099,11 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
   if (device_queue == device.queues.end()) {
     return LR_ERROR_RUNTIME;
   }
+  const lr_status_t synchronization_status =
+      synchronize_light_rocr_queue_locked(queue);
+  if (synchronization_status != LR_SUCCESS) {
+    return synchronization_status;
+  }
   const auto status = queue->queue.release();
   if (!status) {
     return LR_ERROR_RUNTIME;
@@ -1061,7 +1153,7 @@ lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
   if (!valid_light_rocr_queue_locked(queue)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return LR_ERROR_NOT_SUPPORTED;
+  return synchronize_light_rocr_queue_locked(queue);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif

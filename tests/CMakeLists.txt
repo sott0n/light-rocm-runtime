@@ -32,6 +32,26 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     lrrt::lrrt
   )
 
+  lrrt_add_hsaco_kernel(
+    light_rocr_copy_kernel
+    tests/copy_kernel_kernel.cpp
+    LIGHT_ROCR_COPY_HSACO
+  )
+  if(LIGHT_ROCR_COPY_HSACO)
+    lrrt_add_test_executable(
+      lrrt_copy_kernel_tests
+      copy_kernel.cpp
+      lrrt::lrrt
+    )
+    lrrt_bind_hsaco(
+      lrrt_copy_kernel_tests
+      light_rocr_copy_kernel_hsaco
+      LRRT_COPY_HSACO
+      "${LIGHT_ROCR_COPY_HSACO}"
+    )
+    list(APPEND LRRT_LIGHT_ROCR_GPU_TESTS lrrt_copy_kernel_tests)
+  endif()
+
   get_property(VECTOR_ADD_HSACO GLOBAL PROPERTY LRRT_VECTOR_ADD_HSACO)
   if(VECTOR_ADD_HSACO)
     lrrt_add_test_executable(

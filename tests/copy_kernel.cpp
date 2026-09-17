@@ -56,6 +56,17 @@ static int expect_status(lr_status_t actual, lr_status_t expected,
   return 0;
 }
 
+static int check_output(const float *actual, const float *expected, int count) {
+  for (int i = 0; i < count; ++i) {
+    if (fabsf(actual[i] - expected[i]) > 0.001f) {
+      fprintf(stderr, "copy_kernel mismatch at %d: got %f expected %f\n", i,
+              actual[i], expected[i]);
+      return 0;
+    }
+  }
+  return 1;
+}
+
 int main(void) {
   lr_status_t status = lr_init();
   if (!expect_status(status, LR_SUCCESS, "lr_init")) {
@@ -143,6 +154,52 @@ int main(void) {
 
   copy_args_t args = {(const float *)device_in, (float *)device_out, n};
   lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+
+  lr_queue_t *queue = NULL;
+  status = lr_queue_create(device, &queue);
+  if (!expect_status(status, LR_SUCCESS, "lr_queue_create")) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_launch_on_queue(queue, kernel, &config, &args, sizeof(args));
+  if (!expect_status(status, LR_SUCCESS, "lr_launch_on_queue") ||
+      !expect_status(lr_queue_synchronize(queue), LR_SUCCESS,
+                     "lr_queue_synchronize") ||
+      !expect_status(lr_queue_destroy(queue), LR_SUCCESS, "lr_queue_destroy")) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
+  status =
+      lr_memcpy(device, out, device_out, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
+  if (!expect_status(status, LR_SUCCESS, "copy out from explicit queue") ||
+      !check_output(out, in, n)) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
+  for (int i = 0; i < n; ++i) {
+    out[i] = 0.0f;
+  }
+  status =
+      lr_memcpy(device, device_out, out, sizeof(out), LR_MEMCPY_HOST_TO_DEVICE);
+  if (!expect_status(status, LR_SUCCESS, "reset output")) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
   status = lr_launch(kernel, &config, &args, sizeof(args));
   if (!expect_status(status, LR_SUCCESS, "lr_launch")) {
     lr_module_destroy(module);
@@ -171,19 +228,54 @@ int main(void) {
     return 1;
   }
 
-  for (int i = 0; i < n; ++i) {
-    if (fabsf(out[i] - in[i]) > 0.001f) {
-      fprintf(stderr, "copy_kernel mismatch at %d: got %f expected %f\n", i,
-              out[i], in[i]);
-      lr_module_destroy(module);
-      lr_free(device, device_out);
-      lr_free(device, device_in);
-      lr_shutdown();
-      return 1;
-    }
+  if (!check_output(out, in, n)) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
   }
 
-  lr_module_destroy(module);
+  for (int i = 0; i < n; ++i) {
+    out[i] = 0.0f;
+  }
+  status =
+      lr_memcpy(device, device_out, out, sizeof(out), LR_MEMCPY_HOST_TO_DEVICE);
+  if (!expect_status(status, LR_SUCCESS, "reset output before implicit wait") ||
+      !expect_status(lr_launch(kernel, &config, &args, sizeof(args)),
+                     LR_SUCCESS, "lr_launch before synchronous copy") ||
+      !expect_status(lr_memcpy(device, out, device_out, sizeof(out),
+                               LR_MEMCPY_DEVICE_TO_HOST),
+                     LR_SUCCESS, "synchronous copy waits for launch") ||
+      !check_output(out, in, n)) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
+  for (int i = 0; i < n; ++i) {
+    out[i] = 0.0f;
+  }
+  status =
+      lr_memcpy(device, device_out, out, sizeof(out), LR_MEMCPY_HOST_TO_DEVICE);
+  if (!expect_status(status, LR_SUCCESS,
+                     "reset output before module destroy") ||
+      !expect_status(lr_launch(kernel, &config, &args, sizeof(args)),
+                     LR_SUCCESS, "lr_launch before module destroy") ||
+      !expect_status(lr_module_destroy(module), LR_SUCCESS,
+                     "lr_module_destroy waits for launch") ||
+      !expect_status(lr_memcpy(device, out, device_out, sizeof(out),
+                               LR_MEMCPY_DEVICE_TO_HOST),
+                     LR_SUCCESS, "copy out after module destroy") ||
+      !check_output(out, in, n)) {
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
   lr_free(device, device_out);
   lr_free(device, device_in);
   lr_shutdown();

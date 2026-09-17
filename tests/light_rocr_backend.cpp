@@ -123,8 +123,8 @@ bool run_allocation_checks(lr_device_t device) {
     return false;
   }
 
-  if (!expect_status(lr_synchronize(device), LR_ERROR_NOT_SUPPORTED,
-                     "lr_synchronize unsupported") ||
+  if (!expect_status(lr_synchronize(device), LR_SUCCESS,
+                     "lr_synchronize idle device") ||
       !expect_status(lr_free(device, allocation), LR_SUCCESS,
                      "lr_free allocation") ||
       !expect_status(lr_free(device, allocation), LR_ERROR_INVALID_ARGUMENT,
@@ -162,7 +162,7 @@ bool run_queue_checks(lr_device_t device, lr_queue_t **shutdown_owned_queue) {
     return false;
   }
 
-  if (!expect_status(lr_queue_synchronize(first), LR_ERROR_NOT_SUPPORTED,
+  if (!expect_status(lr_queue_synchronize(first), LR_SUCCESS,
                      "lr_queue_synchronize live") ||
       !expect_status(lr_queue_destroy(first), LR_SUCCESS,
                      "lr_queue_destroy first") ||
@@ -170,7 +170,7 @@ bool run_queue_checks(lr_device_t device, lr_queue_t **shutdown_owned_queue) {
                      "lr_queue_synchronize stale") ||
       !expect_status(lr_queue_destroy(first), LR_ERROR_INVALID_ARGUMENT,
                      "lr_queue_destroy stale") ||
-      !expect_status(lr_queue_synchronize(second), LR_ERROR_NOT_SUPPORTED,
+      !expect_status(lr_queue_synchronize(second), LR_SUCCESS,
                      "lr_queue_synchronize independent") ||
       !expect_status(lr_queue_destroy(second), LR_SUCCESS,
                      "lr_queue_destroy second")) {

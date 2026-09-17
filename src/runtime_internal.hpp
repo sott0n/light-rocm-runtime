@@ -13,6 +13,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #if LRRT_ENABLE_HSA
@@ -21,8 +22,10 @@
 #elif LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr/runtime/topology.hpp"
 #include "light_rocr/transport/hsakmt/executable_image.hpp"
+#include "light_rocr/transport/hsakmt/kernarg.hpp"
 #include "light_rocr/transport/hsakmt/memory.hpp"
 #include "light_rocr/transport/hsakmt/queue.hpp"
+#include "light_rocr/transport/hsakmt/signal.hpp"
 #endif
 
 #if LRRT_ENABLE_HSA
@@ -133,7 +136,17 @@ struct lr_queue_t {
 #if LRRT_ENABLE_HSA
   QueueState state;
 #elif LRRT_ENABLE_LIGHT_ROCR
+  struct PendingDispatch {
+    PendingDispatch(light_rocr::transport::hsakmt::UserSignal &&signal,
+                    light_rocr::transport::hsakmt::KernargBuffer &&kernarg)
+        : completion_signal(std::move(signal)), kernarg(std::move(kernarg)) {}
+
+    light_rocr::transport::hsakmt::UserSignal completion_signal;
+    light_rocr::transport::hsakmt::KernargBuffer kernarg;
+  };
+
   light_rocr::transport::hsakmt::AqlQueue queue;
+  std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
 #endif
 };
 
@@ -201,6 +214,11 @@ lr_status_t create_light_rocr_queue(lr_device_t device_handle,
                                     DeviceState *device, bool is_default,
                                     lr_queue_t **queue);
 bool valid_light_rocr_queue_locked(lr_queue_t *queue);
+lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
+                                                   lr_queue_t *queue,
+                                                   uint32_t private_size);
+lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue);
+lr_status_t synchronize_light_rocr_device_locked(DeviceState *device);
 void release_light_rocr_queues_locked(lr_status_t *result);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked(lr_status_t *result);

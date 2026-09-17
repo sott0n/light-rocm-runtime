@@ -405,7 +405,7 @@ lr_status_t lr_synchronize(lr_device_t device) {
   if (device.index >= g_devices.size() || !g_devices[device.index].opened) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return LR_ERROR_NOT_SUPPORTED;
+  return synchronize_light_rocr_device_locked(&g_devices[device.index]);
 #else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;
