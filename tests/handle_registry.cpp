@@ -140,6 +140,20 @@ int main(void) {
     return 1;
   }
 
+  lr_kernel_t *missing_kernel = (lr_kernel_t *)(uintptr_t)1;
+  status = lr_kernel_get(module, "missing_kernel", &missing_kernel);
+  if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
+                     "lr_kernel_get missing kernel") ||
+      missing_kernel != NULL) {
+    fprintf(stderr, "failed lr_kernel_get wrote a kernel handle\n");
+    lr_module_destroy(module);
+    lr_free(device, device_c);
+    lr_free(device, device_b);
+    lr_free(device, device_a);
+    lr_shutdown();
+    return 1;
+  }
+
   status = lr_module_destroy(module);
   if (!expect_status(status, LR_SUCCESS, "lr_module_destroy")) {
     lr_free(device, device_c);
@@ -184,7 +198,27 @@ int main(void) {
   lr_free(device, device_c);
   lr_free(device, device_b);
   lr_free(device, device_a);
-  lr_shutdown();
+
+  hsaco = NULL;
+  hsaco_size = 0;
+  if (!read_file(LRRT_VECTOR_ADD_HSACO, &hsaco, &hsaco_size)) {
+    fprintf(stderr, "failed to reread HSACO: %s\n", LRRT_VECTOR_ADD_HSACO);
+    lr_shutdown();
+    return 1;
+  }
+  lr_module_t *shutdown_owned_module = NULL;
+  status =
+      lr_module_load_hsaco(device, hsaco, hsaco_size, &shutdown_owned_module);
+  free(hsaco);
+  if (!expect_status(status, LR_SUCCESS,
+                     "lr_module_load_hsaco before shutdown")) {
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_shutdown();
+  if (!expect_status(status, LR_SUCCESS, "lr_shutdown with live module")) {
+    return 1;
+  }
 
   printf("handle_registry: ok\n");
   return 0;

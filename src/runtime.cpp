@@ -251,6 +251,7 @@ lr_status_t lr_shutdown(void) {
   {
     RuntimeLock lock(g_devices_mutex);
     lr_status_t release_status = LR_SUCCESS;
+    release_modules_locked(&release_status);
     release_memory_allocations_locked(&release_status);
     if (release_status != LR_SUCCESS) {
       g_initialized.store(true);

@@ -10,6 +10,12 @@ function(lrrt_bind_hsaco target dependency define path)
 endfunction()
 
 if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
+  set(
+    LRRT_LIGHT_ROCR_GPU_TESTS
+    lrrt_light_rocr_backend_tests
+    lrrt_memory_bounds_tests
+    lrrt_allocation_registry_tests
+  )
   lrrt_add_test_executable(
     lrrt_light_rocr_backend_tests
     light_rocr_backend.cpp
@@ -25,10 +31,25 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     allocation_registry.cpp
     lrrt::lrrt
   )
+
+  get_property(VECTOR_ADD_HSACO GLOBAL PROPERTY LRRT_VECTOR_ADD_HSACO)
+  if(VECTOR_ADD_HSACO)
+    lrrt_add_test_executable(
+      lrrt_handle_registry_tests
+      handle_registry.cpp
+      lrrt::lrrt
+    )
+    lrrt_bind_hsaco(
+      lrrt_handle_registry_tests
+      vector_add_kernel_hsaco
+      LRRT_VECTOR_ADD_HSACO
+      "${VECTOR_ADD_HSACO}"
+    )
+    list(APPEND LRRT_LIGHT_ROCR_GPU_TESTS lrrt_handle_registry_tests)
+  endif()
+
   set_tests_properties(
-    lrrt_light_rocr_backend_tests
-    lrrt_memory_bounds_tests
-    lrrt_allocation_registry_tests
+    ${LRRT_LIGHT_ROCR_GPU_TESTS}
     PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
   )
   return()

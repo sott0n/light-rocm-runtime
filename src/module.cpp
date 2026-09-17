@@ -2,22 +2,26 @@
 
 #include <string>
 #include <unordered_set>
+#include <utility>
 
 namespace lrrt_internal {
 
-#if LRRT_ENABLE_HSA
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
 namespace {
 
+#if LRRT_ENABLE_HSA
 struct SymbolSearch {
   const char *name;
   std::string descriptor_name;
   hsa_executable_symbol_t symbol;
   bool found;
 };
+#endif
 
 std::unordered_set<lr_module_t *> g_modules;
 std::unordered_set<lr_kernel_t *> g_kernels;
 
+#if LRRT_ENABLE_HSA
 hsa_status_t find_kernel_symbol(hsa_executable_t, hsa_agent_t,
                                 hsa_executable_symbol_t symbol, void *data) {
   auto *search = static_cast<SymbolSearch *>(data);
@@ -65,6 +69,58 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
   }
   return reader_status;
 }
+#elif LRRT_ENABLE_LIGHT_ROCR
+void destroy_module_handles(lr_module_t *module) {
+  for (lr_kernel_t *kernel : module->kernels) {
+    g_kernels.erase(kernel);
+    delete kernel;
+  }
+  module->kernels.clear();
+  delete module;
+}
+
+lr_status_t loader_error_status(light_rocr::loader::ParseErrorCode error) {
+  using light_rocr::loader::ParseErrorCode;
+  switch (error) {
+  case ParseErrorCode::UnsupportedElfClass:
+  case ParseErrorCode::UnsupportedEndianness:
+  case ParseErrorCode::UnsupportedElfVersion:
+  case ParseErrorCode::UnsupportedOsAbi:
+  case ParseErrorCode::UnsupportedAbiVersion:
+  case ParseErrorCode::UnsupportedObjectType:
+  case ParseErrorCode::UnsupportedMachine:
+  case ParseErrorCode::UnsupportedTarget:
+  case ParseErrorCode::UnsupportedExtendedProgramHeaderCount:
+  case ParseErrorCode::UnsupportedMetadataEncoding:
+  case ParseErrorCode::UnsupportedMetadataVersion:
+  case ParseErrorCode::UnsupportedRelocationFormat:
+  case ParseErrorCode::UnsupportedRelocationType:
+    return LR_ERROR_NOT_SUPPORTED;
+  case ParseErrorCode::None:
+    return LR_SUCCESS;
+  default:
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+}
+
+lr_status_t executable_image_error_status(
+    light_rocr::transport::hsakmt::ExecutableImageError error) {
+  using light_rocr::transport::hsakmt::ExecutableImageError;
+  switch (error) {
+  case ExecutableImageError::UnsupportedAlignment:
+  case ExecutableImageError::UnsupportedRelocations:
+    return LR_ERROR_NOT_SUPPORTED;
+  case ExecutableImageError::AllocationFailed:
+  case ExecutableImageError::MisalignedAllocation:
+  case ExecutableImageError::GpuAddressOverflow:
+    return LR_ERROR_RUNTIME;
+  case ExecutableImageError::None:
+    return LR_SUCCESS;
+  default:
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+}
+#endif
 
 } // namespace
 
@@ -73,9 +129,17 @@ bool valid_kernel_locked(lr_kernel_t *kernel) {
     return false;
   }
   lr_module_t *module = kernel->module;
-  return g_modules.find(module) != g_modules.end() && !module->destroying;
+  if (g_modules.find(module) == g_modules.end() || module->destroying) {
+    return false;
+  }
+#if LRRT_ENABLE_LIGHT_ROCR
+  return static_cast<bool>(module->executable_image);
+#else
+  return true;
+#endif
 }
 
+#if LRRT_ENABLE_HSA
 void release_modules_locked() {
   for (lr_module_t *module : g_modules) {
     destroy_module_resources(module);
@@ -83,6 +147,23 @@ void release_modules_locked() {
   g_modules.clear();
   g_kernels.clear();
 }
+#elif LRRT_ENABLE_LIGHT_ROCR
+void release_modules_locked(lr_status_t *result) {
+  for (auto module = g_modules.begin(); module != g_modules.end();) {
+    const auto status = (*module)->executable_image.release();
+    if (!status) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      ++module;
+      continue;
+    }
+    lr_module_t *released_module = *module;
+    module = g_modules.erase(module);
+    destroy_module_handles(released_module);
+  }
+}
+#endif
 #endif
 
 } // namespace lrrt_internal
@@ -156,6 +237,31 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
   loaded_module->destroying = false;
   g_modules.insert(loaded_module);
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  const auto parsed = light_rocr::loader::parse_code_object(
+      static_cast<const uint8_t *>(image), image_size);
+  if (!parsed) {
+    return loader_error_status(parsed.error.code);
+  }
+
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto loaded = light_rocr::transport::hsakmt::materialize_executable_image(
+      *g_kfd_session, g_devices[device.index].node.node_id,
+      static_cast<const uint8_t *>(image), image_size, parsed.code_object);
+  if (!loaded) {
+    return executable_image_error_status(loaded.status.error);
+  }
+
+  auto *loaded_module =
+      new lr_module_t{device, {}, false, std::move(loaded.image)};
+  g_modules.insert(loaded_module);
+  *module = loaded_module;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -192,6 +298,25 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
 
   g_modules.erase(module);
   return to_lr_status(destroy_module_resources(module));
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  auto module_entry = g_modules.find(module);
+  if (module_entry == g_modules.end() || module->destroying ||
+      module->device.index >= g_devices.size() ||
+      !g_devices[module->device.index].opened) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  module->destroying = true;
+  const auto status = module->executable_image.release();
+  if (!status) {
+    module->destroying = false;
+    return LR_ERROR_RUNTIME;
+  }
+
+  g_modules.erase(module_entry);
+  destroy_module_handles(module);
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -259,6 +384,33 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
     return to_lr_status(status);
   }
 
+  module->kernels.push_back(loaded_kernel);
+  g_kernels.insert(loaded_kernel);
+  *kernel = loaded_kernel;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (g_modules.find(module) == g_modules.end() || module->destroying ||
+      module->device.index >= g_devices.size() ||
+      !g_devices[module->device.index].opened || !module->executable_image) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const auto &code_kernels = module->executable_image.code_object().kernels;
+
+  size_t kernel_index = code_kernels.size();
+  for (size_t index = 0; index < code_kernels.size(); ++index) {
+    if (code_kernels[index].name == name ||
+        code_kernels[index].symbol_name == name) {
+      kernel_index = index;
+      break;
+    }
+  }
+  if (kernel_index == code_kernels.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto *loaded_kernel = new lr_kernel_t{module, kernel_index};
   module->kernels.push_back(loaded_kernel);
   g_kernels.insert(loaded_kernel);
   *kernel = loaded_kernel;

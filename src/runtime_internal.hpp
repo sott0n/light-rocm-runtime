@@ -20,6 +20,7 @@
 #include <hsa/hsa_ext_amd.h>
 #elif LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr/runtime/topology.hpp"
+#include "light_rocr/transport/hsakmt/executable_image.hpp"
 #include "light_rocr/transport/hsakmt/memory.hpp"
 #endif
 
@@ -136,12 +137,14 @@ struct lr_queue_t {
 struct lr_module_t {
   lr_device_t device;
   std::vector<lr_kernel_t *> kernels;
+  bool destroying;
 #if LRRT_ENABLE_HSA
   LifetimePinCount active_submissions;
-  bool destroying;
   hsa_code_object_reader_t reader;
   hsa_executable_t executable;
   hsa_loaded_code_object_t loaded_code_object;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  light_rocr::transport::hsakmt::ExecutableImage executable_image;
 #endif
 };
 
@@ -152,6 +155,8 @@ struct lr_kernel_t {
   uint32_t kernarg_size;
   uint32_t group_segment_size;
   uint32_t private_segment_size;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  size_t image_kernel_index;
 #endif
 };
 
@@ -187,6 +192,8 @@ extern std::vector<DeviceState> g_devices;
 
 #if LRRT_ENABLE_LIGHT_ROCR
 extern std::unique_ptr<light_rocr::transport::hsakmt::KfdSession> g_kfd_session;
+bool valid_kernel_locked(lr_kernel_t *kernel);
+void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
 #endif
 

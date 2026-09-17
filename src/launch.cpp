@@ -461,6 +461,12 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     queue.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
   }
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_kernel_locked(kernel)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return LR_ERROR_NOT_SUPPORTED;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif

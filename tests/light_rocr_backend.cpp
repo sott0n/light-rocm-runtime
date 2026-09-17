@@ -124,10 +124,10 @@ bool run_allocation_checks(lr_device_t device) {
 
   lr_module_t *module = reinterpret_cast<lr_module_t *>(uintptr_t{1});
   if (!expect_status(lr_module_load_hsaco(device, &host_byte, 1, &module),
-                     LR_ERROR_NOT_SUPPORTED,
-                     "lr_module_load_hsaco unsupported") ||
+                     LR_ERROR_INVALID_ARGUMENT,
+                     "lr_module_load_hsaco malformed image") ||
       module != nullptr) {
-    std::fprintf(stderr, "unsupported lr_module_load_hsaco wrote a module\n");
+    std::fprintf(stderr, "failed lr_module_load_hsaco wrote a module\n");
     (void)lr_free(device, allocation);
     return false;
   }
