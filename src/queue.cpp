@@ -113,21 +113,6 @@ void publish_packet_header(uint16_t *header, uint16_t value) {
   __atomic_store_n(header, value, __ATOMIC_RELEASE);
 }
 
-uint16_t packet_setup(uint16_t dimensions) {
-  return static_cast<uint16_t>(dimensions
-                               << HSA_KERNEL_DISPATCH_PACKET_SETUP_DIMENSIONS);
-}
-
-uint16_t dispatch_dimensions(const lr_launch_config_t *config) {
-  if (config->grid.z > 1 || config->block.z > 1) {
-    return 3;
-  }
-  if (config->grid.y > 1 || config->block.y > 1) {
-    return 2;
-  }
-  return 1;
-}
-
 lr_status_t drain_queue_work_locked(QueueState *queue) {
   lr_status_t result = LR_SUCCESS;
   for (const PendingBarrier &barrier : queue->pending_barriers) {
@@ -933,22 +918,92 @@ lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
              : LR_ERROR_RUNTIME;
 }
 
-lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue) {
-  while (!queue->pending_dispatches.empty()) {
-    lr_queue_t::PendingDispatch &dispatch = *queue->pending_dispatches.front();
-    const auto waited = dispatch.completion_signal.wait_until_equal(
-        0, std::chrono::steady_clock::time_point::max());
-    if (!waited) {
+namespace {
+
+lr_status_t release_light_rocr_dispatch(lr_queue_t::PendingDispatch *dispatch) {
+  if (!dispatch->kernarg.release()) {
+    return LR_ERROR_RUNTIME;
+  }
+  if (!dispatch->completion_signal.release()) {
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_SUCCESS;
+}
+
+} // namespace
+
+lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue) {
+  size_t completed_count = 0;
+  while (completed_count < queue->pending_dispatches.size()) {
+    lr_queue_t::PendingDispatch &dispatch =
+        *queue->pending_dispatches[completed_count];
+    if (dispatch.completion_signal.load_acquire() != 0) {
+      break;
+    }
+    const lr_status_t status = release_light_rocr_dispatch(&dispatch);
+    if (status != LR_SUCCESS) {
+      queue->pending_dispatches.erase(queue->pending_dispatches.begin(),
+                                      queue->pending_dispatches.begin() +
+                                          completed_count);
+      return status;
+    }
+    ++completed_count;
+  }
+  queue->pending_dispatches.erase(queue->pending_dispatches.begin(),
+                                  queue->pending_dispatches.begin() +
+                                      completed_count);
+  return LR_SUCCESS;
+}
+
+lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
+                                                    size_t required_packets) {
+  if (!queue->queue || required_packets == 0 ||
+      required_packets > queue->queue.packet_count()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  while (true) {
+    const lr_status_t reap_status =
+        reap_completed_light_rocr_dispatches_locked(queue);
+    if (reap_status != LR_SUCCESS) {
+      return reap_status;
+    }
+
+    const uint64_t read_index = queue->queue.read_index_acquire();
+    const uint64_t write_index = queue->queue.write_index_relaxed();
+    if (write_index < read_index) {
+      return LR_ERROR_RUNTIME;
+    }
+    if (write_index - read_index <=
+        queue->queue.packet_count() - required_packets) {
+      return LR_SUCCESS;
+    }
+    if (queue->pending_dispatches.empty()) {
       return LR_ERROR_RUNTIME;
     }
 
-    if (!dispatch.kernarg.release()) {
+    const auto waited =
+        queue->pending_dispatches.front()->completion_signal.wait_until_equal(
+            0, std::chrono::steady_clock::time_point::max());
+    if (!waited) {
       return LR_ERROR_RUNTIME;
     }
-    if (!dispatch.completion_signal.release()) {
+  }
+}
+
+lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue) {
+  while (!queue->pending_dispatches.empty()) {
+    const auto waited =
+        queue->pending_dispatches.front()->completion_signal.wait_until_equal(
+            0, std::chrono::steady_clock::time_point::max());
+    if (!waited) {
       return LR_ERROR_RUNTIME;
     }
-    queue->pending_dispatches.erase(queue->pending_dispatches.begin());
+    const lr_status_t status =
+        reap_completed_light_rocr_dispatches_locked(queue);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
   }
   return LR_SUCCESS;
 }

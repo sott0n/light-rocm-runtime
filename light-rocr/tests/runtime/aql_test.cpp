@@ -44,6 +44,8 @@ void abi_constants(TestContext *context) {
                   "AQL packet type values are incorrect");
   context->expect(light_rocr::runtime::kAqlKernelDispatchHeader == 0x1402,
                   "kernel-dispatch header bits are incorrect");
+  context->expect(light_rocr::runtime::kAqlPacketHeaderBarrierShift == 8,
+                  "packet-header barrier shift is incorrect");
   context->expect(light_rocr::runtime::kAqlKernelDispatchDimensionsShift == 0,
                   "kernel-dispatch dimensions shift is incorrect");
 }

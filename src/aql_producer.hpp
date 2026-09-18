@@ -1,11 +1,11 @@
-#ifndef LIGHT_ROCR_RUNTIME_AQL_HPP
-#define LIGHT_ROCR_RUNTIME_AQL_HPP
+#ifndef LRRT_AQL_PRODUCER_HPP_
+#define LRRT_AQL_PRODUCER_HPP_
 
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
-namespace light_rocr::runtime {
+namespace lrrt_internal {
 
 inline constexpr uint16_t kAqlPacketTypeInvalid = 1;
 inline constexpr uint16_t kAqlPacketTypeKernelDispatch = 2;
@@ -19,17 +19,7 @@ inline constexpr uint16_t kAqlKernelDispatchHeader = static_cast<uint16_t>(
     (kAqlPacketTypeKernelDispatch << kAqlPacketHeaderTypeShift) |
     (kAqlFenceScopeSystem << kAqlPacketHeaderAcquireFenceScopeShift) |
     (kAqlFenceScopeSystem << kAqlPacketHeaderReleaseFenceScopeShift));
-inline constexpr uint64_t kAmdKernelDescriptorAlignment = 64;
-inline constexpr uint64_t kAmdKernargMinimumAlignment = 16;
-inline constexpr uint64_t kAmdSignalAlignment = 64;
-// The first runtime target is gfx1101. Keep its dispatch limits explicit until
-// topology discovery grows a transport-independent ISA-limit model.
-inline constexpr uint16_t kGfx1101WorkgroupMaximumDimension = 1024;
-inline constexpr uint32_t kGfx1101WorkgroupMaximumSize = 1024;
-inline constexpr uint32_t kGfx1101GroupSegmentMaximumSize = 64 * 1024;
 
-// Self-authored HSA AQL kernel-dispatch packet ABI. Packet producers own field
-// construction, validation, ring writes, and header publication.
 struct alignas(64) AqlKernelDispatchPacket {
   uint16_t header = kAqlPacketTypeInvalid;
   uint16_t setup = 0;
@@ -61,6 +51,68 @@ static_assert(offsetof(AqlKernelDispatchPacket, kernarg_address) == 40);
 static_assert(offsetof(AqlKernelDispatchPacket, reserved2) == 48);
 static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) == 56);
 
-} // namespace light_rocr::runtime
+struct AqlKernelDispatchParameters {
+  uint32_t grid_size_x = 0;
+  uint32_t grid_size_y = 0;
+  uint32_t grid_size_z = 0;
+  uint16_t workgroup_size_x = 0;
+  uint16_t workgroup_size_y = 0;
+  uint16_t workgroup_size_z = 0;
+  uint32_t private_segment_size = 0;
+  uint32_t group_segment_size = 0;
+  uint64_t kernel_object = 0;
+  uint64_t kernarg_address = 0;
+  uint64_t completion_signal = 0;
+};
+
+struct AqlDispatchOrdering {
+  size_t pending_dispatch_count = 0;
+  bool has_pending_dependencies = false;
+};
+
+using AqlIndexLoad = uint64_t (*)(void *context);
+using AqlPacketReserve = bool (*)(void *context, uint64_t *packet_id);
+using AqlDoorbellStore = bool (*)(void *context, uint64_t packet_id);
+using AqlPacketValidator = bool (*)(void *context,
+                                    const AqlKernelDispatchPacket &packet);
+
+struct AqlQueueProducerOps {
+  void *context = nullptr;
+  void *ring_base = nullptr;
+  uint64_t packet_count = 0;
+  AqlIndexLoad load_read_index = nullptr;
+  AqlIndexLoad load_write_index = nullptr;
+  AqlPacketReserve reserve_packet = nullptr;
+  AqlDoorbellStore ring_doorbell = nullptr;
+  AqlPacketValidator validate_packet = nullptr;
+};
+
+enum class AqlSubmitError {
+  None,
+  InvalidPacket,
+  InvalidQueue,
+  QueueFull,
+  ReserveFailed,
+  DoorbellFailed,
+};
+
+struct AqlSubmitResult {
+  AqlSubmitError error = AqlSubmitError::None;
+  uint64_t packet_id = 0;
+
+  explicit operator bool() const { return error == AqlSubmitError::None; }
+};
+
+[[nodiscard]] AqlKernelDispatchPacket
+build_aql_kernel_dispatch_packet(const AqlKernelDispatchParameters &parameters,
+                                 const AqlDispatchOrdering &ordering);
+[[nodiscard]] bool
+valid_aql_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet);
+[[nodiscard]] AqlSubmitResult
+submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
+                           const AqlKernelDispatchParameters &parameters,
+                           const AqlDispatchOrdering &ordering);
+
+} // namespace lrrt_internal
 
 #endif

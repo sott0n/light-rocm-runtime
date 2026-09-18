@@ -217,6 +217,9 @@ bool valid_light_rocr_queue_locked(lr_queue_t *queue);
 lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
                                                    lr_queue_t *queue,
                                                    uint32_t private_size);
+lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue);
+lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
+                                                    size_t required_packets);
 lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue);
 lr_status_t synchronize_light_rocr_device_locked(DeviceState *device);
 void release_light_rocr_queues_locked(lr_status_t *result);
@@ -237,8 +240,6 @@ hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
 uint16_t packet_header(hsa_packet_type_t type);
 uint16_t barrier_packet_header(hsa_packet_type_t type);
 void publish_packet_header(uint16_t *header, uint16_t value);
-uint16_t packet_setup(uint16_t dimensions);
-uint16_t dispatch_dimensions(const lr_launch_config_t *config);
 hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal);
 hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
                                     size_t size, KernargBuffer *kernarg);

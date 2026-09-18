@@ -155,26 +155,53 @@ int main(void) {
   copy_args_t args = {(const float *)device_in, (float *)device_out, n};
   lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
 
+  void *device_intermediate = NULL;
+  status = lr_malloc(device, sizeof(out), &device_intermediate);
+  if (!expect_status(status, LR_SUCCESS, "lr_malloc intermediate")) {
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
   lr_queue_t *queue = NULL;
   status = lr_queue_create(device, &queue);
   if (!expect_status(status, LR_SUCCESS, "lr_queue_create")) {
+    lr_free(device, device_intermediate);
     lr_module_destroy(module);
     lr_free(device, device_out);
     lr_free(device, device_in);
     lr_shutdown();
     return 1;
   }
-  status = lr_launch_on_queue(queue, kernel, &config, &args, sizeof(args));
-  if (!expect_status(status, LR_SUCCESS, "lr_launch_on_queue") ||
+  copy_args_t first_args = {
+      (const float *)device_in,
+      (float *)device_intermediate,
+      n,
+  };
+  copy_args_t second_args = {
+      (const float *)device_intermediate,
+      (float *)device_out,
+      n,
+  };
+  status = lr_launch_on_queue(queue, kernel, &config, &first_args,
+                              sizeof(first_args));
+  if (!expect_status(status, LR_SUCCESS, "first ordered queue launch") ||
+      !expect_status(lr_launch_on_queue(queue, kernel, &config, &second_args,
+                                        sizeof(second_args)),
+                     LR_SUCCESS, "second ordered queue launch") ||
       !expect_status(lr_queue_synchronize(queue), LR_SUCCESS,
                      "lr_queue_synchronize") ||
       !expect_status(lr_queue_destroy(queue), LR_SUCCESS, "lr_queue_destroy")) {
+    lr_free(device, device_intermediate);
     lr_module_destroy(module);
     lr_free(device, device_out);
     lr_free(device, device_in);
     lr_shutdown();
     return 1;
   }
+  lr_free(device, device_intermediate);
 
   status =
       lr_memcpy(device, out, device_out, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);

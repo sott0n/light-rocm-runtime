@@ -91,6 +91,7 @@ endif()
 
 add_library(
   lrrt
+  src/aql_producer.cpp
   src/device_synchronization.cpp
   src/event.cpp
   src/launch.cpp

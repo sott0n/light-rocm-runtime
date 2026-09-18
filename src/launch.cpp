@@ -1,4 +1,8 @@
+#include "aql_producer.hpp"
 #include "launch_profile.hpp"
+#if LRRT_ENABLE_LIGHT_ROCR
+#include "light_rocr/runtime/aql.hpp"
+#endif
 #include "runtime_internal.hpp"
 
 #include <chrono>
@@ -15,8 +19,83 @@ using namespace lrrt_internal;
 #define LRRT_ENABLE_LAUNCH_PROFILING 0
 #endif
 
+namespace {
+
+AqlKernelDispatchParameters
+aql_dispatch_parameters(const lr_launch_config_t *config,
+                        uint32_t private_segment_size,
+                        uint32_t group_segment_size, uint64_t kernel_object,
+                        uint64_t kernarg_address, uint64_t completion_signal) {
+  return {config->grid.x,
+          config->grid.y,
+          config->grid.z,
+          static_cast<uint16_t>(config->block.x),
+          static_cast<uint16_t>(config->block.y),
+          static_cast<uint16_t>(config->block.z),
+          private_segment_size,
+          group_segment_size,
+          kernel_object,
+          kernarg_address,
+          completion_signal};
+}
+
+lr_status_t aql_submit_status(AqlSubmitError error) {
+  switch (error) {
+  case AqlSubmitError::None:
+    return LR_SUCCESS;
+  case AqlSubmitError::InvalidPacket:
+  case AqlSubmitError::InvalidQueue:
+    return LR_ERROR_INVALID_ARGUMENT;
+  case AqlSubmitError::QueueFull:
+  case AqlSubmitError::ReserveFailed:
+  case AqlSubmitError::DoorbellFailed:
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_ERROR_RUNTIME;
+}
+
+} // namespace
+
 #if LRRT_ENABLE_HSA
 namespace {
+
+static_assert(sizeof(AqlKernelDispatchPacket) ==
+              sizeof(hsa_kernel_dispatch_packet_t));
+static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) ==
+              offsetof(hsa_kernel_dispatch_packet_t, completion_signal));
+
+uint64_t rocr_load_read_index(void *context) {
+  return hsa_queue_load_read_index_scacquire(
+      static_cast<hsa_queue_t *>(context));
+}
+
+uint64_t rocr_load_write_index(void *context) {
+  return hsa_queue_load_write_index_relaxed(
+      static_cast<hsa_queue_t *>(context));
+}
+
+bool rocr_reserve_packet(void *context, uint64_t *packet_id) {
+  *packet_id = hsa_queue_add_write_index_scacq_screl(
+      static_cast<hsa_queue_t *>(context), 1);
+  return true;
+}
+
+bool rocr_ring_doorbell(void *context, uint64_t packet_id) {
+  auto *queue = static_cast<hsa_queue_t *>(context);
+  hsa_signal_store_screlease(queue->doorbell_signal, packet_id);
+  return true;
+}
+
+AqlQueueProducerOps rocr_producer_ops(hsa_queue_t *queue) {
+  return {queue,
+          queue != nullptr ? queue->base_address : nullptr,
+          queue != nullptr ? queue->size : 0,
+          rocr_load_read_index,
+          rocr_load_write_index,
+          rocr_reserve_packet,
+          rocr_ring_doorbell,
+          nullptr};
+}
 
 #if LRRT_ENABLE_LAUNCH_PROFILING
 using ProfileClock = std::chrono::steady_clock;
@@ -177,6 +256,15 @@ private:
 #if LRRT_ENABLE_LIGHT_ROCR
 namespace {
 
+static_assert(kAqlPacketHeaderBarrierShift ==
+              light_rocr::runtime::kAqlPacketHeaderBarrierShift);
+static_assert(kAqlKernelDispatchHeader ==
+              light_rocr::runtime::kAqlKernelDispatchHeader);
+static_assert(sizeof(AqlKernelDispatchPacket) ==
+              sizeof(light_rocr::runtime::AqlKernelDispatchPacket));
+static_assert(alignof(AqlKernelDispatchPacket) ==
+              alignof(light_rocr::runtime::AqlKernelDispatchPacket));
+
 lr_status_t
 light_rocr_kernarg_status(light_rocr::runtime::KernargBufferError error) {
   using light_rocr::runtime::KernargBufferError;
@@ -192,96 +280,69 @@ light_rocr_kernarg_status(light_rocr::runtime::KernargBufferError error) {
   }
 }
 
-uint16_t light_rocr_dispatch_dimensions(const lr_launch_config_t *config) {
-  if (config->grid.z > 1 || config->block.z > 1) {
-    return 3;
-  }
-  if (config->grid.y > 1 || config->block.y > 1) {
-    return 2;
-  }
-  return 1;
+uint64_t light_rocr_load_read_index(void *context) {
+  return static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
+      ->read_index_acquire();
 }
 
-bool valid_light_rocr_dispatch_packet(
-    const light_rocr::runtime::AqlKernelDispatchPacket &packet) {
+uint64_t light_rocr_load_write_index(void *context) {
+  return static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
+      ->write_index_relaxed();
+}
+
+bool light_rocr_reserve_packet(void *context, uint64_t *packet_id) {
+  auto *queue = static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context);
+  const auto reserved = queue->add_write_index_scacq_screl(1);
+  if (!reserved) {
+    return false;
+  }
+  *packet_id = reserved.previous_index;
+  return true;
+}
+
+bool light_rocr_ring_doorbell(void *context, uint64_t packet_id) {
+  return static_cast<bool>(
+      static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
+          ->store_doorbell_screlease(packet_id));
+}
+
+bool valid_light_rocr_dispatch_packet(void *context,
+                                      const AqlKernelDispatchPacket &packet) {
   using namespace light_rocr::runtime;
-  if (packet.header != kAqlKernelDispatchHeader ||
-      (packet.setup & static_cast<uint16_t>(~uint16_t{0x3})) != 0) {
-    return false;
-  }
-  const uint16_t dimensions =
-      static_cast<uint16_t>(packet.setup >> kAqlKernelDispatchDimensionsShift);
-  if (dimensions < 1 || dimensions > 3 || packet.workgroup_size_x == 0 ||
-      packet.workgroup_size_y == 0 || packet.workgroup_size_z == 0 ||
-      (dimensions < 2 && packet.workgroup_size_y != 1) ||
-      (dimensions < 3 && packet.workgroup_size_z != 1) ||
-      packet.workgroup_size_x > kGfx1101WorkgroupMaximumDimension ||
-      packet.workgroup_size_y > kGfx1101WorkgroupMaximumDimension ||
-      packet.workgroup_size_z > kGfx1101WorkgroupMaximumDimension) {
-    return false;
-  }
+  auto *queue = static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context);
   const uint64_t workgroup_size =
       static_cast<uint64_t>(packet.workgroup_size_x) *
       static_cast<uint64_t>(packet.workgroup_size_y) *
       static_cast<uint64_t>(packet.workgroup_size_z);
-  if (workgroup_size > kGfx1101WorkgroupMaximumSize ||
-      packet.grid_size_x < packet.workgroup_size_x ||
-      packet.grid_size_y < packet.workgroup_size_y ||
-      packet.grid_size_z < packet.workgroup_size_z ||
-      (dimensions < 2 && packet.grid_size_y != 1) ||
-      (dimensions < 3 && packet.grid_size_z != 1) ||
+  if (packet.workgroup_size_x > kGfx1101WorkgroupMaximumDimension ||
+      packet.workgroup_size_y > kGfx1101WorkgroupMaximumDimension ||
+      packet.workgroup_size_z > kGfx1101WorkgroupMaximumDimension ||
+      workgroup_size > kGfx1101WorkgroupMaximumSize ||
       packet.group_segment_size > kGfx1101GroupSegmentMaximumSize ||
-      packet.kernel_object == 0 ||
+      packet.private_segment_size > queue->scratch_private_segment_size() ||
       packet.kernel_object % kAmdKernelDescriptorAlignment != 0 ||
       (packet.kernarg_address != 0 &&
        packet.kernarg_address % kAmdKernargMinimumAlignment != 0) ||
       (packet.completion_signal != 0 &&
-       packet.completion_signal % kAmdSignalAlignment != 0) ||
-      packet.reserved0 != 0 || packet.reserved2 != 0) {
+       packet.completion_signal % kAmdSignalAlignment != 0)) {
     return false;
   }
   return true;
 }
 
-lr_status_t publish_light_rocr_dispatch(
-    light_rocr::transport::hsakmt::AqlQueue *queue,
-    const light_rocr::runtime::AqlKernelDispatchPacket &packet) {
-  using light_rocr::transport::hsakmt::kAqlPacketSize;
-  if (queue == nullptr || !*queue || queue->ring_host_address() == nullptr ||
-      queue->doorbell_address() == 0 || queue->packet_count() == 0 ||
-      !valid_light_rocr_dispatch_packet(packet)) {
-    return LR_ERROR_INVALID_ARGUMENT;
-  }
-  if (packet.private_segment_size > queue->scratch_private_segment_size()) {
-    return LR_ERROR_NOT_SUPPORTED;
-  }
-
-  const uint64_t read_index = queue->read_index_acquire();
-  const uint64_t write_index = queue->write_index_relaxed();
-  if (write_index < read_index ||
-      write_index - read_index >= queue->packet_count()) {
-    return LR_ERROR_RUNTIME;
-  }
-
-  const auto reserved = queue->add_write_index_scacq_screl(1);
-  if (!reserved) {
-    return LR_ERROR_RUNTIME;
-  }
-  const uint64_t packet_id = reserved.previous_index;
-  const uint64_t slot_index = packet_id & (queue->packet_count() - 1);
-  auto *slot = static_cast<uint8_t *>(queue->ring_host_address()) +
-               static_cast<size_t>(slot_index * kAqlPacketSize);
-  auto *slot_header = reinterpret_cast<uint16_t *>(slot);
-  __atomic_store_n(slot_header, light_rocr::runtime::kAqlPacketTypeInvalid,
-                   __ATOMIC_RELAXED);
-  const auto *packet_bytes = reinterpret_cast<const uint8_t *>(&packet);
-  std::memcpy(slot + sizeof(packet.header),
-              packet_bytes + sizeof(packet.header),
-              sizeof(packet) - sizeof(packet.header));
-  __atomic_store_n(slot_header, packet.header, __ATOMIC_RELEASE);
-
-  const auto doorbell = queue->store_doorbell_screlease(packet_id);
-  return doorbell ? LR_SUCCESS : LR_ERROR_RUNTIME;
+AqlQueueProducerOps
+light_rocr_producer_ops(light_rocr::transport::hsakmt::AqlQueue *queue) {
+  const bool valid = queue != nullptr && static_cast<bool>(*queue) &&
+                     queue->ring_host_address() != nullptr &&
+                     queue->doorbell_address() != 0;
+  return {valid ? queue : nullptr,
+          valid ? queue->ring_host_address() : nullptr,
+          valid ? queue->packet_count() : 0,
+          light_rocr_load_read_index,
+          light_rocr_load_write_index,
+          light_rocr_reserve_packet,
+          light_rocr_ring_doorbell,
+          valid_light_rocr_dispatch_packet};
 }
 
 } // namespace
@@ -541,38 +602,22 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     std::memcpy(kernarg.ptr, args, args_size);
     // Keep packets on the same lrrt queue completion-ordered. Several executor
     // pipelines pass one kernel's output directly to the next kernel.
-    const bool wait_for_dependencies =
-        !queue.pending_dispatches.empty() ||
-        (use_implicit_dependencies ? !queue.pending_barriers.empty()
-                                   : !event_dependencies.empty());
-
-    const uint64_t index =
-        hsa_queue_add_write_index_scacq_screl(queue.queue, 1);
-    auto *packets =
-        static_cast<hsa_kernel_dispatch_packet_t *>(queue.queue->base_address);
-    hsa_kernel_dispatch_packet_t *packet =
-        &packets[index & (queue.queue->size - 1)];
-    std::memset(packet, 0, sizeof(*packet));
-    packet->setup = packet_setup(dispatch_dimensions(config));
-    packet->workgroup_size_x = static_cast<uint16_t>(config->block.x);
-    packet->workgroup_size_y = static_cast<uint16_t>(config->block.y);
-    packet->workgroup_size_z = static_cast<uint16_t>(config->block.z);
-    packet->grid_size_x = config->grid.x;
-    packet->grid_size_y = config->grid.y;
-    packet->grid_size_z = config->grid.z;
-    packet->private_segment_size = kernel->private_segment_size;
-    packet->group_segment_size =
-        kernel->group_segment_size + config->shared_memory_bytes;
-    packet->kernel_object = kernel->object;
-    packet->kernarg_address = kernarg.ptr;
-    packet->completion_signal = signal;
-    uint16_t header =
-        wait_for_dependencies
-            ? barrier_packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH)
-            : packet_header(HSA_PACKET_TYPE_KERNEL_DISPATCH);
-    publish_packet_header(&packet->header, header);
-
-    hsa_signal_store_screlease(queue.queue->doorbell_signal, index);
+    const AqlSubmitResult submitted = submit_aql_kernel_dispatch(
+        rocr_producer_ops(queue.queue),
+        aql_dispatch_parameters(
+            config, kernel->private_segment_size,
+            kernel->group_segment_size + config->shared_memory_bytes,
+            kernel->object,
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(kernarg.ptr)),
+            signal.handle),
+        {queue.pending_dispatches.size(), use_implicit_dependencies
+                                              ? !queue.pending_barriers.empty()
+                                              : !event_dependencies.empty()});
+    if (!submitted) {
+      queue.signal_pool.push_back(signal);
+      queue.kernarg_pool.push_back(kernarg);
+      return aql_submit_status(submitted.error);
+    }
     queue.pending_dispatches.push_back(PendingDispatch{signal, kernarg});
   }
   return LR_SUCCESS;
@@ -615,17 +660,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return scratch_status;
   }
 
-  // Barrier-bit ordering is not enabled on this path yet. Retire an earlier
-  // dispatch before publishing the next one so LRRT's same-queue completion
-  // ordering remains correct.
-  if (!execution_queue->pending_dispatches.empty()) {
-    const lr_status_t synchronization_status =
-        synchronize_light_rocr_queue_locked(execution_queue);
-    if (synchronization_status != LR_SUCCESS) {
-      return synchronization_status;
-    }
+  const lr_status_t capacity_status =
+      ensure_light_rocr_queue_capacity_locked(execution_queue, 1);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
   }
-
   auto kernarg = light_rocr::transport::hsakmt::create_kernarg_buffer(
       *g_kfd_session, state.node.node_id, kernel_info, args, args_size);
   if (!kernarg) {
@@ -676,31 +715,6 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
                                                : LR_ERROR_RUNTIME;
   }
 
-  light_rocr::runtime::AqlKernelDispatchPacket packet;
-  packet.header = light_rocr::runtime::kAqlKernelDispatchHeader;
-  packet.setup = static_cast<uint16_t>(
-      light_rocr_dispatch_dimensions(config)
-      << light_rocr::runtime::kAqlKernelDispatchDimensionsShift);
-  packet.workgroup_size_x = static_cast<uint16_t>(config->block.x);
-  packet.workgroup_size_y = static_cast<uint16_t>(config->block.y);
-  packet.workgroup_size_z = static_cast<uint16_t>(config->block.z);
-  packet.grid_size_x = config->grid.x;
-  packet.grid_size_y = config->grid.y;
-  packet.grid_size_z = config->grid.z;
-  packet.private_segment_size = kernel_info.private_segment_size;
-  packet.group_segment_size =
-      kernel_info.group_segment_size + config->shared_memory_bytes;
-  packet.kernel_object = runtime_image.kernels()[kernel->image_kernel_index]
-                             .descriptor_gpu_address;
-  packet.kernarg_address = kernarg_info.gpu_address();
-  packet.completion_signal = signal.signal.gpu_handle();
-  if (!valid_light_rocr_dispatch_packet(packet)) {
-    const bool kernarg_released = static_cast<bool>(kernarg.buffer.release());
-    const bool signal_released = static_cast<bool>(signal.signal.release());
-    return kernarg_released && signal_released ? LR_ERROR_INVALID_ARGUMENT
-                                               : LR_ERROR_RUNTIME;
-  }
-
   std::unique_ptr<lr_queue_t::PendingDispatch> pending;
   try {
     pending = std::make_unique<lr_queue_t::PendingDispatch>(
@@ -718,14 +732,23 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_RUNTIME;
   }
 
-  const lr_status_t publish_status =
-      publish_light_rocr_dispatch(&execution_queue->queue, packet);
-  if (publish_status != LR_SUCCESS) {
+  const AqlSubmitResult submitted = submit_aql_kernel_dispatch(
+      light_rocr_producer_ops(&execution_queue->queue),
+      aql_dispatch_parameters(
+          config, kernel_info.private_segment_size,
+          kernel_info.group_segment_size + config->shared_memory_bytes,
+          runtime_image.kernels()[kernel->image_kernel_index]
+              .descriptor_gpu_address,
+          pending->kernarg.gpu_address(),
+          pending->completion_signal.gpu_handle()),
+      {execution_queue->pending_dispatches.size(), false});
+  if (!submitted) {
     const bool kernarg_released = static_cast<bool>(pending->kernarg.release());
     const bool signal_released =
         static_cast<bool>(pending->completion_signal.release());
-    return kernarg_released && signal_released ? publish_status
-                                               : LR_ERROR_RUNTIME;
+    return kernarg_released && signal_released
+               ? aql_submit_status(submitted.error)
+               : LR_ERROR_RUNTIME;
   }
 
   execution_queue->pending_dispatches.push_back(std::move(pending));

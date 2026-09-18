@@ -9,6 +9,16 @@ function(lrrt_bind_hsaco target dependency define path)
   target_compile_definitions(${target} PRIVATE ${define}="${path}")
 endfunction()
 
+lrrt_add_test_executable(
+  lrrt_aql_producer_tests
+  aql_producer.cpp
+  lrrt::lrrt
+)
+target_include_directories(
+  lrrt_aql_producer_tests
+  PRIVATE "${PROJECT_SOURCE_DIR}/src"
+)
+
 if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
   set(
     LRRT_LIGHT_ROCR_GPU_TESTS
@@ -31,7 +41,6 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     allocation_registry.cpp
     lrrt::lrrt
   )
-
   lrrt_add_hsaco_kernel(
     light_rocr_copy_kernel
     tests/copy_kernel_kernel.cpp
