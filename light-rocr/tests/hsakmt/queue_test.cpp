@@ -61,6 +61,7 @@ struct FakeKmt {
   void *queue_address = nullptr;
   uint64_t queue_size = 0;
   HsaEvent *queue_event = reinterpret_cast<HsaEvent *>(uintptr_t{1});
+  HSAuint64 *queue_doorbell = &doorbell;
   std::vector<AllocationCall> allocations;
   std::vector<MapCall> maps;
   std::vector<std::string> calls;
@@ -140,7 +141,9 @@ void successful_round_trip(TestContext *context) {
                     "doorbell address was not retained");
     context->expect(created.queue.ring_host_address() == ring_memory.data() &&
                         created.queue.ring_gpu_address() == kRingGpuAddress &&
-                        created.queue.ring_size() == kAqlRingDefaultSize,
+                        created.queue.ring_size() == kAqlRingDefaultSize &&
+                        created.queue.packet_count() ==
+                            kAqlRingDefaultSize / kAqlPacketSize,
                     "ring properties were not retained");
 
     context->expect(fake.allocations.size() == 2,
@@ -725,6 +728,91 @@ void inactive_queue_rejects_submission(TestContext *context) {
       "inactive queue accepted a packet");
 }
 
+void queue_primitives_reserve_slots_and_ring_doorbell(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto created =
+      opened.session.create_aql_queue(gfx1101_node(7), kAqlRingDefaultSize);
+  context->expect(static_cast<bool>(created), created.status.message);
+  const auto initial_ring = ring_memory;
+
+  const auto first = created.queue.add_write_index_scacq_screl(1);
+  context->expect(static_cast<bool>(first), first.status.message);
+  context->expect(first.previous_index == 0 &&
+                      created.queue.write_index_relaxed() == 1 &&
+                      doorbell == UINT64_MAX,
+                  "first slot reservation changed the wrong queue state");
+
+  const auto second = created.queue.add_write_index_scacq_screl(3);
+  context->expect(static_cast<bool>(second), second.status.message);
+  context->expect(second.previous_index == 1 &&
+                      created.queue.write_index_relaxed() == 4 &&
+                      created.queue.read_index_acquire() == 0,
+                  "second slot reservation returned incorrect indexes");
+
+  const auto stored = created.queue.store_doorbell_screlease(3);
+  context->expect(static_cast<bool>(stored), stored.message);
+  context->expect(doorbell == 3 && created.queue.write_index_relaxed() == 4 &&
+                      ring_memory == initial_ring,
+                  "doorbell primitive changed the ring or queue indexes");
+}
+
+void queue_primitives_reject_invalid_operations(TestContext *context) {
+  using light_rocr::transport::hsakmt::AqlQueuePrimitiveError;
+
+  light_rocr::transport::hsakmt::AqlQueue inactive;
+  const auto inactive_add = inactive.add_write_index_scacq_screl(1);
+  const auto inactive_doorbell = inactive.store_doorbell_screlease(0);
+  context->expect(
+      inactive_add.status.error == AqlQueuePrimitiveError::InvalidQueue &&
+          inactive_doorbell.error == AqlQueuePrimitiveError::InvalidQueue,
+      "inactive queue accepted a primitive operation");
+
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto created =
+      opened.session.create_aql_queue(gfx1101_node(7), kAqlRingDefaultSize);
+  const auto initial_ring = ring_memory;
+  const auto zero = created.queue.add_write_index_scacq_screl(0);
+  context->expect(zero.status.error ==
+                          AqlQueuePrimitiveError::InvalidIncrement &&
+                      created.queue.write_index_relaxed() == 0,
+                  "zero write-index increment changed the queue");
+
+  auto *control = reinterpret_cast<light_rocr::runtime::AmdQueueV1 *>(
+      control_memory.data());
+  control->write_dispatch_id = std::numeric_limits<uint64_t>::max() - 1;
+  const auto overflow = created.queue.add_write_index_scacq_screl(2);
+  context->expect(
+      overflow.status.error == AqlQueuePrimitiveError::IndexOverflow &&
+          overflow.previous_index == std::numeric_limits<uint64_t>::max() - 1 &&
+          created.queue.write_index_relaxed() ==
+              std::numeric_limits<uint64_t>::max() - 1 &&
+          doorbell == UINT64_MAX && ring_memory == initial_ring,
+      "overflowing write-index increment changed queue state");
+}
+
+void queue_primitive_rejects_missing_doorbell(TestContext *context) {
+  reset_fake();
+  fake.queue_doorbell = nullptr;
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto created =
+      opened.session.create_aql_queue(gfx1101_node(7), kAqlRingDefaultSize);
+  context->expect(static_cast<bool>(created), created.status.message);
+  const auto stored = created.queue.store_doorbell_screlease(0);
+  context->expect(stored.error == light_rocr::transport::hsakmt::
+                                      AqlQueuePrimitiveError::InvalidDoorbell,
+                  "queue primitive accepted a missing doorbell mapping");
+}
+
+void queue_primitive_error_names(TestContext *context) {
+  context->expect(
+      std::string(light_rocr::transport::hsakmt::aql_queue_primitive_error_name(
+          light_rocr::transport::hsakmt::AqlQueuePrimitiveError::
+              IndexOverflow)) == "index_overflow",
+      "unexpected queue primitive error name");
+}
+
 } // namespace
 
 extern "C" HSAKMT_STATUS hsaKmtOpenKFD() {
@@ -831,7 +919,7 @@ hsaKmtCreateQueue(HSAuint32 node_id, HSA_QUEUE_TYPE type,
   fake.queue_resource_input = *queue_resource;
   if (fake.create_status == HSAKMT_STATUS_SUCCESS) {
     queue_resource->QueueId = kQueueId;
-    queue_resource->Queue_DoorBell_aql = &doorbell;
+    queue_resource->Queue_DoorBell_aql = fake.queue_doorbell;
   }
   return fake.create_status;
 }
@@ -881,6 +969,13 @@ int main() {
        reports_full_queue_without_publication},
       {"submit_error_names", submit_error_names},
       {"inactive_queue_rejects_submission", inactive_queue_rejects_submission},
+      {"queue_primitives_reserve_slots_and_ring_doorbell",
+       queue_primitives_reserve_slots_and_ring_doorbell},
+      {"queue_primitives_reject_invalid_operations",
+       queue_primitives_reject_invalid_operations},
+      {"queue_primitive_rejects_missing_doorbell",
+       queue_primitive_rejects_missing_doorbell},
+      {"queue_primitive_error_names", queue_primitive_error_names},
   };
 
   TestContext context;

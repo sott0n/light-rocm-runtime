@@ -104,6 +104,22 @@ struct AqlQueueState {
   uint32_t scratch_private_segment_size = 0;
 };
 
+const char *aql_queue_primitive_error_name(AqlQueuePrimitiveError error) {
+  switch (error) {
+  case AqlQueuePrimitiveError::None:
+    return "none";
+  case AqlQueuePrimitiveError::InvalidQueue:
+    return "invalid_queue";
+  case AqlQueuePrimitiveError::InvalidIncrement:
+    return "invalid_increment";
+  case AqlQueuePrimitiveError::IndexOverflow:
+    return "index_overflow";
+  case AqlQueuePrimitiveError::InvalidDoorbell:
+    return "invalid_doorbell";
+  }
+  return "unknown";
+}
+
 const char *aql_submit_error_name(AqlSubmitError error) {
   switch (error) {
   case AqlSubmitError::None:
@@ -359,6 +375,10 @@ uint64_t AqlQueue::ring_size() const {
   return state_ != nullptr ? state_->ring_size : 0;
 }
 
+uint64_t AqlQueue::packet_count() const {
+  return state_ != nullptr ? state_->ring_size / kAqlPacketSize : 0;
+}
+
 uint32_t AqlQueue::scratch_private_segment_size() const {
   return state_ != nullptr ? state_->scratch_private_segment_size : 0;
 }
@@ -387,6 +407,57 @@ uint64_t AqlQueue::write_index_relaxed() const {
   const auto *control =
       static_cast<const runtime::AmdQueueV1 *>(state_->control.host_address());
   return __atomic_load_n(&control->write_dispatch_id, __ATOMIC_RELAXED);
+}
+
+AqlQueueIndexResult AqlQueue::add_write_index_scacq_screl(uint64_t increment) {
+  if (state_ == nullptr || !state_->active ||
+      state_->control.host_address() == nullptr) {
+    return {{AqlQueuePrimitiveError::InvalidQueue, "AQL queue is not active"},
+            0};
+  }
+  if (increment == 0) {
+    return {{AqlQueuePrimitiveError::InvalidIncrement,
+             "queue write-index increment must be non-zero"},
+            0};
+  }
+
+  auto *control =
+      static_cast<runtime::AmdQueueV1 *>(state_->control.host_address());
+  // A CAS loop preserves the SC acquire/release RMW contract while rejecting
+  // wraparound instead of silently reusing an outstanding packet ID.
+  uint64_t previous =
+      __atomic_load_n(&control->write_dispatch_id, __ATOMIC_SEQ_CST);
+  while (true) {
+    if (previous > std::numeric_limits<uint64_t>::max() - increment) {
+      return {{AqlQueuePrimitiveError::IndexOverflow,
+               "queue write-index increment would overflow"},
+              previous};
+    }
+    const uint64_t desired = previous + increment;
+    if (__atomic_compare_exchange_n(&control->write_dispatch_id, &previous,
+                                    desired, false, __ATOMIC_SEQ_CST,
+                                    __ATOMIC_SEQ_CST)) {
+      return {{}, previous};
+    }
+  }
+}
+
+AqlQueuePrimitiveStatus AqlQueue::store_doorbell_screlease(uint64_t value) {
+  if (state_ == nullptr || !state_->active) {
+    return {AqlQueuePrimitiveError::InvalidQueue, "AQL queue is not active"};
+  }
+  if (state_->doorbell_address == 0) {
+    return {AqlQueuePrimitiveError::InvalidDoorbell,
+            "AQL queue has no doorbell mapping"};
+  }
+
+  // Preserve compiler and host-memory ordering before the architecture-
+  // specific fence that makes prior ring writes visible to the MMIO store.
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  fence_before_doorbell_store();
+  auto *doorbell = reinterpret_cast<uint64_t *>(state_->doorbell_address);
+  __atomic_store_n(doorbell, value, __ATOMIC_RELAXED);
+  return {};
 }
 
 AqlSubmitResult AqlQueue::submit_kernel_dispatch(

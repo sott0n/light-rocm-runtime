@@ -41,6 +41,30 @@ struct AqlQueueStatus {
 
 struct AqlQueueState;
 
+enum class AqlQueuePrimitiveError {
+  None,
+  InvalidQueue,
+  InvalidIncrement,
+  IndexOverflow,
+  InvalidDoorbell,
+};
+
+struct AqlQueuePrimitiveStatus {
+  AqlQueuePrimitiveError error = AqlQueuePrimitiveError::None;
+  std::string message;
+
+  explicit operator bool() const {
+    return error == AqlQueuePrimitiveError::None;
+  }
+};
+
+struct AqlQueueIndexResult {
+  AqlQueuePrimitiveStatus status;
+  uint64_t previous_index = 0;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
 enum class AqlSubmitError {
   None,
   InvalidQueue,
@@ -73,12 +97,20 @@ public:
   [[nodiscard]] void *ring_host_address() const;
   [[nodiscard]] uint64_t ring_gpu_address() const;
   [[nodiscard]] uint64_t ring_size() const;
+  [[nodiscard]] uint64_t packet_count() const;
   [[nodiscard]] uint32_t scratch_private_segment_size() const;
   [[nodiscard]] uint64_t scratch_gpu_address() const;
   [[nodiscard]] uint64_t scratch_size() const;
   // Index accessors return zero after their control allocation is released.
   [[nodiscard]] uint64_t read_index_acquire() const;
   [[nodiscard]] uint64_t write_index_relaxed() const;
+  // These packet-independent primitives mirror the producer-facing ROCr
+  // queue operations. The caller owns capacity checks, ring writes, header
+  // publication, and the choice of the doorbell value.
+  [[nodiscard]] AqlQueueIndexResult
+  add_write_index_scacq_screl(uint64_t increment);
+  [[nodiscard]] AqlQueuePrimitiveStatus
+  store_doorbell_screlease(uint64_t value);
   // The initial implementation is deliberately single-producer. A successful
   // submission publishes one validated packet and rings the 64-bit doorbell.
   [[nodiscard]] AqlSubmitResult
@@ -103,6 +135,8 @@ struct AqlQueueResult {
 };
 
 [[nodiscard]] const char *aql_queue_error_name(AqlQueueError error);
+[[nodiscard]] const char *
+aql_queue_primitive_error_name(AqlQueuePrimitiveError error);
 [[nodiscard]] const char *aql_submit_error_name(AqlSubmitError error);
 
 } // namespace light_rocr::transport::hsakmt
