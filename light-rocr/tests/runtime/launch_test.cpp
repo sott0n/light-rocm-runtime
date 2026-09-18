@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <cstring>
 #include <functional>
 #include <iostream>
 #include <limits>
@@ -14,9 +13,7 @@
 
 namespace {
 
-constexpr uint64_t kImageGpuAddress = 0x200000;
 constexpr uint64_t kKernargGpuAddress = 0x300000;
-constexpr uint64_t kSignalGpuAddress = 0x400000;
 
 struct TestContext {
   int failures = 0;
@@ -46,50 +43,6 @@ light_rocr::loader::KernelInfo make_kernel(uint32_t kernarg_size = 32) {
   kernel.wavefront_size = 32;
   return kernel;
 }
-
-std::vector<uint8_t> make_hsaco_bytes() {
-  std::vector<uint8_t> bytes(0xa0);
-  for (size_t index = 0; index < bytes.size(); ++index) {
-    bytes[index] = static_cast<uint8_t>((index * 13U + 7U) & 0xffU);
-  }
-  return bytes;
-}
-
-light_rocr::loader::CodeObject make_code_object() {
-  light_rocr::loader::CodeObject object;
-  object.target_machine = light_rocr::loader::kAmdgpuMachineGfx1101;
-  object.target_isa = "amdgcn-amd-amdhsa--gfx1101";
-  object.has_metadata = true;
-  object.load_plan.image_virtual_address = 0x1000;
-  object.load_plan.image_size = 0x900;
-  object.load_plan.alignment = 0x1000;
-  object.load_plan.copies = {
-      {0x10, 0x1040, 0x40},
-      {0x60, 0x1800, 0x20},
-  };
-  object.load_plan.zero_fills = {
-      {0x1080, 0x20},
-      {0x1820, 0x20},
-  };
-  object.load_plan.protections = {
-      {0x1040, 0x60, 4},
-      {0x1800, 0x40, 5},
-  };
-  object.kernels.push_back(make_kernel());
-  return object;
-}
-
-struct ImageFixture {
-  std::vector<uint8_t> hsaco = make_hsaco_bytes();
-  light_rocr::loader::CodeObject code_object = make_code_object();
-  alignas(4096) std::array<uint8_t, 4096> storage{};
-
-  light_rocr::runtime::ExecutableImageMaterializationResult materialize() {
-    return light_rocr::runtime::materialize_executable_image(
-        hsaco.data(), hsaco.size(), code_object, storage.data(), storage.size(),
-        kImageGpuAddress);
-  }
-};
 
 struct KernargFixture {
   std::array<uint8_t, 16> arguments{};
@@ -257,163 +210,12 @@ void rejects_invalid_requests_before_writing(TestContext *context) {
                   "destination changed before invalid-request rejection");
 }
 
-void builds_launch_from_loaded_kernel_metadata(TestContext *context) {
-  ImageFixture image_fixture;
-  auto image = image_fixture.materialize();
-  context->expect(static_cast<bool>(image), image.status.message);
-  KernargFixture kernarg_fixture;
-  auto kernarg =
-      kernarg_fixture.materialize(image.image.code_object().kernels.front());
-  context->expect(static_cast<bool>(kernarg), kernarg.status.message);
-
-  light_rocr::runtime::KernelLaunchConfiguration configuration;
-  configuration.dimensions = 2;
-  configuration.workgroup_size_x = 8;
-  configuration.workgroup_size_y = 4;
-  configuration.grid_size_x = 16;
-  configuration.grid_size_y = 8;
-  configuration.dynamic_group_segment_size = 32;
-  const auto launch = light_rocr::runtime::make_kernel_launch_packet(
-      image.image, 0, kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(static_cast<bool>(launch), launch.status.message);
-  context->expect(
-      launch.packet.workgroup_size_x == 8 &&
-          launch.packet.workgroup_size_y == 4 &&
-          launch.packet.grid_size_x == 16 && launch.packet.grid_size_y == 8 &&
-          launch.packet.private_segment_size == 0 &&
-          launch.packet.group_segment_size == 96 &&
-          launch.packet.kernel_object == kImageGpuAddress + 0x40 &&
-          launch.packet.kernarg_address == kKernargGpuAddress &&
-          launch.packet.completion_signal == kSignalGpuAddress,
-      "launch packet did not combine configuration and loaded metadata");
-}
-
-void rejects_invalid_launch_inputs(TestContext *context) {
-  ImageFixture fixture;
-  auto image = fixture.materialize();
-  KernargFixture kernarg_fixture;
-  auto kernarg =
-      kernarg_fixture.materialize(image.image.code_object().kernels.front());
-  light_rocr::runtime::KernelLaunchConfiguration configuration;
-
-  light_rocr::runtime::ExecutableImageInfo invalid_image;
-  auto launch = light_rocr::runtime::make_kernel_launch_packet(
-      invalid_image, 0, kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::InvalidExecutableImage,
-      "invalid executable image was accepted");
-
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      image.image, 1, kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::InvalidKernelIndex,
-      "out-of-range kernel index was accepted");
-
-  light_rocr::runtime::KernargBufferInfo invalid_kernarg;
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      image.image, 0, invalid_kernarg, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::InvalidKernargBuffer,
-      "invalid kernarg buffer was accepted");
-
-  const auto smaller_kernel = make_kernel(16);
-  auto incompatible = kernarg_fixture.materialize(smaller_kernel);
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      image.image, 0, incompatible.buffer, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::IncompatibleKernargBuffer,
-      "incompatible kernarg buffer was accepted");
-
-  configuration.dimensions = 0;
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      image.image, 0, kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-              light_rocr::runtime::KernelLaunchError::InvalidDispatchPacket &&
-          launch.status.aql_status.error ==
-              light_rocr::runtime::AqlPacketError::InvalidDimensions,
-      "invalid geometry did not preserve its AQL validation detail");
-}
-
-void rejects_unsupported_kernel_requirements(TestContext *context) {
-  ImageFixture private_fixture;
-  private_fixture.code_object.kernels[0].private_segment_size = 24;
-  auto private_image = private_fixture.materialize();
-  KernargFixture kernarg_fixture;
-  auto private_kernarg = kernarg_fixture.materialize(
-      private_image.image.code_object().kernels.front());
-  light_rocr::runtime::KernelLaunchConfiguration configuration;
-  auto launch = light_rocr::runtime::make_kernel_launch_packet(
-      private_image.image, 0, private_kernarg.buffer, configuration,
-      kSignalGpuAddress);
-  context->expect(launch && launch.packet.private_segment_size == 24,
-                  "fixed private segment was not copied to the launch packet");
-
-  ImageFixture dynamic_fixture;
-  dynamic_fixture.code_object.kernels[0].uses_dynamic_stack = true;
-  auto dynamic_image = dynamic_fixture.materialize();
-  auto kernarg = kernarg_fixture.materialize(
-      dynamic_image.image.code_object().kernels.front());
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      dynamic_image.image, 0, kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::UnsupportedDynamicStack,
-      "dynamic-stack kernel was accepted");
-
-  ImageFixture lds_fixture;
-  auto lds_image = lds_fixture.materialize();
-  auto lds_kernarg = kernarg_fixture.materialize(
-      lds_image.image.code_object().kernels.front());
-  configuration.dynamic_group_segment_size =
-      light_rocr::runtime::kGfx1101GroupSegmentMaximumSize -
-      lds_image.image.code_object().kernels.front().group_segment_size;
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      lds_image.image, 0, lds_kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(static_cast<bool>(launch),
-                  "maximum valid gfx1101 LDS allocation was rejected");
-
-  ++configuration.dynamic_group_segment_size;
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      lds_image.image, 0, lds_kernarg.buffer, configuration, kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-              light_rocr::runtime::KernelLaunchError::InvalidDispatchPacket &&
-          launch.status.aql_status.error ==
-              light_rocr::runtime::AqlPacketError::InvalidGroupSegmentSize,
-      "oversized gfx1101 LDS allocation was accepted");
-
-  ImageFixture overflow_fixture;
-  overflow_fixture.code_object.kernels[0].group_segment_size =
-      std::numeric_limits<uint32_t>::max();
-  auto overflow_image = overflow_fixture.materialize();
-  auto overflow_kernarg = kernarg_fixture.materialize(
-      overflow_image.image.code_object().kernels.front());
-  configuration.dynamic_group_segment_size = 1;
-  launch = light_rocr::runtime::make_kernel_launch_packet(
-      overflow_image.image, 0, overflow_kernarg.buffer, configuration,
-      kSignalGpuAddress);
-  context->expect(
-      launch.status.error ==
-          light_rocr::runtime::KernelLaunchError::GroupSegmentSizeOverflow,
-      "overflowing group segment size was accepted");
-}
-
 void enum_names(TestContext *context) {
   context->expect(
       std::string(light_rocr::runtime::kernarg_buffer_error_name(
           light_rocr::runtime::KernargBufferError::ArgumentSizeExceeded)) ==
           "argument_size_exceeded",
       "unexpected kernarg error name");
-  context->expect(
-      std::string(light_rocr::runtime::kernel_launch_error_name(
-          light_rocr::runtime::KernelLaunchError::UnsupportedDynamicStack)) ==
-          "unsupported_dynamic_stack",
-      "unexpected launch error name");
 }
 
 static_assert(
@@ -436,11 +238,6 @@ int main() {
       {"supports_canonical_empty_kernarg", supports_canonical_empty_kernarg},
       {"rejects_invalid_requests_before_writing",
        rejects_invalid_requests_before_writing},
-      {"builds_launch_from_loaded_kernel_metadata",
-       builds_launch_from_loaded_kernel_metadata},
-      {"rejects_invalid_launch_inputs", rejects_invalid_launch_inputs},
-      {"rejects_unsupported_kernel_requirements",
-       rejects_unsupported_kernel_requirements},
       {"enum_names", enum_names},
   };
 

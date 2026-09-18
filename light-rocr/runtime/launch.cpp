@@ -2,7 +2,6 @@
 
 #include <cstring>
 #include <limits>
-#include <utility>
 
 namespace light_rocr::runtime {
 namespace {
@@ -10,11 +9,6 @@ namespace {
 KernargBufferStatus kernarg_failure(KernargBufferError error,
                                     const char *message) {
   return {error, message};
-}
-
-KernelLaunchStatus launch_failure(KernelLaunchError error,
-                                  const char *message) {
-  return {error, {}, message};
 }
 
 bool is_power_of_two(uint64_t value) {
@@ -160,99 +154,6 @@ const char *kernarg_buffer_error_name(KernargBufferError error) {
     return "gpu_address_overflow";
   case KernargBufferError::AllocationFailed:
     return "allocation_failed";
-  }
-  return "unknown";
-}
-
-KernelLaunchPacketResult
-make_kernel_launch_packet(const ExecutableImageInfo &image, size_t kernel_index,
-                          const KernargBufferInfo &kernarg,
-                          const KernelLaunchConfiguration &configuration,
-                          uint64_t completion_signal) {
-  if (!image || image.kernels().size() != image.code_object().kernels.size()) {
-    return {launch_failure(KernelLaunchError::InvalidExecutableImage,
-                           "executable image is not GPU-usable"),
-            {}};
-  }
-  if (kernel_index >= image.code_object().kernels.size()) {
-    return {launch_failure(KernelLaunchError::InvalidKernelIndex,
-                           "kernel index is outside the executable image"),
-            {}};
-  }
-  if (!kernarg) {
-    return {launch_failure(KernelLaunchError::InvalidKernargBuffer,
-                           "kernarg buffer is not GPU-usable"),
-            {}};
-  }
-
-  const loader::KernelInfo &kernel = image.code_object().kernels[kernel_index];
-  if (kernarg.kernarg_size() != kernel.kernarg_size ||
-      kernarg.alignment() < kernel.kernarg_alignment ||
-      (kernel.kernarg_size == 0 && kernarg.gpu_address() != 0) ||
-      (kernel.kernarg_size != 0 &&
-       (kernarg.gpu_address() == 0 ||
-        kernarg.gpu_address() % kernel.kernarg_alignment != 0))) {
-    return {
-        launch_failure(KernelLaunchError::IncompatibleKernargBuffer,
-                       "kernarg buffer does not match the selected kernel ABI"),
-        {}};
-  }
-  if (kernel.uses_dynamic_stack) {
-    return {
-        launch_failure(KernelLaunchError::UnsupportedDynamicStack,
-                       "dynamic-stack kernels are not supported by the initial "
-                       "launch path"),
-        {}};
-  }
-  if (configuration.dynamic_group_segment_size >
-      std::numeric_limits<uint32_t>::max() - kernel.group_segment_size) {
-    return {launch_failure(KernelLaunchError::GroupSegmentSizeOverflow,
-                           "fixed and dynamic group segment sizes overflow"),
-            {}};
-  }
-
-  KernelDispatchSpec spec;
-  spec.dimensions = configuration.dimensions;
-  spec.workgroup_size_x = configuration.workgroup_size_x;
-  spec.workgroup_size_y = configuration.workgroup_size_y;
-  spec.workgroup_size_z = configuration.workgroup_size_z;
-  spec.grid_size_x = configuration.grid_size_x;
-  spec.grid_size_y = configuration.grid_size_y;
-  spec.grid_size_z = configuration.grid_size_z;
-  spec.private_segment_size = kernel.private_segment_size;
-  spec.group_segment_size =
-      kernel.group_segment_size + configuration.dynamic_group_segment_size;
-  spec.kernel_object = image.kernels()[kernel_index].descriptor_gpu_address;
-  spec.kernarg_address = kernarg.gpu_address();
-  spec.completion_signal = completion_signal;
-
-  AqlPacketResult packet = make_kernel_dispatch_packet(spec);
-  if (!packet) {
-    return {{KernelLaunchError::InvalidDispatchPacket, std::move(packet.status),
-             "kernel launch produced an invalid AQL dispatch packet"},
-            {}};
-  }
-  return {{}, packet.packet};
-}
-
-const char *kernel_launch_error_name(KernelLaunchError error) {
-  switch (error) {
-  case KernelLaunchError::None:
-    return "none";
-  case KernelLaunchError::InvalidExecutableImage:
-    return "invalid_executable_image";
-  case KernelLaunchError::InvalidKernelIndex:
-    return "invalid_kernel_index";
-  case KernelLaunchError::InvalidKernargBuffer:
-    return "invalid_kernarg_buffer";
-  case KernelLaunchError::IncompatibleKernargBuffer:
-    return "incompatible_kernarg_buffer";
-  case KernelLaunchError::UnsupportedDynamicStack:
-    return "unsupported_dynamic_stack";
-  case KernelLaunchError::GroupSegmentSizeOverflow:
-    return "group_segment_size_overflow";
-  case KernelLaunchError::InvalidDispatchPacket:
-    return "invalid_dispatch_packet";
   }
   return "unknown";
 }

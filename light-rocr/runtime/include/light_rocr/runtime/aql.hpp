@@ -28,9 +28,10 @@ inline constexpr uint16_t kGfx1101WorkgroupMaximumDimension = 1024;
 inline constexpr uint32_t kGfx1101WorkgroupMaximumSize = 1024;
 inline constexpr uint32_t kGfx1101GroupSegmentMaximumSize = 64 * 1024;
 
-// Self-authored HSA AQL kernel-dispatch packet ABI. The queue transport
-// publishes header last with release ordering after writing the remaining 62
-// bytes into a 64-byte-aligned ring slot.
+// Self-authored HSA AQL kernel-dispatch packet ABI. Packet producers own field
+// construction; light-rocr validates the completed packet, then the queue
+// transport publishes its header last with release ordering after writing the
+// remaining 62 bytes into a 64-byte-aligned ring slot.
 struct alignas(64) AqlKernelDispatchPacket {
   uint16_t header = kAqlPacketTypeInvalid;
   uint16_t setup = 0;
@@ -62,21 +63,6 @@ static_assert(offsetof(AqlKernelDispatchPacket, kernarg_address) == 40);
 static_assert(offsetof(AqlKernelDispatchPacket, reserved2) == 48);
 static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) == 56);
 
-struct KernelDispatchSpec {
-  uint16_t dimensions = 1;
-  uint16_t workgroup_size_x = 1;
-  uint16_t workgroup_size_y = 1;
-  uint16_t workgroup_size_z = 1;
-  uint32_t grid_size_x = 1;
-  uint32_t grid_size_y = 1;
-  uint32_t grid_size_z = 1;
-  uint32_t private_segment_size = 0;
-  uint32_t group_segment_size = 0;
-  uint64_t kernel_object = 0;
-  uint64_t kernarg_address = 0;
-  uint64_t completion_signal = 0;
-};
-
 enum class AqlPacketError {
   None,
   InvalidHeader,
@@ -97,18 +83,9 @@ struct AqlPacketStatus {
   explicit operator bool() const { return error == AqlPacketError::None; }
 };
 
-struct AqlPacketResult {
-  AqlPacketStatus status;
-  AqlKernelDispatchPacket packet;
-
-  explicit operator bool() const { return static_cast<bool>(status); }
-};
-
 [[nodiscard]] const char *aql_packet_error_name(AqlPacketError error);
 [[nodiscard]] AqlPacketStatus
 validate_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet);
-[[nodiscard]] AqlPacketResult
-make_kernel_dispatch_packet(const KernelDispatchSpec &spec);
 
 } // namespace light_rocr::runtime
 

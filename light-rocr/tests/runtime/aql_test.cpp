@@ -5,13 +5,12 @@
 #include <functional>
 #include <iostream>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace {
 
+using light_rocr::runtime::AqlKernelDispatchPacket;
 using light_rocr::runtime::AqlPacketError;
-using light_rocr::runtime::KernelDispatchSpec;
 
 struct TestContext {
   int failures = 0;
@@ -26,21 +25,25 @@ struct TestContext {
 
 using TestFunction = std::function<void(TestContext *)>;
 
-KernelDispatchSpec valid_spec() {
-  KernelDispatchSpec spec;
-  spec.dimensions = 1;
-  spec.workgroup_size_x = 64;
-  spec.grid_size_x = 256;
-  spec.private_segment_size = 32;
-  spec.group_segment_size = 128;
-  spec.kernel_object = 0x100000;
-  spec.kernarg_address = 0x200000;
-  spec.completion_signal = 0x300000;
-  return spec;
+AqlKernelDispatchPacket valid_packet() {
+  AqlKernelDispatchPacket packet;
+  packet.header = light_rocr::runtime::kAqlKernelDispatchHeader;
+  packet.setup = 1;
+  packet.workgroup_size_x = 64;
+  packet.workgroup_size_y = 1;
+  packet.workgroup_size_z = 1;
+  packet.grid_size_x = 256;
+  packet.grid_size_y = 1;
+  packet.grid_size_z = 1;
+  packet.private_segment_size = 32;
+  packet.group_segment_size = 128;
+  packet.kernel_object = 0x100000;
+  packet.kernarg_address = 0x200000;
+  packet.completion_signal = 0x300000;
+  return packet;
 }
 
 void abi_layout(TestContext *context) {
-  using light_rocr::runtime::AqlKernelDispatchPacket;
   context->expect(sizeof(AqlKernelDispatchPacket) == 64,
                   "AQL packet size is not 64 bytes");
   context->expect(alignof(AqlKernelDispatchPacket) == 64,
@@ -52,136 +55,134 @@ void abi_layout(TestContext *context) {
       "AQL packet pointer fields have incorrect offsets");
 }
 
-void builds_valid_packet(TestContext *context) {
-  const KernelDispatchSpec spec = valid_spec();
-  const auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(static_cast<bool>(result), result.status.message);
-  context->expect(result.packet.header ==
+void accepts_valid_packet(TestContext *context) {
+  const AqlKernelDispatchPacket packet = valid_packet();
+  const auto status =
+      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(static_cast<bool>(status), status.message);
+  context->expect(packet.header ==
                           light_rocr::runtime::kAqlKernelDispatchHeader &&
-                      result.packet.setup == 1,
+                      packet.setup == 1,
                   "packet header or setup is incorrect");
-  context->expect(result.packet.workgroup_size_x == 64 &&
-                      result.packet.grid_size_x == 256 &&
-                      result.packet.private_segment_size == 32 &&
-                      result.packet.group_segment_size == 128,
+  context->expect(packet.workgroup_size_x == 64 && packet.grid_size_x == 256 &&
+                      packet.private_segment_size == 32 &&
+                      packet.group_segment_size == 128,
                   "packet dispatch geometry or segment sizes are incorrect");
-  context->expect(result.packet.kernel_object == spec.kernel_object &&
-                      result.packet.kernarg_address == spec.kernarg_address &&
-                      result.packet.completion_signal == spec.completion_signal,
+  context->expect(packet.kernel_object == 0x100000 &&
+                      packet.kernarg_address == 0x200000 &&
+                      packet.completion_signal == 0x300000,
                   "packet handles are incorrect");
 }
 
 void rejects_invalid_geometry(TestContext *context) {
-  KernelDispatchSpec spec = valid_spec();
-  spec.dimensions = 0;
-  auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidDimensions,
+  AqlKernelDispatchPacket packet = valid_packet();
+  packet.setup = 0;
+  auto status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidDimensions,
                   "zero dimensions were accepted");
 
-  spec = valid_spec();
-  spec.workgroup_size_x = 0;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidWorkgroupSize,
+  packet = valid_packet();
+  packet.workgroup_size_x = 0;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidWorkgroupSize,
                   "zero workgroup size was accepted");
 
-  spec = valid_spec();
-  spec.grid_size_x = 32;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidGridSize,
+  packet = valid_packet();
+  packet.grid_size_x = 32;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidGridSize,
                   "grid smaller than a workgroup was accepted");
 
-  spec = valid_spec();
-  spec.workgroup_size_y = 2;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidWorkgroupSize,
+  packet = valid_packet();
+  packet.workgroup_size_y = 2;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidWorkgroupSize,
                   "unused workgroup dimension was accepted");
 }
 
 void enforces_gfx1101_workgroup_limits(TestContext *context) {
-  KernelDispatchSpec spec = valid_spec();
-  spec.workgroup_size_x = static_cast<uint16_t>(
+  AqlKernelDispatchPacket packet = valid_packet();
+  packet.workgroup_size_x = static_cast<uint16_t>(
       light_rocr::runtime::kGfx1101WorkgroupMaximumDimension + 1);
-  spec.grid_size_x = spec.workgroup_size_x;
-  auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidWorkgroupSize,
+  packet.grid_size_x = packet.workgroup_size_x;
+  auto status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidWorkgroupSize,
                   "oversized gfx1101 workgroup dimension was accepted");
 
-  spec = valid_spec();
-  spec.dimensions = 2;
-  spec.workgroup_size_x =
+  packet = valid_packet();
+  packet.setup = 2;
+  packet.workgroup_size_x =
       light_rocr::runtime::kGfx1101WorkgroupMaximumDimension;
-  spec.workgroup_size_y = 2;
-  spec.grid_size_x = spec.workgroup_size_x;
-  spec.grid_size_y = spec.workgroup_size_y;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidWorkgroupSize,
+  packet.workgroup_size_y = 2;
+  packet.grid_size_x = packet.workgroup_size_x;
+  packet.grid_size_y = packet.workgroup_size_y;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidWorkgroupSize,
                   "oversized total gfx1101 workgroup was accepted");
 
-  spec = valid_spec();
-  spec.workgroup_size_x =
+  packet = valid_packet();
+  packet.workgroup_size_x =
       light_rocr::runtime::kGfx1101WorkgroupMaximumDimension;
-  spec.grid_size_x = spec.workgroup_size_x;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(static_cast<bool>(result),
+  packet.grid_size_x = packet.workgroup_size_x;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(static_cast<bool>(status),
                   "maximum valid gfx1101 workgroup was rejected");
 }
 
 void enforces_gfx1101_group_segment_limit(TestContext *context) {
-  KernelDispatchSpec spec = valid_spec();
-  spec.group_segment_size =
+  AqlKernelDispatchPacket packet = valid_packet();
+  packet.group_segment_size =
       light_rocr::runtime::kGfx1101GroupSegmentMaximumSize;
-  auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(static_cast<bool>(result),
+  auto status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(static_cast<bool>(status),
                   "maximum valid gfx1101 group segment was rejected");
 
-  spec.group_segment_size =
+  packet.group_segment_size =
       light_rocr::runtime::kGfx1101GroupSegmentMaximumSize + 1U;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error ==
-                      AqlPacketError::InvalidGroupSegmentSize,
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidGroupSegmentSize,
                   "oversized gfx1101 group segment was accepted");
 }
 
 void rejects_misaligned_handles(TestContext *context) {
-  KernelDispatchSpec spec = valid_spec();
-  spec.kernel_object += 1;
-  auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidKernelObject,
+  AqlKernelDispatchPacket packet = valid_packet();
+  packet.kernel_object += 1;
+  auto status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidKernelObject,
                   "misaligned kernel descriptor was accepted");
 
-  spec = valid_spec();
-  spec.kernarg_address += 1;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error == AqlPacketError::InvalidKernargAddress,
+  packet = valid_packet();
+  packet.kernarg_address += 1;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidKernargAddress,
                   "misaligned kernarg was accepted");
 
-  spec = valid_spec();
-  spec.completion_signal += 1;
-  result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(result.status.error ==
-                      AqlPacketError::InvalidCompletionSignal,
+  packet = valid_packet();
+  packet.completion_signal += 1;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(status.error == AqlPacketError::InvalidCompletionSignal,
                   "misaligned completion signal was accepted");
 }
 
 void permits_optional_zero_handles(TestContext *context) {
-  KernelDispatchSpec spec = valid_spec();
-  spec.kernarg_address = 0;
-  spec.completion_signal = 0;
-  const auto result = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  context->expect(static_cast<bool>(result), result.status.message);
+  AqlKernelDispatchPacket packet = valid_packet();
+  packet.kernarg_address = 0;
+  packet.completion_signal = 0;
+  const auto status =
+      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  context->expect(static_cast<bool>(status), status.message);
 }
 
 void validates_packet_before_publication(TestContext *context) {
-  auto result = light_rocr::runtime::make_kernel_dispatch_packet(valid_spec());
-  result.packet.header = light_rocr::runtime::kAqlPacketTypeInvalid;
-  auto status =
-      light_rocr::runtime::validate_kernel_dispatch_packet(result.packet);
+  AqlKernelDispatchPacket packet = valid_packet();
+  packet.header = light_rocr::runtime::kAqlPacketTypeInvalid;
+  auto status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
   context->expect(status.error == AqlPacketError::InvalidHeader,
                   "invalid packet header was accepted");
 
-  result = light_rocr::runtime::make_kernel_dispatch_packet(valid_spec());
-  result.packet.reserved2 = 1;
-  status = light_rocr::runtime::validate_kernel_dispatch_packet(result.packet);
+  packet = valid_packet();
+  packet.reserved2 = 1;
+  status = light_rocr::runtime::validate_kernel_dispatch_packet(packet);
   context->expect(status.error == AqlPacketError::NonzeroReservedField,
                   "non-zero reserved field was accepted");
 }
@@ -198,7 +199,7 @@ void enum_names(TestContext *context) {
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"abi_layout", abi_layout},
-      {"builds_valid_packet", builds_valid_packet},
+      {"accepts_valid_packet", accepts_valid_packet},
       {"rejects_invalid_geometry", rejects_invalid_geometry},
       {"enforces_gfx1101_workgroup_limits", enforces_gfx1101_workgroup_limits},
       {"enforces_gfx1101_group_segment_limit",

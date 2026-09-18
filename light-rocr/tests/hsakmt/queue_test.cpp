@@ -594,12 +594,20 @@ void scratch_cleanup_failure_is_retryable(TestContext *context) {
 
 light_rocr::runtime::AqlKernelDispatchPacket
 valid_packet(uint32_t private_segment_size = 0) {
-  light_rocr::runtime::KernelDispatchSpec spec;
-  spec.private_segment_size = private_segment_size;
-  spec.kernel_object = 0x500000;
-  spec.kernarg_address = 0x600000;
-  spec.completion_signal = 0x700000;
-  return light_rocr::runtime::make_kernel_dispatch_packet(spec).packet;
+  light_rocr::runtime::AqlKernelDispatchPacket packet;
+  packet.header = light_rocr::runtime::kAqlKernelDispatchHeader;
+  packet.setup = 1;
+  packet.workgroup_size_x = 1;
+  packet.workgroup_size_y = 1;
+  packet.workgroup_size_z = 1;
+  packet.grid_size_x = 1;
+  packet.grid_size_y = 1;
+  packet.grid_size_z = 1;
+  packet.private_segment_size = private_segment_size;
+  packet.kernel_object = 0x500000;
+  packet.kernarg_address = 0x600000;
+  packet.completion_signal = 0x700000;
+  return packet;
 }
 
 void rejects_dispatch_above_scratch_capacity(TestContext *context) {

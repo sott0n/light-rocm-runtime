@@ -161,16 +161,25 @@ int main(int argc, char **argv) {
     return fail_queue(queue.status);
   }
 
-  light_rocr::runtime::KernelDispatchSpec spec;
-  spec.kernel_object = executable.allocation.gpu_address();
-  spec.kernarg_address = data.allocation.gpu_address() + kKernargOffset;
-  spec.completion_signal = signal.signal.gpu_handle();
-  const auto packet = light_rocr::runtime::make_kernel_dispatch_packet(spec);
-  if (!packet) {
+  light_rocr::runtime::AqlKernelDispatchPacket packet;
+  packet.header = light_rocr::runtime::kAqlKernelDispatchHeader;
+  packet.setup = 1;
+  packet.workgroup_size_x = 1;
+  packet.workgroup_size_y = 1;
+  packet.workgroup_size_z = 1;
+  packet.grid_size_x = 1;
+  packet.grid_size_y = 1;
+  packet.grid_size_z = 1;
+  packet.kernel_object = executable.allocation.gpu_address();
+  packet.kernarg_address = data.allocation.gpu_address() + kKernargOffset;
+  packet.completion_signal = signal.signal.gpu_handle();
+  const auto packet_status =
+      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  if (!packet_status) {
     std::cerr << "packet_error="
-              << light_rocr::runtime::aql_packet_error_name(packet.status.error)
+              << light_rocr::runtime::aql_packet_error_name(packet_status.error)
               << '\n';
-    std::cerr << "message=" << packet.status.message << '\n';
+    std::cerr << "message=" << packet_status.message << '\n';
     return 1;
   }
 
@@ -178,20 +187,20 @@ int main(int argc, char **argv) {
   std::cout << "target="
             << light_rocr::runtime::gfx_target_name(node.architecture) << '\n';
   std::cout << "kernel.descriptor_gpu_address=0x" << std::hex
-            << spec.kernel_object << '\n';
+            << packet.kernel_object << '\n';
   std::cout << "kernel.entry_gpu_address=0x"
-            << spec.kernel_object + fixed::kCodeOffset << '\n';
-  std::cout << "kernarg.gpu_address=0x" << spec.kernarg_address << '\n';
+            << packet.kernel_object + fixed::kCodeOffset << '\n';
+  std::cout << "kernarg.gpu_address=0x" << packet.kernarg_address << '\n';
   std::cout << "output.gpu_address=0x" << kernarg->output_address << '\n';
-  std::cout << "signal.gpu_handle=0x" << spec.completion_signal << '\n';
+  std::cout << "signal.gpu_handle=0x" << packet.completion_signal << '\n';
   std::cout << "queue.id=0x" << queue.queue.queue_id() << '\n';
   std::cout << "queue.doorbell_address=0x" << queue.queue.doorbell_address()
             << '\n';
-  std::cout << "packet.header=0x" << packet.packet.header << '\n';
-  std::cout << "packet.setup=0x" << packet.packet.setup << std::dec << '\n';
+  std::cout << "packet.header=0x" << packet.header << '\n';
+  std::cout << "packet.setup=0x" << packet.setup << std::dec << '\n';
   std::cout.flush();
 
-  const auto submitted = queue.queue.submit_kernel_dispatch(packet.packet);
+  const auto submitted = queue.queue.submit_kernel_dispatch(packet);
   if (!submitted) {
     std::cerr << "submit_error="
               << light_rocr::transport::hsakmt::aql_submit_error_name(

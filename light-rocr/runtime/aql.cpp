@@ -1,7 +1,5 @@
 #include "light_rocr/runtime/aql.hpp"
 
-#include <utility>
-
 namespace light_rocr::runtime {
 namespace {
 
@@ -115,27 +113,6 @@ validate_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet) {
                    "kernel-dispatch reserved fields must be zero");
   }
   return {};
-}
-
-AqlPacketResult make_kernel_dispatch_packet(const KernelDispatchSpec &spec) {
-  AqlKernelDispatchPacket packet{};
-  packet.header = kAqlKernelDispatchHeader;
-  packet.setup = static_cast<uint16_t>(spec.dimensions
-                                       << kAqlKernelDispatchDimensionsShift);
-  packet.workgroup_size_x = spec.workgroup_size_x;
-  packet.workgroup_size_y = spec.workgroup_size_y;
-  packet.workgroup_size_z = spec.workgroup_size_z;
-  packet.grid_size_x = spec.grid_size_x;
-  packet.grid_size_y = spec.grid_size_y;
-  packet.grid_size_z = spec.grid_size_z;
-  packet.private_segment_size = spec.private_segment_size;
-  packet.group_segment_size = spec.group_segment_size;
-  packet.kernel_object = spec.kernel_object;
-  packet.kernarg_address = spec.kernarg_address;
-  packet.completion_signal = spec.completion_signal;
-
-  AqlPacketStatus status = validate_kernel_dispatch_packet(packet);
-  return {std::move(status), packet};
 }
 
 } // namespace light_rocr::runtime

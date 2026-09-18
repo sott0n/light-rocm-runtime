@@ -1,4 +1,5 @@
 #include "light_rocr/loader/code_object.hpp"
+#include "light_rocr/runtime/aql.hpp"
 #include "light_rocr/runtime/launch.hpp"
 #include "light_rocr/runtime/topology.hpp"
 #include "light_rocr/transport/hsakmt/executable_image.hpp"
@@ -275,25 +276,29 @@ int main(int argc, char **argv) {
     return fail_signal(signal.status);
   }
 
-  light_rocr::runtime::KernelLaunchConfiguration configuration;
-  configuration.workgroup_size_x = static_cast<uint16_t>(kElementCount);
-  configuration.grid_size_x = static_cast<uint32_t>(kElementCount);
-  const auto packet = light_rocr::runtime::make_kernel_launch_packet(
-      loaded.image.runtime_image(), kernel_index,
-      kernarg.buffer.runtime_buffer(), configuration,
-      signal.signal.gpu_handle());
-  if (!packet) {
-    std::cerr << "launch_error="
-              << light_rocr::runtime::kernel_launch_error_name(
-                     packet.status.error)
+  light_rocr::runtime::AqlKernelDispatchPacket packet;
+  packet.header = light_rocr::runtime::kAqlKernelDispatchHeader;
+  packet.setup = 1;
+  packet.workgroup_size_x = static_cast<uint16_t>(kElementCount);
+  packet.workgroup_size_y = 1;
+  packet.workgroup_size_z = 1;
+  packet.grid_size_x = static_cast<uint32_t>(kElementCount);
+  packet.grid_size_y = 1;
+  packet.grid_size_z = 1;
+  packet.private_segment_size = kernel.private_segment_size;
+  packet.group_segment_size = kernel.group_segment_size;
+  packet.kernel_object = loaded.image.runtime_image()
+                             .kernels()[kernel_index]
+                             .descriptor_gpu_address;
+  packet.kernarg_address = kernarg.buffer.gpu_address();
+  packet.completion_signal = signal.signal.gpu_handle();
+  const auto packet_status =
+      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  if (!packet_status) {
+    std::cerr << "packet_error="
+              << light_rocr::runtime::aql_packet_error_name(packet_status.error)
               << '\n';
-    if (!packet.status.aql_status) {
-      std::cerr << "packet_error="
-                << light_rocr::runtime::aql_packet_error_name(
-                       packet.status.aql_status.error)
-                << '\n';
-    }
-    std::cerr << "message=" << packet.status.message << '\n';
+    std::cerr << "message=" << packet_status.message << '\n';
     return 1;
   }
 
@@ -324,7 +329,7 @@ int main(int argc, char **argv) {
   std::cout << "queue.scratch_size=" << queue.queue.scratch_size() << '\n';
   std::cout.flush();
 
-  const auto submitted = queue.queue.submit_kernel_dispatch(packet.packet);
+  const auto submitted = queue.queue.submit_kernel_dispatch(packet);
   if (!submitted) {
     std::cerr << "submit_error="
               << light_rocr::transport::hsakmt::aql_submit_error_name(

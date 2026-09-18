@@ -3,7 +3,6 @@
 
 #include "light_rocr/loader/code_object.hpp"
 #include "light_rocr/runtime/aql.hpp"
-#include "light_rocr/runtime/executable_image.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -97,54 +96,6 @@ materialize_kernarg_buffer(const loader::KernelInfo &kernel,
                            uint64_t gpu_address);
 
 [[nodiscard]] const char *kernarg_buffer_error_name(KernargBufferError error);
-
-struct KernelLaunchConfiguration {
-  uint16_t dimensions = 1;
-  uint16_t workgroup_size_x = 1;
-  uint16_t workgroup_size_y = 1;
-  uint16_t workgroup_size_z = 1;
-  uint32_t grid_size_x = 1;
-  uint32_t grid_size_y = 1;
-  uint32_t grid_size_z = 1;
-  uint32_t dynamic_group_segment_size = 0;
-};
-
-enum class KernelLaunchError {
-  None,
-  InvalidExecutableImage,
-  InvalidKernelIndex,
-  InvalidKernargBuffer,
-  IncompatibleKernargBuffer,
-  UnsupportedDynamicStack,
-  GroupSegmentSizeOverflow,
-  InvalidDispatchPacket,
-};
-
-struct KernelLaunchStatus {
-  KernelLaunchError error = KernelLaunchError::None;
-  AqlPacketStatus aql_status;
-  std::string message;
-
-  explicit operator bool() const { return error == KernelLaunchError::None; }
-};
-
-struct KernelLaunchPacketResult {
-  KernelLaunchStatus status;
-  AqlKernelDispatchPacket packet;
-
-  explicit operator bool() const { return static_cast<bool>(status); }
-};
-
-// Resolves descriptor and segment sizes from the materialized executable
-// image, binds a compatible kernarg buffer, then delegates final packet ABI
-// validation to make_kernel_dispatch_packet().
-[[nodiscard]] KernelLaunchPacketResult
-make_kernel_launch_packet(const ExecutableImageInfo &image, size_t kernel_index,
-                          const KernargBufferInfo &kernarg,
-                          const KernelLaunchConfiguration &configuration,
-                          uint64_t completion_signal);
-
-[[nodiscard]] const char *kernel_launch_error_name(KernelLaunchError error);
 
 } // namespace light_rocr::runtime
 

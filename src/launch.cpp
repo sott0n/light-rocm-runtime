@@ -4,6 +4,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <vector>
@@ -185,19 +186,6 @@ light_rocr_kernarg_status(light_rocr::runtime::KernargBufferError error) {
   case KernargBufferError::AllocationFailed:
     return LR_ERROR_RUNTIME;
   case KernargBufferError::None:
-    return LR_SUCCESS;
-  default:
-    return LR_ERROR_INVALID_ARGUMENT;
-  }
-}
-
-lr_status_t
-light_rocr_launch_status(light_rocr::runtime::KernelLaunchError error) {
-  using light_rocr::runtime::KernelLaunchError;
-  switch (error) {
-  case KernelLaunchError::UnsupportedDynamicStack:
-    return LR_ERROR_NOT_SUPPORTED;
-  case KernelLaunchError::None:
     return LR_SUCCESS;
   default:
     return LR_ERROR_INVALID_ARGUMENT;
@@ -558,9 +546,9 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return scratch_status;
   }
 
-  // The initial light-rocr packet builder does not yet expose the AQL barrier
-  // bit. Retire an earlier dispatch before publishing the next one so LRRT's
-  // same-queue completion ordering remains correct.
+  // Barrier-bit ordering is not enabled on this path yet. Retire an earlier
+  // dispatch before publishing the next one so LRRT's same-queue completion
+  // ordering remains correct.
   if (!execution_queue->pending_dispatches.empty()) {
     const lr_status_t synchronization_status =
         synchronize_light_rocr_queue_locked(execution_queue);
@@ -587,24 +575,63 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_RUNTIME;
   }
 
-  light_rocr::runtime::KernelLaunchConfiguration configuration;
-  configuration.dimensions = light_rocr_dispatch_dimensions(config);
-  configuration.workgroup_size_x = static_cast<uint16_t>(config->block.x);
-  configuration.workgroup_size_y = static_cast<uint16_t>(config->block.y);
-  configuration.workgroup_size_z = static_cast<uint16_t>(config->block.z);
-  configuration.grid_size_x = config->grid.x;
-  configuration.grid_size_y = config->grid.y;
-  configuration.grid_size_z = config->grid.z;
-  configuration.dynamic_group_segment_size = config->shared_memory_bytes;
-  const auto packet = light_rocr::runtime::make_kernel_launch_packet(
-      kernel->module->executable_image.runtime_image(),
-      kernel->image_kernel_index, kernarg.buffer.runtime_buffer(),
-      configuration, signal.signal.gpu_handle());
-  if (!packet) {
-    const lr_status_t status = light_rocr_launch_status(packet.status.error);
+  const auto &runtime_image = kernel->module->executable_image.runtime_image();
+  const auto &kernarg_info = kernarg.buffer.runtime_buffer();
+  if (!runtime_image ||
+      runtime_image.kernels().size() !=
+          runtime_image.code_object().kernels.size() ||
+      kernel->image_kernel_index >= runtime_image.kernels().size() ||
+      !kernarg_info ||
+      kernarg_info.kernarg_size() != kernel_info.kernarg_size ||
+      kernarg_info.alignment() < kernel_info.kernarg_alignment ||
+      (kernel_info.kernarg_size == 0 && kernarg_info.gpu_address() != 0) ||
+      (kernel_info.kernarg_size != 0 &&
+       (kernarg_info.gpu_address() == 0 ||
+        kernarg_info.gpu_address() % kernel_info.kernarg_alignment != 0))) {
     const bool kernarg_released = static_cast<bool>(kernarg.buffer.release());
     const bool signal_released = static_cast<bool>(signal.signal.release());
-    return kernarg_released && signal_released ? status : LR_ERROR_RUNTIME;
+    return kernarg_released && signal_released ? LR_ERROR_INVALID_ARGUMENT
+                                               : LR_ERROR_RUNTIME;
+  }
+  if (kernel_info.uses_dynamic_stack) {
+    const bool kernarg_released = static_cast<bool>(kernarg.buffer.release());
+    const bool signal_released = static_cast<bool>(signal.signal.release());
+    return kernarg_released && signal_released ? LR_ERROR_NOT_SUPPORTED
+                                               : LR_ERROR_RUNTIME;
+  }
+  if (config->shared_memory_bytes >
+      std::numeric_limits<uint32_t>::max() - kernel_info.group_segment_size) {
+    const bool kernarg_released = static_cast<bool>(kernarg.buffer.release());
+    const bool signal_released = static_cast<bool>(signal.signal.release());
+    return kernarg_released && signal_released ? LR_ERROR_INVALID_ARGUMENT
+                                               : LR_ERROR_RUNTIME;
+  }
+
+  light_rocr::runtime::AqlKernelDispatchPacket packet;
+  packet.header = light_rocr::runtime::kAqlKernelDispatchHeader;
+  packet.setup = static_cast<uint16_t>(
+      light_rocr_dispatch_dimensions(config)
+      << light_rocr::runtime::kAqlKernelDispatchDimensionsShift);
+  packet.workgroup_size_x = static_cast<uint16_t>(config->block.x);
+  packet.workgroup_size_y = static_cast<uint16_t>(config->block.y);
+  packet.workgroup_size_z = static_cast<uint16_t>(config->block.z);
+  packet.grid_size_x = config->grid.x;
+  packet.grid_size_y = config->grid.y;
+  packet.grid_size_z = config->grid.z;
+  packet.private_segment_size = kernel_info.private_segment_size;
+  packet.group_segment_size =
+      kernel_info.group_segment_size + config->shared_memory_bytes;
+  packet.kernel_object = runtime_image.kernels()[kernel->image_kernel_index]
+                             .descriptor_gpu_address;
+  packet.kernarg_address = kernarg_info.gpu_address();
+  packet.completion_signal = signal.signal.gpu_handle();
+  const auto packet_status =
+      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
+  if (!packet_status) {
+    const bool kernarg_released = static_cast<bool>(kernarg.buffer.release());
+    const bool signal_released = static_cast<bool>(signal.signal.release());
+    return kernarg_released && signal_released ? LR_ERROR_INVALID_ARGUMENT
+                                               : LR_ERROR_RUNTIME;
   }
 
   std::unique_ptr<lr_queue_t::PendingDispatch> pending;
@@ -624,8 +651,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_RUNTIME;
   }
 
-  const auto submitted =
-      execution_queue->queue.submit_kernel_dispatch(packet.packet);
+  const auto submitted = execution_queue->queue.submit_kernel_dispatch(packet);
   if (!submitted) {
     const lr_status_t status = light_rocr_submit_status(submitted.error);
     const bool kernarg_released = static_cast<bool>(pending->kernarg.release());
