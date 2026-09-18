@@ -28,6 +28,9 @@ static_assert(sizeof(uintptr_t) == sizeof(uint64_t));
 static_assert(__atomic_always_lock_free(sizeof(uint16_t), nullptr));
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr));
 
+constexpr uint16_t kAqlInvalidPacketHeader = 1;
+constexpr uint64_t kGfx1101GroupSegmentMaximumSize = 64 * 1024;
+
 AqlQueueStatus failure(AqlQueueError error, HSAKMT_STATUS status,
                        const std::string &operation) {
   return {error, static_cast<uint32_t>(status),
@@ -86,8 +89,8 @@ void initialize_ring(MemoryAllocation &ring) {
   auto *bytes = static_cast<uint8_t *>(ring.host_address());
   std::memset(bytes, 0, static_cast<size_t>(ring.size()));
   for (uint64_t offset = 0; offset < ring.size(); offset += kAqlPacketSize) {
-    ::new (static_cast<void *>(bytes + offset))
-        runtime::AqlKernelDispatchPacket;
+    std::memcpy(bytes + offset, &kAqlInvalidPacketHeader,
+                sizeof(kAqlInvalidPacketHeader));
   }
 }
 
@@ -116,22 +119,6 @@ const char *aql_queue_primitive_error_name(AqlQueuePrimitiveError error) {
     return "index_overflow";
   case AqlQueuePrimitiveError::InvalidDoorbell:
     return "invalid_doorbell";
-  }
-  return "unknown";
-}
-
-const char *aql_submit_error_name(AqlSubmitError error) {
-  switch (error) {
-  case AqlSubmitError::None:
-    return "none";
-  case AqlSubmitError::InvalidQueue:
-    return "invalid_queue";
-  case AqlSubmitError::InvalidPacket:
-    return "invalid_packet";
-  case AqlSubmitError::InsufficientScratch:
-    return "insufficient_scratch";
-  case AqlSubmitError::QueueFull:
-    return "queue_full";
   }
   return "unknown";
 }
@@ -198,7 +185,7 @@ KfdSession::create_aql_queue(const runtime::Node &node, uint64_t ring_size,
           : 0;
   if (!node.is_gpu() || node.gpu_id == 0 || compute_unit_count == 0 ||
       group_aperture == nullptr || private_aperture == nullptr ||
-      group_aperture->size < runtime::kGfx1101GroupSegmentMaximumSize ||
+      group_aperture->size < kGfx1101GroupSegmentMaximumSize ||
       group_aperture_base_hi == 0 || private_aperture_base_hi == 0 ||
       maximum_wave_id == 0 ||
       maximum_wave_id - 1U > std::numeric_limits<uint32_t>::max()) {
@@ -458,60 +445,6 @@ AqlQueuePrimitiveStatus AqlQueue::store_doorbell_screlease(uint64_t value) {
   auto *doorbell = reinterpret_cast<uint64_t *>(state_->doorbell_address);
   __atomic_store_n(doorbell, value, __ATOMIC_RELAXED);
   return {};
-}
-
-AqlSubmitResult AqlQueue::submit_kernel_dispatch(
-    const runtime::AqlKernelDispatchPacket &packet) {
-  if (state_ == nullptr || !state_->active || state_->doorbell_address == 0 ||
-      state_->ring.host_address() == nullptr ||
-      state_->control.host_address() == nullptr) {
-    return {AqlSubmitError::InvalidQueue, 0, 0, 0, "AQL queue is not active"};
-  }
-  const runtime::AqlPacketStatus packet_status =
-      runtime::validate_kernel_dispatch_packet(packet);
-  if (!packet_status) {
-    return {AqlSubmitError::InvalidPacket, 0, read_index_acquire(),
-            write_index_relaxed(), packet_status.message};
-  }
-  if (packet.private_segment_size > state_->scratch_private_segment_size) {
-    return {AqlSubmitError::InsufficientScratch, 0, read_index_acquire(),
-            write_index_relaxed(),
-            "dispatch private segment exceeds queue scratch capacity"};
-  }
-
-  auto *control =
-      static_cast<runtime::AmdQueueV1 *>(state_->control.host_address());
-  const uint64_t read_index =
-      __atomic_load_n(&control->read_dispatch_id, __ATOMIC_ACQUIRE);
-  const uint64_t write_index =
-      __atomic_load_n(&control->write_dispatch_id, __ATOMIC_RELAXED);
-  const uint64_t packet_count = state_->ring_size / kAqlPacketSize;
-  if (write_index - read_index >= packet_count) {
-    return {AqlSubmitError::QueueFull, write_index, read_index, write_index,
-            "AQL queue has no free packet slot"};
-  }
-
-  const uint64_t slot_index = write_index & (packet_count - 1);
-  auto *slot = static_cast<uint8_t *>(state_->ring.host_address()) +
-               static_cast<size_t>(slot_index * kAqlPacketSize);
-  auto *slot_header = reinterpret_cast<uint16_t *>(slot);
-  __atomic_store_n(slot_header, runtime::kAqlPacketTypeInvalid,
-                   __ATOMIC_RELAXED);
-  const auto *packet_bytes = reinterpret_cast<const uint8_t *>(&packet);
-  std::memcpy(slot + sizeof(packet.header),
-              packet_bytes + sizeof(packet.header),
-              sizeof(packet) - sizeof(packet.header));
-
-  // Header publication makes the complete packet visible. The write index and
-  // MMIO doorbell are updated only after that release point.
-  __atomic_store_n(slot_header, packet.header, __ATOMIC_RELEASE);
-  __atomic_store_n(&control->write_dispatch_id, write_index + 1,
-                   __ATOMIC_RELEASE);
-  fence_before_doorbell_store();
-  auto *doorbell = reinterpret_cast<uint64_t *>(state_->doorbell_address);
-  __atomic_store_n(doorbell, write_index, __ATOMIC_RELAXED);
-
-  return {AqlSubmitError::None, write_index, read_index, write_index + 1, {}};
 }
 
 AqlQueue::operator bool() const { return state_ != nullptr && state_->active; }

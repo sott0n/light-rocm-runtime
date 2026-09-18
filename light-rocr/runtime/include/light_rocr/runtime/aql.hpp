@@ -3,7 +3,6 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <string>
 #include <type_traits>
 
 namespace light_rocr::runtime {
@@ -29,9 +28,7 @@ inline constexpr uint32_t kGfx1101WorkgroupMaximumSize = 1024;
 inline constexpr uint32_t kGfx1101GroupSegmentMaximumSize = 64 * 1024;
 
 // Self-authored HSA AQL kernel-dispatch packet ABI. Packet producers own field
-// construction; light-rocr validates the completed packet, then the queue
-// transport publishes its header last with release ordering after writing the
-// remaining 62 bytes into a 64-byte-aligned ring slot.
+// construction, validation, ring writes, and header publication.
 struct alignas(64) AqlKernelDispatchPacket {
   uint16_t header = kAqlPacketTypeInvalid;
   uint16_t setup = 0;
@@ -62,30 +59,6 @@ static_assert(offsetof(AqlKernelDispatchPacket, kernel_object) == 32);
 static_assert(offsetof(AqlKernelDispatchPacket, kernarg_address) == 40);
 static_assert(offsetof(AqlKernelDispatchPacket, reserved2) == 48);
 static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) == 56);
-
-enum class AqlPacketError {
-  None,
-  InvalidHeader,
-  InvalidDimensions,
-  InvalidWorkgroupSize,
-  InvalidGridSize,
-  InvalidGroupSegmentSize,
-  InvalidKernelObject,
-  InvalidKernargAddress,
-  InvalidCompletionSignal,
-  NonzeroReservedField,
-};
-
-struct AqlPacketStatus {
-  AqlPacketError error = AqlPacketError::None;
-  std::string message;
-
-  explicit operator bool() const { return error == AqlPacketError::None; }
-};
-
-[[nodiscard]] const char *aql_packet_error_name(AqlPacketError error);
-[[nodiscard]] AqlPacketStatus
-validate_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet);
 
 } // namespace light_rocr::runtime
 

@@ -192,19 +192,6 @@ light_rocr_kernarg_status(light_rocr::runtime::KernargBufferError error) {
   }
 }
 
-lr_status_t
-light_rocr_submit_status(light_rocr::transport::hsakmt::AqlSubmitError error) {
-  using light_rocr::transport::hsakmt::AqlSubmitError;
-  switch (error) {
-  case AqlSubmitError::InsufficientScratch:
-    return LR_ERROR_NOT_SUPPORTED;
-  case AqlSubmitError::None:
-    return LR_SUCCESS;
-  default:
-    return LR_ERROR_RUNTIME;
-  }
-}
-
 uint16_t light_rocr_dispatch_dimensions(const lr_launch_config_t *config) {
   if (config->grid.z > 1 || config->block.z > 1) {
     return 3;
@@ -213,6 +200,88 @@ uint16_t light_rocr_dispatch_dimensions(const lr_launch_config_t *config) {
     return 2;
   }
   return 1;
+}
+
+bool valid_light_rocr_dispatch_packet(
+    const light_rocr::runtime::AqlKernelDispatchPacket &packet) {
+  using namespace light_rocr::runtime;
+  if (packet.header != kAqlKernelDispatchHeader ||
+      (packet.setup & static_cast<uint16_t>(~uint16_t{0x3})) != 0) {
+    return false;
+  }
+  const uint16_t dimensions =
+      static_cast<uint16_t>(packet.setup >> kAqlKernelDispatchDimensionsShift);
+  if (dimensions < 1 || dimensions > 3 || packet.workgroup_size_x == 0 ||
+      packet.workgroup_size_y == 0 || packet.workgroup_size_z == 0 ||
+      (dimensions < 2 && packet.workgroup_size_y != 1) ||
+      (dimensions < 3 && packet.workgroup_size_z != 1) ||
+      packet.workgroup_size_x > kGfx1101WorkgroupMaximumDimension ||
+      packet.workgroup_size_y > kGfx1101WorkgroupMaximumDimension ||
+      packet.workgroup_size_z > kGfx1101WorkgroupMaximumDimension) {
+    return false;
+  }
+  const uint64_t workgroup_size =
+      static_cast<uint64_t>(packet.workgroup_size_x) *
+      static_cast<uint64_t>(packet.workgroup_size_y) *
+      static_cast<uint64_t>(packet.workgroup_size_z);
+  if (workgroup_size > kGfx1101WorkgroupMaximumSize ||
+      packet.grid_size_x < packet.workgroup_size_x ||
+      packet.grid_size_y < packet.workgroup_size_y ||
+      packet.grid_size_z < packet.workgroup_size_z ||
+      (dimensions < 2 && packet.grid_size_y != 1) ||
+      (dimensions < 3 && packet.grid_size_z != 1) ||
+      packet.group_segment_size > kGfx1101GroupSegmentMaximumSize ||
+      packet.kernel_object == 0 ||
+      packet.kernel_object % kAmdKernelDescriptorAlignment != 0 ||
+      (packet.kernarg_address != 0 &&
+       packet.kernarg_address % kAmdKernargMinimumAlignment != 0) ||
+      (packet.completion_signal != 0 &&
+       packet.completion_signal % kAmdSignalAlignment != 0) ||
+      packet.reserved0 != 0 || packet.reserved2 != 0) {
+    return false;
+  }
+  return true;
+}
+
+lr_status_t publish_light_rocr_dispatch(
+    light_rocr::transport::hsakmt::AqlQueue *queue,
+    const light_rocr::runtime::AqlKernelDispatchPacket &packet) {
+  using light_rocr::transport::hsakmt::kAqlPacketSize;
+  if (queue == nullptr || !*queue || queue->ring_host_address() == nullptr ||
+      queue->doorbell_address() == 0 || queue->packet_count() == 0 ||
+      !valid_light_rocr_dispatch_packet(packet)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (packet.private_segment_size > queue->scratch_private_segment_size()) {
+    return LR_ERROR_NOT_SUPPORTED;
+  }
+
+  const uint64_t read_index = queue->read_index_acquire();
+  const uint64_t write_index = queue->write_index_relaxed();
+  if (write_index < read_index ||
+      write_index - read_index >= queue->packet_count()) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  const auto reserved = queue->add_write_index_scacq_screl(1);
+  if (!reserved) {
+    return LR_ERROR_RUNTIME;
+  }
+  const uint64_t packet_id = reserved.previous_index;
+  const uint64_t slot_index = packet_id & (queue->packet_count() - 1);
+  auto *slot = static_cast<uint8_t *>(queue->ring_host_address()) +
+               static_cast<size_t>(slot_index * kAqlPacketSize);
+  auto *slot_header = reinterpret_cast<uint16_t *>(slot);
+  __atomic_store_n(slot_header, light_rocr::runtime::kAqlPacketTypeInvalid,
+                   __ATOMIC_RELAXED);
+  const auto *packet_bytes = reinterpret_cast<const uint8_t *>(&packet);
+  std::memcpy(slot + sizeof(packet.header),
+              packet_bytes + sizeof(packet.header),
+              sizeof(packet) - sizeof(packet.header));
+  __atomic_store_n(slot_header, packet.header, __ATOMIC_RELEASE);
+
+  const auto doorbell = queue->store_doorbell_screlease(packet_id);
+  return doorbell ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
 
 } // namespace
@@ -625,9 +694,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
                              .descriptor_gpu_address;
   packet.kernarg_address = kernarg_info.gpu_address();
   packet.completion_signal = signal.signal.gpu_handle();
-  const auto packet_status =
-      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
-  if (!packet_status) {
+  if (!valid_light_rocr_dispatch_packet(packet)) {
     const bool kernarg_released = static_cast<bool>(kernarg.buffer.release());
     const bool signal_released = static_cast<bool>(signal.signal.release());
     return kernarg_released && signal_released ? LR_ERROR_INVALID_ARGUMENT
@@ -651,13 +718,14 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_RUNTIME;
   }
 
-  const auto submitted = execution_queue->queue.submit_kernel_dispatch(packet);
-  if (!submitted) {
-    const lr_status_t status = light_rocr_submit_status(submitted.error);
+  const lr_status_t publish_status =
+      publish_light_rocr_dispatch(&execution_queue->queue, packet);
+  if (publish_status != LR_SUCCESS) {
     const bool kernarg_released = static_cast<bool>(pending->kernarg.release());
     const bool signal_released =
         static_cast<bool>(pending->completion_signal.release());
-    return kernarg_released && signal_released ? status : LR_ERROR_RUNTIME;
+    return kernarg_released && signal_released ? publish_status
+                                               : LR_ERROR_RUNTIME;
   }
 
   execution_queue->pending_dispatches.push_back(std::move(pending));

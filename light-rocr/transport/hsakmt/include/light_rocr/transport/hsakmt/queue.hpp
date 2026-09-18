@@ -1,7 +1,6 @@
 #ifndef LIGHT_ROCR_TRANSPORT_HSAKMT_QUEUE_HPP
 #define LIGHT_ROCR_TRANSPORT_HSAKMT_QUEUE_HPP
 
-#include "light_rocr/runtime/aql.hpp"
 #include "light_rocr/transport/hsakmt/memory.hpp"
 
 #include <cstdint>
@@ -65,24 +64,6 @@ struct AqlQueueIndexResult {
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
-enum class AqlSubmitError {
-  None,
-  InvalidQueue,
-  InvalidPacket,
-  InsufficientScratch,
-  QueueFull,
-};
-
-struct AqlSubmitResult {
-  AqlSubmitError error = AqlSubmitError::None;
-  uint64_t packet_id = 0;
-  uint64_t read_index = 0;
-  uint64_t write_index = 0;
-  std::string message;
-
-  explicit operator bool() const { return error == AqlSubmitError::None; }
-};
-
 class AqlQueue {
 public:
   AqlQueue();
@@ -111,10 +92,6 @@ public:
   add_write_index_scacq_screl(uint64_t increment);
   [[nodiscard]] AqlQueuePrimitiveStatus
   store_doorbell_screlease(uint64_t value);
-  // The initial implementation is deliberately single-producer. A successful
-  // submission publishes one validated packet and rings the 64-bit doorbell.
-  [[nodiscard]] AqlSubmitResult
-  submit_kernel_dispatch(const runtime::AqlKernelDispatchPacket &packet);
   explicit operator bool() const;
 
   [[nodiscard]] AqlQueueStatus release();
@@ -137,7 +114,6 @@ struct AqlQueueResult {
 [[nodiscard]] const char *aql_queue_error_name(AqlQueueError error);
 [[nodiscard]] const char *
 aql_queue_primitive_error_name(AqlQueuePrimitiveError error);
-[[nodiscard]] const char *aql_submit_error_name(AqlSubmitError error);
 
 } // namespace light_rocr::transport::hsakmt
 

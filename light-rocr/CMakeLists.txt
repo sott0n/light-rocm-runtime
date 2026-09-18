@@ -56,7 +56,6 @@ light_rocr_enable_warnings(light_rocr_loader)
 add_library(
   light_rocr_core
   arch/gfx11/scratch.cpp
-  runtime/aql.cpp
   runtime/executable_image.cpp
   runtime/launch.cpp
   runtime/signal.cpp

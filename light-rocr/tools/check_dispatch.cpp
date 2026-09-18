@@ -27,6 +27,36 @@ using light_rocr::transport::hsakmt::UserSignal;
 constexpr uint64_t kOutputOffset = 0;
 constexpr uint64_t kKernargOffset = 64;
 
+bool publish_dispatch(
+    AqlQueue *queue, const light_rocr::runtime::AqlKernelDispatchPacket &packet,
+    uint64_t *packet_id) {
+  const uint64_t read_index = queue->read_index_acquire();
+  const uint64_t write_index = queue->write_index_relaxed();
+  const uint64_t packet_count = queue->packet_count();
+  if (packet_count == 0 || write_index < read_index ||
+      write_index - read_index >= packet_count) {
+    return false;
+  }
+  const auto reserved = queue->add_write_index_scacq_screl(1);
+  if (!reserved) {
+    return false;
+  }
+  *packet_id = reserved.previous_index;
+  auto *slot =
+      static_cast<uint8_t *>(queue->ring_host_address()) +
+      static_cast<size_t>((*packet_id & (packet_count - 1)) *
+                          light_rocr::transport::hsakmt::kAqlPacketSize);
+  auto *slot_header = reinterpret_cast<uint16_t *>(slot);
+  __atomic_store_n(slot_header, light_rocr::runtime::kAqlPacketTypeInvalid,
+                   __ATOMIC_RELAXED);
+  const auto *packet_bytes = reinterpret_cast<const uint8_t *>(&packet);
+  std::memcpy(slot + sizeof(packet.header),
+              packet_bytes + sizeof(packet.header),
+              sizeof(packet) - sizeof(packet.header));
+  __atomic_store_n(slot_header, packet.header, __ATOMIC_RELEASE);
+  return static_cast<bool>(queue->store_doorbell_screlease(*packet_id));
+}
+
 int fail_memory(const light_rocr::transport::hsakmt::MemoryStatus &status) {
   std::cerr << "memory_error="
             << light_rocr::transport::hsakmt::memory_error_name(status.error)
@@ -173,16 +203,6 @@ int main(int argc, char **argv) {
   packet.kernel_object = executable.allocation.gpu_address();
   packet.kernarg_address = data.allocation.gpu_address() + kKernargOffset;
   packet.completion_signal = signal.signal.gpu_handle();
-  const auto packet_status =
-      light_rocr::runtime::validate_kernel_dispatch_packet(packet);
-  if (!packet_status) {
-    std::cerr << "packet_error="
-              << light_rocr::runtime::aql_packet_error_name(packet_status.error)
-              << '\n';
-    std::cerr << "message=" << packet_status.message << '\n';
-    return 1;
-  }
-
   std::cout << "node_id=" << node.node_id << '\n';
   std::cout << "target="
             << light_rocr::runtime::gfx_target_name(node.architecture) << '\n';
@@ -200,13 +220,9 @@ int main(int argc, char **argv) {
   std::cout << "packet.setup=0x" << packet.setup << std::dec << '\n';
   std::cout.flush();
 
-  const auto submitted = queue.queue.submit_kernel_dispatch(packet);
-  if (!submitted) {
-    std::cerr << "submit_error="
-              << light_rocr::transport::hsakmt::aql_submit_error_name(
-                     submitted.error)
-              << '\n';
-    std::cerr << "message=" << submitted.message << '\n';
+  uint64_t packet_id = 0;
+  if (!publish_dispatch(&queue.queue, packet, &packet_id)) {
+    std::cerr << "message=failed to publish AQL dispatch\n";
     return 1;
   }
 
@@ -223,7 +239,7 @@ int main(int argc, char **argv) {
     observed_read_index = queue.queue.read_index_acquire();
   }
 
-  std::cout << "packet.id=" << submitted.packet_id << '\n';
+  std::cout << "packet.id=" << packet_id << '\n';
   std::cout << "queue.read_index=" << observed_read_index << '\n';
   std::cout << "queue.write_index=" << observed_write_index << '\n';
   std::cout << "signal.value=" << waited.observed_value << '\n';
@@ -233,7 +249,7 @@ int main(int argc, char **argv) {
   std::cout << "output.observed=0x" << observed_output << std::dec << '\n';
 
   const bool correct = waited && observed_output == fixed::kExpectedValue &&
-                       observed_read_index == submitted.write_index;
+                       observed_read_index == packet_id + 1;
   if (!correct) {
     std::cerr << "message=fixed AQL dispatch did not complete correctly\n";
   }
