@@ -72,7 +72,9 @@ struct AqlDispatchOrdering {
 
 using AqlIndexLoad = uint64_t (*)(void *context);
 using AqlPacketReserve = bool (*)(void *context, uint64_t *packet_id);
-using AqlDoorbellStore = bool (*)(void *context, uint64_t packet_id);
+// The packet is already visible when this is called, so a doorbell adapter
+// must satisfy its preconditions before submission and cannot fail recoverably.
+using AqlDoorbellStore = void (*)(void *context, uint64_t packet_id);
 using AqlPacketValidator = bool (*)(void *context,
                                     const AqlKernelDispatchPacket &packet);
 
@@ -93,7 +95,6 @@ enum class AqlSubmitError {
   InvalidQueue,
   QueueFull,
   ReserveFailed,
-  DoorbellFailed,
 };
 
 struct AqlSubmitResult {

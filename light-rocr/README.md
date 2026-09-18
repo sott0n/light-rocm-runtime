@@ -7,6 +7,12 @@ keeping Linux KFD as the kernel boundary.
 It does not use `libhsa-runtime64.so`. GPU access currently goes through
 `libhsakmt`; a direct KFD transport will replace that dependency later.
 
+## Boundary
+
+LRRT constructs and publishes AQL packets and owns pending dispatch resources.
+`light-rocr` provides queue indices, Ring memory, doorbells, and KFD-facing
+object lifetimes; it does not decide what a kernel-dispatch packet contains.
+
 ## Status
 
 The current target is `gfx1101`. The repository's normal Clang vector-add

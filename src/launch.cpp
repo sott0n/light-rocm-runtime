@@ -5,6 +5,7 @@
 #endif
 #include "runtime_internal.hpp"
 
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -48,7 +49,6 @@ lr_status_t aql_submit_status(AqlSubmitError error) {
     return LR_ERROR_INVALID_ARGUMENT;
   case AqlSubmitError::QueueFull:
   case AqlSubmitError::ReserveFailed:
-  case AqlSubmitError::DoorbellFailed:
     return LR_ERROR_RUNTIME;
   }
   return LR_ERROR_RUNTIME;
@@ -80,10 +80,9 @@ bool rocr_reserve_packet(void *context, uint64_t *packet_id) {
   return true;
 }
 
-bool rocr_ring_doorbell(void *context, uint64_t packet_id) {
+void rocr_ring_doorbell(void *context, uint64_t packet_id) {
   auto *queue = static_cast<hsa_queue_t *>(context);
   hsa_signal_store_screlease(queue->doorbell_signal, packet_id);
-  return true;
 }
 
 AqlQueueProducerOps rocr_producer_ops(hsa_queue_t *queue) {
@@ -300,10 +299,12 @@ bool light_rocr_reserve_packet(void *context, uint64_t *packet_id) {
   return true;
 }
 
-bool light_rocr_ring_doorbell(void *context, uint64_t packet_id) {
-  return static_cast<bool>(
+void light_rocr_ring_doorbell(void *context, uint64_t packet_id) {
+  const auto status =
       static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
-          ->store_doorbell_screlease(packet_id));
+          ->store_doorbell_screlease(packet_id);
+  assert(status);
+  (void)status;
 }
 
 bool valid_light_rocr_dispatch_packet(void *context,

@@ -117,9 +117,7 @@ submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
   auto *slot = static_cast<uint8_t *>(queue.ring_base) +
                static_cast<size_t>(slot_index * sizeof(packet));
   publish_packet(slot, packet);
-  if (!queue.ring_doorbell(queue.context, packet_id)) {
-    return {AqlSubmitError::DoorbellFailed, packet_id};
-  }
+  queue.ring_doorbell(queue.context, packet_id);
   return {AqlSubmitError::None, packet_id};
 }
 
