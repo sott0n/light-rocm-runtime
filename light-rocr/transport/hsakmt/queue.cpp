@@ -103,7 +103,7 @@ struct AqlQueueState {
   bool active = false;
   MemoryAllocation ring;
   MemoryAllocation control;
-  MemoryAllocation scratch;
+  ScratchLease scratch;
   uint32_t scratch_private_segment_size = 0;
 };
 
@@ -219,14 +219,16 @@ KfdSession::create_aql_queue(const runtime::Node &node, uint64_t ring_size,
             {}};
   }
 
-  AllocationResult scratch;
+  ScratchLeaseResult scratch;
   if (scratch_requirements.requirements.allocation_size != 0) {
-    scratch = allocate_scratch(
-        node.node_id, scratch_requirements.requirements.allocation_size);
+    scratch =
+        acquire_scratch_lease(node.node_id, private_aperture->size,
+                              scratch_requirements.requirements.allocation_size,
+                              arch::gfx11::kScratchBackingAlignment);
     if (!scratch) {
       AqlQueueStatus status = allocation_failure(
           AqlQueueError::AllocateScratch, scratch.status, "AQL queue scratch");
-      if (!scratch.allocation) {
+      if (scratch.lease.size() == 0) {
         return {std::move(status), {}};
       }
 
@@ -235,13 +237,13 @@ KfdSession::create_aql_queue(const runtime::Node &node, uint64_t ring_size,
       cleanup_state->scratch_private_segment_size = private_segment_size;
       cleanup_state->ring = std::move(ring.allocation);
       cleanup_state->control = std::move(control.allocation);
-      cleanup_state->scratch = std::move(scratch.allocation);
+      cleanup_state->scratch = std::move(scratch.lease);
       return {std::move(status), AqlQueue(std::move(cleanup_state))};
     }
   }
 
   const uint64_t scratch_gpu_address =
-      scratch.allocation ? scratch.allocation.gpu_address() : 0;
+      scratch.lease ? scratch.lease.gpu_address() : 0;
   const auto scratch_control = arch::gfx11::make_queue_scratch_control(
       node, private_segment_size, scratch_gpu_address);
   if (!scratch_control) {
@@ -253,7 +255,7 @@ KfdSession::create_aql_queue(const runtime::Node &node, uint64_t ring_size,
     cleanup_state->scratch_private_segment_size = private_segment_size;
     cleanup_state->ring = std::move(ring.allocation);
     cleanup_state->control = std::move(control.allocation);
-    cleanup_state->scratch = std::move(scratch.allocation);
+    cleanup_state->scratch = std::move(scratch.lease);
     return {std::move(status), AqlQueue(std::move(cleanup_state))};
   }
 
@@ -295,7 +297,7 @@ KfdSession::create_aql_queue(const runtime::Node &node, uint64_t ring_size,
   queue_state->scratch_private_segment_size = private_segment_size;
   queue_state->ring = std::move(ring.allocation);
   queue_state->control = std::move(control.allocation);
-  queue_state->scratch = std::move(scratch.allocation);
+  queue_state->scratch = std::move(scratch.lease);
 
   HsaQueueResource resource{};
   resource.QueueRptrValue = queue_state->control.gpu_address() +

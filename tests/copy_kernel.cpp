@@ -164,10 +164,21 @@ int main(void) {
     lr_shutdown();
     return 1;
   }
+  void *device_parallel_out = NULL;
+  status = lr_malloc(device, sizeof(out), &device_parallel_out);
+  if (!expect_status(status, LR_SUCCESS, "lr_malloc parallel output")) {
+    lr_free(device, device_intermediate);
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
 
   lr_queue_t *queue = NULL;
   status = lr_queue_create(device, &queue);
   if (!expect_status(status, LR_SUCCESS, "lr_queue_create")) {
+    lr_free(device, device_parallel_out);
     lr_free(device, device_intermediate);
     lr_module_destroy(module);
     lr_free(device, device_out);
@@ -185,15 +196,26 @@ int main(void) {
       (float *)device_out,
       n,
   };
+  copy_args_t parallel_args = {
+      (const float *)device_in,
+      (float *)device_parallel_out,
+      n,
+  };
   status = lr_launch_on_queue(queue, kernel, &config, &first_args,
                               sizeof(first_args));
   if (!expect_status(status, LR_SUCCESS, "first ordered queue launch") ||
       !expect_status(lr_launch_on_queue(queue, kernel, &config, &second_args,
                                         sizeof(second_args)),
                      LR_SUCCESS, "second ordered queue launch") ||
+      !expect_status(
+          lr_launch(kernel, &config, &parallel_args, sizeof(parallel_args)),
+          LR_SUCCESS, "parallel default queue launch") ||
       !expect_status(lr_queue_synchronize(queue), LR_SUCCESS,
                      "lr_queue_synchronize") ||
+      !expect_status(lr_synchronize(device), LR_SUCCESS,
+                     "parallel default queue synchronize") ||
       !expect_status(lr_queue_destroy(queue), LR_SUCCESS, "lr_queue_destroy")) {
+    lr_free(device, device_parallel_out);
     lr_free(device, device_intermediate);
     lr_module_destroy(module);
     lr_free(device, device_out);
@@ -207,12 +229,26 @@ int main(void) {
       lr_memcpy(device, out, device_out, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
   if (!expect_status(status, LR_SUCCESS, "copy out from explicit queue") ||
       !check_output(out, in, n)) {
+    lr_free(device, device_parallel_out);
     lr_module_destroy(module);
     lr_free(device, device_out);
     lr_free(device, device_in);
     lr_shutdown();
     return 1;
   }
+
+  status = lr_memcpy(device, out, device_parallel_out, sizeof(out),
+                     LR_MEMCPY_DEVICE_TO_HOST);
+  if (!expect_status(status, LR_SUCCESS, "copy out from parallel queue") ||
+      !check_output(out, in, n)) {
+    lr_free(device, device_parallel_out);
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+  lr_free(device, device_parallel_out);
 
   for (int i = 0; i < n; ++i) {
     out[i] = 0.0f;

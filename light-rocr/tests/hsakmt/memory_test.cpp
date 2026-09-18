@@ -2,6 +2,7 @@
 
 #include <hsakmt/hsakmt.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -26,6 +27,8 @@ struct FakeKmt {
   uint32_t preferred_node = 0;
   HsaMemFlags allocation_flags{};
   HsaMemMapFlags map_flags{};
+  std::vector<uintptr_t> scratch_map_addresses;
+  std::vector<uintptr_t> unmap_addresses;
   std::vector<std::string> calls;
 };
 
@@ -223,6 +226,55 @@ void scratch_reservation_is_process_wide(TestContext *context) {
   context->expect(static_cast<bool>(retried), retried.status.message);
   released = retried.allocation.release();
   context->expect(static_cast<bool>(released), released.message);
+}
+
+void scratch_pool_carves_non_overlapping_leases(TestContext *context) {
+  reset_fake();
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto first = opened.session.acquire_scratch_lease(7, 4 * 64 * 1024, 64 * 1024,
+                                                    64 * 1024);
+  auto second = opened.session.acquire_scratch_lease(7, 4 * 64 * 1024,
+                                                     64 * 1024, 64 * 1024);
+  context->expect(static_cast<bool>(first), first.status.message);
+  context->expect(static_cast<bool>(second), second.status.message);
+  context->expect(first.lease.gpu_address() == kCpuAddress &&
+                      second.lease.gpu_address() == kCpuAddress + 64 * 1024 &&
+                      first.lease.size() == 64 * 1024 &&
+                      second.lease.size() == 64 * 1024,
+                  "scratch pool returned overlapping or misaligned leases");
+  context->expect(
+      fake.scratch_map_addresses ==
+          std::vector<uintptr_t>{kCpuAddress, kCpuAddress + 64 * 1024},
+      "scratch leases did not map distinct subranges");
+  expect_calls(context, {"open", "acquire", "allocate:7:262144",
+                         "map-scratch:65536", "map-scratch:65536"});
+
+  auto released = first.lease.release();
+  context->expect(static_cast<bool>(released), released.message);
+  context->expect(fake.calls.back() == "unmap" &&
+                      std::find(fake.calls.begin(), fake.calls.end(),
+                                "free:262144") == fake.calls.end(),
+                  "scratch pool was freed while another lease was active");
+
+  auto reused = opened.session.acquire_scratch_lease(7, 4 * 64 * 1024,
+                                                     64 * 1024, 64 * 1024);
+  context->expect(static_cast<bool>(reused), reused.status.message);
+  context->expect(reused.lease.gpu_address() == kCpuAddress &&
+                      fake.scratch_map_addresses.back() == kCpuAddress,
+                  "released scratch range was not reused");
+
+  released = second.lease.release();
+  context->expect(static_cast<bool>(released), released.message);
+  context->expect(fake.calls.back() == "unmap",
+                  "scratch pool was freed before the reused lease");
+  released = reused.lease.release();
+  context->expect(static_cast<bool>(released), released.message);
+  context->expect(fake.unmap_addresses ==
+                          std::vector<uintptr_t>{kCpuAddress,
+                                                 kCpuAddress + 64 * 1024,
+                                                 kCpuAddress} &&
+                      fake.calls.back() == "free:262144",
+                  "last scratch lease did not release the shared pool");
 }
 
 void identity_mapping_uses_cpu_address(TestContext *context) {
@@ -476,7 +528,9 @@ extern "C" HSAKMT_STATUS
 hsaKmtMapMemoryToGPU(void *address, HSAuint64 size,
                      HSAuint64 *alternate_gpu_address) {
   fake.calls.push_back("map-scratch:" + std::to_string(size));
-  if (address != reinterpret_cast<void *>(kCpuAddress)) {
+  const uintptr_t numeric_address = reinterpret_cast<uintptr_t>(address);
+  fake.scratch_map_addresses.push_back(numeric_address);
+  if (numeric_address < kCpuAddress) {
     return HSAKMT_STATUS_INVALID_PARAMETER;
   }
   if (fake.map_status == HSAKMT_STATUS_SUCCESS) {
@@ -487,7 +541,9 @@ hsaKmtMapMemoryToGPU(void *address, HSAuint64 size,
 
 extern "C" HSAKMT_STATUS hsaKmtUnmapMemoryToGPU(void *address) {
   fake.calls.emplace_back("unmap");
-  if (address != reinterpret_cast<void *>(kCpuAddress)) {
+  const uintptr_t numeric_address = reinterpret_cast<uintptr_t>(address);
+  fake.unmap_addresses.push_back(numeric_address);
+  if (numeric_address < kCpuAddress) {
     return HSAKMT_STATUS_INVALID_PARAMETER;
   }
   return fake.unmap_status;
@@ -512,6 +568,8 @@ int main() {
        scratch_uses_dedicated_kmt_mapping},
       {"scratch_reservation_is_process_wide",
        scratch_reservation_is_process_wide},
+      {"scratch_pool_carves_non_overlapping_leases",
+       scratch_pool_carves_non_overlapping_leases},
       {"identity_mapping_uses_cpu_address", identity_mapping_uses_cpu_address},
       {"invalid_inputs_do_not_allocate", invalid_inputs_do_not_allocate},
       {"open_failure_has_no_cleanup", open_failure_has_no_cleanup},

@@ -46,6 +46,7 @@ struct MemoryStatus {
 struct KfdState;
 struct SessionResult;
 struct AllocationResult;
+struct ScratchLeaseResult;
 struct AqlQueueResult;
 struct UserSignalResult;
 
@@ -68,6 +69,9 @@ public:
                 uint64_t size) const;
   [[nodiscard]] AllocationResult allocate_scratch(uint32_t gpu_node_id,
                                                   uint64_t size) const;
+  [[nodiscard]] ScratchLeaseResult
+  acquire_scratch_lease(uint32_t gpu_node_id, uint64_t pool_size, uint64_t size,
+                        uint64_t alignment) const;
   [[nodiscard]] AqlQueueResult
   create_aql_queue(const runtime::Node &node, uint64_t ring_size,
                    uint32_t private_segment_size = 0) const;
@@ -85,6 +89,38 @@ private:
            bool aql_queue_memory = false) const;
 
   std::shared_ptr<KfdState> state_;
+};
+
+struct ScratchPoolState;
+
+class ScratchLease {
+public:
+  ScratchLease() = default;
+  ScratchLease(const ScratchLease &) = delete;
+  ScratchLease &operator=(const ScratchLease &) = delete;
+  ScratchLease(ScratchLease &&other) noexcept;
+  ScratchLease &operator=(ScratchLease &&other) noexcept;
+  ~ScratchLease();
+
+  [[nodiscard]] uint64_t gpu_address() const;
+  [[nodiscard]] uint64_t size() const { return size_; }
+  explicit operator bool() const { return mapped_; }
+
+  [[nodiscard]] MemoryStatus release();
+
+private:
+  friend class KfdSession;
+  ScratchLease(std::shared_ptr<ScratchPoolState> pool, uint64_t offset,
+               uint64_t size, bool mapped, bool range_returned)
+      : pool_(std::move(pool)), offset_(offset), size_(size), mapped_(mapped),
+        range_returned_(range_returned) {}
+  void reset();
+
+  std::shared_ptr<ScratchPoolState> pool_;
+  uint64_t offset_ = 0;
+  uint64_t size_ = 0;
+  bool mapped_ = false;
+  bool range_returned_ = false;
 };
 
 class MemoryAllocation {
@@ -139,6 +175,13 @@ struct SessionResult {
 struct AllocationResult {
   MemoryStatus status;
   MemoryAllocation allocation;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
+struct ScratchLeaseResult {
+  MemoryStatus status;
+  ScratchLease lease;
 
   explicit operator bool() const { return static_cast<bool>(status); }
 };

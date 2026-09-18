@@ -124,7 +124,15 @@ using TestFunction = std::function<void(TestContext *)>;
 
 void expect_calls(TestContext *context,
                   const std::vector<std::string> &expected) {
-  context->expect(fake.calls == expected, "unexpected KMT call sequence");
+  if (fake.calls == expected) {
+    return;
+  }
+  std::cerr << "  actual KMT calls:";
+  for (const std::string &call : fake.calls) {
+    std::cerr << ' ' << call;
+  }
+  std::cerr << '\n';
+  context->expect(false, "unexpected KMT call sequence");
 }
 
 void successful_round_trip(TestContext *context) {
@@ -480,9 +488,10 @@ void scratch_backed_queue_populates_firmware_control(TestContext *context) {
     expected_flags.ui32.Scratch = 1;
     expected_flags.ui32.HostAccess = 1;
     context->expect(fake.allocations[2].preferred_node == 7 &&
-                        fake.allocations[2].size == 33423360 &&
+                        fake.allocations[2].size ==
+                            uint64_t{4} * 1024 * 1024 * 1024 &&
                         fake.allocations[2].flags.Value == expected_flags.Value,
-                    "unexpected scratch allocation policy");
+                    "scratch pool did not reserve the topology aperture");
   }
 
   const auto *control =
