@@ -1,3 +1,4 @@
+#include "aql_producer.hpp"
 #include "runtime_internal.hpp"
 
 #include <algorithm>
@@ -16,6 +17,62 @@ std::unordered_set<lr_queue_t *> g_queues;
 #endif
 
 #if LRRT_ENABLE_HSA
+
+static_assert(sizeof(AqlBarrierAndPacket) == sizeof(hsa_barrier_and_packet_t));
+static_assert(offsetof(AqlBarrierAndPacket, dep_signal) ==
+              offsetof(hsa_barrier_and_packet_t, dep_signal));
+static_assert(offsetof(AqlBarrierAndPacket, completion_signal) ==
+              offsetof(hsa_barrier_and_packet_t, completion_signal));
+
+namespace {
+
+uint64_t rocr_barrier_load_read_index(void *context) {
+  return hsa_queue_load_read_index_scacquire(
+      static_cast<hsa_queue_t *>(context));
+}
+
+uint64_t rocr_barrier_load_write_index(void *context) {
+  return hsa_queue_load_write_index_relaxed(
+      static_cast<hsa_queue_t *>(context));
+}
+
+bool rocr_barrier_reserve_packet(void *context, uint64_t *packet_id) {
+  *packet_id = hsa_queue_add_write_index_scacq_screl(
+      static_cast<hsa_queue_t *>(context), 1);
+  return true;
+}
+
+void rocr_barrier_ring_doorbell(void *context, uint64_t packet_id) {
+  auto *queue = static_cast<hsa_queue_t *>(context);
+  hsa_signal_store_screlease(queue->doorbell_signal, packet_id);
+}
+
+AqlQueueProducerOps rocr_barrier_producer_ops(hsa_queue_t *queue) {
+  return {queue,
+          queue != nullptr ? queue->base_address : nullptr,
+          queue != nullptr ? queue->size : 0,
+          rocr_barrier_load_read_index,
+          rocr_barrier_load_write_index,
+          rocr_barrier_reserve_packet,
+          rocr_barrier_ring_doorbell,
+          nullptr};
+}
+
+lr_status_t barrier_submit_status(AqlSubmitError error) {
+  switch (error) {
+  case AqlSubmitError::None:
+    return LR_SUCCESS;
+  case AqlSubmitError::InvalidPacket:
+  case AqlSubmitError::InvalidQueue:
+    return LR_ERROR_INVALID_ARGUMENT;
+  case AqlSubmitError::QueueFull:
+  case AqlSubmitError::ReserveFailed:
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_ERROR_RUNTIME;
+}
+
+} // namespace
 
 struct SynchronizationDependency {
   hsa_signal_t signal;
@@ -482,29 +539,40 @@ lr_status_t enqueue_event_dependencies_locked(
       g_event_state_changed.notify_all();
       return capacity_status;
     }
+    queue->pending_barriers.reserve(queue->pending_barriers.size() +
+                                    barrier_count);
 
     for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
-      const uint64_t index =
-          hsa_queue_add_write_index_scacq_screl(queue->queue, 1);
-      auto *packets =
-          static_cast<hsa_barrier_and_packet_t *>(queue->queue->base_address);
-      hsa_barrier_and_packet_t *packet =
-          &packets[index & (queue->queue->size - 1)];
-      std::memset(packet, 0, sizeof(*packet));
-
+      AqlBarrierAndParameters parameters;
+      // The following dispatch owns retirement_signal. The barrier must not
+      // decrement it; software only observes that signal to retire references
+      // after the consumer dispatch completes.
       std::vector<lr_event_t *> packet_dependencies;
       const size_t end = std::min(offset + 5, dependencies.size());
       packet_dependencies.reserve(end - offset);
       for (size_t i = offset; i < end; ++i) {
-        packet->dep_signal[i - offset] = dependencies[i]->signal;
+        parameters.dependency_signals[i - offset] =
+            dependencies[i]->signal.handle;
         retain_queue_event_dependency_locked(queue, dependencies[i]);
         packet_dependencies.push_back(dependencies[i]);
       }
-      publish_packet_header(&packet->header,
-                            barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+      // Publish queue-consumer lifetime tracking before the doorbell makes the
+      // packet executable. Event re-record and destruction consult this state.
       queue->pending_barriers.push_back(
           PendingBarrier{retirement_signal, std::move(packet_dependencies)});
-      hsa_signal_store_screlease(queue->queue->doorbell_signal, index);
+      const AqlSubmitResult submitted = submit_aql_barrier_and(
+          rocr_barrier_producer_ops(queue->queue), parameters);
+      if (!submitted) {
+        for (lr_event_t *event : queue->pending_barriers.back().dependencies) {
+          release_queue_event_dependency_locked(queue, event);
+        }
+        queue->pending_barriers.pop_back();
+        for (lr_event_t *event : dependencies) {
+          --event->active_synchronizers;
+        }
+        g_event_state_changed.notify_all();
+        return barrier_submit_status(submitted.error);
+      }
     }
     for (lr_event_t *event : dependencies) {
       --event->active_synchronizers;
@@ -538,29 +606,33 @@ lr_status_t enqueue_explicit_event_dependencies_locally_locked(
     // remains locked, the required packet count cannot increase here.
     return LR_ERROR_RUNTIME;
   }
+  queue->pending_barriers.reserve(queue->pending_barriers.size() +
+                                  barrier_count);
 
   for (size_t offset = 0; offset < dependencies.size(); offset += 5) {
-    const uint64_t index =
-        hsa_queue_add_write_index_scacq_screl(queue->queue, 1);
-    auto *packets =
-        static_cast<hsa_barrier_and_packet_t *>(queue->queue->base_address);
-    hsa_barrier_and_packet_t *packet =
-        &packets[index & (queue->queue->size - 1)];
-    std::memset(packet, 0, sizeof(*packet));
-
+    AqlBarrierAndParameters parameters;
+    // retirement_signal belongs to the following dispatch, not this packet.
     std::vector<lr_event_t *> packet_dependencies;
     const size_t end = std::min(offset + 5, dependencies.size());
     packet_dependencies.reserve(end - offset);
     for (size_t i = offset; i < end; ++i) {
-      packet->dep_signal[i - offset] = dependencies[i]->signal;
+      parameters.dependency_signals[i - offset] =
+          dependencies[i]->signal.handle;
       retain_queue_event_dependency_locked(queue, dependencies[i]);
       packet_dependencies.push_back(dependencies[i]);
     }
-    publish_packet_header(&packet->header,
-                          barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
+    // Keep lifetime tracking visible before the producer rings the doorbell.
     queue->pending_barriers.push_back(
         PendingBarrier{retirement_signal, std::move(packet_dependencies)});
-    hsa_signal_store_screlease(queue->queue->doorbell_signal, index);
+    const AqlSubmitResult submitted = submit_aql_barrier_and(
+        rocr_barrier_producer_ops(queue->queue), parameters);
+    if (!submitted) {
+      for (lr_event_t *event : queue->pending_barriers.back().dependencies) {
+        release_queue_event_dependency_locked(queue, event);
+      }
+      queue->pending_barriers.pop_back();
+      return barrier_submit_status(submitted.error);
+    }
   }
   return LR_SUCCESS;
 }

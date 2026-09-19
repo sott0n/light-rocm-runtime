@@ -7,6 +7,7 @@
 
 namespace {
 
+using lrrt_internal::AqlBarrierAndPacket;
 using lrrt_internal::AqlKernelDispatchPacket;
 using lrrt_internal::AqlQueueProducerOps;
 using lrrt_internal::AqlSubmitError;
@@ -61,9 +62,9 @@ bool reserve_packet(void *context, uint64_t *packet_id) {
   return true;
 }
 
-bool packet_at(const FakeQueue &queue, size_t index,
-               const AqlKernelDispatchPacket &expected) {
-  AqlKernelDispatchPacket actual;
+template <typename Packet>
+bool packet_at(const FakeQueue &queue, size_t index, const Packet &expected) {
+  Packet actual;
   std::memcpy(&actual, queue.ring.data() + index * sizeof(actual),
               sizeof(actual));
   return std::memcmp(&actual, &expected, sizeof(actual)) == 0;
@@ -159,6 +160,43 @@ int main() {
                                         QueueOperation::Reserve,
                                         QueueOperation::RingDoorbell})) {
     std::cerr << "barrier dispatch was not published correctly\n";
+    return 1;
+  }
+
+  FakeQueue barrier_queue;
+  barrier_queue.ring.fill(0x7c);
+  const lrrt_internal::AqlBarrierAndParameters barrier_parameters = {
+      {0x100, 0x200, 0, 0x400, 0x500}, 0x600};
+  const AqlBarrierAndPacket barrier =
+      lrrt_internal::build_aql_barrier_and_packet(barrier_parameters);
+  const auto barrier_result = lrrt_internal::submit_aql_barrier_and(
+      producer_ops(&barrier_queue), barrier_parameters);
+  if (!barrier_result || barrier_result.packet_id != 0 ||
+      barrier.header != 0x1503 || barrier_queue.doorbell != 0 ||
+      !packet_at(barrier_queue, 0, barrier) ||
+      !operations_are(barrier_queue,
+                      std::array{QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex,
+                                 QueueOperation::Reserve,
+                                 QueueOperation::RingDoorbell})) {
+    std::cerr << "barrier-and packet was not published correctly\n";
+    return 1;
+  }
+
+  barrier_queue.operation_count = 0;
+  barrier_queue.read_index = 0;
+  barrier_queue.write_index = 2;
+  barrier_queue.doorbell = UINT64_MAX;
+  const auto barrier_ring_before_full = barrier_queue.ring;
+  const auto full_barrier_result = lrrt_internal::submit_aql_barrier_and(
+      producer_ops(&barrier_queue), barrier_parameters);
+  if (full_barrier_result.error != AqlSubmitError::QueueFull ||
+      barrier_queue.write_index != 2 || barrier_queue.doorbell != UINT64_MAX ||
+      barrier_queue.ring != barrier_ring_before_full ||
+      !operations_are(barrier_queue,
+                      std::array{QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex})) {
+    std::cerr << "full queue was modified by barrier submission\n";
     return 1;
   }
 

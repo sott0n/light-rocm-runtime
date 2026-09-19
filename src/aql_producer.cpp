@@ -20,7 +20,9 @@ uint16_t dispatch_dimensions(const AqlKernelDispatchParameters &parameters) {
   return 1;
 }
 
-void publish_packet(void *slot, const AqlKernelDispatchPacket &packet) {
+template <typename Packet>
+void publish_packet(void *slot, const Packet &packet) {
+  static_assert(sizeof(Packet) == 64);
   auto *slot_bytes = static_cast<uint8_t *>(slot);
   auto *slot_header = reinterpret_cast<uint16_t *>(slot_bytes);
   __atomic_store_n(slot_header, kAqlPacketTypeInvalid, __ATOMIC_RELAXED);
@@ -29,6 +31,36 @@ void publish_packet(void *slot, const AqlKernelDispatchPacket &packet) {
               packet_bytes + sizeof(packet.header),
               sizeof(packet) - sizeof(packet.header));
   __atomic_store_n(slot_header, packet.header, __ATOMIC_RELEASE);
+}
+
+bool valid_queue(const AqlQueueProducerOps &queue) {
+  return queue.context != nullptr && queue.ring_base != nullptr &&
+         is_power_of_two(queue.packet_count) &&
+         queue.load_read_index != nullptr &&
+         queue.load_write_index != nullptr && queue.reserve_packet != nullptr &&
+         queue.ring_doorbell != nullptr;
+}
+
+template <typename Packet>
+AqlSubmitResult submit_packet(const AqlQueueProducerOps &queue,
+                              const Packet &packet) {
+  const uint64_t read_index = queue.load_read_index(queue.context);
+  const uint64_t write_index = queue.load_write_index(queue.context);
+  if (write_index < read_index ||
+      write_index - read_index >= queue.packet_count) {
+    return {AqlSubmitError::QueueFull, 0};
+  }
+
+  uint64_t packet_id = 0;
+  if (!queue.reserve_packet(queue.context, &packet_id)) {
+    return {AqlSubmitError::ReserveFailed, 0};
+  }
+  const uint64_t slot_index = packet_id & (queue.packet_count - 1);
+  auto *slot = static_cast<uint8_t *>(queue.ring_base) +
+               static_cast<size_t>(slot_index * sizeof(packet));
+  publish_packet(slot, packet);
+  queue.ring_doorbell(queue.context, packet_id);
+  return {AqlSubmitError::None, packet_id};
 }
 
 } // namespace
@@ -84,14 +116,25 @@ bool valid_aql_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet) {
   return true;
 }
 
+AqlBarrierAndPacket
+build_aql_barrier_and_packet(const AqlBarrierAndParameters &parameters) {
+  AqlBarrierAndPacket packet;
+  packet.header = kAqlBarrierAndHeader;
+  packet.dep_signal = parameters.dependency_signals;
+  packet.completion_signal = parameters.completion_signal;
+  return packet;
+}
+
+bool valid_aql_barrier_and_packet(const AqlBarrierAndPacket &packet) {
+  return packet.header == kAqlBarrierAndHeader && packet.reserved0 == 0 &&
+         packet.reserved1 == 0 && packet.reserved2 == 0;
+}
+
 AqlSubmitResult
 submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
                            const AqlKernelDispatchParameters &parameters,
                            const AqlDispatchOrdering &ordering) {
-  if (queue.context == nullptr || queue.ring_base == nullptr ||
-      !is_power_of_two(queue.packet_count) ||
-      queue.load_read_index == nullptr || queue.load_write_index == nullptr ||
-      queue.reserve_packet == nullptr || queue.ring_doorbell == nullptr) {
+  if (!valid_queue(queue)) {
     return {AqlSubmitError::InvalidQueue, 0};
   }
   const AqlKernelDispatchPacket packet =
@@ -102,23 +145,20 @@ submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
     return {AqlSubmitError::InvalidPacket, 0};
   }
 
-  const uint64_t read_index = queue.load_read_index(queue.context);
-  const uint64_t write_index = queue.load_write_index(queue.context);
-  if (write_index < read_index ||
-      write_index - read_index >= queue.packet_count) {
-    return {AqlSubmitError::QueueFull, 0};
-  }
+  return submit_packet(queue, packet);
+}
 
-  uint64_t packet_id = 0;
-  if (!queue.reserve_packet(queue.context, &packet_id)) {
-    return {AqlSubmitError::ReserveFailed, 0};
+AqlSubmitResult
+submit_aql_barrier_and(const AqlQueueProducerOps &queue,
+                       const AqlBarrierAndParameters &parameters) {
+  if (!valid_queue(queue)) {
+    return {AqlSubmitError::InvalidQueue, 0};
   }
-  const uint64_t slot_index = packet_id & (queue.packet_count - 1);
-  auto *slot = static_cast<uint8_t *>(queue.ring_base) +
-               static_cast<size_t>(slot_index * sizeof(packet));
-  publish_packet(slot, packet);
-  queue.ring_doorbell(queue.context, packet_id);
-  return {AqlSubmitError::None, packet_id};
+  const AqlBarrierAndPacket packet = build_aql_barrier_and_packet(parameters);
+  if (!valid_aql_barrier_and_packet(packet)) {
+    return {AqlSubmitError::InvalidPacket, 0};
+  }
+  return submit_packet(queue, packet);
 }
 
 } // namespace lrrt_internal
