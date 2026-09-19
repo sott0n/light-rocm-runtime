@@ -232,7 +232,15 @@ struct LightRocrAllocationInfo {
   light_rocr::transport::hsakmt::MemoryAllocation allocation;
 };
 
+struct LightRocrHostAllocationInfo {
+  uint32_t device_index;
+  size_t requested_size;
+  light_rocr::transport::hsakmt::HostMemoryAllocation allocation;
+};
+
 std::unordered_map<void *, LightRocrAllocationInfo> g_light_rocr_allocations;
+std::unordered_map<void *, LightRocrHostAllocationInfo>
+    g_light_rocr_host_allocations;
 
 void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
                                           size_t size) {
@@ -259,6 +267,43 @@ void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
   return nullptr;
 }
 
+enum class LightRocrHostPointerLookup {
+  Unregistered,
+  Valid,
+  Invalid,
+};
+
+LightRocrHostPointerLookup
+translate_light_rocr_host_pointer(const void *ptr, lr_device_t device,
+                                  size_t size, const void **gpu_ptr = nullptr) {
+  const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
+  for (const auto &entry : g_light_rocr_host_allocations) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(entry.first);
+    const LightRocrHostAllocationInfo &info = entry.second;
+    if (address < base) {
+      continue;
+    }
+    const uintptr_t offset = address - base;
+    if (offset >= info.requested_size) {
+      continue;
+    }
+    if (info.device_index != device.index ||
+        size > info.requested_size - offset) {
+      return LightRocrHostPointerLookup::Invalid;
+    }
+    if (gpu_ptr != nullptr) {
+      const uint64_t gpu_base = info.allocation.gpu_address();
+      if (gpu_base > std::numeric_limits<uintptr_t>::max() - offset) {
+        return LightRocrHostPointerLookup::Invalid;
+      }
+      *gpu_ptr = reinterpret_cast<const void *>(
+          static_cast<uintptr_t>(gpu_base + offset));
+    }
+    return LightRocrHostPointerLookup::Valid;
+  }
+  return LightRocrHostPointerLookup::Unregistered;
+}
+
 void record_allocation(DeviceState *device, size_t size) {
   lr_memory_stats_t &stats = device->memory_stats;
   stats.live_bytes += size;
@@ -274,6 +319,25 @@ void record_free(DeviceState *device, size_t size) {
   stats.live_bytes = size > stats.live_bytes ? 0 : stats.live_bytes - size;
   stats.total_freed_bytes += size;
   ++stats.free_count;
+}
+
+void record_host_allocation(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.pinned_host_live_bytes += size;
+  stats.pinned_host_total_allocated_bytes += size;
+  ++stats.pinned_host_allocation_count;
+  if (stats.pinned_host_live_bytes > stats.pinned_host_peak_live_bytes) {
+    stats.pinned_host_peak_live_bytes = stats.pinned_host_live_bytes;
+  }
+}
+
+void record_host_free(DeviceState *device, size_t size) {
+  lr_memory_stats_t &stats = device->memory_stats;
+  stats.pinned_host_live_bytes = size > stats.pinned_host_live_bytes
+                                     ? 0
+                                     : stats.pinned_host_live_bytes - size;
+  stats.pinned_host_total_freed_bytes += size;
+  ++stats.pinned_host_free_count;
 }
 
 void record_memcpy(DeviceState *device, lr_memcpy_kind_t kind, size_t size) {
@@ -306,6 +370,22 @@ void release_memory_allocations_locked(lr_status_t *result) {
       record_free(&g_devices[info.device_index], info.requested_size);
     }
     allocation = g_light_rocr_allocations.erase(allocation);
+  }
+  for (auto allocation = g_light_rocr_host_allocations.begin();
+       allocation != g_light_rocr_host_allocations.end();) {
+    const auto status = allocation->second.allocation.release();
+    if (!status) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      ++allocation;
+      continue;
+    }
+    const LightRocrHostAllocationInfo &info = allocation->second;
+    if (info.device_index < g_devices.size()) {
+      record_host_free(&g_devices[info.device_index], info.requested_size);
+    }
+    allocation = g_light_rocr_host_allocations.erase(allocation);
   }
 }
 #endif
@@ -553,6 +633,30 @@ lr_status_t lr_host_malloc(lr_device_t device, size_t size, void **ptr) {
   record_host_allocation(&state, size);
   *ptr = host_ptr;
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto allocated = g_kfd_session->allocate_host(
+      g_devices[device.index].node.node_id, static_cast<uint64_t>(size));
+  if (!allocated) {
+    return LR_ERROR_RUNTIME;
+  }
+  void *host_ptr = allocated.allocation.host_address();
+  if (host_ptr == nullptr || g_light_rocr_host_allocations.find(host_ptr) !=
+                                 g_light_rocr_host_allocations.end()) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  g_light_rocr_host_allocations.emplace(
+      host_ptr, LightRocrHostAllocationInfo{device.index, size,
+                                            std::move(allocated.allocation)});
+  record_host_allocation(&g_devices[device.index], size);
+  *ptr = host_ptr;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -605,6 +709,30 @@ lr_status_t lr_host_free(lr_device_t device, void *ptr) {
   g_host_allocations.erase(allocation);
   record_host_free(&state, size);
   g_memory_state_changed.notify_all();
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  auto allocation = g_light_rocr_host_allocations.find(ptr);
+  if (allocation == g_light_rocr_host_allocations.end() ||
+      allocation->second.device_index != device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const lr_status_t synchronization_status =
+      synchronize_light_rocr_device_locked(&g_devices[device.index]);
+  if (synchronization_status != LR_SUCCESS) {
+    return synchronization_status;
+  }
+  const auto status = allocation->second.allocation.release();
+  if (!status) {
+    return LR_ERROR_RUNTIME;
+  }
+  const size_t requested_size = allocation->second.requested_size;
+  g_light_rocr_host_allocations.erase(allocation);
+  record_host_free(&g_devices[device.index], requested_size);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -708,6 +836,17 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     if (!copy_dst || !copy_src) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
+  }
+
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE &&
+      translate_light_rocr_host_pointer(src, device, size) ==
+          LightRocrHostPointerLookup::Invalid) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (kind == LR_MEMCPY_DEVICE_TO_HOST &&
+      translate_light_rocr_host_pointer(dst, device, size) ==
+          LightRocrHostPointerLookup::Invalid) {
+    return LR_ERROR_INVALID_ARGUMENT;
   }
 
   const lr_status_t synchronization_status =

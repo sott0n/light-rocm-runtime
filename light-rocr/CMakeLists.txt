@@ -101,6 +101,7 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
     add_library(
       light_rocr_transport_hsakmt
       transport/hsakmt/executable_image.cpp
+      transport/hsakmt/host_memory.cpp
       transport/hsakmt/kernarg.cpp
       transport/hsakmt/memory.cpp
       transport/hsakmt/queue.cpp

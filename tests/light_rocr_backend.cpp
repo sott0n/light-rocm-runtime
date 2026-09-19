@@ -95,11 +95,45 @@ bool run_allocation_checks(lr_device_t device) {
     return false;
   }
 
-  void *host_allocation = reinterpret_cast<void *>(uintptr_t{1});
-  if (!expect_status(lr_host_malloc(device, 1, &host_allocation),
-                     LR_ERROR_NOT_SUPPORTED, "lr_host_malloc unsupported") ||
-      host_allocation != nullptr) {
-    std::fprintf(stderr, "unsupported lr_host_malloc wrote an allocation\n");
+  void *host_allocation = nullptr;
+  if (!expect_status(lr_host_malloc(device, 8, &host_allocation), LR_SUCCESS,
+                     "lr_host_malloc") ||
+      host_allocation == nullptr) {
+    std::fprintf(stderr, "lr_host_malloc returned a null allocation\n");
+    (void)lr_free(device, allocation);
+    return false;
+  }
+  auto *host_bytes = static_cast<uint8_t *>(host_allocation);
+  host_bytes[0] = 0xa5;
+  if (!expect_status(lr_memcpy(device, allocation, host_bytes, 1,
+                               LR_MEMCPY_HOST_TO_DEVICE),
+                     LR_SUCCESS, "lr_memcpy pinned host to device")) {
+    (void)lr_host_free(device, host_allocation);
+    (void)lr_free(device, allocation);
+    return false;
+  }
+  host_bytes[0] = 0;
+  if (!expect_status(lr_memcpy(device, host_bytes, allocation, 1,
+                               LR_MEMCPY_DEVICE_TO_HOST),
+                     LR_SUCCESS, "lr_memcpy device to pinned host") ||
+      host_bytes[0] != 0xa5 ||
+      !expect_status(lr_memcpy(device, allocation, host_bytes + 6, 4,
+                               LR_MEMCPY_HOST_TO_DEVICE),
+                     LR_ERROR_INVALID_ARGUMENT,
+                     "lr_memcpy pinned host out of bounds") ||
+      !expect_status(lr_host_free(device, host_bytes + 1),
+                     LR_ERROR_INVALID_ARGUMENT, "lr_host_free subpointer") ||
+      !expect_status(lr_get_memory_stats(device, &stats), LR_SUCCESS,
+                     "lr_get_memory_stats after host allocation") ||
+      stats.pinned_host_live_bytes != 8 ||
+      stats.pinned_host_peak_live_bytes != 8 ||
+      stats.pinned_host_total_allocated_bytes != 8 ||
+      stats.pinned_host_allocation_count != 1 ||
+      !expect_status(lr_host_free(device, host_allocation), LR_SUCCESS,
+                     "lr_host_free") ||
+      !expect_status(lr_host_free(device, host_allocation),
+                     LR_ERROR_INVALID_ARGUMENT, "lr_host_free stale")) {
+    (void)lr_host_free(device, host_allocation);
     (void)lr_free(device, allocation);
     return false;
   }
@@ -126,9 +160,11 @@ bool run_allocation_checks(lr_device_t device) {
       !expect_status(lr_get_memory_stats(device, &stats), LR_SUCCESS,
                      "lr_get_memory_stats after free") ||
       stats.live_bytes != 0 || stats.total_freed_bytes != 1 ||
-      stats.free_count != 1 || stats.h2d_copy_bytes != 1 ||
-      stats.d2h_copy_bytes != 1 || stats.d2d_copy_bytes != 0 ||
-      stats.memcpy_count != 2) {
+      stats.free_count != 1 || stats.h2d_copy_bytes != 2 ||
+      stats.d2h_copy_bytes != 2 || stats.d2d_copy_bytes != 0 ||
+      stats.memcpy_count != 4 || stats.pinned_host_live_bytes != 0 ||
+      stats.pinned_host_total_freed_bytes != 8 ||
+      stats.pinned_host_free_count != 1) {
     return false;
   }
 

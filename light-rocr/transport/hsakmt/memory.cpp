@@ -171,6 +171,12 @@ const char *memory_error_name(MemoryError error) {
     return "invalid_session";
   case MemoryError::InvalidSize:
     return "invalid_size";
+  case MemoryError::AllocateHost:
+    return "allocate_host";
+  case MemoryError::RegisterHost:
+    return "register_host";
+  case MemoryError::DeregisterHost:
+    return "deregister_host";
   case MemoryError::OpenKfd:
     return "open_kfd";
   case MemoryError::AcquireSystemProperties:

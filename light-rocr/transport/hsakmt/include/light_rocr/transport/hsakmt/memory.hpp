@@ -22,6 +22,9 @@ enum class MemoryError {
   None,
   InvalidSession,
   InvalidSize,
+  AllocateHost,
+  RegisterHost,
+  DeregisterHost,
   OpenKfd,
   AcquireSystemProperties,
   InvalidVramHeap,
@@ -46,6 +49,7 @@ struct MemoryStatus {
 struct KfdState;
 struct SessionResult;
 struct AllocationResult;
+struct HostAllocationResult;
 struct ScratchLeaseResult;
 struct AqlQueueResult;
 struct UserSignalResult;
@@ -62,6 +66,8 @@ public:
   [[nodiscard]] static SessionResult open();
   [[nodiscard]] AllocationResult allocate_gtt(uint32_t gpu_node_id,
                                               uint64_t size) const;
+  [[nodiscard]] HostAllocationResult allocate_host(uint32_t gpu_node_id,
+                                                   uint64_t size) const;
   [[nodiscard]] AllocationResult allocate_executable_gtt(uint32_t gpu_node_id,
                                                          uint64_t size) const;
   [[nodiscard]] AllocationResult
@@ -92,6 +98,40 @@ private:
 };
 
 struct ScratchPoolState;
+
+class HostMemoryAllocation {
+public:
+  HostMemoryAllocation() = default;
+  HostMemoryAllocation(const HostMemoryAllocation &) = delete;
+  HostMemoryAllocation &operator=(const HostMemoryAllocation &) = delete;
+  HostMemoryAllocation(HostMemoryAllocation &&other) noexcept;
+  HostMemoryAllocation &operator=(HostMemoryAllocation &&other) noexcept;
+  ~HostMemoryAllocation();
+
+  [[nodiscard]] void *host_address() const { return host_address_; }
+  [[nodiscard]] uint64_t gpu_address() const { return gpu_address_; }
+  [[nodiscard]] uint64_t size() const { return size_; }
+  explicit operator bool() const { return host_address_ != nullptr; }
+
+  [[nodiscard]] MemoryStatus release();
+
+private:
+  friend class KfdSession;
+  HostMemoryAllocation(std::shared_ptr<KfdState> state, void *host_address,
+                       uint64_t gpu_address, uint64_t size, bool registered,
+                       bool mapped)
+      : state_(std::move(state)), host_address_(host_address),
+        gpu_address_(gpu_address), size_(size), registered_(registered),
+        mapped_(mapped) {}
+  void reset();
+
+  std::shared_ptr<KfdState> state_;
+  void *host_address_ = nullptr;
+  uint64_t gpu_address_ = 0;
+  uint64_t size_ = 0;
+  bool registered_ = false;
+  bool mapped_ = false;
+};
 
 class ScratchLease {
 public:
@@ -175,6 +215,13 @@ struct SessionResult {
 struct AllocationResult {
   MemoryStatus status;
   MemoryAllocation allocation;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
+struct HostAllocationResult {
+  MemoryStatus status;
+  HostMemoryAllocation allocation;
 
   explicit operator bool() const { return static_cast<bool>(status); }
 };

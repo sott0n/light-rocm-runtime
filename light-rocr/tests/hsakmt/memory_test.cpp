@@ -19,14 +19,18 @@ struct FakeKmt {
   HSAKMT_STATUS open_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS acquire_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS allocate_status = HSAKMT_STATUS_SUCCESS;
+  HSAKMT_STATUS register_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS map_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS unmap_status = HSAKMT_STATUS_SUCCESS;
+  HSAKMT_STATUS deregister_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS free_status = HSAKMT_STATUS_SUCCESS;
   HSAKMT_STATUS close_status = HSAKMT_STATUS_SUCCESS;
   uint64_t alternate_gpu_address = kAlternateGpuAddress;
   uint32_t preferred_node = 0;
   HsaMemFlags allocation_flags{};
+  HsaMemFlags registration_flags{};
   HsaMemMapFlags map_flags{};
+  void *registered_host_address = nullptr;
   std::vector<uintptr_t> scratch_map_addresses;
   std::vector<uintptr_t> unmap_addresses;
   std::vector<std::string> calls;
@@ -94,6 +98,42 @@ void successful_round_trip(TestContext *context) {
   }
   expect_calls(context, {"open", "acquire", "allocate:0:8192", "map:7:8192",
                          "unmap", "free:8192", "release", "close"});
+}
+
+void host_memory_round_trip(TestContext *context) {
+  reset_fake();
+  {
+    auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+    context->expect(static_cast<bool>(opened), opened.status.message);
+    auto allocated = opened.session.allocate_host(7, 123);
+    context->expect(static_cast<bool>(allocated), allocated.status.message);
+    context->expect(allocated.allocation.host_address() != nullptr &&
+                        allocated.allocation.host_address() ==
+                            fake.registered_host_address,
+                    "registered host address was not retained");
+    context->expect(allocated.allocation.gpu_address() == kAlternateGpuAddress,
+                    "registered host GPU address was not retained");
+    context->expect(allocated.allocation.size() == 123,
+                    "registered host size was not retained");
+    HsaMemFlags expected_registration_flags{};
+    expected_registration_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+    expected_registration_flags.ui32.HostAccess = 1;
+    expected_registration_flags.ui32.CachePolicy = HSA_CACHING_CACHED;
+    context->expect(fake.registration_flags.Value ==
+                        expected_registration_flags.Value,
+                    "unexpected host registration policy");
+    HsaMemMapFlags expected_map_flags{};
+    expected_map_flags.ui32.PageSize = HSA_PAGE_SIZE_4KB;
+    expected_map_flags.ui32.HostAccess = 1;
+    context->expect(fake.map_flags.Value == expected_map_flags.Value,
+                    "unexpected host mapping policy");
+    const auto released = allocated.allocation.release();
+    context->expect(static_cast<bool>(released), released.message);
+    expect_calls(context, {"open", "acquire", "register:123", "map:7:123",
+                           "unmap", "deregister"});
+  }
+  expect_calls(context, {"open", "acquire", "register:123", "map:7:123",
+                         "unmap", "deregister", "release", "close"});
 }
 
 void public_vram_is_host_accessible(TestContext *context) {
@@ -294,6 +334,11 @@ void invalid_inputs_do_not_allocate(TestContext *context) {
       allocated.status.error ==
           light_rocr::transport::hsakmt::MemoryError::InvalidSession,
       "invalid session was accepted");
+  auto host_allocated = invalid.allocate_host(1, 64);
+  context->expect(
+      host_allocated.status.error ==
+          light_rocr::transport::hsakmt::MemoryError::InvalidSession,
+      "invalid session was accepted for host memory");
 
   {
     auto opened = light_rocr::transport::hsakmt::KfdSession::open();
@@ -319,6 +364,10 @@ void invalid_inputs_do_not_allocate(TestContext *context) {
     context->expect(allocated.status.error ==
                         light_rocr::transport::hsakmt::MemoryError::InvalidSize,
                     "invalid scratch size was accepted");
+    host_allocated = opened.session.allocate_host(1, 0);
+    context->expect(host_allocated.status.error ==
+                        light_rocr::transport::hsakmt::MemoryError::InvalidSize,
+                    "zero-sized host allocation was accepted");
     expect_calls(context, {"open", "acquire"});
   }
   expect_calls(context, {"open", "acquire", "release", "close"});
@@ -393,6 +442,86 @@ void map_failure_frees_allocation(TestContext *context) {
   }
   expect_calls(context, {"open", "acquire", "allocate:0:4096", "map:9:4096",
                          "free:4096", "release", "close"});
+}
+
+void host_registration_failure_has_no_mapping(TestContext *context) {
+  reset_fake();
+  fake.register_status = HSAKMT_STATUS_NO_MEMORY;
+  {
+    auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+    const auto allocated = opened.session.allocate_host(9, 64);
+    context->expect(!allocated,
+                    "host registration failure unexpectedly succeeded");
+    context->expect(
+        allocated.status.error ==
+            light_rocr::transport::hsakmt::MemoryError::RegisterHost,
+        "wrong host registration failure");
+  }
+  expect_calls(context, {"open", "acquire", "register:64", "release", "close"});
+}
+
+void host_map_failure_deregisters_memory(TestContext *context) {
+  reset_fake();
+  fake.map_status = HSAKMT_STATUS_INVALID_NODE_UNIT;
+  {
+    auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+    const auto allocated = opened.session.allocate_host(9, 64);
+    context->expect(!allocated, "host map failure unexpectedly succeeded");
+    context->expect(allocated.status.error ==
+                        light_rocr::transport::hsakmt::MemoryError::MapToGpu,
+                    "wrong host map failure");
+  }
+  expect_calls(context, {"open", "acquire", "register:64", "map:9:64",
+                         "deregister", "release", "close"});
+}
+
+void host_map_cleanup_failure_returns_ownership(TestContext *context) {
+  reset_fake();
+  fake.map_status = HSAKMT_STATUS_INVALID_NODE_UNIT;
+  fake.deregister_status = HSAKMT_STATUS_ERROR;
+  auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+  auto allocated = opened.session.allocate_host(9, 64);
+  context->expect(!allocated, "host map failure unexpectedly succeeded");
+  context->expect(
+      allocated.status.error ==
+              light_rocr::transport::hsakmt::MemoryError::MapToGpu &&
+          static_cast<bool>(allocated.allocation),
+      "host map cleanup failure did not return allocation ownership");
+  expect_calls(context,
+               {"open", "acquire", "register:64", "map:9:64", "deregister"});
+
+  fake.deregister_status = HSAKMT_STATUS_SUCCESS;
+  const auto released = allocated.allocation.release();
+  context->expect(static_cast<bool>(released), released.message);
+  expect_calls(context, {"open", "acquire", "register:64", "map:9:64",
+                         "deregister", "deregister"});
+}
+
+void host_cleanup_failures_can_be_retried(TestContext *context) {
+  reset_fake();
+  {
+    auto opened = light_rocr::transport::hsakmt::KfdSession::open();
+    auto allocated = opened.session.allocate_host(1, 64);
+    fake.unmap_status = HSAKMT_STATUS_ERROR;
+    auto released = allocated.allocation.release();
+    context->expect(
+        released.error ==
+            light_rocr::transport::hsakmt::MemoryError::UnmapFromGpu,
+        "host unmap failure was not reported");
+    fake.unmap_status = HSAKMT_STATUS_SUCCESS;
+    fake.deregister_status = HSAKMT_STATUS_ERROR;
+    released = allocated.allocation.release();
+    context->expect(
+        released.error ==
+            light_rocr::transport::hsakmt::MemoryError::DeregisterHost,
+        "host deregistration failure was not reported");
+    fake.deregister_status = HSAKMT_STATUS_SUCCESS;
+    released = allocated.allocation.release();
+    context->expect(static_cast<bool>(released), released.message);
+  }
+  expect_calls(context,
+               {"open", "acquire", "register:64", "map:1:64", "unmap", "unmap",
+                "deregister", "deregister", "release", "close"});
 }
 
 void scratch_map_cleanup_failure_returns_ownership(TestContext *context) {
@@ -507,6 +636,15 @@ extern "C" HSAKMT_STATUS hsaKmtAllocMemory(HSAuint32 preferred_node,
   return fake.allocate_status;
 }
 
+extern "C" HSAKMT_STATUS hsaKmtRegisterMemoryWithFlags(void *address,
+                                                       HSAuint64 size,
+                                                       HsaMemFlags flags) {
+  fake.calls.push_back("register:" + std::to_string(size));
+  fake.registration_flags = flags;
+  fake.registered_host_address = address;
+  return fake.register_status;
+}
+
 extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPUNodes(
     void *address, HSAuint64 size, HSAuint64 *alternate_gpu_address,
     HsaMemMapFlags flags, HSAuint64 node_count, HSAuint32 *nodes) {
@@ -514,14 +652,23 @@ extern "C" HSAKMT_STATUS hsaKmtMapMemoryToGPUNodes(
   fake.calls.push_back("map:" + std::to_string(node) + ":" +
                        std::to_string(size));
   fake.map_flags = flags;
-  if (address != reinterpret_cast<void *>(kCpuAddress) || node_count != 1 ||
-      flags.ui32.PageSize != HSA_PAGE_SIZE_4KB) {
+  if ((address != reinterpret_cast<void *>(kCpuAddress) &&
+       address != fake.registered_host_address) ||
+      node_count != 1 || flags.ui32.PageSize != HSA_PAGE_SIZE_4KB) {
     return HSAKMT_STATUS_INVALID_PARAMETER;
   }
   if (fake.map_status == HSAKMT_STATUS_SUCCESS) {
     *alternate_gpu_address = fake.alternate_gpu_address;
   }
   return fake.map_status;
+}
+
+extern "C" HSAKMT_STATUS hsaKmtDeregisterMemory(void *address) {
+  fake.calls.emplace_back("deregister");
+  if (address != fake.registered_host_address) {
+    return HSAKMT_STATUS_INVALID_PARAMETER;
+  }
+  return fake.deregister_status;
 }
 
 extern "C" HSAKMT_STATUS
@@ -560,6 +707,7 @@ extern "C" HSAKMT_STATUS hsaKmtFreeMemory(void *address, HSAuint64 size) {
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"successful_round_trip", successful_round_trip},
+      {"host_memory_round_trip", host_memory_round_trip},
       {"executable_gtt_sets_execute_access",
        executable_gtt_sets_execute_access},
       {"public_vram_is_host_accessible", public_vram_is_host_accessible},
@@ -578,6 +726,14 @@ int main() {
       {"vram_allocation_failure_is_distinct",
        vram_allocation_failure_is_distinct},
       {"map_failure_frees_allocation", map_failure_frees_allocation},
+      {"host_registration_failure_has_no_mapping",
+       host_registration_failure_has_no_mapping},
+      {"host_map_failure_deregisters_memory",
+       host_map_failure_deregisters_memory},
+      {"host_map_cleanup_failure_returns_ownership",
+       host_map_cleanup_failure_returns_ownership},
+      {"host_cleanup_failures_can_be_retried",
+       host_cleanup_failures_can_be_retried},
       {"scratch_map_cleanup_failure_returns_ownership",
        scratch_map_cleanup_failure_returns_ownership},
       {"cleanup_failures_can_be_retried", cleanup_failures_can_be_retried},
