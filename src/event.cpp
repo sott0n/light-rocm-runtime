@@ -383,6 +383,23 @@ lr_status_t wait_for_light_rocr_event_locked(lr_event_t *event) {
   return finish_light_rocr_event_wait_locked(event, waited.observed_value);
 }
 
+lr_status_t wait_for_light_rocr_event_consumers_locked(lr_event_t *event) {
+  while (event->dependency_count != 0) {
+    if (event->dependency_queues.empty()) {
+      return LR_ERROR_RUNTIME;
+    }
+    lr_queue_t *queue = event->dependency_queues.begin()->first;
+    if (!valid_light_rocr_queue_locked(queue)) {
+      return LR_ERROR_RUNTIME;
+    }
+    const lr_status_t status = synchronize_light_rocr_queue_locked(queue);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+  }
+  return LR_SUCCESS;
+}
+
 void wait_for_light_rocr_event_synchronizers_locked(RuntimeLock *devices_lock,
                                                     lr_event_t *event) {
   g_event_state_changed.wait(*devices_lock, [event] {
@@ -565,6 +582,12 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
     event->destroying = false;
     return wait_status;
   }
+  const lr_status_t consumer_status =
+      wait_for_light_rocr_event_consumers_locked(event);
+  if (consumer_status != LR_SUCCESS) {
+    event->destroying = false;
+    return consumer_status;
+  }
   if (!event->signal.release()) {
     event->destroying = false;
     return LR_ERROR_RUNTIME;
@@ -669,6 +692,11 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   const lr_status_t wait_status = wait_for_light_rocr_event_locked(event);
   if (wait_status != LR_SUCCESS) {
     return wait_status;
+  }
+  const lr_status_t consumer_status =
+      wait_for_light_rocr_event_consumers_locked(event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
   }
   DeviceState &device = g_devices[event->device.index];
   if (use_default_queue) {

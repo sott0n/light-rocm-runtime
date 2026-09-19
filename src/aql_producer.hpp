@@ -100,7 +100,10 @@ struct AqlBarrierAndParameters {
 };
 
 using AqlIndexLoad = uint64_t (*)(void *context);
-using AqlPacketReserve = bool (*)(void *context, uint64_t *packet_id);
+// A successful reservation owns one contiguous, non-wrapping packet-ID range.
+// A failed reservation must not change the write index.
+using AqlPacketReserve = bool (*)(void *context, uint64_t packet_count,
+                                  uint64_t *first_packet_id);
 // The packet is already visible when this is called, so a doorbell adapter
 // must satisfy its preconditions before submission and cannot fail recoverably.
 using AqlDoorbellStore = void (*)(void *context, uint64_t packet_id);
@@ -149,6 +152,11 @@ submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
 [[nodiscard]] AqlSubmitResult
 submit_aql_barrier_and(const AqlQueueProducerOps &queue,
                        const AqlBarrierAndParameters &parameters);
+[[nodiscard]] AqlSubmitResult submit_aql_barriers_and_kernel_dispatch(
+    const AqlQueueProducerOps &queue,
+    const AqlBarrierAndParameters *barrier_parameters, size_t barrier_count,
+    const AqlKernelDispatchParameters &dispatch_parameters,
+    const AqlDispatchOrdering &ordering);
 
 } // namespace lrrt_internal
 

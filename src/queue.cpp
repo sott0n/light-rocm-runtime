@@ -2,6 +2,7 @@
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
@@ -36,9 +37,10 @@ uint64_t rocr_barrier_load_write_index(void *context) {
       static_cast<hsa_queue_t *>(context));
 }
 
-bool rocr_barrier_reserve_packet(void *context, uint64_t *packet_id) {
-  *packet_id = hsa_queue_add_write_index_scacq_screl(
-      static_cast<hsa_queue_t *>(context), 1);
+bool rocr_barrier_reserve_packet(void *context, uint64_t packet_count,
+                                 uint64_t *first_packet_id) {
+  *first_packet_id = hsa_queue_add_write_index_scacq_screl(
+      static_cast<hsa_queue_t *>(context), packet_count);
   return true;
 }
 
@@ -932,7 +934,7 @@ lr_status_t create_light_rocr_queue(lr_device_t device_handle,
   }
 
   auto *created_queue = new lr_queue_t{
-      device_handle, is_default, std::move(created.queue), {}, {}};
+      device_handle, is_default, std::move(created.queue), {}, {}, {}};
   device->queues.push_back(created_queue);
   g_queues.insert(created_queue);
   *queue = created_queue;
@@ -1004,7 +1006,56 @@ lr_status_t release_light_rocr_dispatch(lr_queue_t::PendingDispatch *dispatch) {
 
 } // namespace
 
+void retain_light_rocr_event_dependency_locked(lr_event_t *event,
+                                               lr_queue_t *queue) {
+  ++event->dependency_count;
+  auto dependency = std::find_if(
+      event->dependency_queues.begin(), event->dependency_queues.end(),
+      [queue](const auto &entry) { return entry.first == queue; });
+  if (dependency == event->dependency_queues.end()) {
+    event->dependency_queues.push_back({queue, 1});
+  } else {
+    ++dependency->second;
+  }
+}
+
+void release_light_rocr_event_dependency_locked(lr_event_t *event,
+                                                lr_queue_t *queue) {
+  auto dependency = std::find_if(
+      event->dependency_queues.begin(), event->dependency_queues.end(),
+      [queue](const auto &entry) { return entry.first == queue; });
+  assert(event->dependency_count != 0 &&
+         dependency != event->dependency_queues.end() &&
+         dependency->second != 0);
+  --event->dependency_count;
+  if (--dependency->second == 0) {
+    *dependency = event->dependency_queues.back();
+    event->dependency_queues.pop_back();
+  }
+}
+
+void reap_completed_light_rocr_barriers_locked(lr_queue_t *queue) {
+  size_t index = 0;
+  while (index < queue->pending_barriers.size()) {
+    lr_queue_t::PendingBarrier &barrier = queue->pending_barriers[index];
+    if (barrier.retirement_dispatch->completion_signal.load_acquire() != 0) {
+      ++index;
+      continue;
+    }
+    for (lr_event_t *event : barrier.dependencies) {
+      release_light_rocr_event_dependency_locked(event, queue);
+    }
+    if (index + 1 != queue->pending_barriers.size()) {
+      barrier = std::move(queue->pending_barriers.back());
+    }
+    queue->pending_barriers.pop_back();
+  }
+}
+
 lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue) {
+  // A barrier borrows the following dispatch signal as its retirement proof.
+  // Drop Event references before releasing that signal's storage.
+  reap_completed_light_rocr_barriers_locked(queue);
   size_t completed_count = 0;
   while (completed_count < queue->pending_dispatches.size()) {
     lr_queue_t::PendingDispatch &dispatch =
@@ -1072,7 +1123,11 @@ lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
 }
 
 lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue) {
-  while (!queue->pending_dispatches.empty() || !queue->pending_events.empty()) {
+  while (!queue->pending_dispatches.empty() ||
+         !queue->pending_barriers.empty() || !queue->pending_events.empty()) {
+    if (queue->pending_dispatches.empty() && queue->pending_events.empty()) {
+      return LR_ERROR_RUNTIME;
+    }
     const auto waited =
         !queue->pending_dispatches.empty()
             ? queue->pending_dispatches.front()

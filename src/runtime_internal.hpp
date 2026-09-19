@@ -135,6 +135,8 @@ struct lr_event_t {
   light_rocr::transport::hsakmt::UserSignal signal;
   bool pending = false;
   bool completed = false;
+  size_t dependency_count = 0;
+  std::vector<std::pair<lr_queue_t *, size_t>> dependency_queues;
   size_t active_synchronizers = 0;
   bool destroying = false;
   lr_queue_t *recorded_queue = nullptr;
@@ -156,8 +158,14 @@ struct lr_queue_t {
     light_rocr::transport::hsakmt::KernargBuffer kernarg;
   };
 
+  struct PendingBarrier {
+    PendingDispatch *retirement_dispatch;
+    std::vector<lr_event_t *> dependencies;
+  };
+
   light_rocr::transport::hsakmt::AqlQueue queue;
   std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
+  std::vector<PendingBarrier> pending_barriers;
   std::vector<lr_event_t *> pending_events;
 #endif
 };
@@ -232,6 +240,11 @@ lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
                                                    lr_queue_t *queue,
                                                    uint32_t private_size);
 lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue);
+void reap_completed_light_rocr_barriers_locked(lr_queue_t *queue);
+void retain_light_rocr_event_dependency_locked(lr_event_t *event,
+                                               lr_queue_t *queue);
+void release_light_rocr_event_dependency_locked(lr_event_t *event,
+                                                lr_queue_t *queue);
 lr_status_t reap_completed_light_rocr_events_locked(lr_queue_t *queue);
 lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
                                                     size_t required_packets);
@@ -241,6 +254,7 @@ void release_light_rocr_queues_locked(lr_status_t *result);
 void wait_for_all_light_rocr_event_synchronizers_locked(
     RuntimeLock *devices_lock);
 void release_light_rocr_events_locked(lr_status_t *result);
+bool valid_event_locked(lr_event_t *event);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);

@@ -21,7 +21,8 @@ enum class QueueOperation {
 };
 
 struct FakeQueue {
-  alignas(64) std::array<uint8_t, 128> ring{};
+  alignas(64) std::array<uint8_t, 512> ring{};
+  uint64_t packet_count = 2;
   uint64_t read_index = 0;
   uint64_t write_index = 0;
   uint64_t doorbell = UINT64_MAX;
@@ -52,13 +53,15 @@ uint64_t load_write_index(void *context) {
   return queue->write_index;
 }
 
-bool reserve_packet(void *context, uint64_t *packet_id) {
+bool reserve_packet(void *context, uint64_t packet_count,
+                    uint64_t *first_packet_id) {
   auto *queue = static_cast<FakeQueue *>(context);
   record(queue, QueueOperation::Reserve);
   if (!queue->reserve_succeeds) {
     return false;
   }
-  *packet_id = queue->write_index++;
+  *first_packet_id = queue->write_index;
+  queue->write_index += packet_count;
   return true;
 }
 
@@ -75,7 +78,8 @@ void ring_doorbell(void *context, uint64_t packet_id) {
   record(queue, QueueOperation::RingDoorbell);
   if (queue->expected_at_doorbell != nullptr) {
     queue->packet_complete_at_doorbell =
-        packet_at(*queue, packet_id & 1, *queue->expected_at_doorbell);
+        packet_at(*queue, packet_id & (queue->packet_count - 1),
+                  *queue->expected_at_doorbell);
   }
   queue->doorbell = packet_id;
 }
@@ -87,7 +91,7 @@ bool validate_packet(void *context, const AqlKernelDispatchPacket &) {
 }
 
 AqlQueueProducerOps producer_ops(FakeQueue *queue) {
-  return {queue,           queue->ring.data(), 2,
+  return {queue,           queue->ring.data(), queue->packet_count,
           load_read_index, load_write_index,   reserve_packet,
           ring_doorbell,   validate_packet};
 }
@@ -257,6 +261,85 @@ int main() {
                                  QueueOperation::LoadWriteIndex,
                                  QueueOperation::Reserve})) {
     std::cerr << "reserve failure changed queue state\n";
+    return 1;
+  }
+
+  FakeQueue sequence_queue;
+  sequence_queue.packet_count = 4;
+  sequence_queue.ring.fill(0x3d);
+  const std::array<lrrt_internal::AqlBarrierAndParameters, 2>
+      sequence_barriers = {
+          {{{0x10, 0x20, 0x30, 0x40, 0x50}, 0}, {{0x60, 0, 0, 0, 0}, 0}}};
+  const AqlKernelDispatchPacket sequence_dispatch =
+      lrrt_internal::build_aql_kernel_dispatch_packet(dispatch_parameters(),
+                                                      {0, true});
+  sequence_queue.expected_at_doorbell = &sequence_dispatch;
+  const auto sequence_result =
+      lrrt_internal::submit_aql_barriers_and_kernel_dispatch(
+          producer_ops(&sequence_queue), sequence_barriers.data(),
+          sequence_barriers.size(), dispatch_parameters(), {0, true});
+  if (!sequence_result || sequence_result.packet_id != 2 ||
+      sequence_queue.write_index != 3 || sequence_queue.doorbell != 2 ||
+      !packet_at(
+          sequence_queue, 0,
+          lrrt_internal::build_aql_barrier_and_packet(sequence_barriers[0])) ||
+      !packet_at(
+          sequence_queue, 1,
+          lrrt_internal::build_aql_barrier_and_packet(sequence_barriers[1])) ||
+      !packet_at(sequence_queue, 2, sequence_dispatch) ||
+      !sequence_queue.packet_complete_at_doorbell ||
+      !operations_are(
+          sequence_queue,
+          std::array{QueueOperation::Validate, QueueOperation::LoadReadIndex,
+                     QueueOperation::LoadWriteIndex, QueueOperation::Reserve,
+                     QueueOperation::RingDoorbell})) {
+    std::cerr << "barrier and dispatch sequence was not published atomically\n";
+    return 1;
+  }
+
+  sequence_queue.operation_count = 0;
+  sequence_queue.read_index = 0;
+  sequence_queue.write_index = 2;
+  sequence_queue.doorbell = UINT64_MAX;
+  const auto sequence_ring_before_full = sequence_queue.ring;
+  const auto full_sequence_result =
+      lrrt_internal::submit_aql_barriers_and_kernel_dispatch(
+          producer_ops(&sequence_queue), sequence_barriers.data(),
+          sequence_barriers.size(), dispatch_parameters(), {0, true});
+  if (full_sequence_result.error != AqlSubmitError::QueueFull ||
+      sequence_queue.write_index != 2 ||
+      sequence_queue.doorbell != UINT64_MAX ||
+      sequence_queue.ring != sequence_ring_before_full ||
+      !operations_are(sequence_queue,
+                      std::array{QueueOperation::Validate,
+                                 QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex})) {
+    std::cerr << "full queue was modified by sequence submission\n";
+    return 1;
+  }
+
+  FakeQueue sequence_reserve_failure_queue;
+  sequence_reserve_failure_queue.packet_count = 4;
+  sequence_reserve_failure_queue.ring.fill(0x6a);
+  sequence_reserve_failure_queue.reserve_succeeds = false;
+  const auto sequence_ring_before_reserve_failure =
+      sequence_reserve_failure_queue.ring;
+  const auto sequence_reserve_failure =
+      lrrt_internal::submit_aql_barriers_and_kernel_dispatch(
+          producer_ops(&sequence_reserve_failure_queue),
+          sequence_barriers.data(), sequence_barriers.size(),
+          dispatch_parameters(), {0, true});
+  if (sequence_reserve_failure.error != AqlSubmitError::ReserveFailed ||
+      sequence_reserve_failure_queue.write_index != 0 ||
+      sequence_reserve_failure_queue.doorbell != UINT64_MAX ||
+      sequence_reserve_failure_queue.ring !=
+          sequence_ring_before_reserve_failure ||
+      !operations_are(sequence_reserve_failure_queue,
+                      std::array{QueueOperation::Validate,
+                                 QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex,
+                                 QueueOperation::Reserve})) {
+    std::cerr << "sequence reserve failure changed queue state\n";
     return 1;
   }
 

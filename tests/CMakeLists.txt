@@ -58,7 +58,21 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
       LRRT_COPY_HSACO
       "${LIGHT_ROCR_COPY_HSACO}"
     )
+    lrrt_add_test_executable(
+      lrrt_kernel_event_dependencies_tests
+      kernel_event_dependencies.cpp
+      lrrt::lrrt
+    )
+    lrrt_bind_hsaco(
+      lrrt_kernel_event_dependencies_tests
+      light_rocr_copy_kernel_hsaco
+      LRRT_COPY_HSACO
+      "${LIGHT_ROCR_COPY_HSACO}"
+    )
     list(APPEND LRRT_LIGHT_ROCR_GPU_TESTS lrrt_copy_kernel_tests)
+    list(
+      APPEND LRRT_LIGHT_ROCR_GPU_TESTS lrrt_kernel_event_dependencies_tests
+    )
   endif()
 
   get_property(VECTOR_ADD_HSACO GLOBAL PROPERTY LRRT_VECTOR_ADD_HSACO)
@@ -103,6 +117,7 @@ set(
   lrrt_handle_registry_tests handle_registry.cpp
   lrrt_scale_tests scale.cpp
   lrrt_copy_kernel_tests copy_kernel.cpp
+  lrrt_kernel_event_dependencies_tests kernel_event_dependencies.cpp
   lrrt_event_timing_tests event_timing.cpp
   lrrt_cpp_wrapper_tests cpp_wrapper.cpp
 )
@@ -236,4 +251,10 @@ endif()
 if(COPY_HSACO)
   lrrt_bind_hsaco(lrrt_copy_kernel_tests copy_kernel_hsaco LRRT_COPY_HSACO
                   "${COPY_HSACO}")
+  lrrt_bind_hsaco(
+    lrrt_kernel_event_dependencies_tests
+    copy_kernel_hsaco
+    LRRT_COPY_HSACO
+    "${COPY_HSACO}"
+  )
 endif()

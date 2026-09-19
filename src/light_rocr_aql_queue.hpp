@@ -19,13 +19,14 @@ inline uint64_t light_rocr_load_write_index(void *context) {
       ->write_index_relaxed();
 }
 
-inline bool light_rocr_reserve_packet(void *context, uint64_t *packet_id) {
+inline bool light_rocr_reserve_packet(void *context, uint64_t packet_count,
+                                      uint64_t *first_packet_id) {
   auto *queue = static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context);
-  const auto reserved = queue->add_write_index_scacq_screl(1);
+  const auto reserved = queue->add_write_index_scacq_screl(packet_count);
   if (!reserved) {
     return false;
   }
-  *packet_id = reserved.previous_index;
+  *first_packet_id = reserved.previous_index;
   return true;
 }
 

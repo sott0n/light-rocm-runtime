@@ -6,6 +6,7 @@
 #endif
 #include "runtime_internal.hpp"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -13,6 +14,7 @@
 #include <limits>
 #include <mutex>
 #include <new>
+#include <unordered_set>
 #include <vector>
 
 using namespace lrrt_internal;
@@ -75,9 +77,10 @@ uint64_t rocr_load_write_index(void *context) {
       static_cast<hsa_queue_t *>(context));
 }
 
-bool rocr_reserve_packet(void *context, uint64_t *packet_id) {
-  *packet_id = hsa_queue_add_write_index_scacq_screl(
-      static_cast<hsa_queue_t *>(context), 1);
+bool rocr_reserve_packet(void *context, uint64_t packet_count,
+                         uint64_t *first_packet_id) {
+  *first_packet_id = hsa_queue_add_write_index_scacq_screl(
+      static_cast<hsa_queue_t *>(context), packet_count);
   return true;
 }
 
@@ -302,6 +305,42 @@ bool valid_light_rocr_dispatch_packet(void *context,
     return false;
   }
   return true;
+}
+
+lr_status_t collect_light_rocr_event_dependencies_locked(
+    lr_device_t device, lr_event_t *const *dependencies,
+    size_t dependency_count, std::vector<lr_event_t *> *pending_dependencies) {
+  if ((dependency_count != 0 && !dependencies) ||
+      dependency_count > UINT32_MAX) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::unordered_set<lr_event_t *> unique_dependencies;
+  pending_dependencies->clear();
+  try {
+    unique_dependencies.reserve(dependency_count);
+    pending_dependencies->reserve(dependency_count);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+  try {
+    for (size_t index = 0; index < dependency_count; ++index) {
+      lr_event_t *event = dependencies[index];
+      if (!event || !valid_event_locked(event) ||
+          event->device.index != device.index || event->destroying ||
+          (!event->pending && !event->completed) ||
+          !unique_dependencies.insert(event).second) {
+        return LR_ERROR_INVALID_ARGUMENT;
+      }
+      if (event->pending && event->signal.load_acquire() != 0) {
+        pending_dependencies->push_back(event);
+      }
+    }
+  } catch (const std::bad_alloc &) {
+    pending_dependencies->clear();
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_SUCCESS;
 }
 
 } // namespace
@@ -598,14 +637,16 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
       execution_queue->device.index != device.index) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  if (dependency_count != 0) {
-    if (!explicit_dependencies) {
-      return LR_ERROR_INVALID_ARGUMENT;
+  std::vector<lr_event_t *> event_dependencies;
+  if (!use_implicit_dependencies) {
+    const lr_status_t dependency_status =
+        collect_light_rocr_event_dependencies_locked(
+            device, explicit_dependencies, dependency_count,
+            &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
     }
-    return LR_ERROR_NOT_SUPPORTED;
   }
-  (void)explicit_dependencies;
-  (void)use_implicit_dependencies;
 
   const auto &kernels = kernel->module->executable_image.code_object().kernels;
   if (kernel->image_kernel_index >= kernels.size()) {
@@ -619,10 +660,35 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return scratch_status;
   }
 
-  const lr_status_t capacity_status =
-      ensure_light_rocr_queue_capacity_locked(execution_queue, 1);
+  const size_t barrier_count = (event_dependencies.size() + 4) / 5;
+  const lr_status_t capacity_status = ensure_light_rocr_queue_capacity_locked(
+      execution_queue, barrier_count + 1);
   if (capacity_status != LR_SUCCESS) {
     return capacity_status;
+  }
+
+  std::vector<AqlBarrierAndParameters> barrier_parameters;
+  std::vector<std::vector<lr_event_t *>> barrier_dependencies;
+  try {
+    barrier_parameters.reserve(barrier_count);
+    barrier_dependencies.reserve(barrier_count);
+    for (size_t offset = 0; offset < event_dependencies.size(); offset += 5) {
+      AqlBarrierAndParameters parameters;
+      std::vector<lr_event_t *> packet_dependencies;
+      const size_t end = std::min(offset + 5, event_dependencies.size());
+      packet_dependencies.reserve(end - offset);
+      for (size_t index = offset; index < end; ++index) {
+        parameters.dependency_signals[index - offset] =
+            event_dependencies[index]->signal.gpu_handle();
+        event_dependencies[index]->dependency_queues.reserve(
+            event_dependencies[index]->dependency_queues.size() + 1);
+        packet_dependencies.push_back(event_dependencies[index]);
+      }
+      barrier_parameters.push_back(parameters);
+      barrier_dependencies.push_back(std::move(packet_dependencies));
+    }
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
   }
   auto kernarg = light_rocr::transport::hsakmt::create_kernarg_buffer(
       *g_kfd_session, state.node.node_id, kernel_info, args, args_size);
@@ -680,6 +746,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
         std::move(signal.signal), std::move(kernarg.buffer));
     execution_queue->pending_dispatches.reserve(
         execution_queue->pending_dispatches.size() + 1);
+    execution_queue->pending_barriers.reserve(
+        execution_queue->pending_barriers.size() + barrier_count);
   } catch (const std::bad_alloc &) {
     if (pending) {
       (void)pending->kernarg.release();
@@ -691,27 +759,55 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     return LR_ERROR_RUNTIME;
   }
 
-  const AqlSubmitResult submitted = submit_aql_kernel_dispatch(
-      light_rocr_producer_ops(&execution_queue->queue,
-                              valid_light_rocr_dispatch_packet),
+  lr_queue_t::PendingDispatch *retirement_dispatch = pending.get();
+  const size_t preceding_dispatch_count =
+      execution_queue->pending_dispatches.size();
+  execution_queue->pending_dispatches.push_back(std::move(pending));
+  for (std::vector<lr_event_t *> &dependencies : barrier_dependencies) {
+    for (lr_event_t *event : dependencies) {
+      retain_light_rocr_event_dependency_locked(event, execution_queue);
+    }
+    execution_queue->pending_barriers.push_back(
+        {retirement_dispatch, std::move(dependencies)});
+  }
+
+  const AqlKernelDispatchParameters dispatch_parameters =
       aql_dispatch_parameters(
           config, kernel_info.private_segment_size,
           kernel_info.group_segment_size + config->shared_memory_bytes,
           runtime_image.kernels()[kernel->image_kernel_index]
               .descriptor_gpu_address,
-          pending->kernarg.gpu_address(),
-          pending->completion_signal.gpu_handle()),
-      {execution_queue->pending_dispatches.size(), false});
+          retirement_dispatch->kernarg.gpu_address(),
+          retirement_dispatch->completion_signal.gpu_handle());
+  const AqlDispatchOrdering ordering = {preceding_dispatch_count,
+                                        barrier_count != 0};
+  const AqlQueueProducerOps producer = light_rocr_producer_ops(
+      &execution_queue->queue, valid_light_rocr_dispatch_packet);
+  const AqlSubmitResult submitted =
+      barrier_count == 0
+          ? submit_aql_kernel_dispatch(producer, dispatch_parameters, ordering)
+          : submit_aql_barriers_and_kernel_dispatch(
+                producer, barrier_parameters.data(), barrier_parameters.size(),
+                dispatch_parameters, ordering);
   if (!submitted) {
-    const bool kernarg_released = static_cast<bool>(pending->kernarg.release());
+    for (size_t index = 0; index < barrier_count; ++index) {
+      for (lr_event_t *event :
+           execution_queue->pending_barriers.back().dependencies) {
+        release_light_rocr_event_dependency_locked(event, execution_queue);
+      }
+      execution_queue->pending_barriers.pop_back();
+    }
+    std::unique_ptr<lr_queue_t::PendingDispatch> failed_dispatch =
+        std::move(execution_queue->pending_dispatches.back());
+    execution_queue->pending_dispatches.pop_back();
+    const bool kernarg_released =
+        static_cast<bool>(failed_dispatch->kernarg.release());
     const bool signal_released =
-        static_cast<bool>(pending->completion_signal.release());
+        static_cast<bool>(failed_dispatch->completion_signal.release());
     return kernarg_released && signal_released
                ? aql_submit_status(submitted.error)
                : LR_ERROR_RUNTIME;
   }
-
-  execution_queue->pending_dispatches.push_back(std::move(pending));
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;

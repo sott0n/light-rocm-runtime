@@ -116,8 +116,8 @@ the correctness oracle while the loader and runtime are developed.
 The initial LRRT integration can be selected with
 `-DLRRT_BACKEND=light-rocr`. It currently supports lifecycle, `gfx1101`
 discovery, AQL queue lifecycle, device allocation, synchronous memory copies,
-HSACO loading, kernel lookup, and kernel dispatch with queue scratch through
-the public LRRT API.
+HSACO loading, kernel lookup, kernel dispatch with queue scratch, Event markers,
+and explicit cross-queue Event dependencies through the public LRRT API.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton
