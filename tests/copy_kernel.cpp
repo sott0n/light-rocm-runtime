@@ -223,6 +223,32 @@ int main(void) {
     lr_shutdown();
     return 1;
   }
+
+  lr_queue_t *marker_queue = NULL;
+  lr_event_t *marker_event = NULL;
+  if (!expect_status(lr_queue_create(device, &marker_queue), LR_SUCCESS,
+                     "lr_queue_create for marker") ||
+      !expect_status(lr_event_create(device, &marker_event), LR_SUCCESS,
+                     "lr_event_create for dispatch marker") ||
+      !expect_status(lr_launch_on_queue(marker_queue, kernel, &config,
+                                        &first_args, sizeof(first_args)),
+                     LR_SUCCESS, "queue launch before event marker") ||
+      !expect_status(lr_event_record_on_queue(marker_event, marker_queue),
+                     LR_SUCCESS, "record event after queue launch") ||
+      !expect_status(lr_event_synchronize(marker_event), LR_SUCCESS,
+                     "event waits for queue launch") ||
+      !expect_status(lr_event_destroy(marker_event), LR_SUCCESS,
+                     "destroy completed dispatch marker") ||
+      !expect_status(lr_queue_destroy(marker_queue), LR_SUCCESS,
+                     "destroy marker queue")) {
+    lr_free(device, device_parallel_out);
+    lr_free(device, device_intermediate);
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
   lr_free(device, device_intermediate);
 
   status =

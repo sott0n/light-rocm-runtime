@@ -1,20 +1,29 @@
+#include "aql_producer.hpp"
+#if LRRT_ENABLE_LIGHT_ROCR
+#include "light_rocr_aql_queue.hpp"
+#endif
 #include "runtime_internal.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <unordered_set>
 #include <vector>
 
 namespace lrrt_internal {
 
-#if LRRT_ENABLE_HSA
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
 std::unordered_set<lr_event_t *> g_events;
 
 bool valid_event_locked(lr_event_t *event) {
   return g_events.find(event) != g_events.end();
 }
+#endif
+
+#if LRRT_ENABLE_HSA
 
 void retain_event_dependency(lr_event_t *event, QueueState *queue) {
   std::lock_guard<std::mutex> lock(event->dependency_mutex);
@@ -317,6 +326,112 @@ void release_events_locked() {
   }
   g_events.clear();
 }
+#elif LRRT_ENABLE_LIGHT_ROCR
+namespace {
+
+lr_status_t light_rocr_submit_status(AqlSubmitError error) {
+  switch (error) {
+  case AqlSubmitError::None:
+    return LR_SUCCESS;
+  case AqlSubmitError::InvalidPacket:
+  case AqlSubmitError::InvalidQueue:
+    return LR_ERROR_INVALID_ARGUMENT;
+  case AqlSubmitError::QueueFull:
+  case AqlSubmitError::ReserveFailed:
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_ERROR_RUNTIME;
+}
+
+void remove_pending_event(std::vector<lr_event_t *> *events,
+                          lr_event_t *event) {
+  const auto pending = std::find(events->begin(), events->end(), event);
+  if (pending != events->end()) {
+    events->erase(pending);
+  }
+}
+
+lr_status_t finish_light_rocr_event_wait_locked(lr_event_t *event,
+                                                int64_t value) {
+  if (!event->pending) {
+    return LR_SUCCESS;
+  }
+  if (value != 0) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  DeviceState &device = g_devices[event->device.index];
+  remove_pending_event(&device.pending_events, event);
+  if (event->recorded_queue) {
+    remove_pending_event(&event->recorded_queue->pending_events, event);
+    event->recorded_queue = nullptr;
+  }
+  event->pending = false;
+  event->completed = true;
+  return LR_SUCCESS;
+}
+
+lr_status_t wait_for_light_rocr_event_locked(lr_event_t *event) {
+  if (!event->pending) {
+    return LR_SUCCESS;
+  }
+  const auto waited = event->signal.wait_until_equal(
+      0, std::chrono::steady_clock::time_point::max());
+  if (!waited) {
+    return LR_ERROR_RUNTIME;
+  }
+  return finish_light_rocr_event_wait_locked(event, waited.observed_value);
+}
+
+void wait_for_light_rocr_event_synchronizers_locked(RuntimeLock *devices_lock,
+                                                    lr_event_t *event) {
+  g_event_state_changed.wait(*devices_lock, [event] {
+    return !valid_event_locked(event) || event->active_synchronizers == 0;
+  });
+}
+
+} // namespace
+
+lr_status_t reap_completed_light_rocr_events_locked(lr_queue_t *queue) {
+  while (!queue->pending_events.empty()) {
+    lr_event_t *event = queue->pending_events.front();
+    const int64_t value = event->signal.load_acquire();
+    if (value != 0) {
+      break;
+    }
+    const lr_status_t status =
+        finish_light_rocr_event_wait_locked(event, value);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+  }
+  return LR_SUCCESS;
+}
+
+void wait_for_all_light_rocr_event_synchronizers_locked(
+    RuntimeLock *devices_lock) {
+  g_event_state_changed.wait(*devices_lock, [] {
+    return std::all_of(g_events.begin(), g_events.end(), [](lr_event_t *event) {
+      return event->active_synchronizers == 0;
+    });
+  });
+}
+
+void release_light_rocr_events_locked(lr_status_t *result) {
+  auto event = g_events.begin();
+  while (event != g_events.end()) {
+    lr_event_t *current = *event;
+    if (!current->signal.release()) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      ++event;
+      continue;
+    }
+    delete current;
+    event = g_events.erase(event);
+  }
+}
 #endif
 
 } // namespace lrrt_internal
@@ -363,6 +478,34 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   g_events.insert(created_event);
   *event = created_event;
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() ||
+      !g_devices[device.index].default_queue || !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto created_signal = g_kfd_session->create_user_signal(
+      g_devices[device.index].node.node_id, 1);
+  if (!created_signal) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  lr_event_t *created_event = nullptr;
+  try {
+    created_event = new lr_event_t(device, std::move(created_signal.signal));
+    g_events.insert(created_event);
+  } catch (const std::bad_alloc &) {
+    if (created_event) {
+      (void)created_event->signal.release();
+      delete created_event;
+    } else {
+      (void)created_signal.signal.release();
+    }
+    return LR_ERROR_RUNTIME;
+  }
+  *event = created_event;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -402,6 +545,29 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
   if (status != HSA_STATUS_SUCCESS) {
     event->destroying = false;
     return to_lr_status(status);
+  }
+
+  g_events.erase(event_entry);
+  delete event;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  RuntimeLock lock(g_devices_mutex);
+  const auto event_entry = g_events.find(event);
+  if (event_entry == g_events.end() ||
+      event->device.index >= g_devices.size() || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  event->destroying = true;
+  wait_for_light_rocr_event_synchronizers_locked(&lock, event);
+
+  const lr_status_t wait_status = wait_for_light_rocr_event_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    event->destroying = false;
+    return wait_status;
+  }
+  if (!event->signal.release()) {
+    event->destroying = false;
+    return LR_ERROR_RUNTIME;
   }
 
   g_events.erase(event_entry);
@@ -489,6 +655,64 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   device.pending_events.push_back(event);
   hsa_signal_store_screlease(state.queue->doorbell_signal, index);
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  RuntimeLock lock(g_devices_mutex);
+  if (!valid_event_locked(event) || event->device.index >= g_devices.size() ||
+      event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  wait_for_light_rocr_event_synchronizers_locked(&lock, event);
+  if (!valid_event_locked(event) || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const lr_status_t wait_status = wait_for_light_rocr_event_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+  DeviceState &device = g_devices[event->device.index];
+  if (use_default_queue) {
+    queue = device.default_queue;
+  }
+  if (!queue || !valid_light_rocr_queue_locked(queue) ||
+      queue->device.index != event->device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const lr_status_t capacity_status =
+      ensure_light_rocr_queue_capacity_locked(queue, 1);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
+  }
+  try {
+    queue->pending_events.reserve(queue->pending_events.size() + 1);
+    device.pending_events.reserve(device.pending_events.size() + 1);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  const bool was_completed = event->completed;
+  event->signal.store_relaxed(1);
+  event->pending = true;
+  event->completed = false;
+  event->recorded_queue = queue;
+  queue->pending_events.push_back(event);
+  device.pending_events.push_back(event);
+
+  AqlBarrierAndParameters parameters;
+  parameters.completion_signal = event->signal.gpu_handle();
+  const AqlSubmitResult submitted = submit_aql_barrier_and(
+      light_rocr_producer_ops(&queue->queue), parameters);
+  if (!submitted) {
+    queue->pending_events.pop_back();
+    device.pending_events.pop_back();
+    event->recorded_queue = nullptr;
+    event->pending = false;
+    event->completed = was_completed;
+    event->signal.store_relaxed(0);
+    return light_rocr_submit_status(submitted.error);
+  }
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -539,6 +763,28 @@ lr_status_t lr_event_synchronize(lr_event_t *event) {
     --recorded_queue->active_synchronizers;
     g_queue_state_changed.notify_all();
   }
+  return result;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  RuntimeLock lock(g_devices_mutex);
+  if (!valid_event_locked(event) || event->device.index >= g_devices.size() ||
+      event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!event->pending) {
+    return LR_SUCCESS;
+  }
+
+  ++event->active_synchronizers;
+  lock.unlock();
+  const auto waited = event->signal.wait_until_equal(
+      0, std::chrono::steady_clock::time_point::max());
+  lock.lock();
+
+  const lr_status_t result =
+      waited ? finish_light_rocr_event_wait_locked(event, waited.observed_value)
+             : LR_ERROR_RUNTIME;
+  --event->active_synchronizers;
+  g_event_state_changed.notify_all();
   return result;
 #else
   return LR_ERROR_NOT_SUPPORTED;

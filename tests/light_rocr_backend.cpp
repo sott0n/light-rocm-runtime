@@ -104,15 +104,6 @@ bool run_allocation_checks(lr_device_t device) {
     return false;
   }
 
-  lr_event_t *event = reinterpret_cast<lr_event_t *>(uintptr_t{1});
-  if (!expect_status(lr_event_create(device, &event), LR_ERROR_NOT_SUPPORTED,
-                     "lr_event_create unsupported") ||
-      event != nullptr) {
-    std::fprintf(stderr, "unsupported lr_event_create wrote an event\n");
-    (void)lr_free(device, allocation);
-    return false;
-  }
-
   lr_module_t *module = reinterpret_cast<lr_module_t *>(uintptr_t{1});
   if (!expect_status(lr_module_load_hsaco(device, &host_byte, 1, &module),
                      LR_ERROR_INVALID_ARGUMENT,
@@ -141,6 +132,50 @@ bool run_allocation_checks(lr_device_t device) {
     return false;
   }
 
+  return true;
+}
+
+bool run_event_checks(lr_device_t device) {
+  lr_event_t *event = nullptr;
+  lr_queue_t *queue = nullptr;
+  if (!expect_status(lr_event_create(device, &event), LR_SUCCESS,
+                     "lr_event_create") ||
+      event == nullptr ||
+      !expect_status(lr_event_synchronize(event), LR_SUCCESS,
+                     "lr_event_synchronize unrecorded") ||
+      !expect_status(lr_queue_create(device, &queue), LR_SUCCESS,
+                     "lr_queue_create for event") ||
+      queue == nullptr ||
+      !expect_status(lr_event_record_on_queue(event, queue), LR_SUCCESS,
+                     "lr_event_record_on_queue") ||
+      !expect_status(lr_event_synchronize(event), LR_SUCCESS,
+                     "lr_event_synchronize recorded") ||
+      !expect_status(lr_event_record(event), LR_SUCCESS,
+                     "lr_event_record reused") ||
+      !expect_status(lr_event_destroy(event), LR_SUCCESS,
+                     "lr_event_destroy pending") ||
+      !expect_status(lr_event_synchronize(event), LR_ERROR_INVALID_ARGUMENT,
+                     "lr_event_synchronize stale") ||
+      !expect_status(lr_queue_destroy(queue), LR_SUCCESS,
+                     "lr_queue_destroy for event")) {
+    return false;
+  }
+
+  lr_event_t *queue_owned_marker = nullptr;
+  if (!expect_status(lr_queue_create(device, &queue), LR_SUCCESS,
+                     "lr_queue_create for pending event") ||
+      !expect_status(lr_event_create(device, &queue_owned_marker), LR_SUCCESS,
+                     "lr_event_create for queue destroy") ||
+      !expect_status(lr_event_record_on_queue(queue_owned_marker, queue),
+                     LR_SUCCESS, "lr_event_record before queue destroy") ||
+      !expect_status(lr_queue_destroy(queue), LR_SUCCESS,
+                     "lr_queue_destroy with pending event") ||
+      !expect_status(lr_event_synchronize(queue_owned_marker), LR_SUCCESS,
+                     "lr_event_synchronize after queue destroy") ||
+      !expect_status(lr_event_destroy(queue_owned_marker), LR_SUCCESS,
+                     "lr_event_destroy after queue destroy")) {
+    return false;
+  }
   return true;
 }
 
@@ -233,14 +268,21 @@ int main() {
   lr_queue_t *shutdown_owned_queue = nullptr;
   if (!open_only_device(&device, name, sizeof(name)) ||
       !run_allocation_checks(device) ||
-      !run_queue_checks(device, &shutdown_owned_queue)) {
+      !run_queue_checks(device, &shutdown_owned_queue) ||
+      !run_event_checks(device)) {
     (void)lr_shutdown();
     return 1;
   }
 
   void *leaked_allocation = nullptr;
+  lr_event_t *shutdown_owned_event = nullptr;
   if (!expect_status(lr_malloc(device, 5000, &leaked_allocation), LR_SUCCESS,
                      "lr_malloc shutdown-owned allocation") ||
+      !expect_status(lr_event_create(device, &shutdown_owned_event), LR_SUCCESS,
+                     "lr_event_create before shutdown") ||
+      !expect_status(
+          lr_event_record_on_queue(shutdown_owned_event, shutdown_owned_queue),
+          LR_SUCCESS, "lr_event_record before shutdown") ||
       !expect_status(lr_shutdown(), LR_SUCCESS,
                      "lr_shutdown with live allocation") ||
       !expect_status(lr_device_count(&count), LR_ERROR_NOT_INITIALIZED,
@@ -264,7 +306,8 @@ int main() {
     return 1;
   }
 
-  std::printf(
-      "light_rocr_backend: device=%s lifecycle=ok memory=ok queues=ok\n", name);
+  std::printf("light_rocr_backend: device=%s lifecycle=ok memory=ok queues=ok "
+              "events=ok\n",
+              name);
   return 0;
 }

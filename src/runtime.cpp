@@ -109,6 +109,7 @@ hsa_status_t populate_device_regions() {
 
 #elif LRRT_ENABLE_LIGHT_ROCR
 RuntimeMutex g_devices_mutex;
+std::condition_variable_any g_event_state_changed;
 std::vector<DeviceState> g_devices;
 std::unique_ptr<light_rocr::transport::hsakmt::KfdSession> g_kfd_session;
 #endif
@@ -201,6 +202,7 @@ lr_status_t lr_init(void) {
                     false,
                     nullptr,
                     {},
+                    {},
                     {}});
     g_kfd_session = std::make_unique<light_rocr::transport::hsakmt::KfdSession>(
         std::move(opened.session));
@@ -254,6 +256,7 @@ lr_status_t lr_shutdown(void) {
 #elif LRRT_ENABLE_LIGHT_ROCR
   {
     RuntimeLock lock(g_devices_mutex);
+    wait_for_all_light_rocr_event_synchronizers_locked(&lock);
     lr_status_t release_status = LR_SUCCESS;
     release_light_rocr_queues_locked(&release_status);
     if (release_status != LR_SUCCESS) {
@@ -261,6 +264,7 @@ lr_status_t lr_shutdown(void) {
       return release_status;
     }
     release_modules_locked(&release_status);
+    release_light_rocr_events_locked(&release_status);
     release_memory_allocations_locked(&release_status);
     if (release_status != LR_SUCCESS) {
       g_initialized.store(true);

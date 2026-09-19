@@ -127,6 +127,17 @@ struct lr_event_t {
   std::vector<lr_event_t *> dependencies;
   QueueState *recorded_queue;
   void *locked_host_ptr;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  lr_event_t(lr_device_t device_handle,
+             light_rocr::transport::hsakmt::UserSignal &&created_signal)
+      : device(device_handle), signal(std::move(created_signal)) {}
+
+  light_rocr::transport::hsakmt::UserSignal signal;
+  bool pending = false;
+  bool completed = false;
+  size_t active_synchronizers = 0;
+  bool destroying = false;
+  lr_queue_t *recorded_queue = nullptr;
 #endif
 };
 
@@ -147,6 +158,7 @@ struct lr_queue_t {
 
   light_rocr::transport::hsakmt::AqlQueue queue;
   std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
+  std::vector<lr_event_t *> pending_events;
 #endif
 };
 
@@ -201,6 +213,7 @@ struct DeviceState {
   bool opened;
   lr_queue_t *default_queue;
   std::vector<lr_queue_t *> queues;
+  std::vector<lr_event_t *> pending_events;
 #endif
   lr_memory_stats_t memory_stats;
 };
@@ -209,6 +222,7 @@ extern RuntimeMutex g_devices_mutex;
 extern std::vector<DeviceState> g_devices;
 
 #if LRRT_ENABLE_LIGHT_ROCR
+extern std::condition_variable_any g_event_state_changed;
 extern std::unique_ptr<light_rocr::transport::hsakmt::KfdSession> g_kfd_session;
 lr_status_t create_light_rocr_queue(lr_device_t device_handle,
                                     DeviceState *device, bool is_default,
@@ -218,11 +232,15 @@ lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
                                                    lr_queue_t *queue,
                                                    uint32_t private_size);
 lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue);
+lr_status_t reap_completed_light_rocr_events_locked(lr_queue_t *queue);
 lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
                                                     size_t required_packets);
 lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue);
 lr_status_t synchronize_light_rocr_device_locked(DeviceState *device);
 void release_light_rocr_queues_locked(lr_status_t *result);
+void wait_for_all_light_rocr_event_synchronizers_locked(
+    RuntimeLock *devices_lock);
+void release_light_rocr_events_locked(lr_status_t *result);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);

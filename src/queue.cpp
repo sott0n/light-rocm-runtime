@@ -931,8 +931,8 @@ lr_status_t create_light_rocr_queue(lr_device_t device_handle,
     return LR_ERROR_RUNTIME;
   }
 
-  auto *created_queue =
-      new lr_queue_t{device_handle, is_default, std::move(created.queue)};
+  auto *created_queue = new lr_queue_t{
+      device_handle, is_default, std::move(created.queue), {}, {}};
   device->queues.push_back(created_queue);
   g_queues.insert(created_queue);
   *queue = created_queue;
@@ -1035,8 +1035,12 @@ lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
   }
 
   while (true) {
-    const lr_status_t reap_status =
+    lr_status_t reap_status =
         reap_completed_light_rocr_dispatches_locked(queue);
+    if (reap_status != LR_SUCCESS) {
+      return reap_status;
+    }
+    reap_status = reap_completed_light_rocr_events_locked(queue);
     if (reap_status != LR_SUCCESS) {
       return reap_status;
     }
@@ -1050,13 +1054,17 @@ lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
         queue->queue.packet_count() - required_packets) {
       return LR_SUCCESS;
     }
-    if (queue->pending_dispatches.empty()) {
+    if (queue->pending_dispatches.empty() && queue->pending_events.empty()) {
       return LR_ERROR_RUNTIME;
     }
 
     const auto waited =
-        queue->pending_dispatches.front()->completion_signal.wait_until_equal(
-            0, std::chrono::steady_clock::time_point::max());
+        !queue->pending_dispatches.empty()
+            ? queue->pending_dispatches.front()
+                  ->completion_signal.wait_until_equal(
+                      0, std::chrono::steady_clock::time_point::max())
+            : queue->pending_events.front()->signal.wait_until_equal(
+                  0, std::chrono::steady_clock::time_point::max());
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }
@@ -1064,15 +1072,22 @@ lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
 }
 
 lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue) {
-  while (!queue->pending_dispatches.empty()) {
+  while (!queue->pending_dispatches.empty() || !queue->pending_events.empty()) {
     const auto waited =
-        queue->pending_dispatches.front()->completion_signal.wait_until_equal(
-            0, std::chrono::steady_clock::time_point::max());
+        !queue->pending_dispatches.empty()
+            ? queue->pending_dispatches.front()
+                  ->completion_signal.wait_until_equal(
+                      0, std::chrono::steady_clock::time_point::max())
+            : queue->pending_events.front()->signal.wait_until_equal(
+                  0, std::chrono::steady_clock::time_point::max());
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }
-    const lr_status_t status =
-        reap_completed_light_rocr_dispatches_locked(queue);
+    lr_status_t status = reap_completed_light_rocr_dispatches_locked(queue);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+    status = reap_completed_light_rocr_events_locked(queue);
     if (status != LR_SUCCESS) {
       return status;
     }

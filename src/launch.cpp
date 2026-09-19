@@ -2,6 +2,7 @@
 #include "launch_profile.hpp"
 #if LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr/runtime/aql.hpp"
+#include "light_rocr_aql_queue.hpp"
 #endif
 #include "runtime_internal.hpp"
 
@@ -279,34 +280,6 @@ light_rocr_kernarg_status(light_rocr::runtime::KernargBufferError error) {
   }
 }
 
-uint64_t light_rocr_load_read_index(void *context) {
-  return static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
-      ->read_index_acquire();
-}
-
-uint64_t light_rocr_load_write_index(void *context) {
-  return static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
-      ->write_index_relaxed();
-}
-
-bool light_rocr_reserve_packet(void *context, uint64_t *packet_id) {
-  auto *queue = static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context);
-  const auto reserved = queue->add_write_index_scacq_screl(1);
-  if (!reserved) {
-    return false;
-  }
-  *packet_id = reserved.previous_index;
-  return true;
-}
-
-void light_rocr_ring_doorbell(void *context, uint64_t packet_id) {
-  const auto status =
-      static_cast<light_rocr::transport::hsakmt::AqlQueue *>(context)
-          ->store_doorbell_screlease(packet_id);
-  assert(status);
-  (void)status;
-}
-
 bool valid_light_rocr_dispatch_packet(void *context,
                                       const AqlKernelDispatchPacket &packet) {
   using namespace light_rocr::runtime;
@@ -329,21 +302,6 @@ bool valid_light_rocr_dispatch_packet(void *context,
     return false;
   }
   return true;
-}
-
-AqlQueueProducerOps
-light_rocr_producer_ops(light_rocr::transport::hsakmt::AqlQueue *queue) {
-  const bool valid = queue != nullptr && static_cast<bool>(*queue) &&
-                     queue->ring_host_address() != nullptr &&
-                     queue->doorbell_address() != 0;
-  return {valid ? queue : nullptr,
-          valid ? queue->ring_host_address() : nullptr,
-          valid ? queue->packet_count() : 0,
-          light_rocr_load_read_index,
-          light_rocr_load_write_index,
-          light_rocr_reserve_packet,
-          light_rocr_ring_doorbell,
-          valid_light_rocr_dispatch_packet};
 }
 
 } // namespace
@@ -734,7 +692,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   }
 
   const AqlSubmitResult submitted = submit_aql_kernel_dispatch(
-      light_rocr_producer_ops(&execution_queue->queue),
+      light_rocr_producer_ops(&execution_queue->queue,
+                              valid_light_rocr_dispatch_packet),
       aql_dispatch_parameters(
           config, kernel_info.private_segment_size,
           kernel_info.group_segment_size + config->shared_memory_bytes,
