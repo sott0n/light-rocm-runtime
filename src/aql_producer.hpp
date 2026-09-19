@@ -152,6 +152,10 @@ submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
 [[nodiscard]] AqlSubmitResult
 submit_aql_barrier_and(const AqlQueueProducerOps &queue,
                        const AqlBarrierAndParameters &parameters);
+[[nodiscard]] AqlSubmitResult
+submit_aql_barriers_and(const AqlQueueProducerOps &queue,
+                        const AqlBarrierAndParameters *barrier_parameters,
+                        size_t barrier_count);
 [[nodiscard]] AqlSubmitResult submit_aql_barriers_and_kernel_dispatch(
     const AqlQueueProducerOps &queue,
     const AqlBarrierAndParameters *barrier_parameters, size_t barrier_count,

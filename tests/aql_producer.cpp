@@ -29,6 +29,7 @@ struct FakeQueue {
   bool reserve_succeeds = true;
   bool packet_is_accepted = true;
   const AqlKernelDispatchPacket *expected_at_doorbell = nullptr;
+  const AqlBarrierAndPacket *expected_barrier_at_doorbell = nullptr;
   bool packet_complete_at_doorbell = false;
   std::array<QueueOperation, 5> operations{};
   size_t operation_count = 0;
@@ -80,6 +81,10 @@ void ring_doorbell(void *context, uint64_t packet_id) {
     queue->packet_complete_at_doorbell =
         packet_at(*queue, packet_id & (queue->packet_count - 1),
                   *queue->expected_at_doorbell);
+  } else if (queue->expected_barrier_at_doorbell != nullptr) {
+    queue->packet_complete_at_doorbell =
+        packet_at(*queue, packet_id & (queue->packet_count - 1),
+                  *queue->expected_barrier_at_doorbell);
   }
   queue->doorbell = packet_id;
 }
@@ -201,6 +206,104 @@ int main() {
                       std::array{QueueOperation::LoadReadIndex,
                                  QueueOperation::LoadWriteIndex})) {
     std::cerr << "full queue was modified by barrier submission\n";
+    return 1;
+  }
+
+  FakeQueue barrier_batch_queue;
+  barrier_batch_queue.packet_count = 4;
+  barrier_batch_queue.ring.fill(0x4d);
+  const std::array<lrrt_internal::AqlBarrierAndParameters, 2>
+      barrier_batch_parameters = {
+          {{{0x10, 0x20, 0, 0, 0}, 0x30}, {{0x40, 0x50, 0x60, 0, 0}, 0x70}}};
+  const AqlBarrierAndPacket last_batch_barrier =
+      lrrt_internal::build_aql_barrier_and_packet(barrier_batch_parameters[1]);
+  barrier_batch_queue.expected_barrier_at_doorbell = &last_batch_barrier;
+  const auto barrier_batch_result = lrrt_internal::submit_aql_barriers_and(
+      producer_ops(&barrier_batch_queue), barrier_batch_parameters.data(),
+      barrier_batch_parameters.size());
+  if (!barrier_batch_result || barrier_batch_result.packet_id != 1 ||
+      barrier_batch_queue.write_index != 2 ||
+      barrier_batch_queue.doorbell != 1 ||
+      !packet_at(barrier_batch_queue, 0,
+                 lrrt_internal::build_aql_barrier_and_packet(
+                     barrier_batch_parameters[0])) ||
+      !packet_at(barrier_batch_queue, 1, last_batch_barrier) ||
+      !barrier_batch_queue.packet_complete_at_doorbell ||
+      !operations_are(barrier_batch_queue,
+                      std::array{QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex,
+                                 QueueOperation::Reserve,
+                                 QueueOperation::RingDoorbell})) {
+    std::cerr << "barrier batch was not published atomically\n";
+    return 1;
+  }
+
+  barrier_batch_queue.operation_count = 0;
+  barrier_batch_queue.read_index = 3;
+  barrier_batch_queue.write_index = 3;
+  barrier_batch_queue.doorbell = UINT64_MAX;
+  barrier_batch_queue.packet_complete_at_doorbell = false;
+  const auto wrapping_barrier_batch_result =
+      lrrt_internal::submit_aql_barriers_and(producer_ops(&barrier_batch_queue),
+                                             barrier_batch_parameters.data(),
+                                             barrier_batch_parameters.size());
+  if (!wrapping_barrier_batch_result ||
+      wrapping_barrier_batch_result.packet_id != 4 ||
+      barrier_batch_queue.write_index != 5 ||
+      barrier_batch_queue.doorbell != 4 ||
+      !packet_at(barrier_batch_queue, 3,
+                 lrrt_internal::build_aql_barrier_and_packet(
+                     barrier_batch_parameters[0])) ||
+      !packet_at(barrier_batch_queue, 0, last_batch_barrier) ||
+      !barrier_batch_queue.packet_complete_at_doorbell ||
+      !operations_are(barrier_batch_queue,
+                      std::array{QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex,
+                                 QueueOperation::Reserve,
+                                 QueueOperation::RingDoorbell})) {
+    std::cerr << "wrapping barrier batch was not published atomically\n";
+    return 1;
+  }
+
+  barrier_batch_queue.operation_count = 0;
+  barrier_batch_queue.read_index = 0;
+  barrier_batch_queue.write_index = 3;
+  barrier_batch_queue.doorbell = UINT64_MAX;
+  const auto barrier_batch_ring_before_full = barrier_batch_queue.ring;
+  const auto full_barrier_batch_result = lrrt_internal::submit_aql_barriers_and(
+      producer_ops(&barrier_batch_queue), barrier_batch_parameters.data(),
+      barrier_batch_parameters.size());
+  if (full_barrier_batch_result.error != AqlSubmitError::QueueFull ||
+      barrier_batch_queue.write_index != 3 ||
+      barrier_batch_queue.doorbell != UINT64_MAX ||
+      barrier_batch_queue.ring != barrier_batch_ring_before_full ||
+      !operations_are(barrier_batch_queue,
+                      std::array{QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex})) {
+    std::cerr << "full queue was modified by barrier batch submission\n";
+    return 1;
+  }
+
+  FakeQueue barrier_batch_reserve_failure_queue;
+  barrier_batch_reserve_failure_queue.packet_count = 4;
+  barrier_batch_reserve_failure_queue.ring.fill(0x5e);
+  barrier_batch_reserve_failure_queue.reserve_succeeds = false;
+  const auto barrier_batch_ring_before_reserve_failure =
+      barrier_batch_reserve_failure_queue.ring;
+  const auto barrier_batch_reserve_failure =
+      lrrt_internal::submit_aql_barriers_and(
+          producer_ops(&barrier_batch_reserve_failure_queue),
+          barrier_batch_parameters.data(), barrier_batch_parameters.size());
+  if (barrier_batch_reserve_failure.error != AqlSubmitError::ReserveFailed ||
+      barrier_batch_reserve_failure_queue.write_index != 0 ||
+      barrier_batch_reserve_failure_queue.doorbell != UINT64_MAX ||
+      barrier_batch_reserve_failure_queue.ring !=
+          barrier_batch_ring_before_reserve_failure ||
+      !operations_are(barrier_batch_reserve_failure_queue,
+                      std::array{QueueOperation::LoadReadIndex,
+                                 QueueOperation::LoadWriteIndex,
+                                 QueueOperation::Reserve})) {
+    std::cerr << "barrier batch reserve failure changed queue state\n";
     return 1;
   }
 

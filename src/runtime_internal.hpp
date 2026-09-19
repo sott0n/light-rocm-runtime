@@ -202,6 +202,8 @@ using RuntimeMutex = std::shared_mutex;
 using RuntimeLock = std::unique_lock<RuntimeMutex>;
 using RuntimeReadLock = std::shared_lock<RuntimeMutex>;
 
+struct AqlQueueProducerOps;
+
 extern std::atomic<bool> g_initialized;
 
 #if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
@@ -269,9 +271,7 @@ extern bool g_has_host_agent;
 lr_status_t to_lr_status(hsa_status_t status);
 hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
                           bool is_default, lr_queue_t **queue);
-uint16_t packet_header(hsa_packet_type_t type);
-uint16_t barrier_packet_header(hsa_packet_type_t type);
-void publish_packet_header(uint16_t *header, uint16_t value);
+AqlQueueProducerOps rocr_aql_producer_ops(hsa_queue_t *queue);
 hsa_status_t acquire_signal_locked(QueueState *queue, hsa_signal_t *signal);
 hsa_status_t acquire_kernarg_locked(QueueState *queue, hsa_region_t region,
                                     size_t size, KernargBuffer *kernarg);

@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <mutex>
 #include <new>
 #include <unordered_set>
@@ -24,6 +23,24 @@ bool valid_event_locked(lr_event_t *event) {
 #endif
 
 #if LRRT_ENABLE_HSA
+
+namespace {
+
+lr_status_t event_marker_submit_status(AqlSubmitError error) {
+  switch (error) {
+  case AqlSubmitError::None:
+    return LR_SUCCESS;
+  case AqlSubmitError::InvalidPacket:
+  case AqlSubmitError::InvalidQueue:
+    return LR_ERROR_INVALID_ARGUMENT;
+  case AqlSubmitError::QueueFull:
+  case AqlSubmitError::ReserveFailed:
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_ERROR_RUNTIME;
+}
+
+} // namespace
 
 void retain_event_dependency(lr_event_t *event, QueueState *queue) {
   std::lock_guard<std::mutex> lock(event->dependency_mutex);
@@ -656,6 +673,17 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
     return capacity_status;
   }
 
+  try {
+    state.pending_events.reserve(state.pending_events.size() + 1);
+    device.pending_events.reserve(device.pending_events.size() + 1);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  const lr_event_t::Kind previous_kind = event->kind;
+  const bool previous_completed = event->completed;
+  const uint64_t previous_start_tick = event->start_tick;
+  const uint64_t previous_completion_tick = event->completion_tick;
   hsa_signal_store_relaxed(event->signal, 1);
   event->kind = lr_event_t::Kind::Marker;
   event->completed = false;
@@ -663,20 +691,26 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
   event->start_tick = 0;
   event->completion_tick = 0;
   event->recorded_queue = &state;
-
-  const uint64_t index = hsa_queue_add_write_index_scacq_screl(state.queue, 1);
-  auto *packets =
-      static_cast<hsa_barrier_and_packet_t *>(state.queue->base_address);
-  hsa_barrier_and_packet_t *packet = &packets[index & (state.queue->size - 1)];
-  std::memset(packet, 0, sizeof(*packet));
-  packet->completion_signal = event->signal;
-  publish_packet_header(&packet->header,
-                        barrier_packet_header(HSA_PACKET_TYPE_BARRIER_AND));
-
   event->pending = true;
   state.pending_events.push_back(event);
   device.pending_events.push_back(event);
-  hsa_signal_store_screlease(state.queue->doorbell_signal, index);
+
+  AqlBarrierAndParameters parameters;
+  parameters.completion_signal = event->signal.handle;
+  const AqlSubmitResult submitted =
+      submit_aql_barrier_and(rocr_aql_producer_ops(state.queue), parameters);
+  if (!submitted) {
+    device.pending_events.pop_back();
+    state.pending_events.pop_back();
+    event->pending = false;
+    event->recorded_queue = nullptr;
+    event->kind = previous_kind;
+    event->completed = previous_completed;
+    event->start_tick = previous_start_tick;
+    event->completion_tick = previous_completion_tick;
+    hsa_signal_store_relaxed(event->signal, 0);
+    return event_marker_submit_status(submitted.error);
+  }
   return LR_SUCCESS;
 #elif LRRT_ENABLE_LIGHT_ROCR
   RuntimeLock lock(g_devices_mutex);

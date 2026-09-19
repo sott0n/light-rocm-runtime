@@ -151,14 +151,52 @@ submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
 AqlSubmitResult
 submit_aql_barrier_and(const AqlQueueProducerOps &queue,
                        const AqlBarrierAndParameters &parameters) {
+  return submit_aql_barriers_and(queue, &parameters, 1);
+}
+
+AqlSubmitResult
+submit_aql_barriers_and(const AqlQueueProducerOps &queue,
+                        const AqlBarrierAndParameters *barrier_parameters,
+                        size_t barrier_count) {
   if (!valid_queue(queue)) {
     return {AqlSubmitError::InvalidQueue, 0};
   }
-  const AqlBarrierAndPacket packet = build_aql_barrier_and_packet(parameters);
-  if (!valid_aql_barrier_and_packet(packet)) {
+  if (barrier_count == 0 || !barrier_parameters) {
     return {AqlSubmitError::InvalidPacket, 0};
   }
-  return submit_packet(queue, packet);
+
+  for (size_t index = 0; index < barrier_count; ++index) {
+    if (!valid_aql_barrier_and_packet(
+            build_aql_barrier_and_packet(barrier_parameters[index]))) {
+      return {AqlSubmitError::InvalidPacket, 0};
+    }
+  }
+  if (barrier_count > queue.packet_count) {
+    return {AqlSubmitError::QueueFull, 0};
+  }
+  const uint64_t read_index = queue.load_read_index(queue.context);
+  const uint64_t write_index = queue.load_write_index(queue.context);
+  if (write_index < read_index ||
+      write_index - read_index > queue.packet_count - barrier_count) {
+    return {AqlSubmitError::QueueFull, 0};
+  }
+
+  uint64_t first_packet_id = 0;
+  if (!queue.reserve_packet(queue.context, barrier_count, &first_packet_id)) {
+    return {AqlSubmitError::ReserveFailed, 0};
+  }
+  for (size_t index = 0; index < barrier_count; ++index) {
+    const AqlBarrierAndPacket barrier =
+        build_aql_barrier_and_packet(barrier_parameters[index]);
+    const uint64_t packet_id = first_packet_id + index;
+    const uint64_t slot_index = packet_id & (queue.packet_count - 1);
+    auto *slot = static_cast<uint8_t *>(queue.ring_base) +
+                 slot_index * sizeof(AqlBarrierAndPacket);
+    publish_packet(slot, barrier);
+  }
+  const uint64_t last_packet_id = first_packet_id + barrier_count - 1;
+  queue.ring_doorbell(queue.context, last_packet_id);
+  return {AqlSubmitError::None, last_packet_id};
 }
 
 AqlSubmitResult submit_aql_barriers_and_kernel_dispatch(

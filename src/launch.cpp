@@ -67,39 +67,6 @@ static_assert(sizeof(AqlKernelDispatchPacket) ==
 static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) ==
               offsetof(hsa_kernel_dispatch_packet_t, completion_signal));
 
-uint64_t rocr_load_read_index(void *context) {
-  return hsa_queue_load_read_index_scacquire(
-      static_cast<hsa_queue_t *>(context));
-}
-
-uint64_t rocr_load_write_index(void *context) {
-  return hsa_queue_load_write_index_relaxed(
-      static_cast<hsa_queue_t *>(context));
-}
-
-bool rocr_reserve_packet(void *context, uint64_t packet_count,
-                         uint64_t *first_packet_id) {
-  *first_packet_id = hsa_queue_add_write_index_scacq_screl(
-      static_cast<hsa_queue_t *>(context), packet_count);
-  return true;
-}
-
-void rocr_ring_doorbell(void *context, uint64_t packet_id) {
-  auto *queue = static_cast<hsa_queue_t *>(context);
-  hsa_signal_store_screlease(queue->doorbell_signal, packet_id);
-}
-
-AqlQueueProducerOps rocr_producer_ops(hsa_queue_t *queue) {
-  return {queue,
-          queue != nullptr ? queue->base_address : nullptr,
-          queue != nullptr ? queue->size : 0,
-          rocr_load_read_index,
-          rocr_load_write_index,
-          rocr_reserve_packet,
-          rocr_ring_doorbell,
-          nullptr};
-}
-
 #if LRRT_ENABLE_LAUNCH_PROFILING
 using ProfileClock = std::chrono::steady_clock;
 
@@ -601,7 +568,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     // Keep packets on the same lrrt queue completion-ordered. Several executor
     // pipelines pass one kernel's output directly to the next kernel.
     const AqlSubmitResult submitted = submit_aql_kernel_dispatch(
-        rocr_producer_ops(queue.queue),
+        rocr_aql_producer_ops(queue.queue),
         aql_dispatch_parameters(
             config, kernel->private_segment_size,
             kernel->group_segment_size + config->shared_memory_bytes,
