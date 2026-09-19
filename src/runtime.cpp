@@ -203,6 +203,7 @@ lr_status_t lr_init(void) {
                     nullptr,
                     {},
                     {},
+                    {},
                     {}});
     g_kfd_session = std::make_unique<light_rocr::transport::hsakmt::KfdSession>(
         std::move(opened.session));
@@ -263,6 +264,7 @@ lr_status_t lr_shutdown(void) {
       g_initialized.store(true);
       return release_status;
     }
+    release_light_rocr_internal_kernels_locked(&release_status);
     release_modules_locked(&release_status);
     release_light_rocr_events_locked(&release_status);
     release_memory_allocations_locked(&release_status);

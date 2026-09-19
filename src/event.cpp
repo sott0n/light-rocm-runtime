@@ -368,6 +368,8 @@ void remove_pending_event(std::vector<lr_event_t *> *events,
   }
 }
 
+} // namespace
+
 lr_status_t finish_light_rocr_event_wait_locked(lr_event_t *event,
                                                 int64_t value) {
   if (!event->pending) {
@@ -378,11 +380,16 @@ lr_status_t finish_light_rocr_event_wait_locked(lr_event_t *event,
   }
 
   DeviceState &device = g_devices[event->device.index];
-  remove_pending_event(&device.pending_events, event);
   if (event->recorded_queue) {
+    const lr_status_t dispatch_status =
+        reap_completed_light_rocr_dispatches_locked(event->recorded_queue);
+    if (dispatch_status != LR_SUCCESS) {
+      return dispatch_status;
+    }
     remove_pending_event(&event->recorded_queue->pending_events, event);
     event->recorded_queue = nullptr;
   }
+  remove_pending_event(&device.pending_events, event);
   event->pending = false;
   event->completed = true;
   return LR_SUCCESS;
@@ -423,8 +430,6 @@ void wait_for_light_rocr_event_synchronizers_locked(RuntimeLock *devices_lock,
     return !valid_event_locked(event) || event->active_synchronizers == 0;
   });
 }
-
-} // namespace
 
 lr_status_t reap_completed_light_rocr_events_locked(lr_queue_t *queue) {
   while (!queue->pending_events.empty()) {

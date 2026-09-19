@@ -8,6 +8,10 @@
 #include <utility>
 #include <vector>
 
+#if LRRT_ENABLE_LIGHT_ROCR
+#include "lrrt_internal_copy_kernel.inc"
+#endif
+
 namespace lrrt_internal {
 
 #if LRRT_ENABLE_HSA
@@ -242,6 +246,8 @@ std::unordered_map<void *, LightRocrAllocationInfo> g_light_rocr_allocations;
 std::unordered_map<void *, LightRocrHostAllocationInfo>
     g_light_rocr_host_allocations;
 
+constexpr char kLightRocrCopyKernelName[] = "lrrt_copy_bytes";
+
 void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
                                           size_t size) {
   const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
@@ -353,6 +359,69 @@ void record_memcpy(DeviceState *device, lr_memcpy_kind_t kind, size_t size) {
 }
 
 } // namespace
+
+lr_status_t ensure_light_rocr_copy_kernel_locked(DeviceState *device) {
+  if (!device || !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (device->copy_kernel) {
+    return LR_SUCCESS;
+  }
+
+  const auto parsed = light_rocr::loader::parse_code_object(
+      kLightRocrCopyKernelHsaco, sizeof(kLightRocrCopyKernelHsaco));
+  if (!parsed) {
+    return LR_ERROR_RUNTIME;
+  }
+  auto loaded = light_rocr::transport::hsakmt::materialize_executable_image(
+      *g_kfd_session, device->node.node_id, kLightRocrCopyKernelHsaco,
+      sizeof(kLightRocrCopyKernelHsaco), parsed.code_object);
+  if (!loaded) {
+    if (loaded.image.owns_allocation()) {
+      (void)loaded.image.release();
+    }
+    return LR_ERROR_RUNTIME;
+  }
+
+  size_t kernel_index = loaded.image.code_object().kernels.size();
+  for (size_t index = 0; index < loaded.image.code_object().kernels.size();
+       ++index) {
+    const auto &kernel = loaded.image.code_object().kernels[index];
+    if (kernel.name == kLightRocrCopyKernelName ||
+        kernel.symbol_name == kLightRocrCopyKernelName) {
+      kernel_index = index;
+      break;
+    }
+  }
+  if (kernel_index == loaded.image.code_object().kernels.size()) {
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+
+  try {
+    device->copy_kernel.reset(
+        new LightRocrInternalKernel{std::move(loaded.image), kernel_index});
+  } catch (const std::bad_alloc &) {
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_SUCCESS;
+}
+
+void release_light_rocr_internal_kernels_locked(lr_status_t *result) {
+  for (DeviceState &device : g_devices) {
+    if (!device.copy_kernel) {
+      continue;
+    }
+    if (!device.copy_kernel->executable_image.release()) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      continue;
+    }
+    device.copy_kernel.reset();
+  }
+}
 
 void release_memory_allocations_locked(lr_status_t *result) {
   for (auto allocation = g_light_rocr_allocations.begin();
@@ -1044,6 +1113,86 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   }
   event->pending = true;
   state.pending_events.push_back(event);
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  RuntimeLock lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !valid_event_locked(event) ||
+      event->device.index != device.index || event->destroying ||
+      !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  wait_for_light_rocr_event_synchronizers_locked(&lock, event);
+  if (!valid_event_locked(event) || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  const lr_status_t wait_status = wait_for_light_rocr_event_locked(event);
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+  const lr_status_t consumer_status =
+      wait_for_light_rocr_event_consumers_locked(event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
+  }
+  if (!valid_event_locked(event) || event->destroying) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (kind != LR_MEMCPY_DEVICE_TO_DEVICE) {
+    return LR_ERROR_NOT_SUPPORTED;
+  }
+  if (!translate_light_rocr_device_pointer(dst, device, size) ||
+      !translate_light_rocr_device_pointer(src, device, size)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::vector<lr_event_t *> event_dependencies;
+  if (!use_implicit_dependencies) {
+    const lr_status_t dependency_status =
+        collect_light_rocr_event_dependencies_locked(
+            device, explicit_dependencies, dependency_count, event,
+            &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
+    }
+  }
+
+  const lr_status_t kernel_status =
+      ensure_light_rocr_copy_kernel_locked(&state);
+  if (kernel_status != LR_SUCCESS) {
+    return kernel_status;
+  }
+
+  struct CopyArguments {
+    uint64_t source;
+    uint64_t destination;
+    uint64_t size;
+    uint64_t stride;
+    uint64_t workgroup_size;
+  };
+  constexpr uint32_t kBlockSize = 256;
+  constexpr uint32_t kMaximumWorkgroups = 4096;
+  const uint64_t required_workgroups =
+      1 + (static_cast<uint64_t>(size) - 1) / kBlockSize;
+  const uint32_t workgroups = static_cast<uint32_t>(
+      std::min<uint64_t>(required_workgroups, kMaximumWorkgroups));
+  const CopyArguments arguments = {
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(src)),
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst)),
+      static_cast<uint64_t>(size),
+      static_cast<uint64_t>(workgroups) * kBlockSize, kBlockSize};
+  const lr_launch_config_t config = {
+      {workgroups * kBlockSize, 1, 1}, {kBlockSize, 1, 1}, 0};
+
+  const lr_status_t submit_status = submit_light_rocr_kernel_locked(
+      &state, state.default_queue, state.copy_kernel->executable_image,
+      state.copy_kernel->image_kernel_index, &config, &arguments,
+      sizeof(arguments), event_dependencies, event);
+  if (submit_status != LR_SUCCESS) {
+    return submit_status;
+  }
+  record_memcpy(&state, kind, size);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;

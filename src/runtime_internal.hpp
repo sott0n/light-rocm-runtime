@@ -4,6 +4,7 @@
 #include "lrrt/lrrt.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -152,9 +153,32 @@ struct lr_queue_t {
   struct PendingDispatch {
     PendingDispatch(light_rocr::transport::hsakmt::UserSignal &&signal,
                     light_rocr::transport::hsakmt::KernargBuffer &&kernarg)
-        : completion_signal(std::move(signal)), kernarg(std::move(kernarg)) {}
+        : completion_signal(std::move(signal)), completion_event(nullptr),
+          kernarg(std::move(kernarg)) {}
+    PendingDispatch(lr_event_t *event,
+                    light_rocr::transport::hsakmt::KernargBuffer &&kernarg)
+        : completion_event(event), kernarg(std::move(kernarg)) {}
+
+    [[nodiscard]] uint64_t completion_signal_handle() const {
+      return completion_event ? completion_event->signal.gpu_handle()
+                              : completion_signal.gpu_handle();
+    }
+    [[nodiscard]] int64_t completion_value_acquire() const {
+      return completion_event ? completion_event->signal.load_acquire()
+                              : completion_signal.load_acquire();
+    }
+    [[nodiscard]] light_rocr::runtime::SignalWaitResult
+    wait_for_completion(std::chrono::steady_clock::time_point deadline) const {
+      return completion_event
+                 ? completion_event->signal.wait_until_equal(0, deadline)
+                 : completion_signal.wait_until_equal(0, deadline);
+    }
+    [[nodiscard]] bool owns_completion_signal() const {
+      return completion_event == nullptr;
+    }
 
     light_rocr::transport::hsakmt::UserSignal completion_signal;
+    lr_event_t *completion_event;
     light_rocr::transport::hsakmt::KernargBuffer kernarg;
   };
 
@@ -207,6 +231,13 @@ struct AqlQueueProducerOps;
 extern std::atomic<bool> g_initialized;
 
 #if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_LIGHT_ROCR
+struct LightRocrInternalKernel {
+  light_rocr::transport::hsakmt::ExecutableImage executable_image;
+  size_t image_kernel_index = 0;
+};
+#endif
+
 struct DeviceState {
 #if LRRT_ENABLE_HSA
   hsa_agent_t agent;
@@ -224,6 +255,7 @@ struct DeviceState {
   lr_queue_t *default_queue;
   std::vector<lr_queue_t *> queues;
   std::vector<lr_event_t *> pending_events;
+  std::unique_ptr<LightRocrInternalKernel> copy_kernel;
 #endif
   lr_memory_stats_t memory_stats;
 };
@@ -237,6 +269,19 @@ extern std::unique_ptr<light_rocr::transport::hsakmt::KfdSession> g_kfd_session;
 lr_status_t create_light_rocr_queue(lr_device_t device_handle,
                                     DeviceState *device, bool is_default,
                                     lr_queue_t **queue);
+lr_status_t collect_light_rocr_event_dependencies_locked(
+    lr_device_t device, lr_event_t *const *dependencies,
+    size_t dependency_count, const lr_event_t *completion_event,
+    std::vector<lr_event_t *> *pending_dependencies);
+lr_status_t submit_light_rocr_kernel_locked(
+    DeviceState *device, lr_queue_t *queue,
+    const light_rocr::transport::hsakmt::ExecutableImage &executable_image,
+    size_t image_kernel_index, const lr_launch_config_t *config,
+    const void *args, size_t args_size,
+    const std::vector<lr_event_t *> &event_dependencies,
+    lr_event_t *completion_event = nullptr);
+lr_status_t ensure_light_rocr_copy_kernel_locked(DeviceState *device);
+void release_light_rocr_internal_kernels_locked(lr_status_t *result);
 bool valid_light_rocr_queue_locked(lr_queue_t *queue);
 lr_status_t ensure_light_rocr_queue_scratch_locked(DeviceState *device,
                                                    lr_queue_t *queue,
@@ -248,6 +293,10 @@ void retain_light_rocr_event_dependency_locked(lr_event_t *event,
 void release_light_rocr_event_dependency_locked(lr_event_t *event,
                                                 lr_queue_t *queue);
 lr_status_t reap_completed_light_rocr_events_locked(lr_queue_t *queue);
+lr_status_t wait_for_light_rocr_event_locked(lr_event_t *event);
+lr_status_t wait_for_light_rocr_event_consumers_locked(lr_event_t *event);
+void wait_for_light_rocr_event_synchronizers_locked(RuntimeLock *devices_lock,
+                                                    lr_event_t *event);
 lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
                                                     size_t required_packets);
 lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue);

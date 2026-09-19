@@ -1035,7 +1035,8 @@ lr_status_t release_light_rocr_dispatch(lr_queue_t::PendingDispatch *dispatch) {
   if (!dispatch->kernarg.release()) {
     return LR_ERROR_RUNTIME;
   }
-  if (!dispatch->completion_signal.release()) {
+  if (dispatch->owns_completion_signal() &&
+      !dispatch->completion_signal.release()) {
     return LR_ERROR_RUNTIME;
   }
   return LR_SUCCESS;
@@ -1075,7 +1076,7 @@ void reap_completed_light_rocr_barriers_locked(lr_queue_t *queue) {
   size_t index = 0;
   while (index < queue->pending_barriers.size()) {
     lr_queue_t::PendingBarrier &barrier = queue->pending_barriers[index];
-    if (barrier.retirement_dispatch->completion_signal.load_acquire() != 0) {
+    if (barrier.retirement_dispatch->completion_value_acquire() != 0) {
       ++index;
       continue;
     }
@@ -1097,7 +1098,7 @@ lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue) {
   while (completed_count < queue->pending_dispatches.size()) {
     lr_queue_t::PendingDispatch &dispatch =
         *queue->pending_dispatches[completed_count];
-    if (dispatch.completion_signal.load_acquire() != 0) {
+    if (dispatch.completion_value_acquire() != 0) {
       break;
     }
     const lr_status_t status = release_light_rocr_dispatch(&dispatch);
@@ -1146,13 +1147,12 @@ lr_status_t ensure_light_rocr_queue_capacity_locked(lr_queue_t *queue,
       return LR_ERROR_RUNTIME;
     }
 
+    const auto deadline = std::chrono::steady_clock::time_point::max();
     const auto waited =
         !queue->pending_dispatches.empty()
-            ? queue->pending_dispatches.front()
-                  ->completion_signal.wait_until_equal(
-                      0, std::chrono::steady_clock::time_point::max())
-            : queue->pending_events.front()->signal.wait_until_equal(
-                  0, std::chrono::steady_clock::time_point::max());
+            ? queue->pending_dispatches.front()->wait_for_completion(deadline)
+            : queue->pending_events.front()->signal.wait_until_equal(0,
+                                                                     deadline);
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }
@@ -1165,13 +1165,12 @@ lr_status_t synchronize_light_rocr_queue_locked(lr_queue_t *queue) {
     if (queue->pending_dispatches.empty() && queue->pending_events.empty()) {
       return LR_ERROR_RUNTIME;
     }
+    const auto deadline = std::chrono::steady_clock::time_point::max();
     const auto waited =
         !queue->pending_dispatches.empty()
-            ? queue->pending_dispatches.front()
-                  ->completion_signal.wait_until_equal(
-                      0, std::chrono::steady_clock::time_point::max())
-            : queue->pending_events.front()->signal.wait_until_equal(
-                  0, std::chrono::steady_clock::time_point::max());
+            ? queue->pending_dispatches.front()->wait_for_completion(deadline)
+            : queue->pending_events.front()->signal.wait_until_equal(0,
+                                                                     deadline);
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }

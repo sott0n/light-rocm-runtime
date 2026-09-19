@@ -38,7 +38,7 @@ int main(void) {
     return 1;
   }
 
-  const int n = 64;
+  const int n = 65;
   float in[n];
   float out[n];
   for (int i = 0; i < n; ++i) {
@@ -117,6 +117,106 @@ int main(void) {
       lr_shutdown();
       return 1;
     }
+  }
+
+  for (int i = 0; i < n; ++i) {
+    out[i] = 0.0f;
+  }
+  status =
+      lr_memcpy(device, device_dst, out, sizeof(out), LR_MEMCPY_HOST_TO_DEVICE);
+  if (!expect_status(status, LR_SUCCESS, "reset destination")) {
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+
+  lr_event_t *dependency = NULL;
+  status = lr_event_create(device, &dependency);
+  if (!expect_status(status, LR_SUCCESS, "lr_event_create dependency")) {
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_event_record(dependency);
+  if (!expect_status(status, LR_SUCCESS, "lr_event_record dependency")) {
+    lr_event_destroy(dependency);
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+
+  lr_event_t *dependencies[] = {dependency};
+  status = lr_memcpy_async_with_dependencies(
+      device, device_dst, device_src, sizeof(in), LR_MEMCPY_DEVICE_TO_DEVICE,
+      event, dependencies, 1);
+  if (!expect_status(status, LR_SUCCESS, "lr_memcpy_async_with_dependencies")) {
+    lr_event_destroy(dependency);
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_event_destroy(dependency);
+  if (!expect_status(status, LR_SUCCESS, "lr_event_destroy dependency") ||
+      !expect_status(lr_event_synchronize(event), LR_SUCCESS,
+                     "synchronize dependent copy")) {
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+  status =
+      lr_memcpy(device, out, device_dst, sizeof(out), LR_MEMCPY_DEVICE_TO_HOST);
+  if (!expect_status(status, LR_SUCCESS, "copy dependent result")) {
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+  for (int i = 0; i < n; ++i) {
+    if (fabsf(out[i] - in[i]) > 0.001f) {
+      fprintf(stderr,
+              "dependent async_copy mismatch at %d: got %f expected %f\n", i,
+              out[i], in[i]);
+      lr_event_destroy(event);
+      lr_free(device, device_dst);
+      lr_free(device, device_src);
+      lr_shutdown();
+      return 1;
+    }
+  }
+
+  status = lr_memcpy_async(device, device_dst, device_src, sizeof(in) + 1,
+                           LR_MEMCPY_DEVICE_TO_DEVICE, event);
+  if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
+                     "reject out-of-bounds async copy")) {
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
+  }
+
+  lr_event_t *self_dependency[] = {event};
+  status = lr_memcpy_async_with_dependencies(
+      device, device_dst, device_src, sizeof(in), LR_MEMCPY_DEVICE_TO_DEVICE,
+      event, self_dependency, 1);
+  if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
+                     "reject completion event dependency")) {
+    lr_event_destroy(event);
+    lr_free(device, device_dst);
+    lr_free(device, device_src);
+    lr_shutdown();
+    return 1;
   }
 
   lr_event_destroy(event);

@@ -138,6 +138,37 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
 
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR=1)
   target_link_libraries(lrrt PRIVATE light_rocr::transport_hsakmt)
+
+  lrrt_add_hsaco_kernel(
+    lrrt_internal_copy_kernel
+    src/light_rocr_copy_kernel.cpp
+    LRRT_INTERNAL_COPY_HSACO
+    -O2
+  )
+  if(NOT LRRT_INTERNAL_COPY_HSACO)
+    message(FATAL_ERROR "The light-rocr backend requires the ROCm compiler")
+  endif()
+  set(
+    LRRT_INTERNAL_COPY_HEADER
+    "${CMAKE_CURRENT_BINARY_DIR}/lrrt_internal_copy_kernel.inc"
+  )
+  add_custom_command(
+    OUTPUT "${LRRT_INTERNAL_COPY_HEADER}"
+    COMMAND
+      "${CMAKE_COMMAND}" "-DINPUT=${LRRT_INTERNAL_COPY_HSACO}"
+      "-DOUTPUT=${LRRT_INTERNAL_COPY_HEADER}" -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+    DEPENDS
+      "${LRRT_INTERNAL_COPY_HSACO}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+    VERBATIM
+  )
+  add_custom_target(
+    lrrt_internal_copy_kernel_data
+    DEPENDS "${LRRT_INTERNAL_COPY_HEADER}"
+  )
+  add_dependencies(lrrt lrrt_internal_copy_kernel_data)
+  target_include_directories(lrrt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
   message(STATUS "LRRT backend: light-rocr")
 elseif(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)

@@ -25,6 +25,7 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     lrrt_light_rocr_backend_tests
     lrrt_memory_bounds_tests
     lrrt_allocation_registry_tests
+    lrrt_async_copy_tests
   )
   lrrt_add_test_executable(
     lrrt_light_rocr_backend_tests
@@ -39,6 +40,11 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
   lrrt_add_test_executable(
     lrrt_allocation_registry_tests
     allocation_registry.cpp
+    lrrt::lrrt
+  )
+  lrrt_add_test_executable(
+    lrrt_async_copy_tests
+    async_copy.cpp
     lrrt::lrrt
   )
   lrrt_add_hsaco_kernel(

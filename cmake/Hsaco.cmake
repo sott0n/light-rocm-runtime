@@ -14,7 +14,7 @@ function(lrrt_add_hsaco_kernel name source output_var)
       COMMAND
         "${AMDCLANGXX}" --offload-device-only
         "--offload-arch=${LRRT_AMDGPU_TARGET}" -x hip -include
-        hip/hip_runtime.h "${source_path}" -o "${bundle}"
+        hip/hip_runtime.h ${ARGN} "${source_path}" -o "${bundle}"
       COMMAND
         "${CLANG_OFFLOAD_BUNDLER}" -type=o
         "-targets=host-x86_64-unknown-linux-gnu-,hipv4-amdgcn-amd-amdhsa--${LRRT_AMDGPU_TARGET}"
