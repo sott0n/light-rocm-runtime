@@ -89,6 +89,7 @@ const char *gpu_properties() {
          "simd_per_cu 2\n"
          "wave_front_size 32\n"
          "max_waves_per_simd 16\n"
+         "lds_size_in_kb 64\n"
          "array_count 6\n"
          "simd_arrays_per_engine 2\n"
          "max_slots_scratch_cu 32\n"
@@ -100,6 +101,8 @@ const char *gpu_properties() {
          "drm_render_minor 128\n"
          "local_mem_size 17163091968\n"
          "num_xcc 1\n"
+         "cwsr_size 28835840\n"
+         "ctl_stack_size 24576\n"
          "mem_banks_count 1\n"
          "unknown_future_property 99\n";
 }
@@ -149,7 +152,9 @@ void successful_snapshot(TestContext *context) {
   context->expect(gpu.node_id == 2 && gpu.gpu_id == 43288 && gpu.is_gpu(),
                   "GPU identity was not converted");
   context->expect(gpu.compute_unit_count() == 60 &&
-                      gpu.shader_engine_count == 3 && gpu.xcc_count == 1,
+                      gpu.shader_engine_count == 3 && gpu.xcc_count == 1 &&
+                      gpu.lds_size_kb == 64 && gpu.cwsr_size == 28835840 &&
+                      gpu.control_stack_size == 24576,
                   "GPU compute topology was not converted");
   context->expect(gpu.maximum_scratch_waves_per_compute_unit == 32,
                   "GPU scratch topology was not converted");

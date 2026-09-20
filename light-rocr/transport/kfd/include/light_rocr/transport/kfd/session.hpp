@@ -3,6 +3,7 @@
 
 #include "light_rocr/runtime/topology.hpp"
 #include "light_rocr/transport/kfd/memory_types.hpp"
+#include "light_rocr/transport/kfd/queue.hpp"
 #include "light_rocr/transport/kfd/vm_types.hpp"
 
 #include <memory>
@@ -50,10 +51,16 @@ public:
   [[nodiscard]] GttAllocationResult
   allocate_gtt(const runtime::Node &node, uint64_t size,
                const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] AqlQueueResult
+  create_aql_queue(const runtime::Node &node, uint64_t ring_size,
+                   const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] runtime::KfdVersion version() const;
   explicit operator bool() const { return state_ != nullptr; }
 
 private:
+  [[nodiscard]] GttAllocationResult
+  allocate_gtt_impl(const runtime::Node &node, uint64_t size,
+                    const std::string &dri_root, bool aql_ring) const;
   explicit KfdSession(std::shared_ptr<KfdState> state)
       : state_(std::move(state)) {}
 

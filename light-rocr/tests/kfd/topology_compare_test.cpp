@@ -45,6 +45,7 @@ bool compare_node(const light_rocr::runtime::Node &direct,
   expect(direct.wavefront_size == kmt.wavefront_size, "wavefront_size");
   expect(direct.maximum_waves_per_simd == kmt.maximum_waves_per_simd,
          "maximum_waves_per_simd");
+  expect(direct.lds_size_kb == kmt.lds_size_kb, "lds_size_kb");
   expect(direct.shader_engine_count == kmt.shader_engine_count,
          "shader_engine_count");
   expect(direct.maximum_scratch_waves_per_compute_unit ==

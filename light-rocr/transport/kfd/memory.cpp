@@ -91,7 +91,8 @@ RawGttAllocationResult rollback_gtt(MemoryStatus status, int kfd_fd,
 
 RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
                                     const ProcessAperture &aperture,
-                                    uint64_t size, MemorySyscalls syscalls) {
+                                    uint64_t size, GttAllocationUsage usage,
+                                    MemorySyscalls syscalls) {
   if (kfd_fd < 0 || render_fd < 0 || aperture.gpu_id == 0 ||
       !valid_syscalls(syscalls)) {
     return {{MemoryError::InvalidSession, 0,
@@ -100,14 +101,26 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
   }
   if (size == 0 || size % kMemoryPageSize != 0 ||
       size > std::numeric_limits<size_t>::max() ||
-      size > std::numeric_limits<uint64_t>::max() -
-                 kGuardPageCount * kMemoryPageSize) {
+      (usage == GttAllocationUsage::AqlRing &&
+       size > std::numeric_limits<uint64_t>::max() / 2)) {
     return {{MemoryError::InvalidSize, 0,
              "GTT allocation size must be a non-zero multiple of 4096 bytes"},
             {}};
   }
 
-  const uint64_t reservation_size = size + kGuardPageCount * kMemoryPageSize;
+  // KFD's AQL allocation contract reserves a second ring-sized span. The
+  // packet producer only addresses the first span, but KFD uses the full
+  // backing size for queue-memory handling.
+  const uint64_t backing_size =
+      usage == GttAllocationUsage::AqlRing ? size * 2 : size;
+  if (backing_size > std::numeric_limits<uint64_t>::max() -
+                         kGuardPageCount * kMemoryPageSize) {
+    return {{MemoryError::InvalidSize, 0,
+             "GTT allocation plus guard pages exceeds the address range"},
+            {}};
+  }
+  const uint64_t reservation_size =
+      backing_size + kGuardPageCount * kMemoryPageSize;
   if (reservation_size > std::numeric_limits<size_t>::max()) {
     return {{MemoryError::InvalidSize, 0,
              "GTT allocation plus guard pages exceeds the host size range"},
@@ -144,9 +157,9 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
   }
   const uint64_t host_address = reservation_address + kMemoryPageSize;
   const bool range_overflows =
-      host_address > std::numeric_limits<uint64_t>::max() - (size - 1);
+      host_address > std::numeric_limits<uint64_t>::max() - (backing_size - 1);
   if (range_overflows || host_address < aperture.gpuvm_base ||
-      host_address + size - 1 > aperture.gpuvm_limit) {
+      host_address + backing_size - 1 > aperture.gpuvm_limit) {
     return rollback_gtt({MemoryError::ReserveVa, 0,
                          "reserved CPU VA is outside the KFD GPUVM aperture"},
                         kfd_fd,
@@ -157,11 +170,15 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
 
   kfd_ioctl_alloc_memory_of_gpu_args arguments{};
   arguments.va_addr = host_address;
-  arguments.size = size;
+  arguments.size = backing_size;
   arguments.gpu_id = aperture.gpu_id;
   arguments.flags = static_cast<uint32_t>(
       KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
       KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  if (usage == GttAllocationUsage::AqlRing) {
+    arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM |
+                       KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED;
+  }
   int system_error = 0;
   if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &arguments,
                     syscalls.ioctl_function, &system_error)) {
@@ -444,6 +461,13 @@ const char *memory_error_name(MemoryError error) {
 GttAllocationResult
 KfdSession::allocate_gtt(const runtime::Node &node, uint64_t size,
                          const std::string &dri_root) const {
+  return allocate_gtt_impl(node, size, dri_root, false);
+}
+
+GttAllocationResult KfdSession::allocate_gtt_impl(const runtime::Node &node,
+                                                  uint64_t size,
+                                                  const std::string &dri_root,
+                                                  bool aql_ring) const {
   if (state_ == nullptr) {
     return {{MemoryError::InvalidSession, 0,
              "GTT allocation requires an open KFD session"},
@@ -481,8 +505,11 @@ KfdSession::allocate_gtt(const runtime::Node &node, uint64_t size,
     render_fd = device->second.render_fd;
   }
 
-  detail::RawGttAllocationResult allocated = detail::allocate_gtt(
-      state_->fd, render_fd, acquired.aperture, size, real_syscalls());
+  detail::RawGttAllocationResult allocated =
+      detail::allocate_gtt(state_->fd, render_fd, acquired.aperture, size,
+                           aql_ring ? detail::GttAllocationUsage::AqlRing
+                                    : detail::GttAllocationUsage::General,
+                           real_syscalls());
   if (!allocated) {
     detail::RawGttAllocation &raw = allocated.allocation;
     if (raw.reservation_address == nullptr && raw.handle == 0) {

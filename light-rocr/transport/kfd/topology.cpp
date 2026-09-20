@@ -293,6 +293,21 @@ bool read_node(uint32_t node_id, const fs::path &node_path, runtime::Node *node,
   node->simd_per_compute_unit = static_cast<uint32_t>(fields[2].value);
   node->wavefront_size = static_cast<uint32_t>(fields[3].value);
   node->maximum_waves_per_simd = static_cast<uint32_t>(fields[4].value);
+  const uint64_t lds_size_kb = optional_property(properties, "lds_size_in_kb");
+  const uint64_t cwsr_size = optional_property(properties, "cwsr_size");
+  const uint64_t control_stack_size =
+      optional_property(properties, "ctl_stack_size");
+  if (lds_size_kb > std::numeric_limits<uint32_t>::max() ||
+      cwsr_size > std::numeric_limits<uint32_t>::max() ||
+      control_stack_size > std::numeric_limits<uint32_t>::max()) {
+    *failure = {DiscoveryError::InvalidNode, 0,
+                "CWSR topology property is out of range in " +
+                    properties_path.string()};
+    return false;
+  }
+  node->lds_size_kb = static_cast<uint32_t>(lds_size_kb);
+  node->cwsr_size = static_cast<uint32_t>(cwsr_size);
+  node->control_stack_size = static_cast<uint32_t>(control_stack_size);
   node->shader_engine_count =
       arrays_per_engine == 0 ? 0 : array_count / arrays_per_engine;
   node->maximum_scratch_waves_per_compute_unit =

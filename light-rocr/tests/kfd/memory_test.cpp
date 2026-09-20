@@ -36,6 +36,10 @@ struct FakeSystem {
   uint32_t map_result_n_success = std::numeric_limits<uint32_t>::max();
   uint32_t unmap_result_n_success = std::numeric_limits<uint32_t>::max();
   std::vector<uint32_t> expected_gpu_ids{42};
+  uint64_t expected_allocation_size = 8192;
+  size_t expected_reservation_size = 16384;
+  size_t expected_host_mapping_size = 8192;
+  uint32_t expected_extra_allocation_flags = 0;
   std::vector<uint32_t> map_starts;
   std::vector<uint32_t> unmap_starts;
   bool contract_valid = true;
@@ -52,14 +56,16 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
   }
   if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU) {
     auto *args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arguments);
-    const uint32_t expected_flags = static_cast<uint32_t>(
-        KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
-        KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
-        KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+    const uint32_t expected_flags =
+        static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_GTT |
+                              KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+                              KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
+                              KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE) |
+        fake->expected_extra_allocation_flags;
     fake->contract_valid = fake->contract_valid &&
                            args->va_addr == kHostAddress &&
-                           args->size == 8192 && args->gpu_id == 42 &&
-                           args->flags == expected_flags;
+                           args->size == fake->expected_allocation_size &&
+                           args->gpu_id == 42 && args->flags == expected_flags;
     fake->calls.emplace_back("allocate");
     if (fake->allocate_fails) {
       errno = ENOMEM;
@@ -138,8 +144,8 @@ void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
   ++fake->mmap_calls;
   if (fake->mmap_calls == 1) {
     fake->contract_valid =
-        fake->contract_valid && address == nullptr && length == 16384 &&
-        protection == PROT_NONE &&
+        fake->contract_valid && address == nullptr &&
+        length == fake->expected_reservation_size && protection == PROT_NONE &&
         flags == (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE) && fd == -1 &&
         offset == 0;
     fake->calls.emplace_back("reserve");
@@ -147,7 +153,7 @@ void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
   }
   fake->contract_valid = fake->contract_valid &&
                          address == reinterpret_cast<void *>(kHostAddress) &&
-                         length == 8192 &&
+                         length == fake->expected_host_mapping_size &&
                          protection == (PROT_READ | PROT_WRITE) &&
                          flags == (MAP_SHARED | MAP_FIXED) && fd == 23 &&
                          offset == static_cast<off_t>(kMmapOffset);
@@ -167,7 +173,7 @@ int fake_munmap(void *address, size_t length) {
   fake->contract_valid =
       fake->contract_valid &&
       address == reinterpret_cast<void *>(kReservationAddress) &&
-      length == 16384;
+      length == fake->expected_reservation_size;
   fake->calls.emplace_back("unmap");
   if (fake->munmap_fails) {
     errno = EBUSY;
@@ -183,7 +189,8 @@ int fake_madvise(void *address, size_t length, int advice) {
   }
   fake->contract_valid = fake->contract_valid &&
                          address == reinterpret_cast<void *>(kHostAddress) &&
-                         length == 8192 && advice == MADV_DONTFORK;
+                         length == fake->expected_host_mapping_size &&
+                         advice == MADV_DONTFORK;
   fake->calls.emplace_back("dontfork");
   if (fake->madvise_fails) {
     errno = EINVAL;
@@ -256,6 +263,27 @@ void invalid_size_does_not_reserve(TestContext *context) {
                       light_rocr::transport::kfd::MemoryError::InvalidSize,
                   "wrong invalid-size error");
   context->expect(state.calls.empty(), "invalid size issued a syscall");
+  fake = nullptr;
+}
+
+void aql_ring_uses_double_uncached_backing(TestContext *context) {
+  FakeSystem state;
+  state.expected_allocation_size = 16384;
+  state.expected_reservation_size = 24576;
+  state.expected_extra_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM | KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, 23, aperture(), 8192,
+      light_rocr::transport::kfd::detail::GttAllocationUsage::AqlRing,
+      syscalls());
+  context->expect(allocated && allocated.allocation.size == 8192,
+                  allocated.status.message);
+  context->expect(state.contract_valid,
+                  "AQL ring backing allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
   fake = nullptr;
 }
 
@@ -587,6 +615,7 @@ int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"successful round trip", successful_round_trip},
       {"invalid size", invalid_size_does_not_reserve},
+      {"AQL ring backing", aql_ring_uses_double_uncached_backing},
       {"allocation failure", allocation_failure_releases_va},
       {"rollback unmap failure", rollback_unmap_failure_retains_va},
       {"host map failure", host_map_failure_frees_handle},

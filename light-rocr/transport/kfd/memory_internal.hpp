@@ -43,9 +43,20 @@ struct RawGttAllocationResult {
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
+enum class GttAllocationUsage {
+  General,
+  AqlRing,
+};
+
 [[nodiscard]] RawGttAllocationResult
 allocate_gtt(int kfd_fd, int render_fd, const ProcessAperture &aperture,
-             uint64_t size, MemorySyscalls syscalls);
+             uint64_t size, GttAllocationUsage usage, MemorySyscalls syscalls);
+[[nodiscard]] inline RawGttAllocationResult
+allocate_gtt(int kfd_fd, int render_fd, const ProcessAperture &aperture,
+             uint64_t size, MemorySyscalls syscalls) {
+  return allocate_gtt(kfd_fd, render_fd, aperture, size,
+                      GttAllocationUsage::General, syscalls);
+}
 [[nodiscard]] MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
                                    const std::vector<uint32_t> &gpu_ids,
                                    MemorySyscalls syscalls);

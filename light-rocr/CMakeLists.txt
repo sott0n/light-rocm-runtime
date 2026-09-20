@@ -91,6 +91,7 @@ if(LIGHT_ROCR_ENABLE_KFD)
     add_library(
       light_rocr_transport_kfd
       transport/kfd/memory.cpp
+      transport/kfd/queue.cpp
       transport/kfd/session.cpp
       transport/kfd/topology.cpp
       transport/kfd/vm.cpp
@@ -440,6 +441,28 @@ if(LIGHT_ROCR_BUILD_TESTS)
       COMMAND light_rocr_kfd_memory_tests
     )
 
+    add_executable(
+      light_rocr_kfd_queue_tests
+      tests/kfd/queue_test.cpp
+    )
+    target_include_directories(
+      light_rocr_kfd_queue_tests
+      PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/transport/kfd"
+    )
+    target_include_directories(
+      light_rocr_kfd_queue_tests
+      SYSTEM PRIVATE "${LIGHT_ROCR_KFD_INCLUDE_DIR}"
+    )
+    target_link_libraries(
+      light_rocr_kfd_queue_tests
+      PRIVATE light_rocr::transport_kfd
+    )
+    light_rocr_enable_warnings(light_rocr_kfd_queue_tests)
+    add_test(
+      NAME light_rocr_kfd_queue_tests
+      COMMAND light_rocr_kfd_queue_tests
+    )
+
     if(LIGHT_ROCR_BUILD_GPU_TESTS)
       add_executable(
         light_rocr_kfd_topology_device_tests
@@ -496,6 +519,26 @@ if(LIGHT_ROCR_BUILD_TESTS)
       )
       set_tests_properties(
         light_rocr_kfd_memory_device_tests
+        PROPERTIES
+          RESOURCE_LOCK light_rocr_gpu
+          TIMEOUT 20
+      )
+
+      add_executable(
+        light_rocr_kfd_queue_device_tests
+        tests/kfd/queue_device_test.cpp
+      )
+      target_link_libraries(
+        light_rocr_kfd_queue_device_tests
+        PRIVATE light_rocr::transport_kfd
+      )
+      light_rocr_enable_warnings(light_rocr_kfd_queue_device_tests)
+      add_test(
+        NAME light_rocr_kfd_queue_device_tests
+        COMMAND light_rocr_kfd_queue_device_tests
+      )
+      set_tests_properties(
+        light_rocr_kfd_queue_device_tests
         PROPERTIES
           RESOURCE_LOCK light_rocr_gpu
           TIMEOUT 20

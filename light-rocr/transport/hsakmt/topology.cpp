@@ -118,6 +118,7 @@ runtime::Node convert_node(uint32_t node_id,
   node.simd_per_compute_unit = properties.NumSIMDPerCU;
   node.wavefront_size = properties.WaveFrontSize;
   node.maximum_waves_per_simd = properties.MaxWavesPerSIMD;
+  node.lds_size_kb = properties.LDSSizeInKB;
   node.shader_engine_count = properties.NumShaderBanks;
   node.maximum_scratch_waves_per_compute_unit = properties.MaxSlotsScratchCU;
   node.xcc_count = properties.NumXcc;
