@@ -26,6 +26,7 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     lrrt_memory_bounds_tests
     lrrt_allocation_registry_tests
     lrrt_async_copy_tests
+    lrrt_pinned_host_memory_tests
   )
   lrrt_add_test_executable(
     lrrt_light_rocr_backend_tests
@@ -59,6 +60,15 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     lrrt_async_copy_tests
     async_copy.cpp
     lrrt::lrrt
+  )
+  lrrt_add_test_executable(
+    lrrt_pinned_host_memory_tests
+    pinned_host_memory.cpp
+    lrrt::lrrt
+  )
+  target_compile_definitions(
+    lrrt_pinned_host_memory_tests
+    PRIVATE LRRT_TEST_LIGHT_ROCR=1
   )
   lrrt_add_hsaco_kernel(
     light_rocr_copy_kernel

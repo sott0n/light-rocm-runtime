@@ -1139,11 +1139,38 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   if (!valid_event_locked(event) || event->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  if (kind != LR_MEMCPY_DEVICE_TO_DEVICE) {
-    return LR_ERROR_NOT_SUPPORTED;
-  }
-  if (!translate_light_rocr_device_pointer(dst, device, size) ||
-      !translate_light_rocr_device_pointer(src, device, size)) {
+  void *copy_dst = dst;
+  const void *copy_src = src;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    if (!translate_light_rocr_device_pointer(dst, device, size)) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    const void *mapped_src = nullptr;
+    const LightRocrHostPointerLookup lookup =
+        translate_light_rocr_host_pointer(src, device, size, &mapped_src);
+    if (lookup == LightRocrHostPointerLookup::Invalid) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == LightRocrHostPointerLookup::Unregistered) {
+      return LR_ERROR_NOT_SUPPORTED;
+    }
+    copy_src = mapped_src;
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    if (!translate_light_rocr_device_pointer(src, device, size)) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    const void *mapped_dst = nullptr;
+    const LightRocrHostPointerLookup lookup =
+        translate_light_rocr_host_pointer(dst, device, size, &mapped_dst);
+    if (lookup == LightRocrHostPointerLookup::Invalid) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == LightRocrHostPointerLookup::Unregistered) {
+      return LR_ERROR_NOT_SUPPORTED;
+    }
+    copy_dst = const_cast<void *>(mapped_dst);
+  } else if (!translate_light_rocr_device_pointer(dst, device, size) ||
+             !translate_light_rocr_device_pointer(src, device, size)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
@@ -1178,8 +1205,8 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   const uint32_t workgroups = static_cast<uint32_t>(
       std::min<uint64_t>(required_workgroups, kMaximumWorkgroups));
   const CopyArguments arguments = {
-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(src)),
-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(dst)),
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(copy_src)),
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(copy_dst)),
       static_cast<uint64_t>(size),
       static_cast<uint64_t>(workgroups) * kBlockSize, kBlockSize};
   const lr_launch_config_t config = {
