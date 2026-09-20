@@ -137,7 +137,11 @@ int main(void) {
     }
   }
 
+#ifdef LRRT_TEST_HIDDEN_KERNARGS
+  const lr_launch_config_t config = {{192, 1, 1}, {64, 1, 1}, 0};
+#else
   const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+#endif
   const copy_args_t producer_args = {(const float *)device_input,
                                      (float *)device_intermediate, n};
   const copy_args_t consumer_args = {(const float *)device_intermediate,

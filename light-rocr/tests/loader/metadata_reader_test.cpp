@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <utility>
 #include <vector>
@@ -95,7 +96,7 @@ std::string kernel_symbol_name(size_t index) {
   return std::string(kernel_name(index)) + ".kd";
 }
 
-uint32_t kernel_kernarg_size(size_t index) { return index == 0 ? 24 : 32; }
+uint32_t kernel_kernarg_size(size_t index) { return index == 0 ? 64 : 32; }
 
 uint32_t kernel_group_size(size_t index) { return index == 0 ? 4 : 0; }
 
@@ -113,7 +114,7 @@ std::vector<uint8_t> make_metadata(size_t kernel_count = 1) {
   append_string(&bytes, "amdhsa.kernels");
   bytes.push_back(static_cast<uint8_t>(0x90U | kernel_count));
   for (size_t index = 0; index < kernel_count; ++index) {
-    bytes.push_back(0x88); // kernel map(8)
+    bytes.push_back(0x89); // kernel map(9)
     append_string(&bytes, ".name");
     append_string(&bytes, kernel_name(index));
     append_string(&bytes, ".symbol");
@@ -128,6 +129,24 @@ std::vector<uint8_t> make_metadata(size_t kernel_count = 1) {
     append_uint_field(&bytes, ".wavefront_size", 32);
     append_string(&bytes, ".uses_dynamic_stack");
     bytes.push_back(0xc2);
+    append_string(&bytes, ".args");
+    if (index != 0) {
+      bytes.push_back(0x90);
+      continue;
+    }
+    const std::pair<uint32_t, std::pair<uint32_t, const char *>> arguments[] = {
+        {0, {8, "global_buffer"}},        {24, {4, "hidden_block_count_x"}},
+        {28, {2, "hidden_group_size_x"}}, {30, {2, "hidden_remainder_x"}},
+        {32, {2, "hidden_grid_dims"}},
+    };
+    bytes.push_back(static_cast<uint8_t>(0x90U | std::size(arguments)));
+    for (const auto &argument : arguments) {
+      bytes.push_back(0x83);
+      append_uint_field(&bytes, ".offset", argument.first);
+      append_uint_field(&bytes, ".size", argument.second.first);
+      append_string(&bytes, ".value_kind");
+      append_string(&bytes, argument.second.second);
+    }
   }
   return bytes;
 }
@@ -291,7 +310,7 @@ void valid_metadata(TestContext *context) {
                   "unexpected descriptor address");
   context->expect(kernel.code_entry_virtual_address == 0x2000,
                   "unexpected code entry");
-  context->expect(kernel.kernarg_size == 24, "unexpected kernarg size");
+  context->expect(kernel.kernarg_size == 64, "unexpected kernarg size");
   context->expect(kernel.metadata_kernarg_alignment == 8,
                   "unexpected raw kernarg alignment");
   context->expect(kernel.kernarg_alignment == 16,
@@ -301,6 +320,17 @@ void valid_metadata(TestContext *context) {
   context->expect(kernel.private_segment_size == 8,
                   "unexpected private segment size");
   context->expect(kernel.wavefront_size == 32, "unexpected wavefront size");
+  context->expect(kernel.explicit_argument_size == 24,
+                  "unexpected explicit argument boundary");
+  context->expect(kernel.arguments.size() == 5,
+                  "unexpected kernel argument count");
+  if (kernel.arguments.size() == 5) {
+    context->expect(
+        kernel.arguments[1].kind ==
+                light_rocr::loader::KernelArgumentKind::HiddenBlockCountX &&
+            kernel.arguments[1].offset == 24 && kernel.arguments[1].size == 4,
+        "hidden block count metadata was not decoded");
+  }
   context->expect(kernel.compute_pgm_rsrc1 == 0x1234,
                   "unexpected compute_pgm_rsrc1");
   context->expect(kernel.compute_pgm_rsrc2 == 0x5678,
@@ -331,6 +361,9 @@ void multiple_kernels_with_reordered_symbols(TestContext *context) {
                   "second descriptor was not resolved after symbol reorder");
   context->expect(result.code_object.kernels[1].kernarg_size == 32,
                   "unexpected second kernarg size");
+  context->expect(result.code_object.kernels[1].explicit_argument_size == 32 &&
+                      result.code_object.kernels[1].arguments.empty(),
+                  "empty argument metadata changed the explicit boundary");
   context->expect(result.code_object.kernels[1].private_segment_size == 16,
                   "unexpected second private segment size");
 }
@@ -447,6 +480,22 @@ void target_mismatch(TestContext *context) {
   }
   expect_error(context, bytes,
                light_rocr::loader::ParseErrorCode::MetadataTargetMismatch);
+}
+
+void unknown_kernel_argument_kind(TestContext *context) {
+  auto bytes = make_elf();
+  const std::string original = "global_buffer";
+  const std::string replacement = "mystery_value";
+  static_assert(sizeof("global_buffer") == sizeof("mystery_value"));
+  const auto found =
+      std::search(bytes.begin(), bytes.end(), original.begin(), original.end());
+  context->expect(found != bytes.end(), "argument kind fixture was not found");
+  if (found == bytes.end()) {
+    return;
+  }
+  std::copy(replacement.begin(), replacement.end(), found);
+  expect_error(context, bytes,
+               light_rocr::loader::ParseErrorCode::InvalidMetadata);
 }
 
 void missing_symbol(TestContext *context) {
@@ -567,6 +616,7 @@ int main() {
       {"excessive_messagepack_map_count", excessive_messagepack_map_count},
       {"truncated_messagepack", truncated_messagepack},
       {"target_mismatch", target_mismatch},
+      {"unknown_kernel_argument_kind", unknown_kernel_argument_kind},
       {"missing_symbol", missing_symbol},
       {"descriptor_out_of_bounds", descriptor_out_of_bounds},
       {"descriptor_metadata_mismatch", descriptor_metadata_mismatch},

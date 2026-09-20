@@ -3,6 +3,7 @@
 #if LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr/runtime/aql.hpp"
 #include "light_rocr_aql_queue.hpp"
+#include "light_rocr_kernargs.hpp"
 #endif
 #include "runtime_internal.hpp"
 
@@ -331,6 +332,9 @@ lr_status_t submit_light_rocr_kernel_locked(
 
   const light_rocr::loader::KernelInfo &kernel_info =
       executable_image.code_object().kernels[image_kernel_index];
+  if (args_size > kernel_info.explicit_argument_size) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
   const lr_status_t scratch_status = ensure_light_rocr_queue_scratch_locked(
       device, queue, kernel_info.private_segment_size);
   if (scratch_status != LR_SUCCESS) {
@@ -376,6 +380,12 @@ lr_status_t submit_light_rocr_kernel_locked(
       return LR_ERROR_RUNTIME;
     }
     return status;
+  }
+  if (!populate_light_rocr_hidden_kernargs(kernel_info, *config,
+                                           kernarg.buffer.host_address(),
+                                           kernarg.buffer.kernarg_size())) {
+    return kernarg.buffer.release() ? LR_ERROR_INVALID_ARGUMENT
+                                    : LR_ERROR_RUNTIME;
   }
 
   const auto &runtime_image = executable_image.runtime_image();

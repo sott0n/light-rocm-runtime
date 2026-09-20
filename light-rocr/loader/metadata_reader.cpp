@@ -491,6 +491,165 @@ ParseError metadata_uint32(const MessagePackValue &map, const char *name,
   return {};
 }
 
+bool kernel_argument_kind(const std::string &name, KernelArgumentKind *kind) {
+  const std::pair<const char *, KernelArgumentKind> kinds[] = {
+      {"by_value", KernelArgumentKind::ByValue},
+      {"global_buffer", KernelArgumentKind::GlobalBuffer},
+      {"dynamic_shared_pointer", KernelArgumentKind::DynamicSharedPointer},
+      {"sampler", KernelArgumentKind::Sampler},
+      {"image", KernelArgumentKind::Image},
+      {"pipe", KernelArgumentKind::Pipe},
+      {"queue", KernelArgumentKind::Queue},
+      {"hidden_block_count_x", KernelArgumentKind::HiddenBlockCountX},
+      {"hidden_block_count_y", KernelArgumentKind::HiddenBlockCountY},
+      {"hidden_block_count_z", KernelArgumentKind::HiddenBlockCountZ},
+      {"hidden_group_size_x", KernelArgumentKind::HiddenGroupSizeX},
+      {"hidden_group_size_y", KernelArgumentKind::HiddenGroupSizeY},
+      {"hidden_group_size_z", KernelArgumentKind::HiddenGroupSizeZ},
+      {"hidden_remainder_x", KernelArgumentKind::HiddenRemainderX},
+      {"hidden_remainder_y", KernelArgumentKind::HiddenRemainderY},
+      {"hidden_remainder_z", KernelArgumentKind::HiddenRemainderZ},
+      {"hidden_global_offset_x", KernelArgumentKind::HiddenGlobalOffsetX},
+      {"hidden_global_offset_y", KernelArgumentKind::HiddenGlobalOffsetY},
+      {"hidden_global_offset_z", KernelArgumentKind::HiddenGlobalOffsetZ},
+      {"hidden_grid_dims", KernelArgumentKind::HiddenGridDims},
+      {"hidden_none", KernelArgumentKind::HiddenNone},
+      {"hidden_printf_buffer", KernelArgumentKind::HiddenPrintfBuffer},
+      {"hidden_hostcall_buffer", KernelArgumentKind::HiddenHostcallBuffer},
+      {"hidden_heap_v1", KernelArgumentKind::HiddenHeapV1},
+      {"hidden_default_queue", KernelArgumentKind::HiddenDefaultQueue},
+      {"hidden_completion_action", KernelArgumentKind::HiddenCompletionAction},
+      {"hidden_multigrid_sync_arg", KernelArgumentKind::HiddenMultiGridSyncArg},
+      {"hidden_dynamic_lds_size", KernelArgumentKind::HiddenDynamicLdsSize},
+      {"hidden_private_base", KernelArgumentKind::HiddenPrivateBase},
+      {"hidden_shared_base", KernelArgumentKind::HiddenSharedBase},
+      {"hidden_queue_ptr", KernelArgumentKind::HiddenQueuePtr},
+  };
+  const auto found =
+      std::find_if(std::begin(kinds), std::end(kinds),
+                   [&name](const auto &entry) { return name == entry.first; });
+  if (found == std::end(kinds)) {
+    return false;
+  }
+  *kind = found->second;
+  return true;
+}
+
+bool is_hidden_argument(KernelArgumentKind kind) {
+  return kind >= KernelArgumentKind::HiddenBlockCountX;
+}
+
+uint32_t required_hidden_argument_size(KernelArgumentKind kind) {
+  switch (kind) {
+  case KernelArgumentKind::HiddenBlockCountX:
+  case KernelArgumentKind::HiddenBlockCountY:
+  case KernelArgumentKind::HiddenBlockCountZ:
+  case KernelArgumentKind::HiddenDynamicLdsSize:
+  case KernelArgumentKind::HiddenPrivateBase:
+  case KernelArgumentKind::HiddenSharedBase:
+    return 4;
+  case KernelArgumentKind::HiddenGroupSizeX:
+  case KernelArgumentKind::HiddenGroupSizeY:
+  case KernelArgumentKind::HiddenGroupSizeZ:
+  case KernelArgumentKind::HiddenRemainderX:
+  case KernelArgumentKind::HiddenRemainderY:
+  case KernelArgumentKind::HiddenRemainderZ:
+  case KernelArgumentKind::HiddenGridDims:
+    return 2;
+  case KernelArgumentKind::HiddenGlobalOffsetX:
+  case KernelArgumentKind::HiddenGlobalOffsetY:
+  case KernelArgumentKind::HiddenGlobalOffsetZ:
+  case KernelArgumentKind::HiddenPrintfBuffer:
+  case KernelArgumentKind::HiddenHostcallBuffer:
+  case KernelArgumentKind::HiddenHeapV1:
+  case KernelArgumentKind::HiddenDefaultQueue:
+  case KernelArgumentKind::HiddenCompletionAction:
+  case KernelArgumentKind::HiddenMultiGridSyncArg:
+  case KernelArgumentKind::HiddenQueuePtr:
+    return 8;
+  default:
+    return 0;
+  }
+}
+
+ParseError decode_kernel_arguments(const MessagePackValue &kernel_value,
+                                   KernelInfo *kernel) {
+  const MessagePackValue *arguments = find_field(kernel_value, ".args");
+  kernel->explicit_argument_size = kernel->kernarg_size;
+  if (arguments == nullptr) {
+    return {};
+  }
+  if (arguments->kind != MessagePackValue::Kind::Array) {
+    return failure(ParseErrorCode::InvalidMetadata, arguments->offset,
+                   "AMDHSA kernel .args is not an array");
+  }
+
+  kernel->arguments.reserve(arguments->array.size());
+  uint32_t first_hidden_offset = kernel->kernarg_size;
+  for (const MessagePackValue &argument_value : arguments->array) {
+    if (argument_value.kind != MessagePackValue::Kind::Map) {
+      return failure(ParseErrorCode::InvalidMetadata, argument_value.offset,
+                     "AMDHSA kernel argument is not a map");
+    }
+    KernelArgumentInfo argument;
+    ParseError error =
+        metadata_uint32(argument_value, ".offset", &argument.offset);
+    if (error.code != ParseErrorCode::None) {
+      return error;
+    }
+    error = metadata_uint32(argument_value, ".size", &argument.size);
+    if (error.code != ParseErrorCode::None) {
+      return error;
+    }
+    const MessagePackValue *value_kind = nullptr;
+    error = required_field(argument_value, ".value_kind",
+                           MessagePackValue::Kind::String, &value_kind);
+    if (error.code != ParseErrorCode::None) {
+      return error;
+    }
+    if (!kernel_argument_kind(value_kind->string, &argument.kind)) {
+      return failure(ParseErrorCode::InvalidMetadata, value_kind->offset,
+                     "AMDHSA kernel argument has an unknown value kind");
+    }
+    if (argument.size == 0 || argument.offset > kernel->kernarg_size ||
+        argument.size > kernel->kernarg_size - argument.offset) {
+      return failure(ParseErrorCode::InvalidMetadata, argument_value.offset,
+                     "AMDHSA kernel argument range exceeds the kernarg "
+                     "segment");
+    }
+    const uint32_t required_size = required_hidden_argument_size(argument.kind);
+    if (required_size != 0 && argument.size != required_size) {
+      return failure(ParseErrorCode::InvalidMetadata, argument_value.offset,
+                     "AMDHSA hidden kernel argument has an invalid size");
+    }
+    if (is_hidden_argument(argument.kind)) {
+      first_hidden_offset = std::min(first_hidden_offset, argument.offset);
+    }
+    kernel->arguments.push_back(argument);
+  }
+
+  std::sort(kernel->arguments.begin(), kernel->arguments.end(),
+            [](const KernelArgumentInfo &lhs, const KernelArgumentInfo &rhs) {
+              return lhs.offset < rhs.offset;
+            });
+  uint32_t previous_end = 0;
+  for (const KernelArgumentInfo &argument : kernel->arguments) {
+    if (argument.offset < previous_end) {
+      return failure(ParseErrorCode::InvalidMetadata, arguments->offset,
+                     "AMDHSA kernel argument ranges overlap");
+    }
+    if (!is_hidden_argument(argument.kind) &&
+        argument.offset + argument.size > first_hidden_offset) {
+      return failure(ParseErrorCode::InvalidMetadata, arguments->offset,
+                     "AMDHSA explicit kernel argument follows hidden "
+                     "arguments");
+    }
+    previous_end = argument.offset + argument.size;
+  }
+  kernel->explicit_argument_size = first_hidden_offset;
+  return {};
+}
+
 struct MetadataKernel {
   KernelInfo info;
   uint64_t metadata_offset = 0;
@@ -632,6 +791,11 @@ ParseError decode_metadata_document(const MessagePackValue &root,
           find_field(kernel_value, ".wavefront_size");
       return failure(ParseErrorCode::InvalidMetadata, wavefront->offset,
                      "kernel wavefront size must be 32 or 64");
+    }
+
+    error = decode_kernel_arguments(kernel_value, &kernel.info);
+    if (error.code != ParseErrorCode::None) {
+      return error;
     }
 
     error = required_field(kernel_value, ".uses_dynamic_stack",

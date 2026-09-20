@@ -92,7 +92,11 @@ int main(void) {
     return 1;
   }
 
+#ifdef LRRT_TEST_HIDDEN_KERNARGS
+  const int n = 130;
+#else
   const int n = 64;
+#endif
   float in[n];
   float out[n];
   for (int i = 0; i < n; ++i) {
@@ -153,7 +157,11 @@ int main(void) {
   }
 
   copy_args_t args = {(const float *)device_in, (float *)device_out, n};
+#ifdef LRRT_TEST_HIDDEN_KERNARGS
+  lr_launch_config_t config = {{192, 1, 1}, {64, 1, 1}, 0};
+#else
   lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
+#endif
 
   void *device_intermediate = NULL;
   status = lr_malloc(device, sizeof(out), &device_intermediate);

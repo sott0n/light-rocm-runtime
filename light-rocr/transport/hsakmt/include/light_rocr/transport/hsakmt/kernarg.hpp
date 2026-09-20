@@ -33,6 +33,9 @@ public:
   KernargBuffer &operator=(KernargBuffer &&) noexcept = delete;
   ~KernargBuffer() = default;
 
+  [[nodiscard]] void *host_address() {
+    return buffer_ ? allocation_.host_address() : nullptr;
+  }
   [[nodiscard]] const void *host_address() const {
     return buffer_ ? allocation_.host_address() : nullptr;
   }

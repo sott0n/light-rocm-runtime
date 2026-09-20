@@ -89,6 +89,46 @@ struct MetadataVersion {
   uint32_t minor = 0;
 };
 
+enum class KernelArgumentKind {
+  ByValue,
+  GlobalBuffer,
+  DynamicSharedPointer,
+  Sampler,
+  Image,
+  Pipe,
+  Queue,
+  HiddenBlockCountX,
+  HiddenBlockCountY,
+  HiddenBlockCountZ,
+  HiddenGroupSizeX,
+  HiddenGroupSizeY,
+  HiddenGroupSizeZ,
+  HiddenRemainderX,
+  HiddenRemainderY,
+  HiddenRemainderZ,
+  HiddenGlobalOffsetX,
+  HiddenGlobalOffsetY,
+  HiddenGlobalOffsetZ,
+  HiddenGridDims,
+  HiddenNone,
+  HiddenPrintfBuffer,
+  HiddenHostcallBuffer,
+  HiddenHeapV1,
+  HiddenDefaultQueue,
+  HiddenCompletionAction,
+  HiddenMultiGridSyncArg,
+  HiddenDynamicLdsSize,
+  HiddenPrivateBase,
+  HiddenSharedBase,
+  HiddenQueuePtr,
+};
+
+struct KernelArgumentInfo {
+  uint32_t offset = 0;
+  uint32_t size = 0;
+  KernelArgumentKind kind = KernelArgumentKind::ByValue;
+};
+
 struct KernelInfo {
   // Source-level kernel name and ELF kernel-descriptor symbol name.
   std::string name;
@@ -105,6 +145,8 @@ struct KernelInfo {
   uint32_t private_segment_size = 0;
   uint32_t wavefront_size = 0;
   bool uses_dynamic_stack = false;
+  std::vector<KernelArgumentInfo> arguments;
+  uint32_t explicit_argument_size = 0;
 
   uint32_t compute_pgm_rsrc1 = 0;
   uint32_t compute_pgm_rsrc2 = 0;

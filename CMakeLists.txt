@@ -137,6 +137,7 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
   endif()
 
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR=1)
+  target_sources(lrrt PRIVATE src/light_rocr_kernargs.cpp)
   target_link_libraries(lrrt PRIVATE light_rocr::transport_hsakmt)
 
   lrrt_add_hsaco_kernel(

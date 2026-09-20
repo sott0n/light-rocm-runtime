@@ -33,6 +33,19 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     lrrt::lrrt
   )
   lrrt_add_test_executable(
+    lrrt_light_rocr_kernarg_tests
+    light_rocr_kernargs.cpp
+    lrrt::lrrt
+  )
+  target_include_directories(
+    lrrt_light_rocr_kernarg_tests
+    PRIVATE "${PROJECT_SOURCE_DIR}/src"
+  )
+  target_link_libraries(
+    lrrt_light_rocr_kernarg_tests
+    PRIVATE light_rocr::loader
+  )
+  lrrt_add_test_executable(
     lrrt_memory_bounds_tests
     memory_bounds.cpp
     lrrt::lrrt
@@ -51,6 +64,7 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     light_rocr_copy_kernel
     tests/copy_kernel_kernel.cpp
     LIGHT_ROCR_COPY_HSACO
+    -DLRRT_TEST_HIDDEN_KERNARGS=1
   )
   if(LIGHT_ROCR_COPY_HSACO)
     lrrt_add_test_executable(
@@ -64,6 +78,10 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
       LRRT_COPY_HSACO
       "${LIGHT_ROCR_COPY_HSACO}"
     )
+    target_compile_definitions(
+      lrrt_copy_kernel_tests
+      PRIVATE LRRT_TEST_HIDDEN_KERNARGS=1
+    )
     lrrt_add_test_executable(
       lrrt_kernel_event_dependencies_tests
       kernel_event_dependencies.cpp
@@ -74,6 +92,10 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
       light_rocr_copy_kernel_hsaco
       LRRT_COPY_HSACO
       "${LIGHT_ROCR_COPY_HSACO}"
+    )
+    target_compile_definitions(
+      lrrt_kernel_event_dependencies_tests
+      PRIVATE LRRT_TEST_HIDDEN_KERNARGS=1
     )
     list(APPEND LRRT_LIGHT_ROCR_GPU_TESTS lrrt_copy_kernel_tests)
     list(
