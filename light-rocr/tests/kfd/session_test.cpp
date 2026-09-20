@@ -11,6 +11,8 @@ namespace {
 
 static_assert(sizeof(light_rocr::transport::kfd::VmResult) > 0,
               "session.hpp must provide the acquire_vm result type");
+static_assert(sizeof(light_rocr::transport::kfd::UserSignalResult) > 0,
+              "session.hpp must provide the create_user_signal result type");
 
 struct TestContext {
   int failures = 0;
@@ -64,6 +66,19 @@ void ioctl_failure_is_reported(TestContext *context) {
                   "ioctl failure errno was not preserved");
 }
 
+void invalid_session_rejects_signal_creation(TestContext *context) {
+  light_rocr::transport::kfd::KfdSession session;
+  const light_rocr::runtime::Node node;
+  auto created = session.create_user_signal(node, 1);
+  context->expect(!created, "invalid session unexpectedly created a signal");
+  context->expect(
+      created.status.error ==
+          light_rocr::transport::kfd::UserSignalError::InvalidSession,
+      "wrong invalid-session signal error");
+  context->expect(!created.signal,
+                  "invalid session returned signal resource ownership");
+}
+
 } // namespace
 
 int main() {
@@ -71,6 +86,7 @@ int main() {
       {"version contract", version_contract},
       {"missing device", missing_device_is_reported},
       {"ioctl failure", ioctl_failure_is_reported},
+      {"invalid signal session", invalid_session_rejects_signal_creation},
   };
 
   int failures = 0;

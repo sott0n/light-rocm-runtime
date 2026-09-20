@@ -25,12 +25,18 @@
 #include <system_error>
 #include <utility>
 
+#if defined(__x86_64__)
+#include <emmintrin.h>
+#endif
+
 namespace light_rocr::transport::kfd {
 namespace {
 
 static_assert(sizeof(runtime::AmdQueueV1) <= kMemoryPageSize);
 static_assert(sizeof(uintptr_t) == sizeof(uint64_t));
 static_assert(sizeof(off_t) == sizeof(uint64_t));
+static_assert(__atomic_always_lock_free(sizeof(uint16_t), nullptr));
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr));
 
 constexpr uint16_t kAqlInvalidPacketHeader = 1;
 constexpr uint64_t kEopBufferSize = kMemoryPageSize;
@@ -139,8 +145,22 @@ int real_munmap(void *address, size_t length) {
   return ::munmap(address, length);
 }
 
+int real_madvise(void *address, size_t length, int advice) {
+  return ::madvise(address, length, advice);
+}
+
 detail::QueueSyscalls real_syscalls() {
-  return {real_ioctl, real_mmap, real_munmap};
+  return {real_ioctl, real_mmap, real_munmap, real_madvise};
+}
+
+void fence_before_doorbell_store() {
+#if defined(__x86_64__)
+  _mm_sfence();
+#elif defined(__aarch64__)
+  __asm__ __volatile__("dmb oshst" ::: "memory");
+#else
+#error "light-rocr needs an audited host MMIO store fence for this architecture"
+#endif
 }
 
 void initialize_ring(GttAllocation *ring) {
@@ -165,7 +185,8 @@ namespace {
 bool valid_syscalls(QueueSyscalls syscalls) {
   return syscalls.ioctl_function != nullptr &&
          syscalls.mmap_function != nullptr &&
-         syscalls.munmap_function != nullptr;
+         syscalls.munmap_function != nullptr &&
+         syscalls.madvise_function != nullptr;
 }
 
 bool invoke_ioctl(int fd, unsigned long request, void *arguments,
@@ -343,6 +364,11 @@ RawAqlQueueResult create_aql_queue(int kfd_fd, const AqlQueueCreateInfo &info,
              "AQL queue requires a 4-byte or 8-byte doorbell"},
             {}};
   }
+  if (info.doorbell_mapping_address == nullptr) {
+    return {{AqlQueueError::InvalidDoorbell, 0,
+             "AQL queue requires reserved GPUVM doorbell storage"},
+            {}};
+  }
 
   kfd_ioctl_create_queue_args arguments{};
   arguments.ring_base_address = info.ring_address;
@@ -395,8 +421,9 @@ RawAqlQueueResult create_aql_queue(int kfd_fd, const AqlQueueCreateInfo &info,
   // pattern when crossing the signed Linux off_t API boundary.
   std::memcpy(&mmap_offset, &mapping_offset, sizeof(mmap_offset));
   void *mapping = syscalls.mmap_function(
-      nullptr, static_cast<size_t>(queue.doorbell_mapping_size),
-      PROT_READ | PROT_WRITE, MAP_SHARED, kfd_fd, mmap_offset);
+      info.doorbell_mapping_address,
+      static_cast<size_t>(queue.doorbell_mapping_size), PROT_READ | PROT_WRITE,
+      MAP_SHARED | MAP_FIXED, kfd_fd, mmap_offset);
   if (mapping == MAP_FAILED) {
     AqlQueueStatus status = system_failure(AqlQueueError::MapDoorbell, errno,
                                            "mmap(KFD AQL doorbell)");
@@ -410,6 +437,17 @@ RawAqlQueueResult create_aql_queue(int kfd_fd, const AqlQueueCreateInfo &info,
   queue.doorbell_mapping = mapping;
   queue.doorbell_address = reinterpret_cast<uintptr_t>(mapping) +
                            static_cast<uintptr_t>(doorbell_offset);
+  if (syscalls.madvise_function(
+          mapping, static_cast<size_t>(queue.doorbell_mapping_size),
+          MADV_DONTFORK) != 0) {
+    AqlQueueStatus status = system_failure(AqlQueueError::MapDoorbell, errno,
+                                           "madvise(KFD AQL doorbell)");
+    const AqlQueueStatus cleanup = release_aql_queue(kfd_fd, &queue, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+    }
+    return {std::move(status), std::move(queue)};
+  }
   return {{}, std::move(queue)};
 }
 
@@ -461,7 +499,8 @@ struct AqlQueueState {
            (ring.has_value() && static_cast<bool>(*ring)) ||
            (control.has_value() && static_cast<bool>(*control)) ||
            (eop.has_value() && static_cast<bool>(*eop)) ||
-           (cwsr.has_value() && static_cast<bool>(*cwsr));
+           (cwsr.has_value() && static_cast<bool>(*cwsr)) ||
+           (doorbell.has_value() && static_cast<bool>(*doorbell));
   }
 
   std::shared_ptr<KfdState> session;
@@ -469,6 +508,7 @@ struct AqlQueueState {
   std::optional<GttAllocation> control;
   std::optional<GttAllocation> eop;
   std::optional<GttAllocation> cwsr;
+  std::optional<GttAllocation> doorbell;
   uint64_t ring_size = 0;
   detail::RawAqlQueue queue;
 };
@@ -497,6 +537,8 @@ const char *aql_queue_error_name(AqlQueueError error) {
     return "invalid_cwsr_layout";
   case AqlQueueError::AllocateCwsr:
     return "allocate_cwsr";
+  case AqlQueueError::AllocateDoorbell:
+    return "allocate_doorbell";
   case AqlQueueError::CreateQueue:
     return "create_queue";
   case AqlQueueError::InvalidDoorbell:
@@ -511,10 +553,28 @@ const char *aql_queue_error_name(AqlQueueError error) {
     return "release_eop";
   case AqlQueueError::ReleaseCwsr:
     return "release_cwsr";
+  case AqlQueueError::ReleaseDoorbell:
+    return "release_doorbell";
   case AqlQueueError::ReleaseControl:
     return "release_control";
   case AqlQueueError::ReleaseRing:
     return "release_ring";
+  }
+  return "unknown";
+}
+
+const char *aql_queue_primitive_error_name(AqlQueuePrimitiveError error) {
+  switch (error) {
+  case AqlQueuePrimitiveError::None:
+    return "none";
+  case AqlQueuePrimitiveError::InvalidQueue:
+    return "invalid_queue";
+  case AqlQueuePrimitiveError::InvalidIncrement:
+    return "invalid_increment";
+  case AqlQueuePrimitiveError::IndexOverflow:
+    return "index_overflow";
+  case AqlQueuePrimitiveError::InvalidDoorbell:
+    return "invalid_doorbell";
   }
   return "unknown";
 }
@@ -576,7 +636,7 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
             {}};
   }
 
-  auto ring = allocate_gtt_impl(node, ring_size, dri_root, true);
+  auto ring = allocate_gtt_impl(node, ring_size, dri_root, GttUsage::AqlRing);
   queue_state->ring.emplace(std::move(ring.allocation));
   if (!ring) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateRing,
@@ -587,25 +647,23 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
   }
   initialize_ring(&*queue_state->ring);
 
-  auto control = allocate_gtt_impl(node, kMemoryPageSize, dri_root, false);
+  auto control =
+      allocate_gtt_impl(node, kMemoryPageSize, dri_root, GttUsage::General);
   queue_state->control.emplace(std::move(control.allocation));
   if (!control) {
     AqlQueueStatus status = allocation_failure(
         AqlQueueError::AllocateControl, control.status, "AQL queue control");
     return {std::move(status), AqlQueue(std::move(queue_state))};
   }
-  auto eop = allocate_gtt_impl(node, kEopBufferSize, dri_root, false);
+  auto eop = allocate_gtt_impl(node, kEopBufferSize, dri_root, GttUsage::Eop);
   queue_state->eop.emplace(std::move(eop.allocation));
   if (!eop) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateEop,
                                                eop.status, "AQL EOP buffer");
     return {std::move(status), AqlQueue(std::move(queue_state))};
   }
-  std::memset(queue_state->eop->host_address(), 0,
-              static_cast<size_t>(queue_state->eop->size()));
-
-  auto cwsr =
-      allocate_gtt_impl(node, cwsr_layout.allocation_size, dri_root, false);
+  auto cwsr = allocate_gtt_impl(node, cwsr_layout.allocation_size, dri_root,
+                                GttUsage::General);
   queue_state->cwsr.emplace(std::move(cwsr.allocation));
   if (!cwsr) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateCwsr,
@@ -613,6 +671,17 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
     return {std::move(status), AqlQueue(std::move(queue_state))};
   }
   detail::initialize_cwsr(queue_state->cwsr->host_address(), cwsr_layout);
+
+  const uint64_t doorbell_mapping_size =
+      std::max<uint64_t>(kMemoryPageSize, uint64_t{kDoorbellCount} * 8U);
+  auto doorbell = allocate_gtt_impl(node, doorbell_mapping_size, dri_root,
+                                    GttUsage::Doorbell);
+  queue_state->doorbell.emplace(std::move(doorbell.allocation));
+  if (!doorbell) {
+    AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateDoorbell,
+                                               doorbell.status, "AQL doorbell");
+    return {std::move(status), AqlQueue(std::move(queue_state))};
+  }
 
   std::memset(queue_state->control->host_address(), 0,
               static_cast<size_t>(queue_state->control->size()));
@@ -647,12 +716,20 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
   info.context_save_restore_size = cwsr_layout.context_save_restore_size;
   info.control_stack_size = cwsr_layout.control_stack_size;
   info.doorbell_size = node.architecture.major >= 9 ? 8U : 4U;
+  info.doorbell_mapping_address = queue_state->doorbell->host_address();
 
   detail::RawAqlQueueResult created =
       detail::create_aql_queue(state_->fd, info, real_syscalls());
   queue_state->queue = std::move(created.queue);
   if (!created) {
     return {std::move(created.status), AqlQueue(std::move(queue_state))};
+  }
+  const MemoryStatus doorbell_mapped =
+      map_pending_allocation(&*queue_state->doorbell);
+  if (!doorbell_mapped) {
+    return {{AqlQueueError::MapDoorbell, doorbell_mapped.system_error,
+             "AQL doorbell GPU mapping failed: " + doorbell_mapped.message},
+            AqlQueue(std::move(queue_state))};
   }
   return {{}, AqlQueue(std::move(queue_state))};
 }
@@ -724,6 +801,54 @@ uint64_t AqlQueue::write_index_relaxed() const {
   return __atomic_load_n(&control->write_dispatch_id, __ATOMIC_RELAXED);
 }
 
+AqlQueueIndexResult AqlQueue::add_write_index_scacq_screl(uint64_t increment) {
+  if (state_ == nullptr || !state_->queue.active ||
+      !state_->control.has_value() ||
+      state_->control->host_address() == nullptr) {
+    return {{AqlQueuePrimitiveError::InvalidQueue, "AQL queue is not active"},
+            0};
+  }
+  if (increment == 0) {
+    return {{AqlQueuePrimitiveError::InvalidIncrement,
+             "queue write-index increment must be non-zero"},
+            0};
+  }
+
+  auto *control =
+      static_cast<runtime::AmdQueueV1 *>(state_->control->host_address());
+  uint64_t previous =
+      __atomic_load_n(&control->write_dispatch_id, __ATOMIC_SEQ_CST);
+  while (true) {
+    if (previous > std::numeric_limits<uint64_t>::max() - increment) {
+      return {{AqlQueuePrimitiveError::IndexOverflow,
+               "queue write-index increment would overflow"},
+              previous};
+    }
+    const uint64_t desired = previous + increment;
+    if (__atomic_compare_exchange_n(&control->write_dispatch_id, &previous,
+                                    desired, false, __ATOMIC_SEQ_CST,
+                                    __ATOMIC_SEQ_CST)) {
+      return {{}, previous};
+    }
+  }
+}
+
+AqlQueuePrimitiveStatus AqlQueue::store_doorbell_screlease(uint64_t value) {
+  if (state_ == nullptr || !state_->queue.active) {
+    return {AqlQueuePrimitiveError::InvalidQueue, "AQL queue is not active"};
+  }
+  if (state_->queue.doorbell_address == 0) {
+    return {AqlQueuePrimitiveError::InvalidDoorbell,
+            "AQL queue has no doorbell mapping"};
+  }
+
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  fence_before_doorbell_store();
+  auto *doorbell = reinterpret_cast<uint64_t *>(state_->queue.doorbell_address);
+  __atomic_store_n(doorbell, value, __ATOMIC_RELAXED);
+  return {};
+}
+
 AqlQueue::operator bool() const {
   return state_ != nullptr && state_->queue.active &&
          state_->queue.doorbell_address != 0;
@@ -738,6 +863,14 @@ AqlQueueStatus AqlQueue::release() {
       real_syscalls());
   if (!queue_status) {
     return queue_status;
+  }
+  if (state_->doorbell.has_value()) {
+    const MemoryStatus doorbell_status = state_->doorbell->release();
+    if (!doorbell_status) {
+      return {AqlQueueError::ReleaseDoorbell, doorbell_status.system_error,
+              "AQL doorbell cleanup failed: " + doorbell_status.message};
+    }
+    state_->doorbell.reset();
   }
   if (state_->cwsr.has_value()) {
     const MemoryStatus cwsr_status = state_->cwsr->release();

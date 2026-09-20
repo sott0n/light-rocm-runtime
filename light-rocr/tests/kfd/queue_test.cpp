@@ -24,6 +24,7 @@ struct FakeSystem {
   bool map_fails = false;
   bool destroy_fails = false;
   bool unmap_fails = false;
+  bool advise_fails = false;
   bool contract_valid = true;
   std::vector<std::string> calls;
 };
@@ -76,9 +77,11 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
 void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
                 off_t offset) {
   fake->contract_valid =
-      fake->contract_valid && address == nullptr && length == 8192 &&
-      protection == (PROT_READ | PROT_WRITE) && flags == MAP_SHARED &&
-      fd == 17 && offset == static_cast<off_t>(kDoorbellMappingOffset);
+      fake->contract_valid &&
+      address == reinterpret_cast<void *>(kDoorbellMappingAddress) &&
+      length == 8192 && protection == (PROT_READ | PROT_WRITE) &&
+      flags == (MAP_SHARED | MAP_FIXED) && fd == 17 &&
+      offset == static_cast<off_t>(kDoorbellMappingOffset);
   fake->calls.emplace_back("map");
   if (fake->map_fails) {
     errno = ENXIO;
@@ -100,8 +103,21 @@ int fake_munmap(void *address, size_t length) {
   return 0;
 }
 
+int fake_madvise(void *address, size_t length, int advice) {
+  fake->contract_valid =
+      fake->contract_valid &&
+      address == reinterpret_cast<void *>(kDoorbellMappingAddress) &&
+      length == 8192 && advice == MADV_DONTFORK;
+  fake->calls.emplace_back("advise");
+  if (fake->advise_fails) {
+    errno = EINVAL;
+    return -1;
+  }
+  return 0;
+}
+
 light_rocr::transport::kfd::detail::QueueSyscalls syscalls() {
-  return {fake_ioctl, fake_mmap, fake_munmap};
+  return {fake_ioctl, fake_mmap, fake_munmap, fake_madvise};
 }
 
 light_rocr::transport::kfd::detail::AqlQueueCreateInfo create_info() {
@@ -117,6 +133,8 @@ light_rocr::transport::kfd::detail::AqlQueueCreateInfo create_info() {
   info.context_save_restore_size = 0x1b72000;
   info.control_stack_size = 0x6000;
   info.doorbell_size = 8;
+  info.doorbell_mapping_address =
+      reinterpret_cast<void *>(kDoorbellMappingAddress);
   return info;
 }
 
@@ -153,7 +171,8 @@ void successful_round_trip(TestContext *context) {
                   released.message);
   context->expect(state.contract_valid, "KFD queue syscall contract changed");
   context->expect(state.calls == std::vector<std::string>{"create", "map",
-                                                          "destroy", "unmap"},
+                                                          "advise", "destroy",
+                                                          "unmap"},
                   "queue lifecycle order changed");
   fake = nullptr;
 }
@@ -216,6 +235,25 @@ void failed_rollback_is_retryable(TestContext *context) {
   fake = nullptr;
 }
 
+void madvise_failure_releases_mapping_and_queue(TestContext *context) {
+  FakeSystem state;
+  state.advise_fails = true;
+  fake = &state;
+  auto created = light_rocr::transport::kfd::detail::create_aql_queue(
+      17, create_info(), syscalls());
+  context->expect(
+      !created &&
+          created.status.error ==
+              light_rocr::transport::kfd::AqlQueueError::MapDoorbell &&
+          !created.queue.active && created.queue.doorbell_mapping == nullptr,
+      "doorbell madvise failure retained queue resources");
+  context->expect(state.calls == std::vector<std::string>{"create", "map",
+                                                          "advise", "destroy",
+                                                          "unmap"},
+                  "doorbell madvise rollback order changed");
+  fake = nullptr;
+}
+
 void unmap_failure_does_not_redestroy(TestContext *context) {
   FakeSystem state;
   fake = &state;
@@ -234,8 +272,8 @@ void unmap_failure_does_not_redestroy(TestContext *context) {
   context->expect(released && created.queue.doorbell_mapping == nullptr,
                   "doorbell unmap retry did not complete");
   context->expect(state.calls == std::vector<std::string>{"create", "map",
-                                                          "destroy", "unmap",
-                                                          "unmap"},
+                                                          "advise", "destroy",
+                                                          "unmap", "unmap"},
                   "doorbell unmap retry destroyed the queue twice");
   fake = nullptr;
 }
@@ -325,6 +363,22 @@ void kernel_cwsr_sizes_take_precedence(TestContext *context) {
                   "kernel CWSR sizes were not preferred");
 }
 
+void inactive_queue_rejects_producer_operations(TestContext *context) {
+  light_rocr::transport::kfd::AqlQueue queue;
+  const auto reserved = queue.add_write_index_scacq_screl(1);
+  const auto doorbell = queue.store_doorbell_screlease(0);
+  context->expect(
+      !reserved &&
+          reserved.status.error ==
+              light_rocr::transport::kfd::AqlQueuePrimitiveError::InvalidQueue,
+      "inactive queue accepted a write-index reservation");
+  context->expect(
+      !doorbell &&
+          doorbell.error ==
+              light_rocr::transport::kfd::AqlQueuePrimitiveError::InvalidQueue,
+      "inactive queue accepted a doorbell store");
+}
+
 } // namespace
 
 int main() {
@@ -333,10 +387,13 @@ int main() {
       {"create failure", create_failure_has_no_owned_queue},
       {"map failure", map_failure_destroys_queue},
       {"failed rollback", failed_rollback_is_retryable},
+      {"madvise failure", madvise_failure_releases_mapping_and_queue},
       {"unmap retry", unmap_failure_does_not_redestroy},
       {"invalid inputs", invalid_inputs_issue_no_syscall},
       {"gfx1101 CWSR layout", gfx1101_cwsr_layout},
       {"kernel CWSR sizes", kernel_cwsr_sizes_take_precedence},
+      {"inactive producer operations",
+       inactive_queue_rejects_producer_operations},
   };
 
   int failures = 0;

@@ -93,8 +93,8 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
                                     const ProcessAperture &aperture,
                                     uint64_t size, GttAllocationUsage usage,
                                     MemorySyscalls syscalls) {
-  if (kfd_fd < 0 || render_fd < 0 || aperture.gpu_id == 0 ||
-      !valid_syscalls(syscalls)) {
+  if (kfd_fd < 0 || (usage != GttAllocationUsage::Doorbell && render_fd < 0) ||
+      aperture.gpu_id == 0 || !valid_syscalls(syscalls)) {
     return {{MemoryError::InvalidSession, 0,
              "GTT allocation requires an acquired KFD VM"},
             {}};
@@ -172,11 +172,27 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
   arguments.va_addr = host_address;
   arguments.size = backing_size;
   arguments.gpu_id = aperture.gpu_id;
-  arguments.flags = static_cast<uint32_t>(
-      KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
-      KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
-  if (usage == GttAllocationUsage::AqlRing) {
-    arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM |
+  if (usage == GttAllocationUsage::Doorbell) {
+    arguments.flags = static_cast<uint32_t>(
+        KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+        KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
+        KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  } else if (usage == GttAllocationUsage::Eop) {
+    arguments.flags = static_cast<uint32_t>(
+        KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+        KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
+        KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  } else {
+    arguments.flags = static_cast<uint32_t>(
+        KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+        KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
+        KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  }
+  if (usage == GttAllocationUsage::Executable) {
+    arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
+  } else if (usage == GttAllocationUsage::AqlRing) {
+    arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
+                       KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM |
                        KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED;
   }
   int system_error = 0;
@@ -208,23 +224,25 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
                               0,
                               false};
 
-  if (arguments.mmap_offset >
-      static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
-    return rollback_gtt(
-        {MemoryError::MapHost, 0,
-         "KFD returned a GTT mmap offset outside the host off_t range"},
-        kfd_fd, std::move(allocation), syscalls);
-  }
-
   void *host = reinterpret_cast<void *>(static_cast<uintptr_t>(host_address));
-  void *mapped = syscalls.mmap_function(
-      host, static_cast<size_t>(size), PROT_READ | PROT_WRITE,
-      MAP_SHARED | MAP_FIXED, render_fd,
-      static_cast<off_t>(arguments.mmap_offset));
-  if (mapped == MAP_FAILED) {
-    return rollback_gtt(system_failure(MemoryError::MapHost, errno,
-                                       "mmap(GTT render-node mapping)"),
-                        kfd_fd, std::move(allocation), syscalls);
+  if (usage != GttAllocationUsage::Doorbell) {
+    if (arguments.mmap_offset >
+        static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
+      return rollback_gtt(
+          {MemoryError::MapHost, 0,
+           "KFD returned a GTT mmap offset outside the host off_t range"},
+          kfd_fd, std::move(allocation), syscalls);
+    }
+    const int protection =
+        usage == GttAllocationUsage::Eop ? PROT_NONE : PROT_READ | PROT_WRITE;
+    void *mapped = syscalls.mmap_function(
+        host, static_cast<size_t>(size), protection, MAP_SHARED | MAP_FIXED,
+        render_fd, static_cast<off_t>(arguments.mmap_offset));
+    if (mapped == MAP_FAILED) {
+      return rollback_gtt(system_failure(MemoryError::MapHost, errno,
+                                         "mmap(GTT render-node mapping)"),
+                          kfd_fd, std::move(allocation), syscalls);
+    }
   }
   allocation.host_address = host;
 
@@ -235,10 +253,12 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
                         kfd_fd, std::move(allocation), syscalls);
   }
 
-  const MemoryStatus gpu_mapped =
-      map_gtt(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
-  if (!gpu_mapped) {
-    return rollback_gtt(gpu_mapped, kfd_fd, std::move(allocation), syscalls);
+  if (usage != GttAllocationUsage::Doorbell) {
+    const MemoryStatus gpu_mapped =
+        map_gtt(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
+    if (!gpu_mapped) {
+      return rollback_gtt(gpu_mapped, kfd_fd, std::move(allocation), syscalls);
+    }
   }
 
   return {{}, std::move(allocation)};
@@ -461,13 +481,19 @@ const char *memory_error_name(MemoryError error) {
 GttAllocationResult
 KfdSession::allocate_gtt(const runtime::Node &node, uint64_t size,
                          const std::string &dri_root) const {
-  return allocate_gtt_impl(node, size, dri_root, false);
+  return allocate_gtt_impl(node, size, dri_root, GttUsage::General);
+}
+
+GttAllocationResult
+KfdSession::allocate_executable_gtt(const runtime::Node &node, uint64_t size,
+                                    const std::string &dri_root) const {
+  return allocate_gtt_impl(node, size, dri_root, GttUsage::Executable);
 }
 
 GttAllocationResult KfdSession::allocate_gtt_impl(const runtime::Node &node,
                                                   uint64_t size,
                                                   const std::string &dri_root,
-                                                  bool aql_ring) const {
+                                                  GttUsage usage) const {
   if (state_ == nullptr) {
     return {{MemoryError::InvalidSession, 0,
              "GTT allocation requires an open KFD session"},
@@ -505,11 +531,14 @@ GttAllocationResult KfdSession::allocate_gtt_impl(const runtime::Node &node,
     render_fd = device->second.render_fd;
   }
 
-  detail::RawGttAllocationResult allocated =
-      detail::allocate_gtt(state_->fd, render_fd, acquired.aperture, size,
-                           aql_ring ? detail::GttAllocationUsage::AqlRing
-                                    : detail::GttAllocationUsage::General,
-                           real_syscalls());
+  detail::RawGttAllocationResult allocated = detail::allocate_gtt(
+      state_->fd, render_fd, acquired.aperture, size,
+      usage == GttUsage::AqlRing      ? detail::GttAllocationUsage::AqlRing
+      : usage == GttUsage::Doorbell   ? detail::GttAllocationUsage::Doorbell
+      : usage == GttUsage::Eop        ? detail::GttAllocationUsage::Eop
+      : usage == GttUsage::Executable ? detail::GttAllocationUsage::Executable
+                                      : detail::GttAllocationUsage::General,
+      real_syscalls());
   if (!allocated) {
     detail::RawGttAllocation &raw = allocated.allocation;
     if (raw.reservation_address == nullptr && raw.handle == 0) {
@@ -527,6 +556,39 @@ GttAllocationResult KfdSession::allocate_gtt_impl(const runtime::Node &node,
                         raw.host_address, raw.size, raw.handle,
                         std::move(raw.gpu_ids), raw.mapped_device_count,
                         raw.unmapped_device_count, raw.map_complete)};
+}
+
+MemoryStatus
+KfdSession::map_pending_allocation(GttAllocation *allocation) const {
+  if (state_ == nullptr || allocation == nullptr ||
+      allocation->state_ != state_ || allocation->handle_ == 0) {
+    return {MemoryError::InvalidSession, 0,
+            "GPU mapping requires an allocation owned by this KFD session"};
+  }
+
+  detail::RawGttAllocation raw;
+  try {
+    raw.gpu_ids = allocation->gpu_ids_;
+  } catch (const std::bad_alloc &) {
+    return {MemoryError::AllocateState, 0,
+            "failed to copy pending GPU mapping state"};
+  }
+  raw.reservation_address = allocation->reservation_address_;
+  raw.reservation_size = allocation->reservation_size_;
+  raw.host_address = allocation->host_address_;
+  raw.size = allocation->size_;
+  raw.handle = allocation->handle_;
+  raw.mapped_device_count = allocation->mapped_device_count_;
+  raw.unmapped_device_count = allocation->unmapped_device_count_;
+  raw.map_complete = allocation->map_complete_;
+
+  const MemoryStatus status =
+      detail::map_gtt(state_->fd, &raw, allocation->gpu_ids_, real_syscalls());
+  allocation->gpu_ids_ = std::move(raw.gpu_ids);
+  allocation->mapped_device_count_ = raw.mapped_device_count;
+  allocation->unmapped_device_count_ = raw.unmapped_device_count;
+  allocation->map_complete_ = raw.map_complete;
+  return status;
 }
 
 GttAllocation::GttAllocation(GttAllocation &&other) noexcept

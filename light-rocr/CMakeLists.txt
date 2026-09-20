@@ -93,6 +93,7 @@ if(LIGHT_ROCR_ENABLE_KFD)
       transport/kfd/memory.cpp
       transport/kfd/queue.cpp
       transport/kfd/session.cpp
+      transport/kfd/signal.cpp
       transport/kfd/topology.cpp
       transport/kfd/vm.cpp
     )

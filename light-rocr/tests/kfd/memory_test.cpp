@@ -39,6 +39,10 @@ struct FakeSystem {
   uint64_t expected_allocation_size = 8192;
   size_t expected_reservation_size = 16384;
   size_t expected_host_mapping_size = 8192;
+  int expected_host_protection = PROT_READ | PROT_WRITE;
+  uint32_t expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   uint32_t expected_extra_allocation_flags = 0;
   std::vector<uint32_t> map_starts;
   std::vector<uint32_t> unmap_starts;
@@ -57,11 +61,7 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
   if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU) {
     auto *args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arguments);
     const uint32_t expected_flags =
-        static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_GTT |
-                              KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
-                              KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
-                              KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE) |
-        fake->expected_extra_allocation_flags;
+        fake->expected_allocation_flags | fake->expected_extra_allocation_flags;
     fake->contract_valid = fake->contract_valid &&
                            args->va_addr == kHostAddress &&
                            args->size == fake->expected_allocation_size &&
@@ -154,7 +154,7 @@ void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
   fake->contract_valid = fake->contract_valid &&
                          address == reinterpret_cast<void *>(kHostAddress) &&
                          length == fake->expected_host_mapping_size &&
-                         protection == (PROT_READ | PROT_WRITE) &&
+                         protection == fake->expected_host_protection &&
                          flags == (MAP_SHARED | MAP_FIXED) && fd == 23 &&
                          offset == static_cast<off_t>(kMmapOffset);
   fake->calls.emplace_back("map_host");
@@ -271,6 +271,7 @@ void aql_ring_uses_double_uncached_backing(TestContext *context) {
   state.expected_allocation_size = 16384;
   state.expected_reservation_size = 24576;
   state.expected_extra_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
       KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM | KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED);
   fake = &state;
   auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
@@ -281,6 +282,65 @@ void aql_ring_uses_double_uncached_backing(TestContext *context) {
                   allocated.status.message);
   context->expect(state.contract_valid,
                   "AQL ring backing allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  fake = nullptr;
+}
+
+void executable_gtt_sets_kfd_flag(TestContext *context) {
+  FakeSystem state;
+  state.expected_extra_allocation_flags = KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, 23, aperture(), 8192,
+      light_rocr::transport::kfd::detail::GttAllocationUsage::Executable,
+      syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(state.contract_valid,
+                  "executable GTT allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  fake = nullptr;
+}
+
+void doorbell_reserves_gpuvm_without_render_mapping(TestContext *context) {
+  FakeSystem state;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, -1, aperture(), 8192,
+      light_rocr::transport::kfd::detail::GttAllocationUsage::Doorbell,
+      syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(
+      state.contract_valid && state.mmap_calls == 1 &&
+          allocated.allocation.host_address ==
+              reinterpret_cast<void *>(kHostAddress),
+      "doorbell allocation unexpectedly used a render-node host mapping");
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  fake = nullptr;
+}
+
+void eop_uses_inaccessible_executable_vram(TestContext *context) {
+  FakeSystem state;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  state.expected_host_protection = PROT_NONE;
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, 23, aperture(), 8192,
+      light_rocr::transport::kfd::detail::GttAllocationUsage::Eop, syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(state.contract_valid,
+                  "EOP allocation does not match KFD VRAM requirements");
   const auto released = light_rocr::transport::kfd::detail::release_gtt(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
@@ -616,6 +676,9 @@ int main() {
       {"successful round trip", successful_round_trip},
       {"invalid size", invalid_size_does_not_reserve},
       {"AQL ring backing", aql_ring_uses_double_uncached_backing},
+      {"executable GTT", executable_gtt_sets_kfd_flag},
+      {"doorbell GPUVM", doorbell_reserves_gpuvm_without_render_mapping},
+      {"EOP VRAM", eop_uses_inaccessible_executable_vram},
       {"allocation failure", allocation_failure_releases_va},
       {"rollback unmap failure", rollback_unmap_failure_retains_va},
       {"host map failure", host_map_failure_frees_handle},

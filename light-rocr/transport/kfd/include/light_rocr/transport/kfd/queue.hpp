@@ -24,6 +24,7 @@ enum class AqlQueueError {
   AllocateEop,
   InvalidCwsrLayout,
   AllocateCwsr,
+  AllocateDoorbell,
   CreateQueue,
   InvalidDoorbell,
   MapDoorbell,
@@ -31,6 +32,7 @@ enum class AqlQueueError {
   UnmapDoorbell,
   ReleaseEop,
   ReleaseCwsr,
+  ReleaseDoorbell,
   ReleaseControl,
   ReleaseRing,
 };
@@ -44,6 +46,30 @@ struct AqlQueueStatus {
 };
 
 struct AqlQueueState;
+
+enum class AqlQueuePrimitiveError {
+  None,
+  InvalidQueue,
+  InvalidIncrement,
+  IndexOverflow,
+  InvalidDoorbell,
+};
+
+struct AqlQueuePrimitiveStatus {
+  AqlQueuePrimitiveError error = AqlQueuePrimitiveError::None;
+  std::string message;
+
+  explicit operator bool() const {
+    return error == AqlQueuePrimitiveError::None;
+  }
+};
+
+struct AqlQueueIndexResult {
+  AqlQueuePrimitiveStatus status;
+  uint64_t previous_index = 0;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
 
 class AqlQueue {
 public:
@@ -62,6 +88,12 @@ public:
   [[nodiscard]] uint64_t packet_count() const;
   [[nodiscard]] uint64_t read_index_acquire() const;
   [[nodiscard]] uint64_t write_index_relaxed() const;
+  // Packet producers own capacity checks, ring writes, header publication,
+  // and the doorbell value. These operations only expose queue mechanics.
+  [[nodiscard]] AqlQueueIndexResult
+  add_write_index_scacq_screl(uint64_t increment);
+  [[nodiscard]] AqlQueuePrimitiveStatus
+  store_doorbell_screlease(uint64_t value);
   explicit operator bool() const;
 
   [[nodiscard]] AqlQueueStatus release();
@@ -82,6 +114,8 @@ struct AqlQueueResult {
 };
 
 [[nodiscard]] const char *aql_queue_error_name(AqlQueueError error);
+[[nodiscard]] const char *
+aql_queue_primitive_error_name(AqlQueuePrimitiveError error);
 
 } // namespace light_rocr::transport::kfd
 

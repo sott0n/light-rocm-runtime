@@ -19,6 +19,33 @@ target_include_directories(
   PRIVATE "${PROJECT_SOURCE_DIR}/src"
 )
 
+if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
+  add_executable(
+    lrrt_direct_kfd_dispatch_device_tests
+    direct_kfd_dispatch.cpp
+  )
+  target_include_directories(
+    lrrt_direct_kfd_dispatch_device_tests
+    PRIVATE
+      "${PROJECT_SOURCE_DIR}/src"
+      "${PROJECT_SOURCE_DIR}/light-rocr/tools"
+  )
+  target_link_libraries(
+    lrrt_direct_kfd_dispatch_device_tests
+    PRIVATE
+      lrrt::lrrt
+      light_rocr::transport_kfd
+  )
+  add_test(
+    NAME lrrt_direct_kfd_dispatch_device_tests
+    COMMAND lrrt_direct_kfd_dispatch_device_tests
+  )
+  set_tests_properties(
+    lrrt_direct_kfd_dispatch_device_tests
+    PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
+  )
+endif()
+
 if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
   set(
     LRRT_LIGHT_ROCR_GPU_TESTS

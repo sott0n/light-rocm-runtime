@@ -61,9 +61,10 @@ not provide peer-to-peer multi-GPU scheduling, managed memory APIs,
 stream-ordered allocation, graph capture, dynamic launch inference, or a
 general tensor/kernel ABI. The default backend requires ROCr/HSA; the
 experimental `light-rocr` backend currently targets `gfx1101` and uses
-`libhsakmt` for execution. Its direct KFD transport currently covers discovery,
-VM acquisition, GPU-mapped host-visible GTT allocation, and scratch-free AQL
-queue lifecycle with explicit EOP/CWSR storage and doorbell mapping.
+`libhsakmt` for execution. Its direct KFD path combines LRRT-owned AQL packet
+publication with transport-owned discovery, VM and memory management, queue
+indices, doorbell signaling, completion signals, and resource cleanup to execute
+scratch-free kernels.
 Initialization and runtime state are process-global, and several
 safety-oriented operations introduce broad synchronization.
 
@@ -122,8 +123,9 @@ Select the LRRT integration with `-DLRRT_BACKEND=light-rocr`. On `gfx1101`, it
 has run the full 24-layer Qwen2.5-0.5B IREE path, including prompt prefill,
 device-resident KV caches, the model tail, and autoregressive generation. The
 generated tokens and top logits matched the ROCr backend. GPU access still uses
-the `libhsakmt` execution transport; the direct KFD replacement is being built
-from device discovery and memory management upward.
+the `libhsakmt` execution transport for the LRRT backend. Independently, the
+direct KFD path can complete a scratch-free fixed-kernel dispatch without
+`libhsakmt`; connecting that path to the full LRRT backend remains in progress.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

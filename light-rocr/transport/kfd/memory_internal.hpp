@@ -45,7 +45,10 @@ struct RawGttAllocationResult {
 
 enum class GttAllocationUsage {
   General,
+  Executable,
   AqlRing,
+  Doorbell,
+  Eop,
 };
 
 [[nodiscard]] RawGttAllocationResult

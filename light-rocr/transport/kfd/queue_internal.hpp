@@ -16,11 +16,14 @@ using DoorbellMmapFunction = void *(*)(void *address, size_t length,
                                        int protection, int flags, int fd,
                                        off_t offset);
 using DoorbellMunmapFunction = int (*)(void *address, size_t length);
+using DoorbellMadviseFunction = int (*)(void *address, size_t length,
+                                        int advice);
 
 struct QueueSyscalls {
   QueueIoctlFunction ioctl_function = nullptr;
   DoorbellMmapFunction mmap_function = nullptr;
   DoorbellMunmapFunction munmap_function = nullptr;
+  DoorbellMadviseFunction madvise_function = nullptr;
 };
 
 struct RawAqlQueue {
@@ -50,6 +53,7 @@ struct AqlQueueCreateInfo {
   uint32_t context_save_restore_size = 0;
   uint32_t control_stack_size = 0;
   uint32_t doorbell_size = 0;
+  void *doorbell_mapping_address = nullptr;
 };
 
 struct CwsrLayout {
