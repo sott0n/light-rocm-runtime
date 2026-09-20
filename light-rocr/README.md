@@ -7,7 +7,7 @@ keeping Linux KFD as the kernel boundary.
 It does not use `libhsa-runtime64.so`. The LRRT backend currently executes
 through `libhsakmt`, while the direct KFD transport can discover the GPU,
 manage GPUVM memory, create an AQL queue, and complete a scratch-free kernel
-dispatch without `libhsakmt`.
+dispatch from a parsed Clang HSACO without `libhsakmt`.
 
 ## Boundary
 
@@ -21,8 +21,9 @@ The current target is `gfx1101`. `light-rocr` has run the full 24-layer
 Qwen2.5-0.5B IREE path, including prompt prefill, per-layer device-resident KV
 caches, the model tail, and autoregressive generation. Its generated tokens and
 top logits matched the ROCr backend. Clang and Triton generated HSACOs are also
-covered by the GPU tests. The direct KFD path has independently executed a
-fixed kernel and verified its completion signal, Queue read index, and output.
+covered by the GPU tests. The direct KFD path can materialize a Clang HSACO in
+executable GTT, invalidate the instruction cache, resolve its kernel descriptor,
+and execute a scratch-free kernel.
 
 ## Build
 

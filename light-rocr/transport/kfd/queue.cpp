@@ -490,9 +490,10 @@ AqlQueueStatus release_aql_queue(int kfd_fd, RawAqlQueue *queue,
 } // namespace detail
 
 struct AqlQueueState {
-  AqlQueueState(std::shared_ptr<KfdState> session_state,
+  AqlQueueState(std::shared_ptr<KfdState> session_state, uint32_t queue_gpu_id,
                 uint64_t queue_ring_size)
-      : session(std::move(session_state)), ring_size(queue_ring_size) {}
+      : session(std::move(session_state)), gpu_id(queue_gpu_id),
+        ring_size(queue_ring_size) {}
 
   [[nodiscard]] bool owns_resources() const {
     return queue.active || queue.doorbell_mapping != nullptr ||
@@ -504,6 +505,7 @@ struct AqlQueueState {
   }
 
   std::shared_ptr<KfdState> session;
+  uint32_t gpu_id = 0;
   std::optional<GttAllocation> ring;
   std::optional<GttAllocation> control;
   std::optional<GttAllocation> eop;
@@ -629,7 +631,8 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
   // point onward each acquired object can be retained for explicit cleanup.
   std::unique_ptr<AqlQueueState> queue_state;
   try {
-    queue_state = std::make_unique<AqlQueueState>(state_, ring_size);
+    queue_state =
+        std::make_unique<AqlQueueState>(state_, node.gpu_id, ring_size);
   } catch (const std::bad_alloc &) {
     return {{AqlQueueError::AllocateState, 0,
              "failed to allocate direct KFD AQL queue state"},
@@ -852,6 +855,13 @@ AqlQueuePrimitiveStatus AqlQueue::store_doorbell_screlease(uint64_t value) {
 AqlQueue::operator bool() const {
   return state_ != nullptr && state_->queue.active &&
          state_->queue.doorbell_address != 0;
+}
+
+bool KfdSession::owns_aql_queue(const AqlQueue &queue,
+                                const runtime::Node &node) const {
+  return state_ != nullptr && node.is_gpu() && node.gpu_id != 0 &&
+         queue.state_ != nullptr && queue.state_->session == state_ &&
+         queue.state_->gpu_id == node.gpu_id;
 }
 
 AqlQueueStatus AqlQueue::release() {

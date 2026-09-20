@@ -124,8 +124,9 @@ has run the full 24-layer Qwen2.5-0.5B IREE path, including prompt prefill,
 device-resident KV caches, the model tail, and autoregressive generation. The
 generated tokens and top logits matched the ROCr backend. GPU access still uses
 the `libhsakmt` execution transport for the LRRT backend. Independently, the
-direct KFD path can complete a scratch-free fixed-kernel dispatch without
-`libhsakmt`; connecting that path to the full LRRT backend remains in progress.
+direct KFD path can load and execute a scratch-free Clang HSACO without
+`libhsakmt`; scratch support and connection to the full LRRT backend remain in
+progress.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

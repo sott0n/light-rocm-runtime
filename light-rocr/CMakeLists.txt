@@ -90,6 +90,8 @@ if(LIGHT_ROCR_ENABLE_KFD)
     set(LIGHT_ROCR_KFD_AVAILABLE ON)
     add_library(
       light_rocr_transport_kfd
+      transport/kfd/code_cache.cpp
+      transport/kfd/executable_image.cpp
       transport/kfd/memory.cpp
       transport/kfd/queue.cpp
       transport/kfd/session.cpp
@@ -462,6 +464,20 @@ if(LIGHT_ROCR_BUILD_TESTS)
     add_test(
       NAME light_rocr_kfd_queue_tests
       COMMAND light_rocr_kfd_queue_tests
+    )
+
+    add_executable(
+      light_rocr_kfd_code_cache_tests
+      tests/kfd/code_cache_test.cpp
+    )
+    target_link_libraries(
+      light_rocr_kfd_code_cache_tests
+      PRIVATE light_rocr::transport_kfd
+    )
+    light_rocr_enable_warnings(light_rocr_kfd_code_cache_tests)
+    add_test(
+      NAME light_rocr_kfd_code_cache_tests
+      COMMAND light_rocr_kfd_code_cache_tests
     )
 
     if(LIGHT_ROCR_BUILD_GPU_TESTS)

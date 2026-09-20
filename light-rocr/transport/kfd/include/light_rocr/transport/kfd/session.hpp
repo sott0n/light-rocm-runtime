@@ -34,6 +34,7 @@ struct SessionStatus {
 
 struct KfdState;
 struct SessionResult;
+class ExecutableImage;
 
 class KfdSession {
 public:
@@ -61,6 +62,10 @@ public:
   [[nodiscard]] UserSignalResult
   create_user_signal(const runtime::Node &node, int64_t initial_value,
                      const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] bool owns_aql_queue(const AqlQueue &queue,
+                                    const runtime::Node &node) const;
+  [[nodiscard]] bool owns_executable_image(const ExecutableImage &image,
+                                           const runtime::Node &node) const;
   [[nodiscard]] runtime::KfdVersion version() const;
   explicit operator bool() const { return state_ != nullptr; }
 
