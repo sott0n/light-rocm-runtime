@@ -2,6 +2,7 @@
 #define LIGHT_ROCR_TRANSPORT_KFD_SESSION_HPP
 
 #include "light_rocr/runtime/topology.hpp"
+#include "light_rocr/transport/kfd/vm_types.hpp"
 
 #include <memory>
 #include <string>
@@ -14,6 +15,7 @@ inline constexpr runtime::KfdVersion kMinimumKfdVersion{1, 1};
 enum class SessionError {
   None,
   OpenKfd,
+  InspectKfd,
   QueryKfdVersion,
   UnsupportedKfdVersion,
   AllocateState,
@@ -41,6 +43,9 @@ public:
 
   [[nodiscard]] static SessionResult
   open(const std::string &device_path = "/dev/kfd");
+  [[nodiscard]] VmResult
+  acquire_vm(const runtime::Node &node,
+             const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] runtime::KfdVersion version() const;
   explicit operator bool() const { return state_ != nullptr; }
 

@@ -9,6 +9,9 @@
 
 namespace {
 
+static_assert(sizeof(light_rocr::transport::kfd::VmResult) > 0,
+              "session.hpp must provide the acquire_vm result type");
+
 struct TestContext {
   int failures = 0;
 
@@ -34,6 +37,10 @@ void version_contract(TestContext *context) {
                   "older KFD version was accepted");
   context->expect(!is_supported_kfd_version(KfdVersion{2, 0}),
                   "unknown KFD major version was accepted");
+  context->expect(std::string(light_rocr::transport::kfd::session_error_name(
+                      light_rocr::transport::kfd::SessionError::InspectKfd)) ==
+                      "inspect_kfd",
+                  "new session error has no stable name");
 }
 
 void missing_device_is_reported(TestContext *context) {
