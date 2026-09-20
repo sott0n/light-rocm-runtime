@@ -55,6 +55,7 @@ light_rocr_enable_warnings(light_rocr_loader)
 
 add_library(
   light_rocr_core
+  arch/gfx11/code_cache.cpp
   arch/gfx11/scratch.cpp
   runtime/executable_image.cpp
   runtime/launch.cpp
@@ -100,6 +101,7 @@ if(LIGHT_ROCR_ENABLE_HSAKMT)
     set(LIGHT_ROCR_HSAKMT_AVAILABLE ON)
     add_library(
       light_rocr_transport_hsakmt
+      transport/hsakmt/code_cache.cpp
       transport/hsakmt/executable_image.cpp
       transport/hsakmt/host_memory.cpp
       transport/hsakmt/kernarg.cpp
@@ -288,6 +290,20 @@ if(LIGHT_ROCR_BUILD_TESTS)
   target_link_libraries(light_rocr_launch_tests PRIVATE light_rocr::core)
   light_rocr_enable_warnings(light_rocr_launch_tests)
   add_test(NAME light_rocr_launch_tests COMMAND light_rocr_launch_tests)
+
+  add_executable(
+    light_rocr_gfx11_code_cache_tests
+    tests/runtime/gfx11_code_cache_test.cpp
+  )
+  target_link_libraries(
+    light_rocr_gfx11_code_cache_tests
+    PRIVATE light_rocr::core
+  )
+  light_rocr_enable_warnings(light_rocr_gfx11_code_cache_tests)
+  add_test(
+    NAME light_rocr_gfx11_code_cache_tests
+    COMMAND light_rocr_gfx11_code_cache_tests
+  )
 
   add_executable(
     light_rocr_gfx11_scratch_tests

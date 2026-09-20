@@ -1101,6 +1101,16 @@ lr_status_t reap_completed_light_rocr_dispatches_locked(lr_queue_t *queue) {
     if (dispatch.completion_value_acquire() != 0) {
       break;
     }
+    const bool retires_pending_barrier = std::any_of(
+        queue->pending_barriers.begin(), queue->pending_barriers.end(),
+        [&dispatch](const lr_queue_t::PendingBarrier &barrier) {
+          return barrier.retirement_dispatch == &dispatch;
+        });
+    if (retires_pending_barrier) {
+      // The signal may have reached zero after the barrier pass above. Keep
+      // its owning dispatch alive until the next pass retires that barrier.
+      break;
+    }
     const lr_status_t status = release_light_rocr_dispatch(&dispatch);
     if (status != LR_SUCCESS) {
       queue->pending_dispatches.erase(queue->pending_dispatches.begin(),

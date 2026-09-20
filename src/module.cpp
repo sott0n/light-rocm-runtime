@@ -1,5 +1,9 @@
 #include "runtime_internal.hpp"
 
+#if LRRT_ENABLE_LIGHT_ROCR
+#include "light_rocr/transport/hsakmt/code_cache.hpp"
+#endif
+
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -255,6 +259,26 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
       static_cast<const uint8_t *>(image), image_size, parsed.code_object);
   if (!loaded) {
     return executable_image_error_status(loaded.status.error);
+  }
+
+  DeviceState &state = g_devices[device.index];
+  if (state.default_queue == nullptr) {
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+  const lr_status_t capacity_status =
+      ensure_light_rocr_queue_capacity_locked(state.default_queue, 1);
+  if (capacity_status != LR_SUCCESS) {
+    (void)loaded.image.release();
+    return capacity_status;
+  }
+  const auto invalidated =
+      light_rocr::transport::hsakmt::freeze_executable_image(
+          *g_kfd_session, state.node.node_id, state.default_queue->queue,
+          loaded.image);
+  if (!invalidated) {
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
   }
 
   auto *loaded_module =
