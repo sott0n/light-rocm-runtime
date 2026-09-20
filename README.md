@@ -62,9 +62,9 @@ stream-ordered allocation, graph capture, dynamic launch inference, or a
 general tensor/kernel ABI. The default backend requires ROCr/HSA; the
 experimental `light-rocr` backend currently targets `gfx1101` and uses
 `libhsakmt` for execution. Its direct KFD transport currently covers discovery,
-VM acquisition, and host-visible GTT allocation. Initialization and runtime
-state are process-global, and several safety-oriented operations introduce
-broad synchronization.
+VM acquisition, and GPU-mapped host-visible GTT allocation. Initialization and
+runtime state are process-global, and several safety-oriented operations
+introduce broad synchronization.
 
 See [Runtime Design](docs/design.md) for the complete responsibility boundaries,
 execution model, limitations, intentional non-goals, and criteria for extending

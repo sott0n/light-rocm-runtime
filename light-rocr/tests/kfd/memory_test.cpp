@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <sys/mman.h>
 #include <type_traits>
@@ -28,8 +29,15 @@ struct FakeSystem {
   bool allocate_fails = false;
   bool host_mmap_fails = false;
   bool madvise_fails = false;
+  bool map_fails = false;
+  bool unmap_gpu_fails = false;
   bool munmap_fails = false;
   bool free_fails = false;
+  uint32_t map_result_n_success = std::numeric_limits<uint32_t>::max();
+  uint32_t unmap_result_n_success = std::numeric_limits<uint32_t>::max();
+  std::vector<uint32_t> expected_gpu_ids{42};
+  std::vector<uint32_t> map_starts;
+  std::vector<uint32_t> unmap_starts;
   bool contract_valid = true;
   unsigned mmap_calls = 0;
   std::vector<std::string> calls;
@@ -68,6 +76,50 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
     fake->calls.emplace_back("free");
     if (fake->free_fails) {
       errno = EIO;
+      return -1;
+    }
+    return 0;
+  }
+  if (request == AMDKFD_IOC_MAP_MEMORY_TO_GPU) {
+    auto *args = static_cast<kfd_ioctl_map_memory_to_gpu_args *>(arguments);
+    const auto *gpu_ids = reinterpret_cast<const uint32_t *>(
+        static_cast<uintptr_t>(args->device_ids_array_ptr));
+    fake->contract_valid =
+        fake->contract_valid && args->handle == kHandle && gpu_ids != nullptr &&
+        args->n_devices == fake->expected_gpu_ids.size() &&
+        std::vector<uint32_t>(gpu_ids, gpu_ids + args->n_devices) ==
+            fake->expected_gpu_ids;
+    fake->calls.emplace_back("map_gpu");
+    fake->map_starts.push_back(args->n_success);
+    args->n_success =
+        fake->map_result_n_success == std::numeric_limits<uint32_t>::max()
+            ? args->n_devices
+            : fake->map_result_n_success;
+    if (fake->map_fails) {
+      errno = EBUSY;
+      return -1;
+    }
+    return 0;
+  }
+  if (request == AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU) {
+    auto *args = static_cast<kfd_ioctl_unmap_memory_from_gpu_args *>(arguments);
+    const auto *gpu_ids = reinterpret_cast<const uint32_t *>(
+        static_cast<uintptr_t>(args->device_ids_array_ptr));
+    fake->contract_valid =
+        fake->contract_valid && args->handle == kHandle && gpu_ids != nullptr &&
+        args->n_devices <= fake->expected_gpu_ids.size() &&
+        std::vector<uint32_t>(gpu_ids, gpu_ids + args->n_devices) ==
+            std::vector<uint32_t>(fake->expected_gpu_ids.begin(),
+                                  fake->expected_gpu_ids.begin() +
+                                      args->n_devices);
+    fake->calls.emplace_back("unmap_gpu");
+    fake->unmap_starts.push_back(args->n_success);
+    args->n_success =
+        fake->unmap_result_n_success == std::numeric_limits<uint32_t>::max()
+            ? args->n_devices
+            : fake->unmap_result_n_success;
+    if (fake->unmap_gpu_fails) {
+      errno = EBUSY;
       return -1;
     }
     return 0;
@@ -175,14 +227,19 @@ void successful_round_trip(TestContext *context) {
   context->expect(allocated.allocation.host_address ==
                           reinterpret_cast<void *>(kHostAddress) &&
                       allocated.allocation.size == 8192 &&
-                      allocated.allocation.handle == kHandle,
+                      allocated.allocation.handle == kHandle &&
+                      allocated.allocation.gpu_ids ==
+                          std::vector<uint32_t>{42} &&
+                      allocated.allocation.mapped_device_count == 1 &&
+                      allocated.allocation.map_complete,
                   "allocation result was not retained");
   auto released = light_rocr::transport::kfd::detail::release_gtt(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(
       state.calls == std::vector<std::string>{"reserve", "allocate", "map_host",
-                                              "dontfork", "unmap", "free"},
+                                              "dontfork", "map_gpu",
+                                              "unmap_gpu", "unmap", "free"},
       "unexpected successful allocation call order");
   context->expect(allocated.allocation.handle == 0,
                   "released allocation retained its handle");
@@ -305,6 +362,174 @@ void dontfork_failure_cleans_up(TestContext *context) {
   fake = nullptr;
 }
 
+void map_failure_cleans_up(TestContext *context) {
+  FakeSystem state;
+  state.map_fails = true;
+  state.map_result_n_success = 0;
+  fake = &state;
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, 23, aperture(), 8192, syscalls());
+  context->expect(!allocated, "failed GPU map unexpectedly succeeded");
+  context->expect(allocated.status.error ==
+                          light_rocr::transport::kfd::MemoryError::MapToGpu &&
+                      allocated.status.system_error == EBUSY,
+                  "GPU map errno was not preserved");
+  context->expect(
+      state.calls == std::vector<std::string>{"reserve", "allocate", "map_host",
+                                              "dontfork", "map_gpu", "unmap",
+                                              "free"},
+      "failed GPU map did not clean up the host mapping and handle");
+  fake = nullptr;
+}
+
+void partial_map_cleanup_is_retryable(TestContext *context) {
+  FakeSystem state;
+  state.map_fails = true;
+  state.map_result_n_success = 1;
+  state.unmap_gpu_fails = true;
+  state.unmap_result_n_success = 0;
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, 23, aperture(), 8192, syscalls());
+  context->expect(!allocated,
+                  "partially failed GPU map unexpectedly succeeded");
+  context->expect(allocated.allocation.mapped_device_count == 1 &&
+                      allocated.allocation.host_address != nullptr &&
+                      allocated.allocation.handle == kHandle,
+                  "failed partial-map cleanup discarded owned resources");
+  context->expect(allocated.status.message.find("cleanup failed") !=
+                      std::string::npos,
+                  "partial-map cleanup failure was not diagnosed");
+  context->expect(state.calls.back() == "unmap_gpu",
+                  "partial-map cleanup continued after GPU unmap failed");
+
+  state.unmap_gpu_fails = false;
+  state.unmap_result_n_success = std::numeric_limits<uint32_t>::max();
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(released && allocated.allocation.handle == 0,
+                  "partial-map cleanup could not be retried");
+  context->expect(state.calls ==
+                      std::vector<std::string>{
+                          "reserve", "allocate", "map_host", "dontfork",
+                          "map_gpu", "unmap_gpu", "unmap_gpu", "unmap", "free"},
+                  "partial-map cleanup retry order changed");
+  fake = nullptr;
+}
+
+void partial_progress_is_retryable(TestContext *context) {
+  FakeSystem state;
+  state.expected_gpu_ids = {42, 43, 44};
+  state.map_fails = true;
+  state.map_result_n_success = 2;
+  fake = &state;
+  light_rocr::transport::kfd::detail::RawGttAllocation allocation;
+  allocation.handle = kHandle;
+
+  auto status = light_rocr::transport::kfd::detail::map_gtt(
+      17, &allocation, state.expected_gpu_ids, syscalls());
+  context->expect(!status &&
+                      status.error ==
+                          light_rocr::transport::kfd::MemoryError::MapToGpu &&
+                      allocation.mapped_device_count == 2,
+                  "partial GPU map progress was not retained");
+
+  state.map_result_n_success = 1;
+  status = light_rocr::transport::kfd::detail::map_gtt(
+      17, &allocation, state.expected_gpu_ids, syscalls());
+  context->expect(!status && allocation.mapped_device_count == 2,
+                  "non-monotonic GPU map progress was accepted");
+
+  state.map_result_n_success = std::numeric_limits<uint32_t>::max();
+  status = light_rocr::transport::kfd::detail::map_gtt(
+      17, &allocation, state.expected_gpu_ids, syscalls());
+  context->expect(!status && allocation.mapped_device_count == 3 &&
+                      !allocation.map_complete,
+                  "failed full-progress GPU map was marked complete");
+
+  state.map_fails = false;
+  status = light_rocr::transport::kfd::detail::map_gtt(
+      17, &allocation, state.expected_gpu_ids, syscalls());
+  context->expect(status && allocation.mapped_device_count == 3 &&
+                      allocation.map_complete &&
+                      state.map_starts == std::vector<uint32_t>{0, 2, 2, 3},
+                  "GPU map retry did not resume after the mapped prefix");
+
+  state.unmap_gpu_fails = true;
+  state.unmap_result_n_success = 1;
+  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
+                                                         syscalls());
+  context->expect(
+      !status &&
+          status.error ==
+              light_rocr::transport::kfd::MemoryError::UnmapFromGpu &&
+          allocation.unmapped_device_count == 1,
+      "partial GPU unmap progress was not retained");
+
+  state.unmap_result_n_success = 0;
+  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
+                                                         syscalls());
+  context->expect(!status && allocation.unmapped_device_count == 1,
+                  "non-monotonic GPU unmap progress was accepted");
+
+  state.unmap_result_n_success = 4;
+  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
+                                                         syscalls());
+  context->expect(!status && allocation.unmapped_device_count == 1,
+                  "out-of-range GPU unmap progress was retained");
+
+  state.unmap_result_n_success = std::numeric_limits<uint32_t>::max();
+  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
+                                                         syscalls());
+  context->expect(!status && allocation.unmapped_device_count == 3 &&
+                      allocation.map_complete,
+                  "failed full-progress GPU unmap was marked complete");
+
+  state.unmap_gpu_fails = false;
+  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
+                                                         syscalls());
+  context->expect(
+      status && allocation.gpu_ids.empty() &&
+          allocation.mapped_device_count == 0 && !allocation.map_complete &&
+          state.unmap_starts == std::vector<uint32_t>{0, 1, 1, 1, 3},
+      "GPU unmap retry did not resume after the unmapped prefix");
+
+  status = light_rocr::transport::kfd::detail::release_gtt(17, &allocation,
+                                                           syscalls());
+  context->expect(status && allocation.handle == 0,
+                  "mapped allocation handle was not released");
+  context->expect(state.contract_valid, "GPU map/unmap contract changed");
+  fake = nullptr;
+}
+
+void gpu_unmap_failure_blocks_release(TestContext *context) {
+  FakeSystem state;
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+      17, 23, aperture(), 8192, syscalls());
+  state.unmap_gpu_fails = true;
+  state.unmap_result_n_success = 0;
+  auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(!released &&
+                      released.error ==
+                          light_rocr::transport::kfd::MemoryError::UnmapFromGpu,
+                  "GPU unmap failure was not reported");
+  context->expect(allocated.allocation.host_address != nullptr &&
+                      allocated.allocation.handle == kHandle,
+                  "GPU unmap failure released dependent resources");
+  context->expect(state.calls.back() == "unmap_gpu",
+                  "release continued after GPU unmap failed");
+
+  state.unmap_gpu_fails = false;
+  state.unmap_result_n_success = std::numeric_limits<uint32_t>::max();
+  released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(released && allocated.allocation.handle == 0,
+                  "GPU unmap retry did not finish release");
+  fake = nullptr;
+}
+
 void release_failures_are_retryable(TestContext *context) {
   FakeSystem state;
   fake = &state;
@@ -367,6 +592,10 @@ int main() {
       {"host map failure", host_map_failure_frees_handle},
       {"cleanup failure", cleanup_failure_retains_handle},
       {"dontfork failure", dontfork_failure_cleans_up},
+      {"map failure", map_failure_cleans_up},
+      {"partial map cleanup", partial_map_cleanup_is_retryable},
+      {"partial GPU progress", partial_progress_is_retryable},
+      {"GPU unmap failure", gpu_unmap_failure_blocks_release},
       {"retryable release", release_failures_are_retryable},
       {"invalid public inputs", invalid_public_inputs},
   };

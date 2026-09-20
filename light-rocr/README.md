@@ -6,8 +6,8 @@ keeping Linux KFD as the kernel boundary.
 
 It does not use `libhsa-runtime64.so`. GPU access currently goes through
 `libhsakmt`. The direct KFD transport currently covers device discovery, VM
-acquisition, and host-visible GTT allocation; queue execution remains on the
-`libhsakmt` path.
+acquisition, and GPU-mapped host-visible GTT allocation; queue execution
+remains on the `libhsakmt` path.
 
 ## Boundary
 

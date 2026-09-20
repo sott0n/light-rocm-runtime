@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <sys/types.h>
+#include <vector>
 
 namespace light_rocr::transport::kfd::detail {
 
@@ -29,6 +30,10 @@ struct RawGttAllocation {
   void *host_address = nullptr;
   uint64_t size = 0;
   uint64_t handle = 0;
+  std::vector<uint32_t> gpu_ids;
+  uint32_t mapped_device_count = 0;
+  uint32_t unmapped_device_count = 0;
+  bool map_complete = false;
 };
 
 struct RawGttAllocationResult {
@@ -41,6 +46,11 @@ struct RawGttAllocationResult {
 [[nodiscard]] RawGttAllocationResult
 allocate_gtt(int kfd_fd, int render_fd, const ProcessAperture &aperture,
              uint64_t size, MemorySyscalls syscalls);
+[[nodiscard]] MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
+                                   const std::vector<uint32_t> &gpu_ids,
+                                   MemorySyscalls syscalls);
+[[nodiscard]] MemoryStatus unmap_gtt(int kfd_fd, RawGttAllocation *allocation,
+                                     MemorySyscalls syscalls);
 [[nodiscard]] MemoryStatus release_gtt(int kfd_fd, RawGttAllocation *allocation,
                                        MemorySyscalls syscalls);
 

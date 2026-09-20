@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace light_rocr::transport::kfd {
 
@@ -15,11 +16,14 @@ enum class MemoryError {
   InvalidSession,
   InvalidNode,
   InvalidSize,
+  AllocateState,
   AcquireVm,
   ReserveVa,
   AllocateGtt,
   MapHost,
   AdviseDontFork,
+  MapToGpu,
+  UnmapFromGpu,
   UnmapHost,
   FreeGtt,
 };
@@ -45,7 +49,14 @@ public:
 
   [[nodiscard]] void *host_address() const { return host_address_; }
   [[nodiscard]] uint64_t gpu_address() const {
-    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(host_address_));
+    return gpu_mapped() ? static_cast<uint64_t>(
+                              reinterpret_cast<uintptr_t>(host_address_))
+                        : 0;
+  }
+  [[nodiscard]] bool gpu_mapped() const {
+    return map_complete_ && !gpu_ids_.empty() &&
+           mapped_device_count_ == gpu_ids_.size() &&
+           unmapped_device_count_ == 0;
   }
   [[nodiscard]] uint64_t size() const { return size_; }
   explicit operator bool() const {
@@ -58,10 +69,15 @@ private:
   friend class KfdSession;
   GttAllocation(std::shared_ptr<KfdState> state, void *reservation_address,
                 uint64_t reservation_size, void *host_address, uint64_t size,
-                uint64_t handle)
+                uint64_t handle, std::vector<uint32_t> gpu_ids,
+                uint32_t mapped_device_count, uint32_t unmapped_device_count,
+                bool map_complete)
       : state_(std::move(state)), reservation_address_(reservation_address),
         reservation_size_(reservation_size), host_address_(host_address),
-        size_(size), handle_(handle) {}
+        size_(size), handle_(handle), gpu_ids_(std::move(gpu_ids)),
+        mapped_device_count_(mapped_device_count),
+        unmapped_device_count_(unmapped_device_count),
+        map_complete_(map_complete) {}
   void reset();
 
   std::shared_ptr<KfdState> state_;
@@ -70,6 +86,10 @@ private:
   void *host_address_ = nullptr;
   uint64_t size_ = 0;
   uint64_t handle_ = 0;
+  std::vector<uint32_t> gpu_ids_;
+  uint32_t mapped_device_count_ = 0;
+  uint32_t unmapped_device_count_ = 0;
+  bool map_complete_ = false;
 };
 
 struct GttAllocationResult {
