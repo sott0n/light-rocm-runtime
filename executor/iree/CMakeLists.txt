@@ -536,6 +536,30 @@ if(TARGET lrrt_iree_hal_driver AND EXISTS "${LRRT_IREE_TOOLING_RUN_MODULE_LIB}")
       tools/iree_qwen_decode1_layer.mlir
       qwen_decode1_layer
     )
+    set(_qwen_decode1_layer_vmfb
+        "${PROJECT_SOURCE_DIR}/build-iree-probe/qwen_decode1_layer/qwen_decode1_layer_${LRRT_AMDGPU_TARGET}.vmfb"
+    )
+    add_executable(
+      lrrt_iree_qwen_layer_e2e_smoke
+      "${LRRT_IREE_TEST_SOURCE_DIR}/qwen/layer_e2e_smoke.cpp"
+    )
+    target_link_libraries(
+      lrrt_iree_qwen_layer_e2e_smoke
+      PRIVATE lrrt::iree_vmfb_runner
+    )
+    add_test(
+      NAME lrrt_iree_qwen_layer_e2e_smoke
+      COMMAND
+        lrrt_iree_qwen_layer_e2e_smoke
+        "${_qwen_decode1_layer_vmfb}"
+    )
+    set_tests_properties(
+      lrrt_iree_qwen_layer_e2e_smoke
+      PROPERTIES
+        FIXTURES_REQUIRED lrrt_iree_qwen_decode1_layer_vmfb
+        LABELS "iree;gpu"
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+    )
     lrrt_add_iree_vmfb_probe(
       lrrt_iree_qwen_decode2_layer_kv_cache_vmfb_probe
       lrrt_iree_qwen_decode2_layer_kv_cache_vmfb
