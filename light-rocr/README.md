@@ -5,7 +5,9 @@ for `light-rocm-runtime`. Its goal is to replace ROCr and its loader while
 keeping Linux KFD as the kernel boundary.
 
 It does not use `libhsa-runtime64.so`. GPU access currently goes through
-`libhsakmt`; a direct KFD transport will replace that dependency later.
+`libhsakmt`. The direct KFD transport currently covers device discovery, VM
+acquisition, and host-visible GTT allocation; queue execution remains on the
+`libhsakmt` path.
 
 ## Boundary
 

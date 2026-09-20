@@ -2,6 +2,7 @@
 #define LIGHT_ROCR_TRANSPORT_KFD_SESSION_HPP
 
 #include "light_rocr/runtime/topology.hpp"
+#include "light_rocr/transport/kfd/memory_types.hpp"
 #include "light_rocr/transport/kfd/vm_types.hpp"
 
 #include <memory>
@@ -46,6 +47,9 @@ public:
   [[nodiscard]] VmResult
   acquire_vm(const runtime::Node &node,
              const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] GttAllocationResult
+  allocate_gtt(const runtime::Node &node, uint64_t size,
+               const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] runtime::KfdVersion version() const;
   explicit operator bool() const { return state_ != nullptr; }
 
