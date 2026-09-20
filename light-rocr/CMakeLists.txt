@@ -16,6 +16,11 @@ option(
   "Build the libhsakmt transport when its development files are available"
   ON
 )
+option(
+  LIGHT_ROCR_ENABLE_KFD
+  "Build the direct KFD transport when the public UAPI header is available"
+  ON
+)
 set(
   LIGHT_ROCR_VECTOR_ADD_HSACO
   ""
@@ -74,6 +79,43 @@ target_include_directories(
 set_target_properties(light_rocr_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(light_rocr_core PUBLIC light_rocr::loader Threads::Threads)
 light_rocr_enable_warnings(light_rocr_core)
+
+set(LIGHT_ROCR_KFD_AVAILABLE OFF)
+if(LIGHT_ROCR_ENABLE_KFD)
+  find_path(
+    LIGHT_ROCR_KFD_INCLUDE_DIR
+    NAMES linux/kfd_ioctl.h
+  )
+  if(LIGHT_ROCR_KFD_INCLUDE_DIR)
+    set(LIGHT_ROCR_KFD_AVAILABLE ON)
+    add_library(
+      light_rocr_transport_kfd
+      transport/kfd/session.cpp
+      transport/kfd/topology.cpp
+    )
+    add_library(light_rocr::transport_kfd ALIAS light_rocr_transport_kfd)
+    target_compile_features(light_rocr_transport_kfd PUBLIC cxx_std_17)
+    target_include_directories(
+      light_rocr_transport_kfd
+      PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/transport/kfd/include>
+        $<INSTALL_INTERFACE:include>
+    )
+    target_include_directories(
+      light_rocr_transport_kfd
+      SYSTEM PRIVATE "${LIGHT_ROCR_KFD_INCLUDE_DIR}"
+    )
+    target_link_libraries(light_rocr_transport_kfd PUBLIC light_rocr::core)
+    set_target_properties(
+      light_rocr_transport_kfd
+      PROPERTIES POSITION_INDEPENDENT_CODE ON
+    )
+    light_rocr_enable_warnings(light_rocr_transport_kfd)
+    message(STATUS "light-rocr direct KFD transport enabled")
+  else()
+    message(STATUS "light-rocr direct KFD transport unavailable")
+  endif()
+endif()
 
 set(LIGHT_ROCR_HSAKMT_AVAILABLE OFF)
 if(LIGHT_ROCR_ENABLE_HSAKMT)
@@ -229,8 +271,12 @@ endif()
 if(LIGHT_ROCR_BUILD_TESTS)
   enable_testing()
 
-  if(LIGHT_ROCR_BUILD_GPU_TESTS AND NOT LIGHT_ROCR_HSAKMT_AVAILABLE)
-    message(FATAL_ERROR "GPU tests require the libhsakmt transport")
+  if(
+    LIGHT_ROCR_BUILD_GPU_TESTS
+    AND NOT LIGHT_ROCR_HSAKMT_AVAILABLE
+    AND NOT LIGHT_ROCR_KFD_AVAILABLE
+  )
+    message(FATAL_ERROR "GPU tests require a KFD or libhsakmt transport")
   endif()
 
   add_executable(light_rocr_loader_tests tests/loader/elf_reader_test.cpp)
@@ -318,6 +364,58 @@ if(LIGHT_ROCR_BUILD_TESTS)
     NAME light_rocr_gfx11_scratch_tests
     COMMAND light_rocr_gfx11_scratch_tests
   )
+
+  if(LIGHT_ROCR_KFD_AVAILABLE)
+    add_executable(
+      light_rocr_kfd_session_tests
+      tests/kfd/session_test.cpp
+    )
+    target_link_libraries(
+      light_rocr_kfd_session_tests
+      PRIVATE light_rocr::transport_kfd
+    )
+    light_rocr_enable_warnings(light_rocr_kfd_session_tests)
+    add_test(
+      NAME light_rocr_kfd_session_tests
+      COMMAND light_rocr_kfd_session_tests
+    )
+
+    add_executable(
+      light_rocr_kfd_topology_tests
+      tests/kfd/topology_test.cpp
+    )
+    target_link_libraries(
+      light_rocr_kfd_topology_tests
+      PRIVATE light_rocr::transport_kfd
+    )
+    light_rocr_enable_warnings(light_rocr_kfd_topology_tests)
+    add_test(
+      NAME light_rocr_kfd_topology_tests
+      COMMAND light_rocr_kfd_topology_tests
+    )
+
+    if(LIGHT_ROCR_BUILD_GPU_TESTS)
+      add_executable(
+        light_rocr_kfd_topology_device_tests
+        tests/kfd/topology_device_test.cpp
+      )
+      target_link_libraries(
+        light_rocr_kfd_topology_device_tests
+        PRIVATE light_rocr::transport_kfd
+      )
+      light_rocr_enable_warnings(light_rocr_kfd_topology_device_tests)
+      add_test(
+        NAME light_rocr_kfd_topology_device_tests
+        COMMAND light_rocr_kfd_topology_device_tests
+      )
+      set_tests_properties(
+        light_rocr_kfd_topology_device_tests
+        PROPERTIES
+          RESOURCE_LOCK light_rocr_gpu
+          TIMEOUT 20
+      )
+    endif()
+  endif()
 
   find_program(
     LIGHT_ROCR_AMDGPU_CLANG
@@ -595,6 +693,34 @@ if(LIGHT_ROCR_BUILD_TESTS)
       NAME light_rocr_hsakmt_topology_tests
       COMMAND light_rocr_hsakmt_topology_tests
     )
+
+    if(LIGHT_ROCR_KFD_AVAILABLE AND LIGHT_ROCR_BUILD_GPU_TESTS)
+      add_executable(
+        light_rocr_kfd_topology_compare_tests
+        tests/kfd/topology_compare_test.cpp
+      )
+      target_include_directories(
+        light_rocr_kfd_topology_compare_tests
+        SYSTEM PRIVATE "${LIGHT_ROCR_HSAKMT_INCLUDE_DIR}"
+      )
+      target_link_libraries(
+        light_rocr_kfd_topology_compare_tests
+        PRIVATE
+          light_rocr::transport_kfd
+          light_rocr::transport_hsakmt
+      )
+      light_rocr_enable_warnings(light_rocr_kfd_topology_compare_tests)
+      add_test(
+        NAME light_rocr_kfd_topology_compare_tests
+        COMMAND light_rocr_kfd_topology_compare_tests
+      )
+      set_tests_properties(
+        light_rocr_kfd_topology_compare_tests
+        PROPERTIES
+          RESOURCE_LOCK light_rocr_gpu
+          TIMEOUT 20
+      )
+    endif()
 
     if(LIGHT_ROCR_BUILD_GPU_TESTS)
       if(NOT LIGHT_ROCR_VECTOR_ADD_HSACO)

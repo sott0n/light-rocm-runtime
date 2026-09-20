@@ -42,7 +42,11 @@ struct MemoryBank {
 };
 
 struct Node {
+  // Identifier understood by the transport that produced this snapshot.
+  // Use gpu_id, not node_id, to correlate GPU nodes across transports.
   uint32_t node_id = 0;
+  // Kernel-assigned GPU identity used by the public KFD UAPI. Zero identifies
+  // a CPU-only topology node.
   uint32_t gpu_id = 0;
   uint32_t cpu_core_count = 0;
   uint32_t simd_count = 0;

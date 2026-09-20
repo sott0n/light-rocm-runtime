@@ -1,0 +1,66 @@
+#ifndef LIGHT_ROCR_TRANSPORT_KFD_SESSION_HPP
+#define LIGHT_ROCR_TRANSPORT_KFD_SESSION_HPP
+
+#include "light_rocr/runtime/topology.hpp"
+
+#include <memory>
+#include <string>
+#include <utility>
+
+namespace light_rocr::transport::kfd {
+
+inline constexpr runtime::KfdVersion kMinimumKfdVersion{1, 1};
+
+enum class SessionError {
+  None,
+  OpenKfd,
+  QueryKfdVersion,
+  UnsupportedKfdVersion,
+  AllocateState,
+};
+
+struct SessionStatus {
+  SessionError error = SessionError::None;
+  int system_error = 0;
+  std::string message;
+
+  explicit operator bool() const { return error == SessionError::None; }
+};
+
+struct KfdState;
+struct SessionResult;
+
+class KfdSession {
+public:
+  KfdSession() = default;
+  KfdSession(const KfdSession &) = delete;
+  KfdSession &operator=(const KfdSession &) = delete;
+  KfdSession(KfdSession &&) noexcept = default;
+  KfdSession &operator=(KfdSession &&) noexcept = default;
+  ~KfdSession() = default;
+
+  [[nodiscard]] static SessionResult
+  open(const std::string &device_path = "/dev/kfd");
+  [[nodiscard]] runtime::KfdVersion version() const;
+  explicit operator bool() const { return state_ != nullptr; }
+
+private:
+  explicit KfdSession(std::shared_ptr<KfdState> state)
+      : state_(std::move(state)) {}
+
+  std::shared_ptr<KfdState> state_;
+};
+
+struct SessionResult {
+  SessionStatus status;
+  KfdSession session;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
+[[nodiscard]] bool is_supported_kfd_version(runtime::KfdVersion version);
+[[nodiscard]] const char *session_error_name(SessionError error);
+
+} // namespace light_rocr::transport::kfd
+
+#endif
