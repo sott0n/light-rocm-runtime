@@ -15,9 +15,11 @@ object lifetimes; it does not decide what a kernel-dispatch packet contains.
 
 ## Status
 
-The current target is `gfx1101`. The repository's normal Clang vector-add
-HSACO can be loaded and run end to end through a self-authored AQL queue,
-scratch backing, and signal.
+The current target is `gfx1101`. `light-rocr` has run the full 24-layer
+Qwen2.5-0.5B IREE path, including prompt prefill, per-layer device-resident KV
+caches, the model tail, and autoregressive generation. Its generated tokens and
+top logits matched the ROCr backend. Clang and Triton generated HSACOs are also
+covered by the GPU tests.
 
 ## Build
 
@@ -36,7 +38,9 @@ cmake -S light-rocr -B build-light-rocr \
 ```
 
 To include `light-rocr` in the main project build, configure with
-`-DLRRT_ENABLE_LIGHT_ROCR=ON`.
+`-DLRRT_BACKEND=light-rocr`. See the
+[Qwen execution guide](../examples/qwen/README.md) for the IREE model build and
+execution flow.
 
 ## Try it
 

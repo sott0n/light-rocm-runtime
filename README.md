@@ -19,8 +19,9 @@ The first target is intentionally narrow:
 - launch one kernel
 - synchronize and copy results back
 
-This project is not trying to replace the full HIP runtime. The implementation
-uses the HSA/ROCr API directly and keeps a small public C ABI.
+This project is not trying to replace the full HIP runtime. The default backend
+uses HSA/ROCr, while the experimental `light-rocr` backend provides a
+self-authored runtime and AMDHSA loader behind the same small public C ABI.
 
 In the longer compiler-oriented stack, the runtime is the boundary between
 generated kernel bundles and the AMD GPU. Its performance role is to keep
@@ -55,12 +56,13 @@ device work. Multiple queues can overlap independent work, while cross-queue
 ordering must be expressed with explicit event dependencies.
 
 The current implementation has deliberate limitations. It requires
-Linux/AMDGPU and ROCr/HSA, loads pre-built HSACO only, is not HIP API
-compatible, and does not provide peer-to-peer multi-GPU scheduling, managed
-memory APIs, stream-ordered allocation, graph capture, dynamic launch
-inference, or a general tensor/kernel ABI. Initialization and runtime state are
-process-global, and several safety-oriented operations introduce broad
-synchronization.
+Linux/AMDGPU, loads pre-built HSACO only, is not HIP API compatible, and does
+not provide peer-to-peer multi-GPU scheduling, managed memory APIs,
+stream-ordered allocation, graph capture, dynamic launch inference, or a
+general tensor/kernel ABI. The default backend requires ROCr/HSA; the
+experimental `light-rocr` backend currently targets `gfx1101` and uses
+`libhsakmt` for KFD access. Initialization and runtime state are process-global,
+and several safety-oriented operations introduce broad synchronization.
 
 See [Runtime Design](docs/design.md) for the complete responsibility boundaries,
 execution model, limitations, intentional non-goals, and criteria for extending
@@ -113,11 +115,12 @@ It can also be included in the main build with
 `-DLRRT_ENABLE_LIGHT_ROCR=ON`. The existing ROCr path remains the default and
 the correctness oracle while the loader and runtime are developed.
 
-The initial LRRT integration can be selected with
-`-DLRRT_BACKEND=light-rocr`. It currently supports lifecycle, `gfx1101`
-discovery, AQL queue lifecycle, device allocation, synchronous memory copies,
-HSACO loading, kernel lookup, kernel dispatch with queue scratch, Event markers,
-and explicit cross-queue Event dependencies through the public LRRT API.
+Select the LRRT integration with `-DLRRT_BACKEND=light-rocr`. On `gfx1101`, it
+has run the full 24-layer Qwen2.5-0.5B IREE path, including prompt prefill,
+device-resident KV caches, the model tail, and autoregressive generation. The
+generated tokens and top logits matched the ROCr backend. GPU access still uses
+the `libhsakmt` transport; replacing it with direct KFD UAPI access is the next
+low-level boundary.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton
@@ -357,8 +360,9 @@ This repository is currently developed and tested on:
 
 ## AMD Dependencies
 
-The current implementation uses the ROCr/HSA runtime directly. The versions
-below describe the AMD stack used for development:
+The default backend uses the ROCr/HSA runtime directly. The versions below
+describe the AMD stack used for development; the optional `light-rocr` backend
+does not use `libhsa-runtime64.so`:
 
 - ROCm: `6.4.4`
 - ROCr/HSA runtime package: `hsa-rocr 1.15.0.60404-129~22.04`
