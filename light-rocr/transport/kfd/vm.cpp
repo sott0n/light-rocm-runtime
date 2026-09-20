@@ -259,12 +259,14 @@ VmResult KfdSession::acquire_vm(const runtime::Node &node,
     }
 
     try {
-      existing =
-          state_->device_vms
-              .emplace(node.gpu_id,
-                       DeviceVmState{
-                           render_fd, node.drm_render_minor, false, false, {}})
-              .first;
+      existing = state_->device_vms
+                     .emplace(node.gpu_id, DeviceVmState{render_fd,
+                                                         node.drm_render_minor,
+                                                         false,
+                                                         false,
+                                                         false,
+                                                         {}})
+                     .first;
     } catch (const std::bad_alloc &) {
       (void)::close(render_fd);
       return {{VmError::AllocateState, 0,

@@ -1,6 +1,7 @@
 #include "light_rocr/transport/kfd/memory.hpp"
 
 #include "memory_internal.hpp"
+#include "session_state.hpp"
 
 #include <linux/kfd_ioctl.h>
 
@@ -19,14 +20,18 @@ namespace {
 
 constexpr uintptr_t kReservationAddress = 0x100000;
 constexpr uintptr_t kHostAddress = kReservationAddress + 4096;
+constexpr uintptr_t kScratchAddress = 0x110000;
 constexpr uint64_t kHandle = 0x1234;
 constexpr uint64_t kMmapOffset = 0x200000;
 
 static_assert(
     !std::is_move_assignable_v<light_rocr::transport::kfd::GttAllocation>);
+static_assert(
+    !std::is_move_assignable_v<light_rocr::transport::kfd::ScratchAllocation>);
 
 struct FakeSystem {
   bool allocate_fails = false;
+  bool set_scratch_fails = false;
   bool host_mmap_fails = false;
   bool madvise_fails = false;
   bool map_fails = false;
@@ -36,6 +41,7 @@ struct FakeSystem {
   uint32_t map_result_n_success = std::numeric_limits<uint32_t>::max();
   uint32_t unmap_result_n_success = std::numeric_limits<uint32_t>::max();
   std::vector<uint32_t> expected_gpu_ids{42};
+  uintptr_t expected_va_address = kHostAddress;
   uint64_t expected_allocation_size = 8192;
   size_t expected_reservation_size = 16384;
   size_t expected_host_mapping_size = 8192;
@@ -44,6 +50,8 @@ struct FakeSystem {
       KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
       KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   uint32_t expected_extra_allocation_flags = 0;
+  bool scratch_mode = false;
+  bool integrated_scratch = false;
   std::vector<uint32_t> map_starts;
   std::vector<uint32_t> unmap_starts;
   bool contract_valid = true;
@@ -58,12 +66,26 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
     errno = EINVAL;
     return -1;
   }
+  if (request == AMDKFD_IOC_SET_SCRATCH_BACKING_VA) {
+    const auto *args =
+        static_cast<kfd_ioctl_set_scratch_backing_va_args *>(arguments);
+    fake->contract_valid =
+        fake->contract_valid && fake->scratch_mode &&
+        args->va_addr == (fake->expected_va_address >> 16U) &&
+        args->gpu_id == 42;
+    fake->calls.emplace_back("set_scratch");
+    if (fake->set_scratch_fails) {
+      errno = EIO;
+      return -1;
+    }
+    return 0;
+  }
   if (request == AMDKFD_IOC_ALLOC_MEMORY_OF_GPU) {
     auto *args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arguments);
     const uint32_t expected_flags =
         fake->expected_allocation_flags | fake->expected_extra_allocation_flags;
     fake->contract_valid = fake->contract_valid &&
-                           args->va_addr == kHostAddress &&
+                           args->va_addr == fake->expected_va_address &&
                            args->size == fake->expected_allocation_size &&
                            args->gpu_id == 42 && args->flags == expected_flags;
     fake->calls.emplace_back("allocate");
@@ -151,6 +173,21 @@ void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
     fake->calls.emplace_back("reserve");
     return reinterpret_cast<void *>(kReservationAddress);
   }
+  if (fake->scratch_mode && fake->integrated_scratch) {
+    fake->contract_valid =
+        fake->contract_valid &&
+        address == reinterpret_cast<void *>(fake->expected_va_address) &&
+        length == fake->expected_host_mapping_size &&
+        protection == (PROT_READ | PROT_WRITE) &&
+        flags == (MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED) && fd == -1 &&
+        offset == 0;
+    fake->calls.emplace_back("map_host");
+    if (fake->host_mmap_fails) {
+      errno = ENXIO;
+      return MAP_FAILED;
+    }
+    return address;
+  }
   fake->contract_valid = fake->contract_valid &&
                          address == reinterpret_cast<void *>(kHostAddress) &&
                          length == fake->expected_host_mapping_size &&
@@ -187,10 +224,10 @@ int fake_madvise(void *address, size_t length, int advice) {
     errno = EINVAL;
     return -1;
   }
-  fake->contract_valid = fake->contract_valid &&
-                         address == reinterpret_cast<void *>(kHostAddress) &&
-                         length == fake->expected_host_mapping_size &&
-                         advice == MADV_DONTFORK;
+  fake->contract_valid =
+      fake->contract_valid &&
+      address == reinterpret_cast<void *>(fake->expected_va_address) &&
+      length == fake->expected_host_mapping_size && advice == MADV_DONTFORK;
   fake->calls.emplace_back("dontfork");
   if (fake->madvise_fails) {
     errno = EINVAL;
@@ -209,6 +246,30 @@ light_rocr::transport::kfd::ProcessAperture aperture() {
   result.gpuvm_base = 0x4000;
   result.gpuvm_limit = 0x7fffffffffff;
   return result;
+}
+
+std::shared_ptr<light_rocr::transport::kfd::KfdState> scratch_state() {
+  using light_rocr::runtime::KfdVersion;
+  using light_rocr::transport::kfd::DeviceVmState;
+  using light_rocr::transport::kfd::KfdState;
+
+  auto state = std::make_shared<KfdState>(-1, KfdVersion{1, 16});
+  state->device_vms.emplace(
+      42, DeviceVmState{-1, -1, true, true, false, aperture()});
+  return state;
+}
+
+FakeSystem scratch_system(bool integrated) {
+  FakeSystem state;
+  state.scratch_mode = true;
+  state.integrated_scratch = integrated;
+  state.expected_va_address = kScratchAddress;
+  state.expected_allocation_size = 64 * 1024;
+  state.expected_reservation_size = 2 * 64 * 1024 + 2 * 4096;
+  state.expected_host_mapping_size = 64 * 1024;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE);
+  return state;
 }
 
 struct TestContext {
@@ -345,6 +406,123 @@ void eop_uses_inaccessible_executable_vram(TestContext *context) {
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   fake = nullptr;
+}
+
+void discrete_scratch_round_trip(TestContext *context) {
+  FakeSystem state = scratch_system(false);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
+      17, aperture(), 8192, false, syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(
+      state.contract_valid && allocated.gpu_address == kScratchAddress &&
+          allocated.allocation.size == 64 * 1024 &&
+          allocated.allocation.handle == kHandle && allocated.gpu_mapped,
+      "discrete scratch allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  context->expect(state.calls ==
+                      std::vector<std::string>{
+                          "reserve", "dontfork", "set_scratch", "allocate",
+                          "map_gpu", "unmap_gpu", "unmap", "free"},
+                  "unexpected discrete scratch call order");
+  fake = nullptr;
+}
+
+void integrated_scratch_round_trip(TestContext *context) {
+  FakeSystem state = scratch_system(true);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
+      17, aperture(), 8192, true, syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(state.contract_valid &&
+                      allocated.gpu_address == kScratchAddress &&
+                      allocated.allocation.size == 64 * 1024 &&
+                      allocated.allocation.handle == 0 && allocated.gpu_mapped,
+                  "integrated scratch allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  context->expect(
+      state.calls == std::vector<std::string>{"reserve", "map_host", "dontfork",
+                                              "set_scratch", "unmap"},
+      "unexpected integrated scratch call order");
+  fake = nullptr;
+}
+
+void scratch_setup_failure_releases_reservation(TestContext *context) {
+  FakeSystem state = scratch_system(false);
+  state.set_scratch_fails = true;
+  fake = &state;
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
+      17, aperture(), 8192, false, syscalls());
+  context->expect(
+      !allocated &&
+          allocated.status.error ==
+              light_rocr::transport::kfd::MemoryError::SetScratchBacking &&
+          allocated.status.system_error == EIO,
+      "scratch backing ioctl failure was not preserved");
+  context->expect(state.contract_valid &&
+                      state.calls ==
+                          std::vector<std::string>{"reserve", "dontfork",
+                                                   "set_scratch", "unmap"},
+                  "scratch setup failure did not release its VA");
+  fake = nullptr;
+}
+
+void scratch_setup_cleanup_is_retryable(TestContext *context) {
+  FakeSystem state = scratch_system(false);
+  state.set_scratch_fails = true;
+  state.munmap_fails = true;
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
+      17, aperture(), 8192, false, syscalls());
+  context->expect(!allocated &&
+                      allocated.allocation.reservation_address ==
+                          reinterpret_cast<void *>(kReservationAddress),
+                  "scratch cleanup failure discarded its VA owner");
+  context->expect(allocated.status.message.find("cleanup failed") !=
+                      std::string::npos,
+                  "scratch cleanup failure was not diagnosed");
+
+  state.munmap_fails = false;
+  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+      17, &allocated.allocation, syscalls());
+  context->expect(released &&
+                      allocated.allocation.reservation_address == nullptr,
+                  "scratch cleanup could not be retried");
+  fake = nullptr;
+}
+
+void scratch_reservation_follows_kfd_state(TestContext *context) {
+  using light_rocr::transport::kfd::detail::ScratchReservationResult;
+
+  auto state = scratch_state();
+  auto second_session = state;
+  context->expect(
+      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
+          state, 42) == ScratchReservationResult::Acquired,
+      "first session could not reserve scratch");
+  context->expect(
+      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
+          second_session, 42) == ScratchReservationResult::AlreadyReserved,
+      "second session bypassed shared scratch reservation");
+  light_rocr::transport::kfd::detail::release_scratch_reservation(state, 42);
+  context->expect(
+      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
+          second_session, 42) == ScratchReservationResult::Acquired,
+      "released scratch reservation could not be reused");
+
+  state.reset();
+  second_session.reset();
+  auto replacement = scratch_state();
+  context->expect(
+      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
+          replacement, 42) == ScratchReservationResult::Acquired,
+      "destroyed KFD state left a stale scratch reservation");
+  light_rocr::transport::kfd::detail::release_scratch_reservation(replacement,
+                                                                  42);
 }
 
 void allocation_failure_releases_va(TestContext *context) {
@@ -667,6 +845,11 @@ void invalid_public_inputs(TestContext *context) {
       !allocated && allocated.status.error ==
                         light_rocr::transport::kfd::MemoryError::InvalidSession,
       "invalid session was accepted");
+  const auto scratch = session.allocate_scratch(node, 4096);
+  context->expect(
+      !scratch && scratch.status.error ==
+                      light_rocr::transport::kfd::MemoryError::InvalidSession,
+      "invalid session was accepted for scratch allocation");
 }
 
 } // namespace
@@ -679,6 +862,11 @@ int main() {
       {"executable GTT", executable_gtt_sets_kfd_flag},
       {"doorbell GPUVM", doorbell_reserves_gpuvm_without_render_mapping},
       {"EOP VRAM", eop_uses_inaccessible_executable_vram},
+      {"discrete scratch", discrete_scratch_round_trip},
+      {"integrated scratch", integrated_scratch_round_trip},
+      {"scratch setup failure", scratch_setup_failure_releases_reservation},
+      {"scratch cleanup retry", scratch_setup_cleanup_is_retryable},
+      {"scratch reservation state", scratch_reservation_follows_kfd_state},
       {"allocation failure", allocation_failure_releases_va},
       {"rollback unmap failure", rollback_unmap_failure_retains_va},
       {"host map failure", host_map_failure_frees_handle},

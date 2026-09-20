@@ -14,6 +14,7 @@ struct DeviceVmState {
   int32_t drm_render_minor = -1;
   bool acquired = false;
   bool aperture_valid = false;
+  bool scratch_reserved = false;
   ProcessAperture aperture;
 };
 

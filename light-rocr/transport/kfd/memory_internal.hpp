@@ -11,6 +11,8 @@
 
 namespace light_rocr::transport::kfd::detail {
 
+inline constexpr uint64_t kScratchBackingAlignment = 64 * 1024;
+
 using IoctlFunction = int (*)(int fd, unsigned long request, void *arguments);
 using MmapFunction = void *(*)(void *address, size_t length, int protection,
                                int flags, int fd, off_t offset);
@@ -43,6 +45,22 @@ struct RawGttAllocationResult {
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
+struct RawScratchAllocationResult {
+  MemoryStatus status;
+  RawGttAllocation allocation;
+  uint64_t gpu_address = 0;
+  bool integrated = false;
+  bool gpu_mapped = false;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
+enum class ScratchReservationResult {
+  Acquired,
+  AlreadyReserved,
+  InvalidState,
+};
+
 enum class GttAllocationUsage {
   General,
   Executable,
@@ -67,6 +85,14 @@ allocate_gtt(int kfd_fd, int render_fd, const ProcessAperture &aperture,
                                      MemorySyscalls syscalls);
 [[nodiscard]] MemoryStatus release_gtt(int kfd_fd, RawGttAllocation *allocation,
                                        MemorySyscalls syscalls);
+[[nodiscard]] RawScratchAllocationResult
+allocate_scratch(int kfd_fd, const ProcessAperture &aperture, uint64_t size,
+                 bool integrated, MemorySyscalls syscalls);
+[[nodiscard]] ScratchReservationResult
+acquire_scratch_reservation(const std::shared_ptr<KfdState> &state,
+                            uint32_t gpu_id);
+void release_scratch_reservation(const std::shared_ptr<KfdState> &state,
+                                 uint32_t gpu_id);
 
 } // namespace light_rocr::transport::kfd::detail
 
