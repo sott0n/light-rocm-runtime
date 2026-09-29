@@ -41,6 +41,11 @@ struct QueueScratchRequirements {
   uint32_t waves_per_shader_engine = 0;
 };
 
+struct ScratchAperture {
+  uint64_t base = 0;
+  uint64_t size = 0;
+};
+
 struct QueueScratchRequirementsResult {
   QueueScratchStatus status;
   QueueScratchRequirements requirements;
@@ -67,11 +72,18 @@ struct QueueScratchControlResult {
 [[nodiscard]] QueueScratchRequirementsResult
 queue_scratch_requirements(const runtime::Node &node,
                            uint32_t private_segment_size);
+[[nodiscard]] QueueScratchRequirementsResult
+queue_scratch_requirements(const runtime::Node &node,
+                           uint32_t private_segment_size,
+                           ScratchAperture aperture);
 
 [[nodiscard]] QueueScratchControlResult
 make_queue_scratch_control(const runtime::Node &node,
                            uint32_t private_segment_size,
                            uint64_t backing_gpu_address);
+[[nodiscard]] QueueScratchControlResult make_queue_scratch_control(
+    const runtime::Node &node, uint32_t private_segment_size,
+    uint64_t backing_gpu_address, ScratchAperture aperture);
 
 [[nodiscard]] const char *queue_scratch_error_name(QueueScratchError error);
 

@@ -64,7 +64,33 @@ int main() {
     return 1;
   }
 
+  constexpr uint32_t kPrivateSegmentSize = 272;
+  auto scratch_created = opened.session.create_aql_queue(
+      node, light_rocr::transport::kfd::kAqlRingDefaultSize,
+      kPrivateSegmentSize);
+  if (!scratch_created) {
+    std::cerr << scratch_created.status.message << '\n';
+    return 1;
+  }
+  if (!scratch_created.queue ||
+      scratch_created.queue.scratch_private_segment_size() !=
+          kPrivateSegmentSize ||
+      scratch_created.queue.scratch_gpu_address() == 0 ||
+      scratch_created.queue.scratch_gpu_address() % (64 * 1024) != 0 ||
+      scratch_created.queue.scratch_size() == 0) {
+    std::cerr << "direct KFD scratch-backed queue metadata is invalid\n";
+    return 1;
+  }
+  const auto scratch_released = scratch_created.queue.release();
+  if (!scratch_released || scratch_created.queue) {
+    std::cerr << (scratch_released
+                      ? "released scratch-backed queue retained state"
+                      : scratch_released.message)
+              << '\n';
+    return 1;
+  }
+
   std::cout << "created and destroyed direct KFD AQL queue " << queue_id
-            << '\n';
+            << " and a scratch-backed queue\n";
   return 0;
 }

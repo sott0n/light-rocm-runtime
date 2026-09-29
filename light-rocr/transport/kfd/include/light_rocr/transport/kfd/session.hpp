@@ -61,6 +61,7 @@ public:
                    const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] AqlQueueResult
   create_aql_queue(const runtime::Node &node, uint64_t ring_size,
+                   uint32_t private_segment_size = 0,
                    const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] UserSignalResult
   create_user_signal(const runtime::Node &node, int64_t initial_value,

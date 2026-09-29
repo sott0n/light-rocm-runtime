@@ -1,5 +1,6 @@
 #include "light_rocr/transport/kfd/queue.hpp"
 
+#include "light_rocr/arch/gfx11/scratch.hpp"
 #include "light_rocr/runtime/amd_queue.hpp"
 #include "light_rocr/transport/kfd/memory_types.hpp"
 #include "light_rocr/transport/kfd/session.hpp"
@@ -501,7 +502,8 @@ struct AqlQueueState {
            (control.has_value() && static_cast<bool>(*control)) ||
            (eop.has_value() && static_cast<bool>(*eop)) ||
            (cwsr.has_value() && static_cast<bool>(*cwsr)) ||
-           (doorbell.has_value() && static_cast<bool>(*doorbell));
+           (doorbell.has_value() && static_cast<bool>(*doorbell)) ||
+           (scratch.has_value() && static_cast<bool>(*scratch));
   }
 
   std::shared_ptr<KfdState> session;
@@ -511,7 +513,9 @@ struct AqlQueueState {
   std::optional<GttAllocation> eop;
   std::optional<GttAllocation> cwsr;
   std::optional<GttAllocation> doorbell;
+  std::optional<ScratchAllocation> scratch;
   uint64_t ring_size = 0;
+  uint32_t scratch_private_segment_size = 0;
   detail::RawAqlQueue queue;
 };
 
@@ -541,6 +545,10 @@ const char *aql_queue_error_name(AqlQueueError error) {
     return "allocate_cwsr";
   case AqlQueueError::AllocateDoorbell:
     return "allocate_doorbell";
+  case AqlQueueError::ConfigureScratch:
+    return "configure_scratch";
+  case AqlQueueError::AllocateScratch:
+    return "allocate_scratch";
   case AqlQueueError::CreateQueue:
     return "create_queue";
   case AqlQueueError::InvalidDoorbell:
@@ -557,6 +565,8 @@ const char *aql_queue_error_name(AqlQueueError error) {
     return "release_cwsr";
   case AqlQueueError::ReleaseDoorbell:
     return "release_doorbell";
+  case AqlQueueError::ReleaseScratch:
+    return "release_scratch";
   case AqlQueueError::ReleaseControl:
     return "release_control";
   case AqlQueueError::ReleaseRing:
@@ -583,6 +593,7 @@ const char *aql_queue_primitive_error_name(AqlQueuePrimitiveError error) {
 
 AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
                                             uint64_t ring_size,
+                                            uint32_t private_segment_size,
                                             const std::string &dri_root) const {
   if (state_ == nullptr) {
     return {{AqlQueueError::InvalidSession, 0, "KFD session is not open"}, {}};
@@ -621,9 +632,22 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
             {}};
   }
   if (acquired.aperture.lds_base >> 32U == 0 ||
-      acquired.aperture.scratch_base >> 32U == 0) {
+      acquired.aperture.scratch_base >> 32U == 0 ||
+      acquired.aperture.scratch_limit < acquired.aperture.scratch_base) {
     return {{AqlQueueError::InvalidNode, 0,
              "AQL queue requires non-zero KFD LDS and scratch apertures"},
+            {}};
+  }
+
+  const arch::gfx11::ScratchAperture scratch_aperture{
+      acquired.aperture.scratch_base,
+      acquired.aperture.scratch_limit - acquired.aperture.scratch_base + 1U};
+  const auto scratch_requirements = arch::gfx11::queue_scratch_requirements(
+      node, private_segment_size, scratch_aperture);
+  if (!scratch_requirements) {
+    return {{AqlQueueError::ConfigureScratch, 0,
+             std::string("gfx1101 scratch configuration failed: ") +
+                 scratch_requirements.status.message},
             {}};
   }
 
@@ -637,6 +661,33 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
     return {{AqlQueueError::AllocateState, 0,
              "failed to allocate direct KFD AQL queue state"},
             {}};
+  }
+  queue_state->scratch_private_segment_size = private_segment_size;
+
+  if (scratch_requirements.requirements.allocation_size != 0) {
+    auto scratch = allocate_scratch(
+        node, scratch_requirements.requirements.allocation_size, dri_root);
+    queue_state->scratch.emplace(std::move(scratch.allocation));
+    if (!scratch) {
+      AqlQueueStatus status = allocation_failure(
+          AqlQueueError::AllocateScratch, scratch.status, "AQL queue scratch");
+      return {std::move(status), queue_state->owns_resources()
+                                     ? AqlQueue(std::move(queue_state))
+                                     : AqlQueue{}};
+    }
+  }
+
+  const uint64_t scratch_gpu_address = queue_state->scratch.has_value()
+                                           ? queue_state->scratch->gpu_address()
+                                           : 0;
+  const auto scratch_control = arch::gfx11::make_queue_scratch_control(
+      node, private_segment_size, scratch_gpu_address, scratch_aperture);
+  if (!scratch_control) {
+    return {{AqlQueueError::ConfigureScratch, 0,
+             std::string("gfx1101 scratch control failed: ") +
+                 scratch_control.status.message},
+            queue_state->owns_resources() ? AqlQueue(std::move(queue_state))
+                                          : AqlQueue{}};
   }
 
   auto ring = allocate_gtt_impl(node, ring_size, dri_root, GttUsage::AqlRing);
@@ -703,6 +754,19 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
   amd_queue->max_wave_id = static_cast<uint32_t>(maximum_wave_id - 1U);
   amd_queue->read_dispatch_id_field_base_byte_offset =
       static_cast<uint32_t>(offsetof(runtime::AmdQueueV1, read_dispatch_id));
+  amd_queue->compute_tmpring_size =
+      scratch_control.control.compute_tmpring_size;
+  for (size_t index = 0;
+       index < scratch_control.control.resource_descriptor.size(); ++index) {
+    amd_queue->scratch_resource_descriptor[index] =
+        scratch_control.control.resource_descriptor[index];
+  }
+  amd_queue->scratch_backing_memory_location =
+      scratch_control.control.backing_memory_location;
+  amd_queue->scratch_backing_memory_byte_size =
+      scratch_control.control.backing_memory_byte_size;
+  amd_queue->scratch_wave64_lane_byte_size =
+      scratch_control.control.wave64_lane_byte_size;
   amd_queue->queue_properties = runtime::kAmdQueuePropertyIsPointer64;
 
   detail::AqlQueueCreateInfo info;
@@ -782,6 +846,22 @@ uint64_t AqlQueue::ring_size() const {
 
 uint64_t AqlQueue::packet_count() const {
   return state_ != nullptr ? state_->ring_size / kAqlPacketSize : 0;
+}
+
+uint32_t AqlQueue::scratch_private_segment_size() const {
+  return state_ != nullptr ? state_->scratch_private_segment_size : 0;
+}
+
+uint64_t AqlQueue::scratch_gpu_address() const {
+  return state_ != nullptr && state_->scratch.has_value()
+             ? state_->scratch->gpu_address()
+             : 0;
+}
+
+uint64_t AqlQueue::scratch_size() const {
+  return state_ != nullptr && state_->scratch.has_value()
+             ? state_->scratch->size()
+             : 0;
 }
 
 uint64_t AqlQueue::read_index_acquire() const {
@@ -897,6 +977,14 @@ AqlQueueStatus AqlQueue::release() {
               "AQL EOP cleanup failed: " + eop_status.message};
     }
     state_->eop.reset();
+  }
+  if (state_->scratch.has_value()) {
+    const MemoryStatus scratch_status = state_->scratch->release();
+    if (!scratch_status) {
+      return {AqlQueueError::ReleaseScratch, scratch_status.system_error,
+              "AQL queue scratch cleanup failed: " + scratch_status.message};
+    }
+    state_->scratch.reset();
   }
   if (state_->control.has_value()) {
     const MemoryStatus control_status = state_->control->release();

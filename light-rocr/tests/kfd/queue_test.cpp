@@ -377,6 +377,10 @@ void inactive_queue_rejects_producer_operations(TestContext *context) {
           doorbell.error ==
               light_rocr::transport::kfd::AqlQueuePrimitiveError::InvalidQueue,
       "inactive queue accepted a doorbell store");
+  context->expect(queue.scratch_private_segment_size() == 0 &&
+                      queue.scratch_gpu_address() == 0 &&
+                      queue.scratch_size() == 0,
+                  "inactive queue exposed scratch state");
 }
 
 } // namespace

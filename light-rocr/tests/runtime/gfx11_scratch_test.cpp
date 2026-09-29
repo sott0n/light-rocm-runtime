@@ -83,6 +83,23 @@ void supports_canonical_scratch_free_queue(TestContext *context) {
                   "scratch-free control state is not canonical");
 }
 
+void accepts_explicit_process_aperture(TestContext *context) {
+  auto node = gfx1101_node();
+  node.memory_banks.clear();
+  constexpr light_rocr::arch::gfx11::ScratchAperture kAperture{
+      0x2000000000000ULL, uint64_t{4} * 1024 * 1024 * 1024};
+  const auto requirements =
+      light_rocr::arch::gfx11::queue_scratch_requirements(node, 272, kAperture);
+  const auto control = light_rocr::arch::gfx11::make_queue_scratch_control(
+      node, 272, 0x00007abc12000000ULL, kAperture);
+  context->expect(requirements && control, requirements
+                                               ? control.status.message
+                                               : requirements.status.message);
+  context->expect(requirements.requirements.allocation_size == 33423360 &&
+                      control.control.compute_tmpring_size == 0x44280,
+                  "explicit process scratch aperture was not used");
+}
+
 void rejects_invalid_topology(TestContext *context) {
   auto node = gfx1101_node();
   node.architecture.stepping = 2;
@@ -167,6 +184,7 @@ int main() {
        builds_observed_vector_add_registers},
       {"supports_canonical_scratch_free_queue",
        supports_canonical_scratch_free_queue},
+      {"accepts_explicit_process_aperture", accepts_explicit_process_aperture},
       {"rejects_invalid_topology", rejects_invalid_topology},
       {"rejects_unrepresentable_requests", rejects_unrepresentable_requests},
       {"rejects_invalid_backing_addresses", rejects_invalid_backing_addresses},

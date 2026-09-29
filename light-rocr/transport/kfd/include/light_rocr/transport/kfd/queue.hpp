@@ -25,6 +25,8 @@ enum class AqlQueueError {
   InvalidCwsrLayout,
   AllocateCwsr,
   AllocateDoorbell,
+  ConfigureScratch,
+  AllocateScratch,
   CreateQueue,
   InvalidDoorbell,
   MapDoorbell,
@@ -33,6 +35,7 @@ enum class AqlQueueError {
   ReleaseEop,
   ReleaseCwsr,
   ReleaseDoorbell,
+  ReleaseScratch,
   ReleaseControl,
   ReleaseRing,
 };
@@ -86,6 +89,9 @@ public:
   [[nodiscard]] uint64_t ring_gpu_address() const;
   [[nodiscard]] uint64_t ring_size() const;
   [[nodiscard]] uint64_t packet_count() const;
+  [[nodiscard]] uint32_t scratch_private_segment_size() const;
+  [[nodiscard]] uint64_t scratch_gpu_address() const;
+  [[nodiscard]] uint64_t scratch_size() const;
   [[nodiscard]] uint64_t read_index_acquire() const;
   [[nodiscard]] uint64_t write_index_relaxed() const;
   // Packet producers own capacity checks, ring writes, header publication,

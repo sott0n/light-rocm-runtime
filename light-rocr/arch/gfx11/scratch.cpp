@@ -70,6 +70,28 @@ const char *queue_scratch_error_name(QueueScratchError error) {
 QueueScratchRequirementsResult
 queue_scratch_requirements(const runtime::Node &node,
                            uint32_t private_segment_size) {
+  size_t scratch_aperture_count = 0;
+  const runtime::MemoryBank *aperture =
+      scratch_aperture(node, &scratch_aperture_count);
+  if (scratch_aperture_count == 0) {
+    return {failure(QueueScratchError::MissingScratchAperture,
+                    "GPU topology has no scratch aperture"),
+            {}};
+  }
+  if (scratch_aperture_count != 1 || aperture == nullptr) {
+    return {failure(QueueScratchError::InvalidScratchAperture,
+                    "GPU topology has an invalid scratch aperture"),
+            {}};
+  }
+  return queue_scratch_requirements(
+      node, private_segment_size,
+      {aperture->virtual_base_address, aperture->size});
+}
+
+QueueScratchRequirementsResult
+queue_scratch_requirements(const runtime::Node &node,
+                           uint32_t private_segment_size,
+                           ScratchAperture aperture) {
   if (node.architecture.major != 11 || node.architecture.minor != 0 ||
       node.architecture.stepping != 1) {
     return {failure(QueueScratchError::UnsupportedArchitecture,
@@ -86,17 +108,8 @@ queue_scratch_requirements(const runtime::Node &node,
             {}};
   }
 
-  size_t scratch_aperture_count = 0;
-  const runtime::MemoryBank *aperture =
-      scratch_aperture(node, &scratch_aperture_count);
-  if (scratch_aperture_count == 0) {
-    return {failure(QueueScratchError::MissingScratchAperture,
-                    "GPU topology has no scratch aperture"),
-            {}};
-  }
-  if (scratch_aperture_count != 1 || aperture == nullptr ||
-      aperture->size == 0 || aperture->virtual_base_address == 0 ||
-      aperture->virtual_base_address % kScratchBackingAlignment != 0) {
+  if (aperture.size == 0 || aperture.base == 0 ||
+      aperture.base % kScratchBackingAlignment != 0) {
     return {failure(QueueScratchError::InvalidScratchAperture,
                     "GPU topology has an invalid scratch aperture"),
             {}};
@@ -133,7 +146,7 @@ queue_scratch_requirements(const runtime::Node &node,
   requirements.allocation_size =
       (raw_size + kPageSize - 1U) & ~(kPageSize - 1U);
   requirements.backing_size_per_xcc = requirements.allocation_size;
-  if (requirements.allocation_size > aperture->size) {
+  if (requirements.allocation_size > aperture.size) {
     return {failure(QueueScratchError::ScratchApertureTooSmall,
                     "scratch backing exceeds the topology aperture"),
             {}};
@@ -178,8 +191,31 @@ QueueScratchControlResult
 make_queue_scratch_control(const runtime::Node &node,
                            uint32_t private_segment_size,
                            uint64_t backing_gpu_address) {
+  size_t scratch_aperture_count = 0;
+  const runtime::MemoryBank *aperture =
+      scratch_aperture(node, &scratch_aperture_count);
+  if (scratch_aperture_count == 0) {
+    return {failure(QueueScratchError::MissingScratchAperture,
+                    "GPU topology has no scratch aperture"),
+            {},
+            {}};
+  }
+  if (scratch_aperture_count != 1 || aperture == nullptr) {
+    return {failure(QueueScratchError::InvalidScratchAperture,
+                    "GPU topology has an invalid scratch aperture"),
+            {},
+            {}};
+  }
+  return make_queue_scratch_control(
+      node, private_segment_size, backing_gpu_address,
+      {aperture->virtual_base_address, aperture->size});
+}
+
+QueueScratchControlResult make_queue_scratch_control(
+    const runtime::Node &node, uint32_t private_segment_size,
+    uint64_t backing_gpu_address, ScratchAperture aperture) {
   QueueScratchRequirementsResult calculated =
-      queue_scratch_requirements(node, private_segment_size);
+      queue_scratch_requirements(node, private_segment_size, aperture);
   if (!calculated) {
     return {std::move(calculated.status), {}, {}};
   }
