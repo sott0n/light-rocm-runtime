@@ -173,8 +173,8 @@ int main() {
     return 1;
   }
   const auto &kernel = parsed.code_object.kernels[kernel_index];
-  if (kernel.private_segment_size != 0) {
-    std::cerr << "direct KFD HSACO fixture unexpectedly requires scratch\n";
+  if (kernel.private_segment_size == 0) {
+    std::cerr << "direct KFD HSACO fixture does not require scratch\n";
     return 1;
   }
 
@@ -291,9 +291,17 @@ int main() {
     return fail_signal(signal.status);
   }
   auto queue = opened.session.create_aql_queue(
-      node, light_rocr::transport::kfd::kAqlRingDefaultSize);
+      node, light_rocr::transport::kfd::kAqlRingDefaultSize,
+      kernel.private_segment_size);
   if (!queue) {
     return fail_queue(queue.status);
+  }
+  if (queue.queue.scratch_private_segment_size() !=
+          kernel.private_segment_size ||
+      queue.queue.scratch_gpu_address() == 0 ||
+      queue.queue.scratch_size() == 0) {
+    std::cerr << "direct KFD queue did not retain kernel scratch backing\n";
+    return 1;
   }
 
   auto mismatched_node = node;
@@ -381,7 +389,7 @@ int main() {
   const int cleanup_status =
       cleanup(queue.queue, signal.signal, data.allocation, loaded.image);
   if (correct && cleanup_status == 0) {
-    std::cout << "direct KFD HSACO vector add: ok\n";
+    std::cout << "direct KFD scratch-backed HSACO vector add: ok\n";
   }
   return correct && cleanup_status == 0 ? 0 : 1;
 }

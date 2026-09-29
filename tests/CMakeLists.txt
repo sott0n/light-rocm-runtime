@@ -21,8 +21,8 @@ target_include_directories(
 
 if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
   lrrt_add_hsaco_kernel(
-    direct_kfd_vector_add_kernel
-    examples/vector_add/vector_add_kernel.cpp
+    direct_kfd_scratch_kernel
+    tests/direct_kfd_scratch_kernel.cpp
     DIRECT_KFD_VECTOR_ADD_HSACO
     -O2
   )
@@ -46,7 +46,7 @@ if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
   )
   lrrt_bind_hsaco(
     lrrt_direct_kfd_dispatch_device_tests
-    direct_kfd_vector_add_kernel_hsaco
+    direct_kfd_scratch_kernel_hsaco
     DIRECT_KFD_VECTOR_ADD_HSACO
     "${DIRECT_KFD_VECTOR_ADD_HSACO}"
   )
