@@ -27,6 +27,9 @@
 #include "light_rocr/transport/hsakmt/memory.hpp"
 #include "light_rocr/transport/hsakmt/queue.hpp"
 #include "light_rocr/transport/hsakmt/signal.hpp"
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr/runtime/topology.hpp"
+#include "light_rocr/transport/kfd/session.hpp"
 #endif
 
 #if LRRT_ENABLE_HSA
@@ -230,7 +233,7 @@ struct AqlQueueProducerOps;
 
 extern std::atomic<bool> g_initialized;
 
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 #if LRRT_ENABLE_LIGHT_ROCR
 struct LightRocrInternalKernel {
   light_rocr::transport::hsakmt::ExecutableImage executable_image;
@@ -255,7 +258,9 @@ struct DeviceState {
   lr_queue_t *default_queue;
   std::vector<lr_queue_t *> queues;
   std::vector<lr_event_t *> pending_events;
+#if LRRT_ENABLE_LIGHT_ROCR
   std::unique_ptr<LightRocrInternalKernel> copy_kernel;
+#endif
 #endif
   lr_memory_stats_t memory_stats;
 };
@@ -309,6 +314,8 @@ bool valid_event_locked(lr_event_t *event);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+extern std::unique_ptr<light_rocr::transport::kfd::KfdSession> g_kfd_session;
 #endif
 
 #if LRRT_ENABLE_HSA

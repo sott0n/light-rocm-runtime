@@ -2,6 +2,8 @@
 
 #if LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr/transport/hsakmt/topology.hpp"
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr/transport/kfd/topology.hpp"
 #endif
 
 #include <atomic>
@@ -112,10 +114,14 @@ RuntimeMutex g_devices_mutex;
 std::condition_variable_any g_event_state_changed;
 std::vector<DeviceState> g_devices;
 std::unique_ptr<light_rocr::transport::hsakmt::KfdSession> g_kfd_session;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+RuntimeMutex g_devices_mutex;
+std::vector<DeviceState> g_devices;
+std::unique_ptr<light_rocr::transport::kfd::KfdSession> g_kfd_session;
 #endif
 
 bool valid_device(lr_device_t device) {
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   return device.index < g_devices.size();
 #else
@@ -208,6 +214,34 @@ lr_status_t lr_init(void) {
     g_kfd_session = std::make_unique<light_rocr::transport::hsakmt::KfdSession>(
         std::move(opened.session));
   }
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  auto opened = light_rocr::transport::kfd::KfdSession::open();
+  if (!opened) {
+    g_initialized.store(false);
+    return LR_ERROR_RUNTIME;
+  }
+  auto discovered =
+      light_rocr::transport::kfd::discover_topology(opened.session);
+  if (!discovered) {
+    g_initialized.store(false);
+    return LR_ERROR_RUNTIME;
+  }
+  const auto selected =
+      light_rocr::runtime::select_unique_gpu(discovered.topology, "gfx1101");
+  if (!selected) {
+    g_initialized.store(false);
+    return LR_ERROR_NOT_SUPPORTED;
+  }
+
+  {
+    std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+    g_devices.clear();
+    DeviceState device{};
+    device.node = std::move(discovered.topology.nodes[selected.node_index]);
+    g_devices.push_back(std::move(device));
+    g_kfd_session = std::make_unique<light_rocr::transport::kfd::KfdSession>(
+        std::move(opened.session));
+  }
 #endif
 
   return LR_SUCCESS;
@@ -275,6 +309,12 @@ lr_status_t lr_shutdown(void) {
     g_devices.clear();
     g_kfd_session.reset();
   }
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  {
+    std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+    g_devices.clear();
+    g_kfd_session.reset();
+  }
 #endif
 
   return LR_SUCCESS;
@@ -289,7 +329,7 @@ lr_status_t lr_device_count(uint32_t *count) {
   }
 
   *count = 0;
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   *count = static_cast<uint32_t>(g_devices.size());
   return LR_SUCCESS;
@@ -337,6 +377,20 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
       }
     }
     state.opened = true;
+  }
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  {
+    std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+    if (index >= g_devices.size()) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    DeviceState &state = g_devices[index];
+    if (!state.opened) {
+      if (!g_kfd_session || !g_kfd_session->acquire_vm(state.node)) {
+        return LR_ERROR_RUNTIME;
+      }
+      state.opened = true;
+    }
   }
 #else
   if (index != 0) {
@@ -387,6 +441,23 @@ lr_status_t lr_device_name(lr_device_t device, char *name, size_t name_size) {
   std::strncpy(name, device_name.c_str(), name_size);
   name[name_size - 1] = '\0';
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const DeviceState &state = g_devices[device.index];
+  const std::string device_name =
+      state.node.name.empty()
+          ? light_rocr::runtime::gfx_target_name(state.node.architecture)
+          : state.node.name;
+  if (device_name.size() + 1 > name_size) {
+    name[0] = '\0';
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  std::strncpy(name, device_name.c_str(), name_size);
+  name[name_size - 1] = '\0';
+  return LR_SUCCESS;
 #else
   (void)device;
   name[0] = '\0';
@@ -412,6 +483,12 @@ lr_status_t lr_synchronize(lr_device_t device) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   return synchronize_light_rocr_device_locked(&g_devices[device.index]);
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return LR_SUCCESS;
 #else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;

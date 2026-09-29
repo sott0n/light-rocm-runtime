@@ -473,7 +473,7 @@ lr_status_t lr_get_memory_stats(lr_device_t device, lr_memory_stats_t *stats) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -493,7 +493,7 @@ lr_status_t lr_reset_memory_stats(lr_device_t device) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;

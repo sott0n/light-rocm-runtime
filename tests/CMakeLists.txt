@@ -60,7 +60,26 @@ if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
   )
 endif()
 
-if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
+if(
+  LRRT_SELECTED_BACKEND STREQUAL "light-rocr"
+  AND LRRT_SELECTED_LIGHT_ROCR_TRANSPORT STREQUAL "kfd"
+  AND LIGHT_ROCR_BUILD_GPU_TESTS
+)
+  lrrt_add_test_executable(
+    lrrt_direct_kfd_backend_device_tests
+    direct_kfd_backend.cpp
+    lrrt::lrrt
+  )
+  set_tests_properties(
+    lrrt_direct_kfd_backend_device_tests
+    PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
+  )
+endif()
+
+if(
+  LRRT_SELECTED_BACKEND STREQUAL "light-rocr"
+  AND LRRT_SELECTED_LIGHT_ROCR_TRANSPORT STREQUAL "hsakmt"
+)
   set(
     LRRT_LIGHT_ROCR_GPU_TESTS
     lrrt_light_rocr_backend_tests

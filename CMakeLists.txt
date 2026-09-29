@@ -18,6 +18,12 @@ set(
   CACHE STRING "LRRT runtime backend (rocr or light-rocr)"
 )
 set_property(CACHE LRRT_BACKEND PROPERTY STRINGS rocr light-rocr)
+set(
+  LRRT_LIGHT_ROCR_TRANSPORT
+  "hsakmt"
+  CACHE STRING "light-rocr transport used by the LRRT backend (hsakmt or kfd)"
+)
+set_property(CACHE LRRT_LIGHT_ROCR_TRANSPORT PROPERTY STRINGS hsakmt kfd)
 option(
   LRRT_ENABLE_LIGHT_ROCR
   "Build the experimental self-authored light-rocr stack"
@@ -132,45 +138,63 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
   if(NOT LRRT_AMDGPU_TARGET STREQUAL "gfx1101")
     message(FATAL_ERROR "The light-rocr LRRT backend currently requires gfx1101")
   endif()
-  if(NOT TARGET light_rocr::transport_hsakmt)
-    message(FATAL_ERROR "The light-rocr LRRT backend requires libhsakmt")
-  endif()
 
-  target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR=1)
-  target_sources(lrrt PRIVATE src/light_rocr_kernargs.cpp)
-  target_link_libraries(lrrt PRIVATE light_rocr::transport_hsakmt)
+  string(TOLOWER "${LRRT_LIGHT_ROCR_TRANSPORT}" LRRT_SELECTED_LIGHT_ROCR_TRANSPORT)
+  if(LRRT_SELECTED_LIGHT_ROCR_TRANSPORT STREQUAL "hsakmt")
+    if(NOT TARGET light_rocr::transport_hsakmt)
+      message(FATAL_ERROR "The hsakmt light-rocr transport requires libhsakmt")
+    endif()
 
-  lrrt_add_hsaco_kernel(
-    lrrt_internal_copy_kernel
-    src/light_rocr_copy_kernel.cpp
-    LRRT_INTERNAL_COPY_HSACO
-    -O2
-  )
-  if(NOT LRRT_INTERNAL_COPY_HSACO)
-    message(FATAL_ERROR "The light-rocr backend requires the ROCm compiler")
+    target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR=1)
+    target_sources(lrrt PRIVATE src/light_rocr_kernargs.cpp)
+    target_link_libraries(lrrt PRIVATE light_rocr::transport_hsakmt)
+
+    lrrt_add_hsaco_kernel(
+      lrrt_internal_copy_kernel
+      src/light_rocr_copy_kernel.cpp
+      LRRT_INTERNAL_COPY_HSACO
+      -O2
+    )
+    if(NOT LRRT_INTERNAL_COPY_HSACO)
+      message(FATAL_ERROR "The light-rocr backend requires the ROCm compiler")
+    endif()
+    set(
+      LRRT_INTERNAL_COPY_HEADER
+      "${CMAKE_CURRENT_BINARY_DIR}/lrrt_internal_copy_kernel.inc"
+    )
+    add_custom_command(
+      OUTPUT "${LRRT_INTERNAL_COPY_HEADER}"
+      COMMAND
+        "${CMAKE_COMMAND}" "-DINPUT=${LRRT_INTERNAL_COPY_HSACO}"
+        "-DOUTPUT=${LRRT_INTERNAL_COPY_HEADER}" -P
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+      DEPENDS
+        "${LRRT_INTERNAL_COPY_HSACO}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+      VERBATIM
+    )
+    add_custom_target(
+      lrrt_internal_copy_kernel_data
+      DEPENDS "${LRRT_INTERNAL_COPY_HEADER}"
+    )
+    add_dependencies(lrrt lrrt_internal_copy_kernel_data)
+    target_include_directories(lrrt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+  elseif(LRRT_SELECTED_LIGHT_ROCR_TRANSPORT STREQUAL "kfd")
+    if(NOT TARGET light_rocr::transport_kfd)
+      message(FATAL_ERROR "The direct KFD light-rocr transport is unavailable")
+    endif()
+    target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR_KFD=1)
+    target_link_libraries(lrrt PRIVATE light_rocr::transport_kfd)
+  else()
+    message(
+      FATAL_ERROR
+      "LRRT_LIGHT_ROCR_TRANSPORT must be hsakmt or kfd"
+    )
   endif()
-  set(
-    LRRT_INTERNAL_COPY_HEADER
-    "${CMAKE_CURRENT_BINARY_DIR}/lrrt_internal_copy_kernel.inc"
+  message(
+    STATUS
+    "LRRT backend: light-rocr (${LRRT_SELECTED_LIGHT_ROCR_TRANSPORT})"
   )
-  add_custom_command(
-    OUTPUT "${LRRT_INTERNAL_COPY_HEADER}"
-    COMMAND
-      "${CMAKE_COMMAND}" "-DINPUT=${LRRT_INTERNAL_COPY_HSACO}"
-      "-DOUTPUT=${LRRT_INTERNAL_COPY_HEADER}" -P
-      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
-    DEPENDS
-      "${LRRT_INTERNAL_COPY_HSACO}"
-      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
-    VERBATIM
-  )
-  add_custom_target(
-    lrrt_internal_copy_kernel_data
-    DEPENDS "${LRRT_INTERNAL_COPY_HEADER}"
-  )
-  add_dependencies(lrrt lrrt_internal_copy_kernel_data)
-  target_include_directories(lrrt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-  message(STATUS "LRRT backend: light-rocr")
 elseif(LRRT_ENABLE_HSA AND HSA_INCLUDE_DIR AND HSA_RUNTIME_LIBRARY)
   target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_HSA=1)
   target_include_directories(lrrt PRIVATE "${HSA_INCLUDE_DIR}")
