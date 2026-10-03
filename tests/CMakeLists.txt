@@ -71,6 +71,7 @@ if(
       lrrt_direct_kfd_memory_device_tests direct_kfd_memory.cpp
       lrrt_direct_kfd_queue_device_tests direct_kfd_queue.cpp
       lrrt_direct_kfd_module_device_tests direct_kfd_module.cpp
+      lrrt_direct_kfd_launch_device_tests direct_kfd_launch.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )
@@ -86,6 +87,12 @@ if(
       lrrt_direct_kfd_module_device_tests
       direct_kfd_scratch_kernel_hsaco
       DIRECT_KFD_MODULE_HSACO
+      "${DIRECT_KFD_VECTOR_ADD_HSACO}"
+    )
+    lrrt_bind_hsaco(
+      lrrt_direct_kfd_launch_device_tests
+      direct_kfd_scratch_kernel_hsaco
+      DIRECT_KFD_LAUNCH_HSACO
       "${DIRECT_KFD_VECTOR_ADD_HSACO}"
     )
   endif()

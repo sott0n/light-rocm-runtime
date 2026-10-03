@@ -29,6 +29,7 @@
 #include "light_rocr/transport/hsakmt/queue.hpp"
 #include "light_rocr/transport/hsakmt/signal.hpp"
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr/runtime/launch.hpp"
 #include "light_rocr/runtime/topology.hpp"
 #include "light_rocr/transport/kfd/code_cache.hpp"
 #include "light_rocr/transport/kfd/executable_image.hpp"
@@ -198,7 +199,17 @@ struct lr_queue_t {
   std::vector<PendingBarrier> pending_barriers;
   std::vector<lr_event_t *> pending_events;
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  struct PendingDispatch {
+    PendingDispatch(light_rocr::transport::kfd::UserSignal &&signal,
+                    light_rocr::transport::kfd::GttAllocation &&kernarg)
+        : completion_signal(std::move(signal)), kernarg(std::move(kernarg)) {}
+
+    light_rocr::transport::kfd::UserSignal completion_signal;
+    light_rocr::transport::kfd::GttAllocation kernarg;
+  };
+
   light_rocr::transport::kfd::AqlQueue queue;
+  std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
 #endif
 };
 
@@ -334,6 +345,12 @@ lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
 bool valid_direct_kfd_queue_locked(lr_queue_t *queue);
 lr_status_t restore_direct_kfd_default_queue_locked(lr_device_t device_handle,
                                                     DeviceState *device);
+lr_status_t ensure_direct_kfd_queue_scratch_locked(DeviceState *device,
+                                                   lr_queue_t *queue,
+                                                   uint32_t private_size);
+lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue);
+lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue);
+lr_status_t synchronize_direct_kfd_device_locked(DeviceState *device);
 void release_direct_kfd_queues_locked(lr_status_t *result);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked(lr_status_t *result);

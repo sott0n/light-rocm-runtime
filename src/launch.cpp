@@ -1,9 +1,13 @@
 #include "aql_producer.hpp"
 #include "launch_profile.hpp"
-#if LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 #include "light_rocr/runtime/aql.hpp"
-#include "light_rocr_aql_queue.hpp"
 #include "light_rocr_kernargs.hpp"
+#endif
+#if LRRT_ENABLE_LIGHT_ROCR
+#include "light_rocr_aql_queue.hpp"
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr_kfd_aql_queue.hpp"
 #endif
 #include "runtime_internal.hpp"
 
@@ -22,6 +26,167 @@ using namespace lrrt_internal;
 
 #ifndef LRRT_ENABLE_LAUNCH_PROFILING
 #define LRRT_ENABLE_LAUNCH_PROFILING 0
+#endif
+
+namespace {
+AqlKernelDispatchParameters
+aql_dispatch_parameters(const lr_launch_config_t *config,
+                        uint32_t private_segment_size,
+                        uint32_t group_segment_size, uint64_t kernel_object,
+                        uint64_t kernarg_address, uint64_t completion_signal);
+lr_status_t aql_submit_status(AqlSubmitError error);
+} // namespace
+
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+namespace {
+
+static_assert(kAqlPacketHeaderBarrierShift ==
+              light_rocr::runtime::kAqlPacketHeaderBarrierShift);
+static_assert(kAqlKernelDispatchHeader ==
+              light_rocr::runtime::kAqlKernelDispatchHeader);
+
+bool valid_direct_kfd_dispatch_packet(void *context,
+                                      const AqlKernelDispatchPacket &packet) {
+  using namespace light_rocr::runtime;
+  auto *queue = static_cast<light_rocr::transport::kfd::AqlQueue *>(context);
+  const uint64_t workgroup_size =
+      static_cast<uint64_t>(packet.workgroup_size_x) *
+      static_cast<uint64_t>(packet.workgroup_size_y) *
+      static_cast<uint64_t>(packet.workgroup_size_z);
+  return packet.workgroup_size_x <= kGfx1101WorkgroupMaximumDimension &&
+         packet.workgroup_size_y <= kGfx1101WorkgroupMaximumDimension &&
+         packet.workgroup_size_z <= kGfx1101WorkgroupMaximumDimension &&
+         workgroup_size <= kGfx1101WorkgroupMaximumSize &&
+         packet.group_segment_size <= kGfx1101GroupSegmentMaximumSize &&
+         packet.private_segment_size <= queue->scratch_private_segment_size() &&
+         packet.kernel_object % kAmdKernelDescriptorAlignment == 0 &&
+         (packet.kernarg_address == 0 ||
+          packet.kernarg_address % kAmdKernargMinimumAlignment == 0) &&
+         packet.completion_signal != 0 &&
+         packet.completion_signal % kAmdSignalAlignment == 0;
+}
+
+lr_status_t submit_direct_kfd_kernel_locked(
+    DeviceState *device, lr_queue_t *queue,
+    const light_rocr::transport::kfd::ExecutableImage &executable_image,
+    size_t image_kernel_index, const lr_launch_config_t *config,
+    const void *args, size_t args_size) {
+  if (!device || !queue || !config || !args || !g_kfd_session ||
+      !executable_image ||
+      image_kernel_index >= executable_image.code_object().kernels.size() ||
+      image_kernel_index >= executable_image.kernels().size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const auto &kernel_info =
+      executable_image.code_object().kernels[image_kernel_index];
+  if (args_size > kernel_info.explicit_argument_size ||
+      kernel_info.uses_dynamic_stack ||
+      config->shared_memory_bytes > std::numeric_limits<uint32_t>::max() -
+                                        kernel_info.group_segment_size) {
+    return kernel_info.uses_dynamic_stack ? LR_ERROR_NOT_SUPPORTED
+                                          : LR_ERROR_INVALID_ARGUMENT;
+  }
+  const lr_status_t scratch_status = ensure_direct_kfd_queue_scratch_locked(
+      device, queue, kernel_info.private_segment_size);
+  if (scratch_status != LR_SUCCESS) {
+    return scratch_status;
+  }
+
+  const lr_status_t capacity_status =
+      ensure_direct_kfd_queue_capacity_locked(queue);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
+  }
+
+  const auto requirements = light_rocr::runtime::kernarg_buffer_requirements(
+      kernel_info, args, args_size);
+  if (!requirements) {
+    return requirements.status.error ==
+                   light_rocr::runtime::KernargBufferError::UnsupportedAlignment
+               ? LR_ERROR_NOT_SUPPORTED
+               : LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::optional<light_rocr::transport::kfd::GttAllocation> kernarg_allocation;
+  uint64_t kernarg_address = 0;
+  if (requirements.storage_size != 0) {
+    if (requirements.storage_size >
+        std::numeric_limits<uint64_t>::max() -
+            (light_rocr::transport::kfd::kMemoryPageSize - 1)) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    const uint64_t allocation_size =
+        (requirements.storage_size +
+         light_rocr::transport::kfd::kMemoryPageSize - 1) &
+        ~(light_rocr::transport::kfd::kMemoryPageSize - 1);
+    auto allocated = g_kfd_session->allocate_gtt(device->node, allocation_size);
+    kernarg_allocation.emplace(std::move(allocated.allocation));
+    if (!allocated) {
+      (void)kernarg_allocation->release();
+      return LR_ERROR_RUNTIME;
+    }
+    const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
+        kernel_info, args, args_size, kernarg_allocation->host_address(),
+        kernarg_allocation->size(), kernarg_allocation->gpu_address());
+    if (!materialized ||
+        !populate_light_rocr_hidden_kernargs(kernel_info, *config,
+                                             kernarg_allocation->host_address(),
+                                             kernel_info.kernarg_size)) {
+      (void)kernarg_allocation->release();
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    kernarg_address = materialized.buffer.gpu_address();
+  }
+
+  auto signal = g_kfd_session->create_user_signal(device->node, 1);
+  if (!signal) {
+    if (kernarg_allocation.has_value()) {
+      (void)kernarg_allocation->release();
+    }
+    (void)signal.signal.release();
+    return LR_ERROR_RUNTIME;
+  }
+  std::unique_ptr<lr_queue_t::PendingDispatch> pending;
+  try {
+    light_rocr::transport::kfd::GttAllocation empty_kernarg;
+    pending = std::make_unique<lr_queue_t::PendingDispatch>(
+        std::move(signal.signal), kernarg_allocation.has_value()
+                                      ? std::move(*kernarg_allocation)
+                                      : std::move(empty_kernarg));
+    queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
+  } catch (const std::bad_alloc &) {
+    if (pending) {
+      (void)pending->kernarg.release();
+      (void)pending->completion_signal.release();
+    } else {
+      if (kernarg_allocation.has_value()) {
+        (void)kernarg_allocation->release();
+      }
+      (void)signal.signal.release();
+    }
+    return LR_ERROR_RUNTIME;
+  }
+
+  const auto parameters = aql_dispatch_parameters(
+      config, kernel_info.private_segment_size,
+      kernel_info.group_segment_size + config->shared_memory_bytes,
+      executable_image.kernels()[image_kernel_index].descriptor_gpu_address,
+      kernarg_address, pending->completion_signal.gpu_handle());
+  const auto submitted = submit_aql_kernel_dispatch(
+      light_rocr_kfd_producer_ops(&queue->queue,
+                                  valid_direct_kfd_dispatch_packet),
+      parameters, {queue->pending_dispatches.size(), false});
+  if (!submitted) {
+    (void)pending->kernarg.release();
+    (void)pending->completion_signal.release();
+    return aql_submit_status(submitted.error);
+  }
+  queue->pending_dispatches.push_back(std::move(pending));
+  return LR_SUCCESS;
+}
+
+} // namespace
 #endif
 
 namespace {
@@ -830,6 +995,30 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   return submit_light_rocr_kernel_locked(
       &state, execution_queue, kernel->module->executable_image,
       kernel->image_kernel_index, config, args, args_size, event_dependencies);
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  if (dependency_count != 0 || explicit_dependencies != nullptr) {
+    return LR_ERROR_NOT_SUPPORTED;
+  }
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_kernel_locked(kernel)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const lr_device_t device = kernel->module->device;
+  if (device.index >= g_devices.size() || !g_kfd_session ||
+      !kernel->module->executable_image.has_value()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  DeviceState &state = g_devices[device.index];
+  if (use_default_queue) {
+    execution_queue = state.default_queue;
+  }
+  if (!execution_queue || !valid_direct_kfd_queue_locked(execution_queue) ||
+      execution_queue->device.index != device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return submit_direct_kfd_kernel_locked(
+      &state, execution_queue, *kernel->module->executable_image,
+      kernel->image_kernel_index, config, args, args_size);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif

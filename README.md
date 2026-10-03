@@ -64,7 +64,7 @@ experimental `light-rocr` backend currently targets `gfx1101` and uses
 `libhsakmt` for execution. Its direct KFD path combines LRRT-owned AQL packet
 publication with transport-owned discovery, VM and memory management, queue
 indices, doorbell signaling, completion signals, and resource cleanup to execute
-scratch-free kernels.
+Clang HSACO kernels, including kernels that use scratch memory.
 Initialization and runtime state are process-global, and several
 safety-oriented operations introduce broad synchronization.
 
@@ -126,9 +126,11 @@ generated tokens and top logits matched the ROCr backend. GPU access still uses
 the `libhsakmt` execution transport by default. Add
 `-DLRRT_LIGHT_ROCR_TRANSPORT=kfd` to select the direct KFD integration, which
 currently supports LRRT runtime and device lifecycle, device allocation,
-synchronous copies, queue lifecycle, and HSACO module and kernel lookup. The
-direct KFD primitives can already execute scratch-backed Clang HSACO without
-`libhsakmt`; event and launch API integration remains in progress.
+synchronous copies, queue lifecycle, HSACO module and kernel lookup, kernel
+launch on default and explicit queues, and queue or device synchronization.
+These operations execute scratch-backed Clang HSACO without `libhsakmt`.
+Events, asynchronous copies, and simultaneous scratch-backed queues remain in
+progress.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

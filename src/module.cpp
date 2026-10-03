@@ -499,6 +499,12 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
   }
 
   module->destroying = true;
+  const lr_status_t synchronization_status =
+      synchronize_direct_kfd_device_locked(&g_devices[module->device.index]);
+  if (synchronization_status != LR_SUCCESS) {
+    module->destroying = false;
+    return synchronization_status;
+  }
   const lr_status_t status = release_direct_kfd_module_resources(module);
   if (status != LR_SUCCESS) {
     module->destroying = false;

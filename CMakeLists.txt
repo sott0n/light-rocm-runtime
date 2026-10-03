@@ -184,6 +184,7 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
       message(FATAL_ERROR "The direct KFD light-rocr transport is unavailable")
     endif()
     target_compile_definitions(lrrt PRIVATE LRRT_ENABLE_LIGHT_ROCR_KFD=1)
+    target_sources(lrrt PRIVATE src/light_rocr_kernargs.cpp)
     target_link_libraries(lrrt PRIVATE light_rocr::transport_kfd)
   else()
     message(

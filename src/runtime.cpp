@@ -313,6 +313,16 @@ lr_status_t lr_shutdown(void) {
   {
     std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
     lr_status_t release_status = LR_SUCCESS;
+    for (DeviceState &device : g_devices) {
+      const lr_status_t status = synchronize_direct_kfd_device_locked(&device);
+      if (release_status == LR_SUCCESS && status != LR_SUCCESS) {
+        release_status = status;
+      }
+    }
+    if (release_status != LR_SUCCESS) {
+      g_initialized.store(true);
+      return release_status;
+    }
     release_modules_locked(&release_status);
     if (release_status != LR_SUCCESS) {
       g_initialized.store(true);
@@ -513,7 +523,7 @@ lr_status_t lr_synchronize(lr_device_t device) {
       !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return LR_SUCCESS;
+  return synchronize_direct_kfd_device_locked(&g_devices[device.index]);
 #else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;
