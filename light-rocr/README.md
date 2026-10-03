@@ -6,7 +6,7 @@ keeping Linux KFD as the kernel boundary.
 
 It does not use `libhsa-runtime64.so`. The LRRT backend currently executes
 through `libhsakmt`, while the direct KFD transport can discover the GPU,
-manage GPUVM memory, create an AQL queue, and complete a scratch-free kernel
+manage GPUVM memory, create an AQL queue, and complete a scratch-backed kernel
 dispatch from a parsed Clang HSACO without `libhsakmt`.
 
 ## Boundary
@@ -23,7 +23,8 @@ caches, the model tail, and autoregressive generation. Its generated tokens and
 top logits matched the ROCr backend. Clang and Triton generated HSACOs are also
 covered by the GPU tests. The direct KFD path can materialize a Clang HSACO in
 executable GTT, invalidate the instruction cache, resolve its kernel descriptor,
-and execute a scratch-free kernel.
+and execute a scratch-backed kernel. LRRT's public direct KFD backend supports
+device, memory, synchronous copy, and queue lifecycle APIs.
 
 ## Build
 

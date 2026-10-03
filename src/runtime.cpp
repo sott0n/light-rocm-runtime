@@ -313,6 +313,11 @@ lr_status_t lr_shutdown(void) {
   {
     std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
     lr_status_t release_status = LR_SUCCESS;
+    release_direct_kfd_queues_locked(&release_status);
+    if (release_status != LR_SUCCESS) {
+      g_initialized.store(true);
+      return release_status;
+    }
     release_memory_allocations_locked(&release_status);
     if (release_status != LR_SUCCESS) {
       g_initialized.store(true);
@@ -395,8 +400,16 @@ lr_status_t lr_device_open(uint32_t index, lr_device_t *device) {
       if (!g_kfd_session || !g_kfd_session->acquire_vm(state.node)) {
         return LR_ERROR_RUNTIME;
       }
-      state.opened = true;
     }
+    if (!state.default_queue) {
+      lr_device_t opened_device = {index};
+      const lr_status_t status = create_direct_kfd_queue(
+          opened_device, &state, true, &state.default_queue);
+      if (status != LR_SUCCESS) {
+        return status;
+      }
+    }
+    state.opened = true;
   }
 #else
   if (index != 0) {
@@ -491,7 +504,8 @@ lr_status_t lr_synchronize(lr_device_t device) {
   return synchronize_light_rocr_device_locked(&g_devices[device.index]);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
-  if (device.index >= g_devices.size() || !g_devices[device.index].opened) {
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   return LR_SUCCESS;

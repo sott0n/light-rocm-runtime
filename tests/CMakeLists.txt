@@ -69,6 +69,7 @@ if(
       LRRT_DIRECT_KFD_GPU_TESTS
       lrrt_direct_kfd_backend_device_tests direct_kfd_backend.cpp
       lrrt_direct_kfd_memory_device_tests direct_kfd_memory.cpp
+      lrrt_direct_kfd_queue_device_tests direct_kfd_queue.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )

@@ -194,6 +194,8 @@ struct lr_queue_t {
   std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
   std::vector<PendingBarrier> pending_barriers;
   std::vector<lr_event_t *> pending_events;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  light_rocr::transport::kfd::AqlQueue queue;
 #endif
 };
 
@@ -316,6 +318,11 @@ void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
 extern std::unique_ptr<light_rocr::transport::kfd::KfdSession> g_kfd_session;
+lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
+                                    DeviceState *device, bool is_default,
+                                    lr_queue_t **queue);
+bool valid_direct_kfd_queue_locked(lr_queue_t *queue);
+void release_direct_kfd_queues_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
 #endif
 
