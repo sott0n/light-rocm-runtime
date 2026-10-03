@@ -316,6 +316,7 @@ void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
 extern std::unique_ptr<light_rocr::transport::kfd::KfdSession> g_kfd_session;
+void release_memory_allocations_locked(lr_status_t *result);
 #endif
 
 #if LRRT_ENABLE_HSA

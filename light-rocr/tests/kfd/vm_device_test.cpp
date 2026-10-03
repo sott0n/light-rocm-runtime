@@ -105,6 +105,22 @@ int main() {
     return 1;
   }
 
+  opened.session = {};
+  second_session.session = {};
+  auto reopened = light_rocr::transport::kfd::KfdSession::open();
+  if (!reopened) {
+    std::cerr << reopened.status.message << '\n';
+    return 1;
+  }
+  const auto reacquired = reopened.session.acquire_vm(node);
+  if (!reacquired || !same_aperture(aperture, reacquired.aperture)) {
+    std::cerr << "reopened KFD session did not retain the process VM\n";
+    if (!reacquired) {
+      std::cerr << reacquired.status.message << '\n';
+    }
+    return 1;
+  }
+
   std::cout << "acquired VM for gpu_id " << aperture.gpu_id << ", gpuvm 0x"
             << std::hex << aperture.gpuvm_base << "-0x" << aperture.gpuvm_limit
             << '\n';

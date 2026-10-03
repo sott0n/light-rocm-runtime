@@ -22,7 +22,7 @@ namespace {
 struct SessionRegistry {
   std::mutex mutex;
   pid_t process_id = ::getpid();
-  std::unordered_map<dev_t, std::weak_ptr<KfdState>> sessions;
+  std::unordered_map<dev_t, std::shared_ptr<KfdState>> sessions;
 };
 
 SessionRegistry &session_registry() {
@@ -143,11 +143,8 @@ SessionResult KfdSession::open(const std::string &device_path) {
 
   const auto registered = registry.sessions.find(device_info.st_rdev);
   if (registered != registry.sessions.end()) {
-    std::shared_ptr<KfdState> state = registered->second.lock();
-    if (state != nullptr) {
-      (void)::close(fd);
-      return {{}, KfdSession(std::move(state))};
-    }
+    (void)::close(fd);
+    return {{}, KfdSession(registered->second)};
   }
 
   std::shared_ptr<KfdState> state;

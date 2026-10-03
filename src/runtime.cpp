@@ -312,6 +312,12 @@ lr_status_t lr_shutdown(void) {
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
   {
     std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+    lr_status_t release_status = LR_SUCCESS;
+    release_memory_allocations_locked(&release_status);
+    if (release_status != LR_SUCCESS) {
+      g_initialized.store(true);
+      return release_status;
+    }
     g_devices.clear();
     g_kfd_session.reset();
   }

@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <list>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -227,26 +228,49 @@ void release_memory_allocations_locked(lr_status_t *result) {
   }
   g_host_allocations.clear();
 }
-#elif LRRT_ENABLE_LIGHT_ROCR
+#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 namespace {
+
+#if LRRT_ENABLE_LIGHT_ROCR
+using LightRocrMemoryAllocation =
+    light_rocr::transport::hsakmt::MemoryAllocation;
+constexpr uint64_t kLightRocrMemoryPageSize =
+    light_rocr::transport::hsakmt::kMemoryPageSize;
+#else
+using LightRocrMemoryAllocation = light_rocr::transport::kfd::GttAllocation;
+constexpr uint64_t kLightRocrMemoryPageSize =
+    light_rocr::transport::kfd::kMemoryPageSize;
+#endif
 
 struct LightRocrAllocationInfo {
   uint32_t device_index;
   size_t requested_size;
-  light_rocr::transport::hsakmt::MemoryAllocation allocation;
+  LightRocrMemoryAllocation allocation;
 };
 
+std::unordered_map<void *, LightRocrAllocationInfo> g_light_rocr_allocations;
+std::list<LightRocrMemoryAllocation> g_light_rocr_pending_cleanup;
+
+#if LRRT_ENABLE_LIGHT_ROCR
 struct LightRocrHostAllocationInfo {
   uint32_t device_index;
   size_t requested_size;
   light_rocr::transport::hsakmt::HostMemoryAllocation allocation;
 };
 
-std::unordered_map<void *, LightRocrAllocationInfo> g_light_rocr_allocations;
 std::unordered_map<void *, LightRocrHostAllocationInfo>
     g_light_rocr_host_allocations;
 
 constexpr char kLightRocrCopyKernelName[] = "lrrt_copy_bytes";
+#endif
+
+auto allocate_light_rocr_gtt(DeviceState *device, uint64_t size) {
+#if LRRT_ENABLE_LIGHT_ROCR
+  return g_kfd_session->allocate_gtt(device->node.node_id, size);
+#else
+  return g_kfd_session->allocate_gtt(device->node, size);
+#endif
+}
 
 void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
                                           size_t size) {
@@ -273,6 +297,7 @@ void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
   return nullptr;
 }
 
+#if LRRT_ENABLE_LIGHT_ROCR
 enum class LightRocrHostPointerLookup {
   Unregistered,
   Valid,
@@ -308,6 +333,20 @@ translate_light_rocr_host_pointer(const void *ptr, lr_device_t device,
     return LightRocrHostPointerLookup::Valid;
   }
   return LightRocrHostPointerLookup::Unregistered;
+}
+#endif
+
+void release_or_retain_light_rocr_cleanup(
+    LightRocrMemoryAllocation &&allocation) {
+  if (allocation && !allocation.release()) {
+    try {
+      g_light_rocr_pending_cleanup.push_back(std::move(allocation));
+    } catch (const std::bad_alloc &) {
+      // Avoid propagating an exception through the C API. The owner retains
+      // its remaining state when release fails, so retry before destruction.
+      (void)allocation.release();
+    }
+  }
 }
 
 void record_allocation(DeviceState *device, size_t size) {
@@ -360,6 +399,7 @@ void record_memcpy(DeviceState *device, lr_memcpy_kind_t kind, size_t size) {
 
 } // namespace
 
+#if LRRT_ENABLE_LIGHT_ROCR
 lr_status_t ensure_light_rocr_copy_kernel_locked(DeviceState *device) {
   if (!device || !g_kfd_session) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -422,6 +462,7 @@ void release_light_rocr_internal_kernels_locked(lr_status_t *result) {
     device.copy_kernel.reset();
   }
 }
+#endif
 
 void release_memory_allocations_locked(lr_status_t *result) {
   for (auto allocation = g_light_rocr_allocations.begin();
@@ -440,6 +481,19 @@ void release_memory_allocations_locked(lr_status_t *result) {
     }
     allocation = g_light_rocr_allocations.erase(allocation);
   }
+  for (auto allocation = g_light_rocr_pending_cleanup.begin();
+       allocation != g_light_rocr_pending_cleanup.end();) {
+    const auto status = allocation->release();
+    if (!status) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      ++allocation;
+      continue;
+    }
+    allocation = g_light_rocr_pending_cleanup.erase(allocation);
+  }
+#if LRRT_ENABLE_LIGHT_ROCR
   for (auto allocation = g_light_rocr_host_allocations.begin();
        allocation != g_light_rocr_host_allocations.end();) {
     const auto status = allocation->second.allocation.release();
@@ -456,6 +510,7 @@ void release_memory_allocations_locked(lr_status_t *result) {
     }
     allocation = g_light_rocr_host_allocations.erase(allocation);
   }
+#endif
 }
 #endif
 
@@ -547,35 +602,37 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
   g_allocations[*ptr] = AllocationInfo{device.index, size, 0, false};
   record_allocation(&state, size);
   return LR_SUCCESS;
-#elif LRRT_ENABLE_LIGHT_ROCR
+#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
       !g_kfd_session) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  if (size > std::numeric_limits<uint64_t>::max() -
-                 (light_rocr::transport::hsakmt::kMemoryPageSize - 1)) {
+  if (size >
+      std::numeric_limits<uint64_t>::max() - (kLightRocrMemoryPageSize - 1)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
   const uint64_t allocation_size =
-      (static_cast<uint64_t>(size) +
-       light_rocr::transport::hsakmt::kMemoryPageSize - 1) &
-      ~(light_rocr::transport::hsakmt::kMemoryPageSize - 1);
-  auto allocated = g_kfd_session->allocate_gtt(
-      g_devices[device.index].node.node_id, allocation_size);
+      (static_cast<uint64_t>(size) + kLightRocrMemoryPageSize - 1) &
+      ~(kLightRocrMemoryPageSize - 1);
+  auto allocated =
+      allocate_light_rocr_gtt(&g_devices[device.index], allocation_size);
   if (!allocated) {
+    release_or_retain_light_rocr_cleanup(std::move(allocated.allocation));
     return LR_ERROR_RUNTIME;
   }
 
   const uint64_t gpu_address = allocated.allocation.gpu_address();
   if (gpu_address == 0 || gpu_address > std::numeric_limits<uintptr_t>::max()) {
+    release_or_retain_light_rocr_cleanup(std::move(allocated.allocation));
     return LR_ERROR_RUNTIME;
   }
   void *device_ptr =
       reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address));
   if (g_light_rocr_allocations.find(device_ptr) !=
       g_light_rocr_allocations.end()) {
+    release_or_retain_light_rocr_cleanup(std::move(allocated.allocation));
     return LR_ERROR_RUNTIME;
   }
 
@@ -636,7 +693,7 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
   g_allocations.erase(allocation);
   g_memory_state_changed.notify_all();
   return LR_SUCCESS;
-#elif LRRT_ENABLE_LIGHT_ROCR
+#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !g_devices[device.index].opened) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -647,11 +704,13 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+#if LRRT_ENABLE_LIGHT_ROCR
   const lr_status_t synchronization_status =
       synchronize_light_rocr_device_locked(&g_devices[device.index]);
   if (synchronization_status != LR_SUCCESS) {
     return synchronization_status;
   }
+#endif
   const auto status = allocation->second.allocation.release();
   if (!status) {
     return LR_ERROR_RUNTIME;
@@ -880,7 +939,7 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     record_memcpy(&g_devices[device.index], kind, size);
   }
   return to_lr_status(status);
-#elif LRRT_ENABLE_LIGHT_ROCR
+#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
       !g_kfd_session) {
@@ -907,6 +966,7 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     }
   }
 
+#if LRRT_ENABLE_LIGHT_ROCR
   if (kind == LR_MEMCPY_HOST_TO_DEVICE &&
       translate_light_rocr_host_pointer(src, device, size) ==
           LightRocrHostPointerLookup::Invalid) {
@@ -923,6 +983,7 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
   if (synchronization_status != LR_SUCCESS) {
     return synchronization_status;
   }
+#endif
   std::memmove(copy_dst, copy_src, size);
   record_memcpy(&g_devices[device.index], kind, size);
   return LR_SUCCESS;
