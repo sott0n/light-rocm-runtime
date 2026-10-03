@@ -126,9 +126,9 @@ generated tokens and top logits matched the ROCr backend. GPU access still uses
 the `libhsakmt` execution transport by default. Add
 `-DLRRT_LIGHT_ROCR_TRANSPORT=kfd` to select the direct KFD integration, which
 currently supports LRRT runtime and device lifecycle, device allocation,
-synchronous copies, and default and explicit queue lifecycle. The direct KFD
-primitives can already load and execute scratch-backed Clang HSACO without
-`libhsakmt`; module, event, and launch API integration remains in progress.
+synchronous copies, queue lifecycle, and HSACO module and kernel lookup. The
+direct KFD primitives can already execute scratch-backed Clang HSACO without
+`libhsakmt`; event and launch API integration remains in progress.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

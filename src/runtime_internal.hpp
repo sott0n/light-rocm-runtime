@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <shared_mutex>
 #include <string>
 #include <unordered_map>
@@ -29,6 +30,8 @@
 #include "light_rocr/transport/hsakmt/signal.hpp"
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
 #include "light_rocr/runtime/topology.hpp"
+#include "light_rocr/transport/kfd/code_cache.hpp"
+#include "light_rocr/transport/kfd/executable_image.hpp"
 #include "light_rocr/transport/kfd/session.hpp"
 #endif
 
@@ -210,6 +213,11 @@ struct lr_module_t {
   hsa_loaded_code_object_t loaded_code_object;
 #elif LRRT_ENABLE_LIGHT_ROCR
   light_rocr::transport::hsakmt::ExecutableImage executable_image;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::optional<light_rocr::transport::kfd::ExecutableImage> executable_image;
+  std::optional<light_rocr::transport::kfd::CodeCacheOperation>
+      pending_cache_operation;
+  lr_queue_t *cache_operation_queue;
 #endif
 };
 
@@ -221,6 +229,8 @@ struct lr_kernel_t {
   uint32_t group_segment_size;
   uint32_t private_segment_size;
 #elif LRRT_ENABLE_LIGHT_ROCR
+  size_t image_kernel_index;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
   size_t image_kernel_index;
 #endif
 };
@@ -322,7 +332,11 @@ lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
                                     DeviceState *device, bool is_default,
                                     lr_queue_t **queue);
 bool valid_direct_kfd_queue_locked(lr_queue_t *queue);
+lr_status_t restore_direct_kfd_default_queue_locked(lr_device_t device_handle,
+                                                    DeviceState *device);
 void release_direct_kfd_queues_locked(lr_status_t *result);
+bool valid_kernel_locked(lr_kernel_t *kernel);
+void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
 #endif
 

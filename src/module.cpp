@@ -2,15 +2,20 @@
 
 #if LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr/transport/hsakmt/code_cache.hpp"
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr/transport/kfd/code_cache.hpp"
 #endif
 
+#include <chrono>
+#include <new>
 #include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace lrrt_internal {
 
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 namespace {
 
 #if LRRT_ENABLE_HSA
@@ -24,6 +29,9 @@ struct SymbolSearch {
 
 std::unordered_set<lr_module_t *> g_modules;
 std::unordered_set<lr_kernel_t *> g_kernels;
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+std::vector<lr_module_t *> g_module_cleanup_owners;
+#endif
 
 #if LRRT_ENABLE_HSA
 hsa_status_t find_kernel_symbol(hsa_executable_t, hsa_agent_t,
@@ -73,7 +81,7 @@ hsa_status_t destroy_module_resources(lr_module_t *module) {
   }
   return reader_status;
 }
-#elif LRRT_ENABLE_LIGHT_ROCR
+#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 void destroy_module_handles(lr_module_t *module) {
   for (lr_kernel_t *kernel : module->kernels) {
     g_kernels.erase(kernel);
@@ -107,9 +115,9 @@ lr_status_t loader_error_status(light_rocr::loader::ParseErrorCode error) {
   }
 }
 
-lr_status_t executable_image_error_status(
-    light_rocr::transport::hsakmt::ExecutableImageError error) {
-  using light_rocr::transport::hsakmt::ExecutableImageError;
+lr_status_t
+executable_image_error_status(light_rocr::runtime::ExecutableImageError error) {
+  using light_rocr::runtime::ExecutableImageError;
   switch (error) {
   case ExecutableImageError::UnsupportedAlignment:
   case ExecutableImageError::UnsupportedRelocations:
@@ -124,6 +132,37 @@ lr_status_t executable_image_error_status(
     return LR_ERROR_INVALID_ARGUMENT;
   }
 }
+
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+lr_status_t release_direct_kfd_module_resources(lr_module_t *module) {
+  if (module->pending_cache_operation.has_value()) {
+    if (module->cache_operation_queue == nullptr) {
+      return LR_ERROR_RUNTIME;
+    }
+    const auto status = module->pending_cache_operation->release(
+        module->cache_operation_queue->queue);
+    if (!status) {
+      return LR_ERROR_RUNTIME;
+    }
+    module->pending_cache_operation.reset();
+    module->cache_operation_queue = nullptr;
+  }
+
+  if (module->executable_image.has_value() &&
+      module->executable_image->owns_allocation() &&
+      !module->executable_image->release()) {
+    return LR_ERROR_RUNTIME;
+  }
+  module->executable_image.reset();
+  destroy_module_handles(module);
+  return LR_SUCCESS;
+}
+
+void retain_direct_kfd_module_cleanup_owner(lr_module_t *module) {
+  module->destroying = true;
+  g_module_cleanup_owners.push_back(module);
+}
+#endif
 #endif
 
 } // namespace
@@ -138,6 +177,9 @@ bool valid_kernel_locked(lr_kernel_t *kernel) {
   }
 #if LRRT_ENABLE_LIGHT_ROCR
   return static_cast<bool>(module->executable_image);
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  return module->executable_image.has_value() &&
+         static_cast<bool>(*module->executable_image);
 #else
   return true;
 #endif
@@ -165,6 +207,38 @@ void release_modules_locked(lr_status_t *result) {
     lr_module_t *released_module = *module;
     module = g_modules.erase(module);
     destroy_module_handles(released_module);
+  }
+}
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+void release_modules_locked(lr_status_t *result) {
+  for (auto module = g_modules.begin(); module != g_modules.end();) {
+    lr_module_t *owned_module = *module;
+    const lr_status_t status =
+        release_direct_kfd_module_resources(owned_module);
+    if (status != LR_SUCCESS) {
+      if (*result == LR_SUCCESS) {
+        *result = status;
+      }
+      ++module;
+      continue;
+    }
+    module = g_modules.erase(module);
+  }
+
+  size_t index = 0;
+  while (index < g_module_cleanup_owners.size()) {
+    lr_module_t *owned_module = g_module_cleanup_owners[index];
+    const lr_status_t status =
+        release_direct_kfd_module_resources(owned_module);
+    if (status != LR_SUCCESS) {
+      if (*result == LR_SUCCESS) {
+        *result = status;
+      }
+      ++index;
+      continue;
+    }
+    g_module_cleanup_owners.erase(g_module_cleanup_owners.begin() +
+                                  static_cast<std::ptrdiff_t>(index));
   }
 }
 #endif
@@ -286,6 +360,74 @@ lr_status_t lr_module_load_hsaco(lr_device_t device, const void *image,
   g_modules.insert(loaded_module);
   *module = loaded_module;
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  const auto parsed = light_rocr::loader::parse_code_object(
+      static_cast<const uint8_t *>(image), image_size);
+  if (!parsed) {
+    return loader_error_status(parsed.error.code);
+  }
+
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_kfd_session || !g_devices[device.index].default_queue) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  try {
+    g_modules.reserve(g_modules.size() + 1);
+    g_module_cleanup_owners.reserve(g_module_cleanup_owners.size() + 1);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  auto *loaded_module = new (std::nothrow)
+      lr_module_t{device, {}, false, std::nullopt, std::nullopt, nullptr};
+  if (!loaded_module) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  DeviceState &state = g_devices[device.index];
+  auto loaded = light_rocr::transport::kfd::materialize_executable_image(
+      *g_kfd_session, state.node, static_cast<const uint8_t *>(image),
+      image_size, parsed.code_object);
+  loaded_module->executable_image.emplace(std::move(loaded.image));
+  if (!loaded) {
+    const lr_status_t result =
+        executable_image_error_status(loaded.status.error);
+    if (release_direct_kfd_module_resources(loaded_module) != LR_SUCCESS) {
+      retain_direct_kfd_module_cleanup_owner(loaded_module);
+    }
+    return result;
+  }
+
+  auto frozen = light_rocr::transport::kfd::freeze_executable_image(
+      *g_kfd_session, state.node, state.default_queue->queue,
+      *loaded_module->executable_image,
+      std::chrono::steady_clock::time_point::max());
+  if (!frozen) {
+    if (frozen.operation) {
+      loaded_module->pending_cache_operation.emplace(
+          std::move(frozen.operation));
+      loaded_module->cache_operation_queue = state.default_queue;
+    }
+    if (release_direct_kfd_module_resources(loaded_module) != LR_SUCCESS) {
+      retain_direct_kfd_module_cleanup_owner(loaded_module);
+    } else if (!state.default_queue->queue) {
+      (void)restore_direct_kfd_default_queue_locked(device, &state);
+    }
+    return LR_ERROR_RUNTIME;
+  }
+
+  try {
+    g_modules.insert(loaded_module);
+  } catch (const std::bad_alloc &) {
+    if (release_direct_kfd_module_resources(loaded_module) != LR_SUCCESS) {
+      retain_direct_kfd_module_cleanup_owner(loaded_module);
+    }
+    return LR_ERROR_RUNTIME;
+  }
+  *module = loaded_module;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -346,6 +488,23 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
 
   g_modules.erase(module_entry);
   destroy_module_handles(module);
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  auto module_entry = g_modules.find(module);
+  if (module_entry == g_modules.end() || module->destroying ||
+      module->device.index >= g_devices.size() ||
+      !g_devices[module->device.index].opened) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  module->destroying = true;
+  const lr_status_t status = release_direct_kfd_module_resources(module);
+  if (status != LR_SUCCESS) {
+    module->destroying = false;
+    return status;
+  }
+  g_modules.erase(module_entry);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -443,6 +602,47 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
   auto *loaded_kernel = new lr_kernel_t{module, kernel_index};
   module->kernels.push_back(loaded_kernel);
   g_kernels.insert(loaded_kernel);
+  *kernel = loaded_kernel;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (g_modules.find(module) == g_modules.end() || module->destroying ||
+      module->device.index >= g_devices.size() ||
+      !g_devices[module->device.index].opened ||
+      !module->executable_image.has_value() || !*module->executable_image) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  const auto &code_kernels = module->executable_image->code_object().kernels;
+  size_t kernel_index = code_kernels.size();
+  for (size_t index = 0; index < code_kernels.size(); ++index) {
+    if (code_kernels[index].name == name ||
+        code_kernels[index].symbol_name == name) {
+      kernel_index = index;
+      break;
+    }
+  }
+  if (kernel_index == code_kernels.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  try {
+    module->kernels.reserve(module->kernels.size() + 1);
+    g_kernels.reserve(g_kernels.size() + 1);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+  auto *loaded_kernel = new (std::nothrow) lr_kernel_t{module, kernel_index};
+  if (!loaded_kernel) {
+    return LR_ERROR_RUNTIME;
+  }
+  try {
+    g_kernels.insert(loaded_kernel);
+  } catch (const std::bad_alloc &) {
+    delete loaded_kernel;
+    return LR_ERROR_RUNTIME;
+  }
+  module->kernels.push_back(loaded_kernel);
   *kernel = loaded_kernel;
   return LR_SUCCESS;
 #else

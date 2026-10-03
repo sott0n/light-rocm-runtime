@@ -24,7 +24,7 @@ top logits matched the ROCr backend. Clang and Triton generated HSACOs are also
 covered by the GPU tests. The direct KFD path can materialize a Clang HSACO in
 executable GTT, invalidate the instruction cache, resolve its kernel descriptor,
 and execute a scratch-backed kernel. LRRT's public direct KFD backend supports
-device, memory, synchronous copy, and queue lifecycle APIs.
+device, memory, synchronous copy, queue, module, and kernel lookup APIs.
 
 ## Build
 

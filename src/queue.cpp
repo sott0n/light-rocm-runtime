@@ -1295,6 +1295,30 @@ bool valid_direct_kfd_queue_locked(lr_queue_t *queue) {
   return g_queues.find(queue) != g_queues.end();
 }
 
+lr_status_t restore_direct_kfd_default_queue_locked(lr_device_t device_handle,
+                                                    DeviceState *device) {
+  lr_queue_t *queue = device->default_queue;
+  if (queue == nullptr || queue->queue) {
+    return LR_SUCCESS;
+  }
+  const auto released = queue->queue.release();
+  if (!released) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  auto device_queue =
+      std::find(device->queues.begin(), device->queues.end(), queue);
+  if (device_queue == device->queues.end()) {
+    return LR_ERROR_RUNTIME;
+  }
+  device->queues.erase(device_queue);
+  device->default_queue = nullptr;
+  g_queues.erase(queue);
+  delete queue;
+  return create_direct_kfd_queue(device_handle, device, true,
+                                 &device->default_queue);
+}
+
 void release_direct_kfd_queues_locked(lr_status_t *result) {
   for (DeviceState &device : g_devices) {
     size_t index = 0;

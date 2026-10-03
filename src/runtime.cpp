@@ -313,6 +313,11 @@ lr_status_t lr_shutdown(void) {
   {
     std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
     lr_status_t release_status = LR_SUCCESS;
+    release_modules_locked(&release_status);
+    if (release_status != LR_SUCCESS) {
+      g_initialized.store(true);
+      return release_status;
+    }
     release_direct_kfd_queues_locked(&release_status);
     if (release_status != LR_SUCCESS) {
       g_initialized.store(true);
