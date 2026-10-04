@@ -64,12 +64,14 @@ ExecutableImageResult materialize_executable_image(
     return {from_runtime_status(requirements.status), {}};
   }
 
-  MemoryAllocationResult allocated = session.allocate_executable_gtt(
+  // Match ROCr's executable placement so instruction fetches do not traverse
+  // host-visible GTT on every dispatch.
+  MemoryAllocationResult allocated = session.allocate_executable_vram(
       node, requirements.allocation_size, dri_root);
   if (!allocated) {
     ExecutableImageStatus allocation_status = failure(
         ExecutableImageError::AllocationFailed,
-        "executable GTT allocation failed: " + allocated.status.message);
+        "executable VRAM allocation failed: " + allocated.status.message);
     allocation_status.memory_status = std::move(allocated.status);
     return {std::move(allocation_status),
             ExecutableImage(std::move(allocated.allocation), {})};

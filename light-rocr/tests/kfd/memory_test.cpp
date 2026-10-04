@@ -350,8 +350,14 @@ void aql_ring_uses_double_uncached_backing(TestContext *context) {
   fake = nullptr;
 }
 
-void executable_gtt_sets_kfd_flag(TestContext *context) {
+void executable_vram_sets_kfd_flags(TestContext *context) {
   FakeSystem state;
+  state.expected_va_address = 0x200000;
+  state.expected_reservation_size =
+      8192 + 2 * 4096 + light_rocr::transport::kfd::kVramAllocationGranule;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   state.expected_extra_allocation_flags = KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
   fake = &state;
   auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
@@ -360,7 +366,7 @@ void executable_gtt_sets_kfd_flag(TestContext *context) {
       syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(state.contract_valid,
-                  "executable GTT allocation contract changed");
+                  "executable VRAM allocation contract changed");
   const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
@@ -909,7 +915,7 @@ int main() {
       {"successful round trip", successful_round_trip},
       {"invalid size", invalid_size_does_not_reserve},
       {"AQL ring backing", aql_ring_uses_double_uncached_backing},
-      {"executable GTT", executable_gtt_sets_kfd_flag},
+      {"executable VRAM", executable_vram_sets_kfd_flags},
       {"host-mapped VRAM", host_mapped_vram_sets_kfd_flags},
       {"device VRAM", device_vram_skips_host_mapping},
       {"doorbell GPUVM", doorbell_reserves_gpuvm_without_render_mapping},

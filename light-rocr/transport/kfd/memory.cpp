@@ -108,6 +108,12 @@ void release_scratch_reservation(const std::shared_ptr<KfdState> &state,
 
 namespace {
 
+bool uses_vram_backing(MemoryAllocationUsage usage) {
+  return usage == MemoryAllocationUsage::Vram ||
+         usage == MemoryAllocationUsage::DeviceVram ||
+         usage == MemoryAllocationUsage::Executable;
+}
+
 RawMemoryAllocationResult rollback_memory(MemoryStatus status, int kfd_fd,
                                           RawMemoryAllocation allocation,
                                           MemorySyscalls syscalls) {
@@ -160,10 +166,8 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
   // backing size for queue-memory handling.
   const uint64_t backing_size =
       usage == MemoryAllocationUsage::AqlRing ? size * 2 : size;
-  const uint64_t alignment_slack = (usage == MemoryAllocationUsage::Vram ||
-                                    usage == MemoryAllocationUsage::DeviceVram)
-                                       ? kVramAllocationGranule
-                                       : 0;
+  const uint64_t alignment_slack =
+      uses_vram_backing(usage) ? kVramAllocationGranule : 0;
   if (backing_size > std::numeric_limits<uint64_t>::max() -
                          kGuardPageCount * kMemoryPageSize - alignment_slack) {
     return {
@@ -200,10 +204,7 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
   const uint64_t reservation_address =
       static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reservation));
   const uint64_t address_alignment_slack =
-      (usage == MemoryAllocationUsage::Vram ||
-       usage == MemoryAllocationUsage::DeviceVram)
-          ? kVramAllocationGranule - 1U
-          : 0;
+      uses_vram_backing(usage) ? kVramAllocationGranule - 1U : 0;
   if (reservation_address > std::numeric_limits<uint64_t>::max() -
                                 kMemoryPageSize - address_alignment_slack) {
     return rollback_memory({MemoryError::ReserveVa, 0,
@@ -215,11 +216,9 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
   }
   const uint64_t first_usable = reservation_address + kMemoryPageSize;
   const uint64_t host_address =
-      (usage == MemoryAllocationUsage::Vram ||
-       usage == MemoryAllocationUsage::DeviceVram)
-          ? (first_usable + kVramAllocationGranule - 1U) &
-                ~(kVramAllocationGranule - 1U)
-          : first_usable;
+      uses_vram_backing(usage) ? (first_usable + kVramAllocationGranule - 1U) &
+                                     ~(kVramAllocationGranule - 1U)
+                               : first_usable;
   const bool range_overflows =
       host_address > std::numeric_limits<uint64_t>::max() - (backing_size - 1);
   if (range_overflows || host_address < aperture.gpuvm_base ||
@@ -247,8 +246,7 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
         KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
-  } else if (usage == MemoryAllocationUsage::Vram ||
-             usage == MemoryAllocationUsage::DeviceVram) {
+  } else if (uses_vram_backing(usage)) {
     arguments.flags = static_cast<uint32_t>(
         KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
@@ -743,8 +741,8 @@ KfdSession::allocate_device_vram(const runtime::Node &node, uint64_t size,
 }
 
 MemoryAllocationResult
-KfdSession::allocate_executable_gtt(const runtime::Node &node, uint64_t size,
-                                    const std::string &dri_root) const {
+KfdSession::allocate_executable_vram(const runtime::Node &node, uint64_t size,
+                                     const std::string &dri_root) const {
   return allocate_memory_impl(node, size, dri_root, MemoryUsage::Executable);
 }
 

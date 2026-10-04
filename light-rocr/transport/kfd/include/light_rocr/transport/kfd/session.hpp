@@ -60,8 +60,8 @@ public:
   allocate_device_vram(const runtime::Node &node, uint64_t size,
                        const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] MemoryAllocationResult
-  allocate_executable_gtt(const runtime::Node &node, uint64_t size,
-                          const std::string &dri_root = "/dev/dri") const;
+  allocate_executable_vram(const runtime::Node &node, uint64_t size,
+                           const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] ScratchAllocationResult
   allocate_scratch(const runtime::Node &node, uint64_t size,
                    const std::string &dri_root = "/dev/dri") const;

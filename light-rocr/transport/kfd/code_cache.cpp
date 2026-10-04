@@ -260,7 +260,7 @@ freeze_executable_image(const KfdSession &session, const runtime::Node &node,
   CodeCacheOperation operation(std::move(operation_state));
 
   auto command =
-      session.allocate_executable_gtt(node, kMemoryPageSize, dri_root);
+      session.allocate_executable_vram(node, kMemoryPageSize, dri_root);
   if (command.allocation) {
     operation.state_->command.emplace(std::move(command.allocation));
   }
