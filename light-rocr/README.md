@@ -26,7 +26,8 @@ executable GTT, invalidate the instruction cache, resolve its kernel descriptor,
 and execute a scratch-backed kernel. LRRT's public direct KFD backend supports
 device, memory, synchronous copy, queue, module, kernel lookup, launch, and
 synchronization APIs. It currently permits only one scratch-backed queue per
-GPU at a time.
+GPU at a time. Current ROCr comparison results and their GPU clock caveats are
+recorded in the [performance comparison](../docs/light-rocr-performance.md).
 
 ## Build
 

@@ -3,6 +3,8 @@
 This directory contains microbenchmarks for launch, synchronization, transfer,
 and host/device pipeline overhead. The Qwen Triton model benchmark is described
 separately in the [Qwen execution guide](../examples/qwen/README.md#triton).
+See the [ROCr and direct KFD comparison](../docs/light-rocr-performance.md) for
+matched launch and full 24-layer Qwen measurements.
 
 ## Build and run
 
