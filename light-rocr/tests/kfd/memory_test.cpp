@@ -389,6 +389,32 @@ void host_mapped_vram_sets_kfd_flags(TestContext *context) {
   fake = nullptr;
 }
 
+void device_vram_skips_host_mapping(TestContext *context) {
+  FakeSystem state;
+  state.expected_va_address = 0x200000;
+  state.expected_reservation_size =
+      8192 + 2 * 4096 + light_rocr::transport::kfd::kVramAllocationGranule;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
+      17, 23, aperture(), 8192,
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::DeviceVram,
+      syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(
+      state.contract_valid && allocated.allocation.host_address == nullptr &&
+          allocated.allocation.gpu_address == 0x200000 &&
+          state.calls == std::vector<std::string>{"reserve", "allocate",
+                                                  "dontfork", "map_gpu"},
+      "device VRAM unexpectedly created a CPU mapping");
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  fake = nullptr;
+}
+
 void doorbell_reserves_gpuvm_without_render_mapping(TestContext *context) {
   FakeSystem state;
   state.expected_allocation_flags = static_cast<uint32_t>(
@@ -885,6 +911,7 @@ int main() {
       {"AQL ring backing", aql_ring_uses_double_uncached_backing},
       {"executable GTT", executable_gtt_sets_kfd_flag},
       {"host-mapped VRAM", host_mapped_vram_sets_kfd_flags},
+      {"device VRAM", device_vram_skips_host_mapping},
       {"doorbell GPUVM", doorbell_reserves_gpuvm_without_render_mapping},
       {"EOP VRAM", eop_uses_inaccessible_executable_vram},
       {"discrete scratch", discrete_scratch_round_trip},

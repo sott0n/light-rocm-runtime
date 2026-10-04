@@ -323,6 +323,11 @@ lr_status_t lr_shutdown(void) {
       g_initialized.store(true);
       return release_status;
     }
+    release_direct_kfd_copy_states_locked(&release_status);
+    if (release_status != LR_SUCCESS) {
+      g_initialized.store(true);
+      return release_status;
+    }
     release_modules_locked(&release_status);
     if (release_status != LR_SUCCESS) {
       g_initialized.store(true);

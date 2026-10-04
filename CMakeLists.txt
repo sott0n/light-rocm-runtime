@@ -149,36 +149,6 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
     target_sources(lrrt PRIVATE src/light_rocr_kernargs.cpp)
     target_link_libraries(lrrt PRIVATE light_rocr::transport_hsakmt)
 
-    lrrt_add_hsaco_kernel(
-      lrrt_internal_copy_kernel
-      src/light_rocr_copy_kernel.cpp
-      LRRT_INTERNAL_COPY_HSACO
-      -O2
-    )
-    if(NOT LRRT_INTERNAL_COPY_HSACO)
-      message(FATAL_ERROR "The light-rocr backend requires the ROCm compiler")
-    endif()
-    set(
-      LRRT_INTERNAL_COPY_HEADER
-      "${CMAKE_CURRENT_BINARY_DIR}/lrrt_internal_copy_kernel.inc"
-    )
-    add_custom_command(
-      OUTPUT "${LRRT_INTERNAL_COPY_HEADER}"
-      COMMAND
-        "${CMAKE_COMMAND}" "-DINPUT=${LRRT_INTERNAL_COPY_HSACO}"
-        "-DOUTPUT=${LRRT_INTERNAL_COPY_HEADER}" -P
-        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
-      DEPENDS
-        "${LRRT_INTERNAL_COPY_HSACO}"
-        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
-      VERBATIM
-    )
-    add_custom_target(
-      lrrt_internal_copy_kernel_data
-      DEPENDS "${LRRT_INTERNAL_COPY_HEADER}"
-    )
-    add_dependencies(lrrt lrrt_internal_copy_kernel_data)
-    target_include_directories(lrrt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
   elseif(LRRT_SELECTED_LIGHT_ROCR_TRANSPORT STREQUAL "kfd")
     if(NOT TARGET light_rocr::transport_kfd)
       message(FATAL_ERROR "The direct KFD light-rocr transport is unavailable")
@@ -192,6 +162,37 @@ if(LRRT_SELECTED_BACKEND STREQUAL "light-rocr")
       "LRRT_LIGHT_ROCR_TRANSPORT must be hsakmt or kfd"
     )
   endif()
+
+  lrrt_add_hsaco_kernel(
+    lrrt_internal_copy_kernel
+    src/light_rocr_copy_kernel.cpp
+    LRRT_INTERNAL_COPY_HSACO
+    -O2
+  )
+  if(NOT LRRT_INTERNAL_COPY_HSACO)
+    message(FATAL_ERROR "The light-rocr backend requires the ROCm compiler")
+  endif()
+  set(
+    LRRT_INTERNAL_COPY_HEADER
+    "${CMAKE_CURRENT_BINARY_DIR}/lrrt_internal_copy_kernel.inc"
+  )
+  add_custom_command(
+    OUTPUT "${LRRT_INTERNAL_COPY_HEADER}"
+    COMMAND
+      "${CMAKE_COMMAND}" "-DINPUT=${LRRT_INTERNAL_COPY_HSACO}"
+      "-DOUTPUT=${LRRT_INTERNAL_COPY_HEADER}" -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+    DEPENDS
+      "${LRRT_INTERNAL_COPY_HSACO}"
+      "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+    VERBATIM
+  )
+  add_custom_target(
+    lrrt_internal_copy_kernel_data
+    DEPENDS "${LRRT_INTERNAL_COPY_HEADER}"
+  )
+  add_dependencies(lrrt lrrt_internal_copy_kernel_data)
+  target_include_directories(lrrt PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
   message(
     STATUS
     "LRRT backend: light-rocr (${LRRT_SELECTED_LIGHT_ROCR_TRANSPORT})"

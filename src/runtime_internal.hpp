@@ -290,6 +290,12 @@ struct LightRocrInternalKernel {
   light_rocr::transport::hsakmt::ExecutableImage executable_image;
   size_t image_kernel_index = 0;
 };
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+struct DirectKfdCopyState {
+  light_rocr::transport::kfd::ExecutableImage executable_image;
+  size_t image_kernel_index = 0;
+  std::optional<light_rocr::transport::kfd::MemoryAllocation> staging;
+};
 #endif
 
 struct DeviceState {
@@ -311,6 +317,8 @@ struct DeviceState {
   std::vector<lr_event_t *> pending_events;
 #if LRRT_ENABLE_LIGHT_ROCR
   std::unique_ptr<LightRocrInternalKernel> copy_kernel;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::unique_ptr<DirectKfdCopyState> copy_state;
 #endif
 #endif
   lr_memory_stats_t memory_stats;
@@ -379,6 +387,13 @@ lr_status_t ensure_direct_kfd_queue_scratch_locked(DeviceState *device,
 lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_device_locked(DeviceState *device);
+lr_status_t submit_direct_kfd_kernel_locked(
+    DeviceState *device, lr_queue_t *queue,
+    const light_rocr::transport::kfd::ExecutableImage &executable_image,
+    size_t image_kernel_index, const lr_launch_config_t *config,
+    const void *args, size_t args_size);
+lr_status_t ensure_direct_kfd_copy_state_locked(DeviceState *device);
+void release_direct_kfd_copy_states_locked(lr_status_t *result);
 void release_direct_kfd_queues_locked(lr_status_t *result);
 bool valid_kernel_locked(lr_kernel_t *kernel);
 void release_modules_locked(lr_status_t *result);

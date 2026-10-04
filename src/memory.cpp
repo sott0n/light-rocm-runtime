@@ -1,16 +1,22 @@
 #include "runtime_internal.hpp"
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <list>
+#include <new>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#if LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 #include "lrrt_internal_copy_kernel.inc"
+#endif
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr/transport/kfd/code_cache.hpp"
 #endif
 
 namespace lrrt_internal {
@@ -240,6 +246,7 @@ constexpr uint64_t kLightRocrMemoryPageSize =
 using LightRocrMemoryAllocation = light_rocr::transport::kfd::MemoryAllocation;
 constexpr uint64_t kLightRocrMemoryPageSize =
     light_rocr::transport::kfd::kMemoryPageSize;
+constexpr uint64_t kDirectKfdStagingSize = 64U * 1024U * 1024U;
 #endif
 
 struct LightRocrAllocationInfo {
@@ -262,40 +269,69 @@ std::unordered_map<void *, LightRocrHostAllocationInfo>
     g_light_rocr_host_allocations;
 
 constexpr char kLightRocrCopyKernelName[] = "lrrt_copy_bytes";
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+constexpr char kLightRocrCopyKernelName[] = "lrrt_copy_bytes";
 #endif
 
 auto allocate_light_rocr_device_memory(DeviceState *device, uint64_t size) {
 #if LRRT_ENABLE_LIGHT_ROCR
   return g_kfd_session->allocate_gtt(device->node.node_id, size);
 #else
-  return g_kfd_session->allocate_vram(device->node, size);
+  return g_kfd_session->allocate_device_vram(device->node, size);
 #endif
 }
 
-void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
-                                          size_t size) {
+const LightRocrAllocationInfo *
+find_light_rocr_allocation(const void *ptr, lr_device_t device, size_t size,
+                           size_t *offset = nullptr) {
   const uintptr_t address = reinterpret_cast<uintptr_t>(ptr);
   for (const auto &entry : g_light_rocr_allocations) {
     const LightRocrAllocationInfo &info = entry.second;
     if (info.device_index != device.index) {
       continue;
     }
-
-    const uintptr_t gpu_base = reinterpret_cast<uintptr_t>(entry.first);
-    if (address < gpu_base) {
+    const uintptr_t base = reinterpret_cast<uintptr_t>(entry.first);
+    if (address < base) {
       continue;
     }
-    const uintptr_t offset = address - gpu_base;
-    if (offset >= info.requested_size || size > info.requested_size - offset) {
+    const uintptr_t allocation_offset = address - base;
+    if (allocation_offset >= info.requested_size ||
+        size > info.requested_size - allocation_offset) {
       continue;
     }
-
-    auto *host_base =
-        static_cast<unsigned char *>(info.allocation.host_address());
-    return host_base == nullptr ? nullptr : host_base + offset;
+    if (offset != nullptr) {
+      *offset = allocation_offset;
+    }
+    return &info;
   }
   return nullptr;
 }
+
+void *translate_light_rocr_device_pointer(const void *ptr, lr_device_t device,
+                                          size_t size) {
+  size_t offset = 0;
+  const LightRocrAllocationInfo *info =
+      find_light_rocr_allocation(ptr, device, size, &offset);
+  auto *host_base =
+      info == nullptr
+          ? nullptr
+          : static_cast<unsigned char *>(info->allocation.host_address());
+  return host_base == nullptr ? nullptr : host_base + offset;
+}
+
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+uint64_t translate_direct_kfd_device_pointer(const void *ptr,
+                                             lr_device_t device, size_t size) {
+  size_t offset = 0;
+  const LightRocrAllocationInfo *info =
+      find_light_rocr_allocation(ptr, device, size, &offset);
+  if (info == nullptr || info->allocation.gpu_address() >
+                             std::numeric_limits<uint64_t>::max() - offset) {
+    return 0;
+  }
+  return info->allocation.gpu_address() + offset;
+}
+#endif
 
 #if LRRT_ENABLE_LIGHT_ROCR
 enum class LightRocrHostPointerLookup {
@@ -461,6 +497,129 @@ void release_light_rocr_internal_kernels_locked(lr_status_t *result) {
     }
     device.copy_kernel.reset();
   }
+}
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+lr_status_t ensure_direct_kfd_copy_state_locked(DeviceState *device) {
+  if (!device || !device->default_queue || !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (device->copy_state) {
+    return LR_SUCCESS;
+  }
+
+  const auto parsed = light_rocr::loader::parse_code_object(
+      kLightRocrCopyKernelHsaco, sizeof(kLightRocrCopyKernelHsaco));
+  if (!parsed) {
+    return LR_ERROR_RUNTIME;
+  }
+  auto loaded = light_rocr::transport::kfd::materialize_executable_image(
+      *g_kfd_session, device->node, kLightRocrCopyKernelHsaco,
+      sizeof(kLightRocrCopyKernelHsaco), parsed.code_object);
+  if (!loaded) {
+    if (loaded.image.owns_allocation()) {
+      (void)loaded.image.release();
+    }
+    return LR_ERROR_RUNTIME;
+  }
+
+  size_t kernel_index = loaded.image.code_object().kernels.size();
+  for (size_t index = 0; index < loaded.image.code_object().kernels.size();
+       ++index) {
+    const auto &kernel = loaded.image.code_object().kernels[index];
+    if (kernel.name == kLightRocrCopyKernelName ||
+        kernel.symbol_name == kLightRocrCopyKernelName) {
+      kernel_index = index;
+      break;
+    }
+  }
+  if (kernel_index == loaded.image.code_object().kernels.size()) {
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+
+  const auto frozen = light_rocr::transport::kfd::freeze_executable_image(
+      *g_kfd_session, device->node, device->default_queue->queue, loaded.image,
+      std::chrono::steady_clock::time_point::max());
+  if (!frozen) {
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+
+  auto staging =
+      g_kfd_session->allocate_gtt(device->node, kDirectKfdStagingSize);
+  if (!staging) {
+    (void)staging.allocation.release();
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+
+  auto state =
+      std::unique_ptr<DirectKfdCopyState>(new (std::nothrow) DirectKfdCopyState{
+          std::move(loaded.image), kernel_index, std::nullopt});
+  if (!state) {
+    (void)staging.allocation.release();
+    (void)loaded.image.release();
+    return LR_ERROR_RUNTIME;
+  }
+  state->staging.emplace(std::move(staging.allocation));
+  device->copy_state = std::move(state);
+  return LR_SUCCESS;
+}
+
+void release_direct_kfd_copy_states_locked(lr_status_t *result) {
+  for (DeviceState &device : g_devices) {
+    if (!device.copy_state) {
+      continue;
+    }
+    bool released = true;
+    if (device.copy_state->staging.has_value() &&
+        !device.copy_state->staging->release()) {
+      released = false;
+    }
+    if (device.copy_state->executable_image.owns_allocation() &&
+        !device.copy_state->executable_image.release()) {
+      released = false;
+    }
+    if (!released && *result == LR_SUCCESS) {
+      *result = LR_ERROR_RUNTIME;
+    }
+    if (released) {
+      device.copy_state.reset();
+    }
+  }
+}
+
+lr_status_t submit_direct_kfd_copy_locked(DeviceState *device,
+                                          uint64_t destination, uint64_t source,
+                                          uint64_t size) {
+  if (!device || !device->copy_state || size == 0) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  struct CopyArguments {
+    uint64_t source;
+    uint64_t destination;
+    uint64_t size;
+    uint64_t stride;
+    uint64_t workgroup_size;
+  };
+  constexpr uint32_t kBlockSize = 256;
+  constexpr uint32_t kMaximumWorkgroups = 4096;
+  const uint64_t required_workgroups = 1 + (size - 1) / kBlockSize;
+  const uint32_t workgroups = static_cast<uint32_t>(
+      std::min<uint64_t>(required_workgroups, kMaximumWorkgroups));
+  const CopyArguments arguments = {
+      source, destination, size, static_cast<uint64_t>(workgroups) * kBlockSize,
+      kBlockSize};
+  const lr_launch_config_t config = {
+      {workgroups * kBlockSize, 1, 1}, {kBlockSize, 1, 1}, 0};
+  const lr_status_t submit_status = submit_direct_kfd_kernel_locked(
+      device, device->default_queue, device->copy_state->executable_image,
+      device->copy_state->image_kernel_index, &config, &arguments,
+      sizeof(arguments));
+  if (submit_status != LR_SUCCESS) {
+    return submit_status;
+  }
+  return synchronize_direct_kfd_queue_locked(device->default_queue);
 }
 #endif
 
@@ -719,6 +878,12 @@ lr_status_t lr_free(lr_device_t device, void *ptr) {
   if (synchronization_status != LR_SUCCESS) {
     return synchronization_status;
   }
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  const lr_status_t synchronization_status =
+      synchronize_direct_kfd_device_locked(&g_devices[device.index]);
+  if (synchronization_status != LR_SUCCESS) {
+    return synchronization_status;
+  }
 #endif
   const auto status = allocation->second.allocation.release();
   if (!status) {
@@ -948,7 +1113,7 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     record_memcpy(&g_devices[device.index], kind, size);
   }
   return to_lr_status(status);
-#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
+#elif LRRT_ENABLE_LIGHT_ROCR
   std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
       !g_kfd_session) {
@@ -975,7 +1140,6 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     }
   }
 
-#if LRRT_ENABLE_LIGHT_ROCR
   if (kind == LR_MEMCPY_HOST_TO_DEVICE &&
       translate_light_rocr_host_pointer(src, device, size) ==
           LightRocrHostPointerLookup::Invalid) {
@@ -992,9 +1156,124 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
   if (synchronization_status != LR_SUCCESS) {
     return synchronization_status;
   }
-#endif
   std::memmove(copy_dst, copy_src, size);
   record_memcpy(&g_devices[device.index], kind, size);
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
+      !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  uint64_t device_destination = 0;
+  uint64_t device_source = 0;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    device_destination = translate_direct_kfd_device_pointer(dst, device, size);
+    if (device_destination == 0) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    device_source = translate_direct_kfd_device_pointer(src, device, size);
+    if (device_source == 0) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  } else {
+    device_destination = translate_direct_kfd_device_pointer(dst, device, size);
+    device_source = translate_direct_kfd_device_pointer(src, device, size);
+    if (device_destination == 0 || device_source == 0) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+  }
+
+  DeviceState &state = g_devices[device.index];
+  const lr_status_t initial_sync = synchronize_direct_kfd_device_locked(&state);
+  if (initial_sync != LR_SUCCESS) {
+    return initial_sync;
+  }
+  const lr_status_t copy_state_status =
+      ensure_direct_kfd_copy_state_locked(&state);
+  if (copy_state_status != LR_SUCCESS ||
+      !state.copy_state->staging.has_value()) {
+    return copy_state_status == LR_SUCCESS ? LR_ERROR_RUNTIME
+                                           : copy_state_status;
+  }
+
+  auto &staging = *state.copy_state->staging;
+  auto *staging_host = static_cast<unsigned char *>(staging.host_address());
+  const uint64_t staging_gpu = staging.gpu_address();
+  if (staging_host == nullptr || staging_gpu == 0) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  lr_status_t copy_status = LR_SUCCESS;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    const auto *host_source = static_cast<const unsigned char *>(src);
+    for (size_t offset = 0; offset < size;) {
+      const size_t chunk = std::min<size_t>(size - offset, staging.size());
+      std::memcpy(staging_host, host_source + offset, chunk);
+      copy_status = submit_direct_kfd_copy_locked(
+          &state, device_destination + offset, staging_gpu, chunk);
+      if (copy_status != LR_SUCCESS) {
+        return copy_status;
+      }
+      offset += chunk;
+    }
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    auto *host_destination = static_cast<unsigned char *>(dst);
+    for (size_t offset = 0; offset < size;) {
+      const size_t chunk = std::min<size_t>(size - offset, staging.size());
+      copy_status = submit_direct_kfd_copy_locked(
+          &state, staging_gpu, device_source + offset, chunk);
+      if (copy_status != LR_SUCCESS) {
+        return copy_status;
+      }
+      std::memcpy(host_destination + offset, staging_host, chunk);
+      offset += chunk;
+    }
+  } else {
+    const bool overlaps = device_destination < device_source + size &&
+                          device_source < device_destination + size;
+    if (!overlaps) {
+      copy_status = submit_direct_kfd_copy_locked(&state, device_destination,
+                                                  device_source, size);
+      if (copy_status != LR_SUCCESS) {
+        return copy_status;
+      }
+    } else if (device_destination > device_source) {
+      size_t remaining = size;
+      while (remaining != 0) {
+        const size_t chunk = std::min<size_t>(remaining, staging.size());
+        const size_t offset = remaining - chunk;
+        copy_status = submit_direct_kfd_copy_locked(
+            &state, staging_gpu, device_source + offset, chunk);
+        if (copy_status == LR_SUCCESS) {
+          copy_status = submit_direct_kfd_copy_locked(
+              &state, device_destination + offset, staging_gpu, chunk);
+        }
+        if (copy_status != LR_SUCCESS) {
+          return copy_status;
+        }
+        remaining = offset;
+      }
+    } else if (device_destination < device_source) {
+      for (size_t offset = 0; offset < size;) {
+        const size_t chunk = std::min<size_t>(size - offset, staging.size());
+        copy_status = submit_direct_kfd_copy_locked(
+            &state, staging_gpu, device_source + offset, chunk);
+        if (copy_status == LR_SUCCESS) {
+          copy_status = submit_direct_kfd_copy_locked(
+              &state, device_destination + offset, staging_gpu, chunk);
+        }
+        if (copy_status != LR_SUCCESS) {
+          return copy_status;
+        }
+        offset += chunk;
+      }
+    }
+  }
+
+  record_memcpy(&state, kind, size);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;

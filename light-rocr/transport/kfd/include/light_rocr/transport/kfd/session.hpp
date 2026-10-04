@@ -57,6 +57,9 @@ public:
   allocate_vram(const runtime::Node &node, uint64_t size,
                 const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] MemoryAllocationResult
+  allocate_device_vram(const runtime::Node &node, uint64_t size,
+                       const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] MemoryAllocationResult
   allocate_executable_gtt(const runtime::Node &node, uint64_t size,
                           const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] ScratchAllocationResult
@@ -80,6 +83,7 @@ private:
   enum class MemoryUsage {
     General,
     Vram,
+    DeviceVram,
     Executable,
     AqlRing,
     Doorbell,

@@ -160,8 +160,10 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
   // backing size for queue-memory handling.
   const uint64_t backing_size =
       usage == MemoryAllocationUsage::AqlRing ? size * 2 : size;
-  const uint64_t alignment_slack =
-      usage == MemoryAllocationUsage::Vram ? kVramAllocationGranule : 0;
+  const uint64_t alignment_slack = (usage == MemoryAllocationUsage::Vram ||
+                                    usage == MemoryAllocationUsage::DeviceVram)
+                                       ? kVramAllocationGranule
+                                       : 0;
   if (backing_size > std::numeric_limits<uint64_t>::max() -
                          kGuardPageCount * kMemoryPageSize - alignment_slack) {
     return {
@@ -198,19 +200,23 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
   const uint64_t reservation_address =
       static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reservation));
   const uint64_t address_alignment_slack =
-      usage == MemoryAllocationUsage::Vram ? kVramAllocationGranule - 1U : 0;
+      (usage == MemoryAllocationUsage::Vram ||
+       usage == MemoryAllocationUsage::DeviceVram)
+          ? kVramAllocationGranule - 1U
+          : 0;
   if (reservation_address > std::numeric_limits<uint64_t>::max() -
                                 kMemoryPageSize - address_alignment_slack) {
     return rollback_memory({MemoryError::ReserveVa, 0,
                             "reserved CPU VA overflows the host address range"},
                            kfd_fd,
-                           {reservation, reservation_size, nullptr, size, 0,
+                           {reservation, reservation_size, nullptr, 0, size, 0,
                             std::move(gpu_ids), 0, 0, false},
                            syscalls);
   }
   const uint64_t first_usable = reservation_address + kMemoryPageSize;
   const uint64_t host_address =
-      usage == MemoryAllocationUsage::Vram
+      (usage == MemoryAllocationUsage::Vram ||
+       usage == MemoryAllocationUsage::DeviceVram)
           ? (first_usable + kVramAllocationGranule - 1U) &
                 ~(kVramAllocationGranule - 1U)
           : first_usable;
@@ -222,8 +228,8 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
         {MemoryError::ReserveVa, 0,
          "reserved CPU VA is outside the KFD GPUVM aperture"},
         kfd_fd,
-        {reservation, reservation_size, nullptr, size, 0, std::move(gpu_ids), 0,
-         0, false},
+        {reservation, reservation_size, nullptr, host_address, size, 0,
+         std::move(gpu_ids), 0, 0, false},
         syscalls);
   }
 
@@ -241,7 +247,8 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
         KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
-  } else if (usage == MemoryAllocationUsage::Vram) {
+  } else if (usage == MemoryAllocationUsage::Vram ||
+             usage == MemoryAllocationUsage::DeviceVram) {
     arguments.flags = static_cast<uint32_t>(
         KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
@@ -265,22 +272,24 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
         system_failure(MemoryError::AllocateMemory, system_error,
                        "AMDKFD_IOC_ALLOC_MEMORY_OF_GPU(memory)"),
         kfd_fd,
-        {reservation, reservation_size, nullptr, size, 0, std::move(gpu_ids), 0,
-         0, false},
+        {reservation, reservation_size, nullptr, host_address, size, 0,
+         std::move(gpu_ids), 0, 0, false},
         syscalls);
   }
   if (arguments.handle == 0) {
     return rollback_memory({MemoryError::AllocateMemory, 0,
                             "KFD returned an invalid zero KFD memory handle"},
                            kfd_fd,
-                           {reservation, reservation_size, nullptr, size, 0,
-                            std::move(gpu_ids), 0, 0, false},
+                           {reservation, reservation_size, nullptr,
+                            host_address, size, 0, std::move(gpu_ids), 0, 0,
+                            false},
                            syscalls);
   }
 
   RawMemoryAllocation allocation{reservation,
                                  reservation_size,
                                  nullptr,
+                                 host_address,
                                  size,
                                  arguments.handle,
                                  std::move(gpu_ids),
@@ -289,7 +298,8 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
                                  false};
 
   void *host = reinterpret_cast<void *>(static_cast<uintptr_t>(host_address));
-  if (usage != MemoryAllocationUsage::Doorbell) {
+  if (usage != MemoryAllocationUsage::Doorbell &&
+      usage != MemoryAllocationUsage::DeviceVram) {
     if (arguments.mmap_offset >
         static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
       return rollback_memory({MemoryError::MapHost, 0,
@@ -310,7 +320,9 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
           kfd_fd, std::move(allocation), syscalls);
     }
   }
-  allocation.host_address = host;
+  if (usage != MemoryAllocationUsage::DeviceVram) {
+    allocation.host_address = host;
+  }
 
   if (syscalls.madvise_function(host, static_cast<size_t>(size),
                                 MADV_DONTFORK) != 0) {
@@ -391,7 +403,7 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
         {MemoryError::ReserveVa, 0,
          "scratch reservation overflows the host address range"},
         kfd_fd,
-        {reservation, reservation_size, nullptr, aligned_size, 0,
+        {reservation, reservation_size, nullptr, 0, aligned_size, 0,
          std::move(gpu_ids), 0, 0, false},
         0, integrated, syscalls);
   }
@@ -408,7 +420,7 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
         {MemoryError::ReserveVa, 0,
          "64 KiB-aligned scratch VA is outside the KFD GPUVM aperture"},
         kfd_fd,
-        {reservation, reservation_size, nullptr, aligned_size, 0,
+        {reservation, reservation_size, nullptr, gpu_address, aligned_size, 0,
          std::move(gpu_ids), 0, 0, false},
         gpu_address, integrated, syscalls);
   }
@@ -418,6 +430,7 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
   RawMemoryAllocation allocation{reservation,
                                  reservation_size,
                                  backing_address,
+                                 gpu_address,
                                  aligned_size,
                                  0,
                                  std::move(gpu_ids),
@@ -724,6 +737,12 @@ KfdSession::allocate_vram(const runtime::Node &node, uint64_t size,
 }
 
 MemoryAllocationResult
+KfdSession::allocate_device_vram(const runtime::Node &node, uint64_t size,
+                                 const std::string &dri_root) const {
+  return allocate_memory_impl(node, size, dri_root, MemoryUsage::DeviceVram);
+}
+
+MemoryAllocationResult
 KfdSession::allocate_executable_gtt(const runtime::Node &node, uint64_t size,
                                     const std::string &dri_root) const {
   return allocate_memory_impl(node, size, dri_root, MemoryUsage::Executable);
@@ -832,6 +851,8 @@ KfdSession::allocate_memory_impl(const runtime::Node &node, uint64_t size,
       : usage == MemoryUsage::Doorbell ? detail::MemoryAllocationUsage::Doorbell
       : usage == MemoryUsage::Eop      ? detail::MemoryAllocationUsage::Eop
       : usage == MemoryUsage::Vram     ? detail::MemoryAllocationUsage::Vram
+      : usage == MemoryUsage::DeviceVram
+          ? detail::MemoryAllocationUsage::DeviceVram
       : usage == MemoryUsage::Executable
           ? detail::MemoryAllocationUsage::Executable
           : detail::MemoryAllocationUsage::General,
@@ -843,18 +864,18 @@ KfdSession::allocate_memory_impl(const runtime::Node &node, uint64_t size,
     }
     return {std::move(allocated.status),
             MemoryAllocation(state_, raw.reservation_address,
-                             raw.reservation_size, raw.host_address, raw.size,
-                             raw.handle, std::move(raw.gpu_ids),
-                             raw.mapped_device_count, raw.unmapped_device_count,
-                             raw.map_complete)};
+                             raw.reservation_size, raw.host_address,
+                             raw.gpu_address, raw.size, raw.handle,
+                             std::move(raw.gpu_ids), raw.mapped_device_count,
+                             raw.unmapped_device_count, raw.map_complete)};
   }
   detail::RawMemoryAllocation &raw = allocated.allocation;
   return {{},
           MemoryAllocation(state_, raw.reservation_address,
-                           raw.reservation_size, raw.host_address, raw.size,
-                           raw.handle, std::move(raw.gpu_ids),
-                           raw.mapped_device_count, raw.unmapped_device_count,
-                           raw.map_complete)};
+                           raw.reservation_size, raw.host_address,
+                           raw.gpu_address, raw.size, raw.handle,
+                           std::move(raw.gpu_ids), raw.mapped_device_count,
+                           raw.unmapped_device_count, raw.map_complete)};
 }
 
 MemoryStatus
@@ -875,6 +896,7 @@ KfdSession::map_pending_allocation(MemoryAllocation *allocation) const {
   raw.reservation_address = allocation->reservation_address_;
   raw.reservation_size = allocation->reservation_size_;
   raw.host_address = allocation->host_address_;
+  raw.gpu_address = allocation->gpu_address_;
   raw.size = allocation->size_;
   raw.handle = allocation->handle_;
   raw.mapped_device_count = allocation->mapped_device_count_;
@@ -894,8 +916,9 @@ MemoryAllocation::MemoryAllocation(MemoryAllocation &&other) noexcept
     : state_(std::move(other.state_)),
       reservation_address_(other.reservation_address_),
       reservation_size_(other.reservation_size_),
-      host_address_(other.host_address_), size_(other.size_),
-      handle_(other.handle_), gpu_ids_(std::move(other.gpu_ids_)),
+      host_address_(other.host_address_), gpu_address_(other.gpu_address_),
+      size_(other.size_), handle_(other.handle_),
+      gpu_ids_(std::move(other.gpu_ids_)),
       mapped_device_count_(other.mapped_device_count_),
       unmapped_device_count_(other.unmapped_device_count_),
       map_complete_(other.map_complete_) {
@@ -916,6 +939,7 @@ MemoryStatus MemoryAllocation::release() {
   detail::RawMemoryAllocation raw{reservation_address_,
                                   reservation_size_,
                                   host_address_,
+                                  gpu_address_,
                                   size_,
                                   handle_,
                                   std::move(gpu_ids_),
@@ -927,6 +951,7 @@ MemoryStatus MemoryAllocation::release() {
   reservation_address_ = raw.reservation_address;
   reservation_size_ = raw.reservation_size;
   host_address_ = raw.host_address;
+  gpu_address_ = raw.gpu_address;
   size_ = raw.size;
   handle_ = raw.handle;
   gpu_ids_ = std::move(raw.gpu_ids);
@@ -944,6 +969,7 @@ void MemoryAllocation::reset() {
   reservation_address_ = nullptr;
   reservation_size_ = 0;
   host_address_ = nullptr;
+  gpu_address_ = 0;
   size_ = 0;
   handle_ = 0;
   gpu_ids_.clear();
@@ -980,6 +1006,7 @@ MemoryStatus ScratchAllocation::release() {
       reservation_address_,
       reservation_size_,
       reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address_)),
+      gpu_address_,
       size_,
       handle_,
       std::move(gpu_ids_),

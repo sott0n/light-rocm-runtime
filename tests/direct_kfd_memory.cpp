@@ -61,13 +61,32 @@ int main() {
     return 1;
   }
 
+  auto overlap_expected = input;
+  for (size_t index = overlap_expected.size() - 1; index != 0; --index) {
+    overlap_expected[index] = overlap_expected[index - 1];
+  }
+  if (!expect_status(lr_memcpy(device, static_cast<unsigned char *>(first) + 1,
+                               first, input.size() - 1,
+                               LR_MEMCPY_DEVICE_TO_DEVICE),
+                     LR_SUCCESS, "lr_memcpy overlapping device memory") ||
+      !expect_status(lr_memcpy(device, output.data(), first, output.size(),
+                               LR_MEMCPY_DEVICE_TO_HOST),
+                     LR_SUCCESS, "lr_memcpy overlapped result") ||
+      output != overlap_expected) {
+    std::fprintf(stderr, "direct KFD overlapping copy mismatch\n");
+    (void)lr_free(device, second);
+    (void)lr_free(device, first);
+    (void)lr_shutdown();
+    return 1;
+  }
+
   lr_memory_stats_t stats{};
   if (!expect_status(lr_get_memory_stats(device, &stats), LR_SUCCESS,
                      "lr_get_memory_stats") ||
       stats.live_bytes != input.size() * 2 || stats.allocation_count != 2 ||
       stats.h2d_copy_bytes != input.size() ||
-      stats.d2d_copy_bytes != input.size() ||
-      stats.d2h_copy_bytes != output.size() || stats.memcpy_count != 3 ||
+      stats.d2d_copy_bytes != input.size() * 2 - 1 ||
+      stats.d2h_copy_bytes != output.size() * 2 || stats.memcpy_count != 5 ||
       !expect_status(lr_free(device, second), LR_SUCCESS, "lr_free second") ||
       !expect_status(lr_free(device, second), LR_ERROR_INVALID_ARGUMENT,
                      "lr_free stale") ||

@@ -92,6 +92,24 @@ int main() {
     return 1;
   }
 
+  auto device_vram = opened.session.allocate_device_vram(node, 8192);
+  if (!device_vram || device_vram.allocation.host_address() != nullptr ||
+      !device_vram.allocation.gpu_mapped() ||
+      device_vram.allocation.gpu_address() == 0) {
+    std::cerr << (device_vram ? "device VRAM allocation metadata is invalid"
+                              : device_vram.status.message)
+              << '\n';
+    return 1;
+  }
+  const auto device_vram_released = device_vram.allocation.release();
+  if (!device_vram_released || device_vram.allocation) {
+    std::cerr << (device_vram_released
+                      ? "released device VRAM allocation retained state"
+                      : device_vram_released.message)
+              << '\n';
+    return 1;
+  }
+
   auto scratch = opened.session.allocate_scratch(node, 8192);
   if (!scratch) {
     std::cerr << scratch.status.message << '\n';

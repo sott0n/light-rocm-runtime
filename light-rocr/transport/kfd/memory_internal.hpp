@@ -30,6 +30,7 @@ struct RawMemoryAllocation {
   void *reservation_address = nullptr;
   uint64_t reservation_size = 0;
   void *host_address = nullptr;
+  uint64_t gpu_address = 0;
   uint64_t size = 0;
   uint64_t handle = 0;
   std::vector<uint32_t> gpu_ids;
@@ -64,6 +65,7 @@ enum class ScratchReservationResult {
 enum class MemoryAllocationUsage {
   General,
   Vram,
+  DeviceVram,
   Executable,
   AqlRing,
   Doorbell,

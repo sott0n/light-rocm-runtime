@@ -4,6 +4,7 @@
 #include <chrono>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <stdint.h>
 #include <stdio.h>
@@ -125,19 +126,26 @@ int main(int argc, char **argv) {
         elapsed_ns(begin, end) / static_cast<double>(burst_size);
     device.synchronize();
 
-    lrrt::Event device_start(device);
-    lrrt::Event device_end(device);
-    device_start.record();
-    for (uint32_t i = 0; i < burst_size; ++i) {
-      lrrt::launch(kernel, config, args);
+    std::optional<double> device_ns;
+    try {
+      lrrt::Event device_start(device);
+      lrrt::Event device_end(device);
+      device_start.record();
+      for (uint32_t i = 0; i < burst_size; ++i) {
+        lrrt::launch(kernel, config, args);
+      }
+      device_end.record();
+      device_end.synchronize();
+      device_start.synchronize();
+      device_ns =
+          static_cast<double>(lrrt::elapsed_time_ns(device_start, device_end)) /
+          static_cast<double>(burst_size);
+      device.synchronize();
+    } catch (const lrrt::Error &error) {
+      if (error.status() != LR_ERROR_NOT_SUPPORTED) {
+        throw;
+      }
     }
-    device_end.record();
-    device_end.synchronize();
-    device_start.synchronize();
-    double device_ns =
-        static_cast<double>(lrrt::elapsed_time_ns(device_start, device_end)) /
-        static_cast<double>(burst_size);
-    device.synchronize();
 
     begin = Clock::now();
     for (uint32_t i = 0; i < iterations; ++i) {
@@ -174,8 +182,13 @@ int main(int argc, char **argv) {
            empty_sync_ns / 1.0e3, colors.reset, "No queued work");
     printf("%-28s %s%9.3f us%s  %s\n", "Host enqueue", colors.time,
            enqueue_ns / 1.0e3, colors.reset, "Burst, final sync excluded");
-    printf("%-28s %s%9.3f us%s  %s\n", "Device batch interval", colors.time,
-           device_ns / 1.0e3, colors.reset, "HSA event interval per launch");
+    if (device_ns) {
+      printf("%-28s %s%9.3f us%s  %s\n", "Device batch interval", colors.time,
+             *device_ns / 1.0e3, colors.reset, "HSA event interval per launch");
+    } else {
+      printf("%-28s %12s  %s\n", "Device batch interval", "unavailable",
+             "Backend does not support events");
+    }
     printf("%-28s %s%9.3f us%s  %s\n", "Submit and synchronize", colors.time,
            batch_ns / 1.0e3, colors.reset, "One sync after the full batch");
     printf("%-28s %s%9.3f us%s  %s\n", "Launch round trip", colors.time,

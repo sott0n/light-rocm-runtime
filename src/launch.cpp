@@ -108,7 +108,7 @@ bool valid_direct_kfd_dispatch_packet(void *context,
          packet.completion_signal % kAmdSignalAlignment == 0;
 }
 
-lr_status_t submit_direct_kfd_kernel_locked(
+lr_status_t submit_direct_kfd_kernel_impl_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
@@ -236,6 +236,20 @@ lr_status_t submit_direct_kfd_kernel_locked(
 }
 
 } // namespace
+
+namespace lrrt_internal {
+
+lr_status_t submit_direct_kfd_kernel_locked(
+    DeviceState *device, lr_queue_t *queue,
+    const light_rocr::transport::kfd::ExecutableImage &executable_image,
+    size_t image_kernel_index, const lr_launch_config_t *config,
+    const void *args, size_t args_size) {
+  return submit_direct_kfd_kernel_impl_locked(device, queue, executable_image,
+                                              image_kernel_index, config, args,
+                                              args_size);
+}
+
+} // namespace lrrt_internal
 #endif
 
 namespace {
