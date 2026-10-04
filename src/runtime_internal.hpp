@@ -210,6 +210,7 @@ struct lr_queue_t {
 
   light_rocr::transport::kfd::AqlQueue queue;
   std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
+  std::vector<std::unique_ptr<PendingDispatch>> available_dispatches;
 #endif
 };
 

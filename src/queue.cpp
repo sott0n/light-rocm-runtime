@@ -1255,7 +1255,7 @@ lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
   }
 
   auto *created_queue =
-      new (std::nothrow) lr_queue_t{device_handle, is_default, {}, {}};
+      new (std::nothrow) lr_queue_t{device_handle, is_default, {}, {}, {}};
   if (!created_queue) {
     return LR_ERROR_RUNTIME;
   }
@@ -1310,21 +1310,42 @@ lr_status_t reap_direct_kfd_dispatches_locked(lr_queue_t *queue) {
     if (dispatch.completion_signal.load_acquire() != 0) {
       break;
     }
-    const lr_status_t status = release_direct_kfd_dispatch(&dispatch);
-    if (status != LR_SUCCESS) {
-      queue->pending_dispatches.erase(
-          queue->pending_dispatches.begin(),
-          queue->pending_dispatches.begin() +
-              static_cast<std::ptrdiff_t>(completed_count));
-      return status;
-    }
     ++completed_count;
+  }
+  if (completed_count == 0) {
+    return LR_SUCCESS;
+  }
+  try {
+    queue->available_dispatches.reserve(queue->available_dispatches.size() +
+                                        completed_count);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+  for (size_t index = 0; index < completed_count; ++index) {
+    queue->available_dispatches.push_back(
+        std::move(queue->pending_dispatches[index]));
   }
   queue->pending_dispatches.erase(
       queue->pending_dispatches.begin(),
       queue->pending_dispatches.begin() +
           static_cast<std::ptrdiff_t>(completed_count));
   return LR_SUCCESS;
+}
+
+lr_status_t release_direct_kfd_dispatch_pool_locked(lr_queue_t *queue) {
+  lr_status_t result = LR_SUCCESS;
+  for (auto &dispatch : queue->available_dispatches) {
+    if (release_direct_kfd_dispatch(dispatch.get()) == LR_SUCCESS) {
+      dispatch.reset();
+    } else {
+      result = LR_ERROR_RUNTIME;
+    }
+  }
+  queue->available_dispatches.erase(
+      std::remove(queue->available_dispatches.begin(),
+                  queue->available_dispatches.end(), nullptr),
+      queue->available_dispatches.end());
+  return result;
 }
 
 } // namespace
@@ -1429,6 +1450,9 @@ lr_status_t restore_direct_kfd_default_queue_locked(lr_device_t device_handle,
   if (!released) {
     return LR_ERROR_RUNTIME;
   }
+  if (release_direct_kfd_dispatch_pool_locked(queue) != LR_SUCCESS) {
+    return LR_ERROR_RUNTIME;
+  }
 
   auto device_queue =
       std::find(device->queues.begin(), device->queues.end(), queue);
@@ -1453,6 +1477,15 @@ void release_direct_kfd_queues_locked(lr_status_t *result) {
       if (synchronization_status != LR_SUCCESS) {
         if (*result == LR_SUCCESS) {
           *result = synchronization_status;
+        }
+        ++index;
+        continue;
+      }
+      const lr_status_t pool_status =
+          release_direct_kfd_dispatch_pool_locked(queue);
+      if (pool_status != LR_SUCCESS) {
+        if (*result == LR_SUCCESS) {
+          *result = pool_status;
         }
         ++index;
         continue;
@@ -1618,6 +1651,11 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
       synchronize_direct_kfd_queue_locked(queue);
   if (synchronization_status != LR_SUCCESS) {
     return synchronization_status;
+  }
+  const lr_status_t pool_status =
+      release_direct_kfd_dispatch_pool_locked(queue);
+  if (pool_status != LR_SUCCESS) {
+    return pool_status;
   }
   if (!queue->queue.release()) {
     return LR_ERROR_RUNTIME;

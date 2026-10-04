@@ -108,64 +108,85 @@ lr_status_t submit_direct_kfd_kernel_locked(
                : LR_ERROR_INVALID_ARGUMENT;
   }
 
-  std::optional<light_rocr::transport::kfd::GttAllocation> kernarg_allocation;
-  uint64_t kernarg_address = 0;
+  uint64_t allocation_size = 0;
   if (requirements.storage_size != 0) {
     if (requirements.storage_size >
         std::numeric_limits<uint64_t>::max() -
             (light_rocr::transport::kfd::kMemoryPageSize - 1)) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
-    const uint64_t allocation_size =
-        (requirements.storage_size +
-         light_rocr::transport::kfd::kMemoryPageSize - 1) &
-        ~(light_rocr::transport::kfd::kMemoryPageSize - 1);
-    auto allocated = g_kfd_session->allocate_gtt(device->node, allocation_size);
-    kernarg_allocation.emplace(std::move(allocated.allocation));
-    if (!allocated) {
-      (void)kernarg_allocation->release();
-      return LR_ERROR_RUNTIME;
-    }
-    const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
-        kernel_info, args, args_size, kernarg_allocation->host_address(),
-        kernarg_allocation->size(), kernarg_allocation->gpu_address());
-    if (!materialized ||
-        !populate_light_rocr_hidden_kernargs(kernel_info, *config,
-                                             kernarg_allocation->host_address(),
-                                             kernel_info.kernarg_size)) {
-      (void)kernarg_allocation->release();
-      return LR_ERROR_INVALID_ARGUMENT;
-    }
-    kernarg_address = materialized.buffer.gpu_address();
+    allocation_size = (requirements.storage_size +
+                       light_rocr::transport::kfd::kMemoryPageSize - 1) &
+                      ~(light_rocr::transport::kfd::kMemoryPageSize - 1);
   }
 
-  auto signal = g_kfd_session->create_user_signal(device->node, 1);
-  if (!signal) {
-    if (kernarg_allocation.has_value()) {
-      (void)kernarg_allocation->release();
-    }
-    (void)signal.signal.release();
+  try {
+    queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
+    queue->available_dispatches.reserve(queue->available_dispatches.size() + 1);
+  } catch (const std::bad_alloc &) {
     return LR_ERROR_RUNTIME;
   }
+
   std::unique_ptr<lr_queue_t::PendingDispatch> pending;
-  try {
-    light_rocr::transport::kfd::GttAllocation empty_kernarg;
-    pending = std::make_unique<lr_queue_t::PendingDispatch>(
-        std::move(signal.signal), kernarg_allocation.has_value()
-                                      ? std::move(*kernarg_allocation)
-                                      : std::move(empty_kernarg));
-    queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
-  } catch (const std::bad_alloc &) {
-    if (pending) {
-      (void)pending->kernarg.release();
-      (void)pending->completion_signal.release();
-    } else {
+  auto reusable = std::find_if(
+      queue->available_dispatches.begin(), queue->available_dispatches.end(),
+      [allocation_size](const auto &dispatch) {
+        return allocation_size == 0 ||
+               (dispatch->kernarg &&
+                dispatch->kernarg.size() >= allocation_size);
+      });
+  if (reusable != queue->available_dispatches.end()) {
+    pending = std::move(*reusable);
+    queue->available_dispatches.erase(reusable);
+    pending->completion_signal.store_relaxed(1);
+  } else {
+    std::optional<light_rocr::transport::kfd::GttAllocation> kernarg_allocation;
+    if (allocation_size != 0) {
+      auto allocated =
+          g_kfd_session->allocate_gtt(device->node, allocation_size);
+      kernarg_allocation.emplace(std::move(allocated.allocation));
+      if (!allocated) {
+        (void)kernarg_allocation->release();
+        return LR_ERROR_RUNTIME;
+      }
+    }
+
+    auto signal = g_kfd_session->create_user_signal(device->node, 1);
+    if (!signal) {
       if (kernarg_allocation.has_value()) {
         (void)kernarg_allocation->release();
       }
       (void)signal.signal.release();
+      return LR_ERROR_RUNTIME;
     }
-    return LR_ERROR_RUNTIME;
+    try {
+      light_rocr::transport::kfd::GttAllocation empty_kernarg;
+      pending = std::make_unique<lr_queue_t::PendingDispatch>(
+          std::move(signal.signal), kernarg_allocation.has_value()
+                                        ? std::move(*kernarg_allocation)
+                                        : std::move(empty_kernarg));
+    } catch (const std::bad_alloc &) {
+      if (kernarg_allocation.has_value()) {
+        (void)kernarg_allocation->release();
+      }
+      (void)signal.signal.release();
+      return LR_ERROR_RUNTIME;
+    }
+  }
+
+  uint64_t kernarg_address = 0;
+  if (requirements.storage_size != 0) {
+    const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
+        kernel_info, args, args_size, pending->kernarg.host_address(),
+        pending->kernarg.size(), pending->kernarg.gpu_address());
+    if (!materialized ||
+        !populate_light_rocr_hidden_kernargs(kernel_info, *config,
+                                             pending->kernarg.host_address(),
+                                             kernel_info.kernarg_size)) {
+      queue->available_dispatches.push_back(std::move(pending));
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    kernarg_address = materialized.buffer.gpu_address();
   }
 
   const auto parameters = aql_dispatch_parameters(
@@ -178,8 +199,7 @@ lr_status_t submit_direct_kfd_kernel_locked(
                                   valid_direct_kfd_dispatch_packet),
       parameters, {queue->pending_dispatches.size(), false});
   if (!submitted) {
-    (void)pending->kernarg.release();
-    (void)pending->completion_signal.release();
+    queue->available_dispatches.push_back(std::move(pending));
     return aql_submit_status(submitted.error);
   }
   queue->pending_dispatches.push_back(std::move(pending));
