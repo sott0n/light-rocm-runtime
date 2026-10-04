@@ -64,7 +64,7 @@ ExecutableImageResult materialize_executable_image(
     return {from_runtime_status(requirements.status), {}};
   }
 
-  GttAllocationResult allocated = session.allocate_executable_gtt(
+  MemoryAllocationResult allocated = session.allocate_executable_gtt(
       node, requirements.allocation_size, dri_root);
   if (!allocated) {
     ExecutableImageStatus allocation_status = failure(

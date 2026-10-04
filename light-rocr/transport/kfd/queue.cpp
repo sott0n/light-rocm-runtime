@@ -164,7 +164,7 @@ void fence_before_doorbell_store() {
 #endif
 }
 
-void initialize_ring(GttAllocation *ring) {
+void initialize_ring(MemoryAllocation *ring) {
   auto *bytes = static_cast<uint8_t *>(ring->host_address());
   std::memset(bytes, 0, static_cast<size_t>(ring->size()));
   for (uint64_t offset = 0; offset < ring->size(); offset += kAqlPacketSize) {
@@ -508,11 +508,11 @@ struct AqlQueueState {
 
   std::shared_ptr<KfdState> session;
   uint32_t gpu_id = 0;
-  std::optional<GttAllocation> ring;
-  std::optional<GttAllocation> control;
-  std::optional<GttAllocation> eop;
-  std::optional<GttAllocation> cwsr;
-  std::optional<GttAllocation> doorbell;
+  std::optional<MemoryAllocation> ring;
+  std::optional<MemoryAllocation> control;
+  std::optional<MemoryAllocation> eop;
+  std::optional<MemoryAllocation> cwsr;
+  std::optional<MemoryAllocation> doorbell;
   std::optional<ScratchAllocation> scratch;
   uint64_t ring_size = 0;
   uint32_t scratch_private_segment_size = 0;
@@ -690,7 +690,8 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
                                           : AqlQueue{}};
   }
 
-  auto ring = allocate_gtt_impl(node, ring_size, dri_root, GttUsage::AqlRing);
+  auto ring =
+      allocate_memory_impl(node, ring_size, dri_root, MemoryUsage::AqlRing);
   queue_state->ring.emplace(std::move(ring.allocation));
   if (!ring) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateRing,
@@ -701,23 +702,24 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
   }
   initialize_ring(&*queue_state->ring);
 
-  auto control =
-      allocate_gtt_impl(node, kMemoryPageSize, dri_root, GttUsage::General);
+  auto control = allocate_memory_impl(node, kMemoryPageSize, dri_root,
+                                      MemoryUsage::General);
   queue_state->control.emplace(std::move(control.allocation));
   if (!control) {
     AqlQueueStatus status = allocation_failure(
         AqlQueueError::AllocateControl, control.status, "AQL queue control");
     return {std::move(status), AqlQueue(std::move(queue_state))};
   }
-  auto eop = allocate_gtt_impl(node, kEopBufferSize, dri_root, GttUsage::Eop);
+  auto eop =
+      allocate_memory_impl(node, kEopBufferSize, dri_root, MemoryUsage::Eop);
   queue_state->eop.emplace(std::move(eop.allocation));
   if (!eop) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateEop,
                                                eop.status, "AQL EOP buffer");
     return {std::move(status), AqlQueue(std::move(queue_state))};
   }
-  auto cwsr = allocate_gtt_impl(node, cwsr_layout.allocation_size, dri_root,
-                                GttUsage::General);
+  auto cwsr = allocate_memory_impl(node, cwsr_layout.allocation_size, dri_root,
+                                   MemoryUsage::General);
   queue_state->cwsr.emplace(std::move(cwsr.allocation));
   if (!cwsr) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateCwsr,
@@ -728,8 +730,8 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
 
   const uint64_t doorbell_mapping_size =
       std::max<uint64_t>(kMemoryPageSize, uint64_t{kDoorbellCount} * 8U);
-  auto doorbell = allocate_gtt_impl(node, doorbell_mapping_size, dri_root,
-                                    GttUsage::Doorbell);
+  auto doorbell = allocate_memory_impl(node, doorbell_mapping_size, dri_root,
+                                       MemoryUsage::Doorbell);
   queue_state->doorbell.emplace(std::move(doorbell.allocation));
   if (!doorbell) {
     AqlQueueStatus status = allocation_failure(AqlQueueError::AllocateDoorbell,

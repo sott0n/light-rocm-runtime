@@ -13,6 +13,7 @@ struct DeviceVmState {
   int render_fd = -1;
   int32_t drm_render_minor = -1;
   bool acquired = false;
+  bool memory_policy_configured = false;
   bool aperture_valid = false;
   bool scratch_reserved = false;
   ProcessAperture aperture;

@@ -51,11 +51,12 @@ public:
 
 private:
   friend class KfdSession;
-  explicit UserSignal(GttAllocation storage) : storage_(std::move(storage)) {}
+  explicit UserSignal(MemoryAllocation storage)
+      : storage_(std::move(storage)) {}
   [[nodiscard]] runtime::AmdSignal &abi();
   [[nodiscard]] const runtime::AmdSignal &abi() const;
 
-  GttAllocation storage_;
+  MemoryAllocation storage_;
 };
 
 struct UserSignalResult {

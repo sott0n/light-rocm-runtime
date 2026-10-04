@@ -237,7 +237,7 @@ using LightRocrMemoryAllocation =
 constexpr uint64_t kLightRocrMemoryPageSize =
     light_rocr::transport::hsakmt::kMemoryPageSize;
 #else
-using LightRocrMemoryAllocation = light_rocr::transport::kfd::GttAllocation;
+using LightRocrMemoryAllocation = light_rocr::transport::kfd::MemoryAllocation;
 constexpr uint64_t kLightRocrMemoryPageSize =
     light_rocr::transport::kfd::kMemoryPageSize;
 #endif
@@ -264,11 +264,11 @@ std::unordered_map<void *, LightRocrHostAllocationInfo>
 constexpr char kLightRocrCopyKernelName[] = "lrrt_copy_bytes";
 #endif
 
-auto allocate_light_rocr_gtt(DeviceState *device, uint64_t size) {
+auto allocate_light_rocr_device_memory(DeviceState *device, uint64_t size) {
 #if LRRT_ENABLE_LIGHT_ROCR
   return g_kfd_session->allocate_gtt(device->node.node_id, size);
 #else
-  return g_kfd_session->allocate_gtt(device->node, size);
+  return g_kfd_session->allocate_vram(device->node, size);
 #endif
 }
 
@@ -613,11 +613,20 @@ lr_status_t lr_malloc(lr_device_t device, size_t size, void **ptr) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
+  const uint64_t allocation_granule =
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+      light_rocr::transport::kfd::kVramAllocationGranule;
+#else
+      kLightRocrMemoryPageSize;
+#endif
+  if (size > std::numeric_limits<uint64_t>::max() - (allocation_granule - 1)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
   const uint64_t allocation_size =
-      (static_cast<uint64_t>(size) + kLightRocrMemoryPageSize - 1) &
-      ~(kLightRocrMemoryPageSize - 1);
-  auto allocated =
-      allocate_light_rocr_gtt(&g_devices[device.index], allocation_size);
+      (static_cast<uint64_t>(size) + allocation_granule - 1) &
+      ~(allocation_granule - 1);
+  auto allocated = allocate_light_rocr_device_memory(&g_devices[device.index],
+                                                     allocation_size);
   if (!allocated) {
     release_or_retain_light_rocr_cleanup(std::move(allocated.allocation));
     return LR_ERROR_RUNTIME;

@@ -20,7 +20,7 @@
 namespace light_rocr::transport::kfd {
 
 struct CodeCacheOperationState {
-  std::optional<GttAllocation> command;
+  std::optional<MemoryAllocation> command;
   std::optional<UserSignal> signal;
   AqlQueue *submitted_queue = nullptr;
   bool submitted = false;

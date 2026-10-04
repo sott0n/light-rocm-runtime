@@ -108,10 +108,10 @@ void release_scratch_reservation(const std::shared_ptr<KfdState> &state,
 
 namespace {
 
-RawGttAllocationResult rollback_gtt(MemoryStatus status, int kfd_fd,
-                                    RawGttAllocation allocation,
-                                    MemorySyscalls syscalls) {
-  const MemoryStatus cleanup = release_gtt(kfd_fd, &allocation, syscalls);
+RawMemoryAllocationResult rollback_memory(MemoryStatus status, int kfd_fd,
+                                          RawMemoryAllocation allocation,
+                                          MemorySyscalls syscalls) {
+  const MemoryStatus cleanup = release_memory(kfd_fd, &allocation, syscalls);
   if (!cleanup) {
     status.message += "; cleanup failed: " + cleanup.message;
   }
@@ -119,11 +119,11 @@ RawGttAllocationResult rollback_gtt(MemoryStatus status, int kfd_fd,
 }
 
 RawScratchAllocationResult rollback_scratch(MemoryStatus status, int kfd_fd,
-                                            RawGttAllocation allocation,
+                                            RawMemoryAllocation allocation,
                                             uint64_t gpu_address,
                                             bool integrated,
                                             MemorySyscalls syscalls) {
-  const MemoryStatus cleanup = release_gtt(kfd_fd, &allocation, syscalls);
+  const MemoryStatus cleanup = release_memory(kfd_fd, &allocation, syscalls);
   if (!cleanup) {
     status.message += "; cleanup failed: " + cleanup.message;
   }
@@ -133,22 +133,25 @@ RawScratchAllocationResult rollback_scratch(MemoryStatus status, int kfd_fd,
 
 } // namespace
 
-RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
-                                    const ProcessAperture &aperture,
-                                    uint64_t size, GttAllocationUsage usage,
-                                    MemorySyscalls syscalls) {
-  if (kfd_fd < 0 || (usage != GttAllocationUsage::Doorbell && render_fd < 0) ||
+RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
+                                          const ProcessAperture &aperture,
+                                          uint64_t size,
+                                          MemoryAllocationUsage usage,
+                                          MemorySyscalls syscalls) {
+  if (kfd_fd < 0 ||
+      (usage != MemoryAllocationUsage::Doorbell && render_fd < 0) ||
       aperture.gpu_id == 0 || !valid_syscalls(syscalls)) {
     return {{MemoryError::InvalidSession, 0,
-             "GTT allocation requires an acquired KFD VM"},
+             "KFD memory allocation requires an acquired KFD VM"},
             {}};
   }
   if (size == 0 || size % kMemoryPageSize != 0 ||
       size > std::numeric_limits<size_t>::max() ||
-      (usage == GttAllocationUsage::AqlRing &&
+      (usage == MemoryAllocationUsage::AqlRing &&
        size > std::numeric_limits<uint64_t>::max() / 2)) {
     return {{MemoryError::InvalidSize, 0,
-             "GTT allocation size must be a non-zero multiple of 4096 bytes"},
+             "KFD memory allocation size must be a non-zero multiple of 4096 "
+             "bytes"},
             {}};
   }
 
@@ -156,19 +159,23 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
   // packet producer only addresses the first span, but KFD uses the full
   // backing size for queue-memory handling.
   const uint64_t backing_size =
-      usage == GttAllocationUsage::AqlRing ? size * 2 : size;
+      usage == MemoryAllocationUsage::AqlRing ? size * 2 : size;
+  const uint64_t alignment_slack =
+      usage == MemoryAllocationUsage::Vram ? kVramAllocationGranule : 0;
   if (backing_size > std::numeric_limits<uint64_t>::max() -
-                         kGuardPageCount * kMemoryPageSize) {
-    return {{MemoryError::InvalidSize, 0,
-             "GTT allocation plus guard pages exceeds the address range"},
-            {}};
+                         kGuardPageCount * kMemoryPageSize - alignment_slack) {
+    return {
+        {MemoryError::InvalidSize, 0,
+         "KFD memory allocation plus guard pages exceeds the address range"},
+        {}};
   }
   const uint64_t reservation_size =
-      backing_size + kGuardPageCount * kMemoryPageSize;
+      backing_size + kGuardPageCount * kMemoryPageSize + alignment_slack;
   if (reservation_size > std::numeric_limits<size_t>::max()) {
-    return {{MemoryError::InvalidSize, 0,
-             "GTT allocation plus guard pages exceeds the host size range"},
-            {}};
+    return {
+        {MemoryError::InvalidSize, 0,
+         "KFD memory allocation plus guard pages exceeds the host size range"},
+        {}};
   }
 
   std::vector<uint32_t> gpu_ids;
@@ -176,7 +183,7 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
     gpu_ids.push_back(aperture.gpu_id);
   } catch (const std::bad_alloc &) {
     return {{MemoryError::AllocateState, 0,
-             "failed to allocate GTT GPU mapping state"},
+             "failed to allocate KFD memory GPU mapping state"},
             {}};
   }
   void *reservation = syscalls.mmap_function(
@@ -184,47 +191,59 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
       MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
   if (reservation == MAP_FAILED) {
     return {system_failure(MemoryError::ReserveVa, errno,
-                           "mmap(GTT address reservation)"),
+                           "mmap(KFD memory address reservation)"),
             {}};
   }
 
   const uint64_t reservation_address =
       static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reservation));
-  if (reservation_address >
-      std::numeric_limits<uint64_t>::max() - kMemoryPageSize) {
-    return rollback_gtt({MemoryError::ReserveVa, 0,
-                         "reserved CPU VA overflows the host address range"},
-                        kfd_fd,
-                        {reservation, reservation_size, nullptr, size, 0,
-                         std::move(gpu_ids), 0, 0, false},
-                        syscalls);
+  const uint64_t address_alignment_slack =
+      usage == MemoryAllocationUsage::Vram ? kVramAllocationGranule - 1U : 0;
+  if (reservation_address > std::numeric_limits<uint64_t>::max() -
+                                kMemoryPageSize - address_alignment_slack) {
+    return rollback_memory({MemoryError::ReserveVa, 0,
+                            "reserved CPU VA overflows the host address range"},
+                           kfd_fd,
+                           {reservation, reservation_size, nullptr, size, 0,
+                            std::move(gpu_ids), 0, 0, false},
+                           syscalls);
   }
-  const uint64_t host_address = reservation_address + kMemoryPageSize;
+  const uint64_t first_usable = reservation_address + kMemoryPageSize;
+  const uint64_t host_address =
+      usage == MemoryAllocationUsage::Vram
+          ? (first_usable + kVramAllocationGranule - 1U) &
+                ~(kVramAllocationGranule - 1U)
+          : first_usable;
   const bool range_overflows =
       host_address > std::numeric_limits<uint64_t>::max() - (backing_size - 1);
   if (range_overflows || host_address < aperture.gpuvm_base ||
       host_address + backing_size - 1 > aperture.gpuvm_limit) {
-    return rollback_gtt({MemoryError::ReserveVa, 0,
-                         "reserved CPU VA is outside the KFD GPUVM aperture"},
-                        kfd_fd,
-                        {reservation, reservation_size, nullptr, size, 0,
-                         std::move(gpu_ids), 0, 0, false},
-                        syscalls);
+    return rollback_memory(
+        {MemoryError::ReserveVa, 0,
+         "reserved CPU VA is outside the KFD GPUVM aperture"},
+        kfd_fd,
+        {reservation, reservation_size, nullptr, size, 0, std::move(gpu_ids), 0,
+         0, false},
+        syscalls);
   }
 
   kfd_ioctl_alloc_memory_of_gpu_args arguments{};
   arguments.va_addr = host_address;
   arguments.size = backing_size;
   arguments.gpu_id = aperture.gpu_id;
-  if (usage == GttAllocationUsage::Doorbell) {
+  if (usage == MemoryAllocationUsage::Doorbell) {
     arguments.flags = static_cast<uint32_t>(
         KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
-  } else if (usage == GttAllocationUsage::Eop) {
+  } else if (usage == MemoryAllocationUsage::Eop) {
     arguments.flags = static_cast<uint32_t>(
         KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
+        KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  } else if (usage == MemoryAllocationUsage::Vram) {
+    arguments.flags = static_cast<uint32_t>(
+        KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   } else {
     arguments.flags = static_cast<uint32_t>(
@@ -232,9 +251,9 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
         KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   }
-  if (usage == GttAllocationUsage::Executable) {
+  if (usage == MemoryAllocationUsage::Executable) {
     arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
-  } else if (usage == GttAllocationUsage::AqlRing) {
+  } else if (usage == MemoryAllocationUsage::AqlRing) {
     arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
                        KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM |
                        KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED;
@@ -242,66 +261,70 @@ RawGttAllocationResult allocate_gtt(int kfd_fd, int render_fd,
   int system_error = 0;
   if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &arguments,
                     syscalls.ioctl_function, &system_error)) {
-    return rollback_gtt(system_failure(MemoryError::AllocateGtt, system_error,
-                                       "AMDKFD_IOC_ALLOC_MEMORY_OF_GPU(GTT)"),
-                        kfd_fd,
-                        {reservation, reservation_size, nullptr, size, 0,
-                         std::move(gpu_ids), 0, 0, false},
-                        syscalls);
+    return rollback_memory(
+        system_failure(MemoryError::AllocateMemory, system_error,
+                       "AMDKFD_IOC_ALLOC_MEMORY_OF_GPU(memory)"),
+        kfd_fd,
+        {reservation, reservation_size, nullptr, size, 0, std::move(gpu_ids), 0,
+         0, false},
+        syscalls);
   }
   if (arguments.handle == 0) {
-    return rollback_gtt({MemoryError::AllocateGtt, 0,
-                         "KFD returned an invalid zero GTT handle"},
-                        kfd_fd,
-                        {reservation, reservation_size, nullptr, size, 0,
-                         std::move(gpu_ids), 0, 0, false},
-                        syscalls);
+    return rollback_memory({MemoryError::AllocateMemory, 0,
+                            "KFD returned an invalid zero KFD memory handle"},
+                           kfd_fd,
+                           {reservation, reservation_size, nullptr, size, 0,
+                            std::move(gpu_ids), 0, 0, false},
+                           syscalls);
   }
 
-  RawGttAllocation allocation{reservation,
-                              reservation_size,
-                              nullptr,
-                              size,
-                              arguments.handle,
-                              std::move(gpu_ids),
-                              0,
-                              0,
-                              false};
+  RawMemoryAllocation allocation{reservation,
+                                 reservation_size,
+                                 nullptr,
+                                 size,
+                                 arguments.handle,
+                                 std::move(gpu_ids),
+                                 0,
+                                 0,
+                                 false};
 
   void *host = reinterpret_cast<void *>(static_cast<uintptr_t>(host_address));
-  if (usage != GttAllocationUsage::Doorbell) {
+  if (usage != MemoryAllocationUsage::Doorbell) {
     if (arguments.mmap_offset >
         static_cast<uint64_t>(std::numeric_limits<off_t>::max())) {
-      return rollback_gtt(
-          {MemoryError::MapHost, 0,
-           "KFD returned a GTT mmap offset outside the host off_t range"},
-          kfd_fd, std::move(allocation), syscalls);
+      return rollback_memory({MemoryError::MapHost, 0,
+                              "KFD returned a KFD memory mmap offset outside "
+                              "the host off_t range"},
+                             kfd_fd, std::move(allocation), syscalls);
     }
-    const int protection =
-        usage == GttAllocationUsage::Eop ? PROT_NONE : PROT_READ | PROT_WRITE;
+    const int protection = usage == MemoryAllocationUsage::Eop
+                               ? PROT_NONE
+                               : PROT_READ | PROT_WRITE;
     void *mapped = syscalls.mmap_function(
         host, static_cast<size_t>(size), protection, MAP_SHARED | MAP_FIXED,
         render_fd, static_cast<off_t>(arguments.mmap_offset));
     if (mapped == MAP_FAILED) {
-      return rollback_gtt(system_failure(MemoryError::MapHost, errno,
-                                         "mmap(GTT render-node mapping)"),
-                          kfd_fd, std::move(allocation), syscalls);
+      return rollback_memory(
+          system_failure(MemoryError::MapHost, errno,
+                         "mmap(KFD memory render-node mapping)"),
+          kfd_fd, std::move(allocation), syscalls);
     }
   }
   allocation.host_address = host;
 
   if (syscalls.madvise_function(host, static_cast<size_t>(size),
                                 MADV_DONTFORK) != 0) {
-    return rollback_gtt(system_failure(MemoryError::AdviseDontFork, errno,
-                                       "madvise(MADV_DONTFORK)"),
-                        kfd_fd, std::move(allocation), syscalls);
+    return rollback_memory(system_failure(MemoryError::AdviseDontFork, errno,
+                                          "madvise(MADV_DONTFORK)"),
+                           kfd_fd, std::move(allocation), syscalls);
   }
 
-  if (usage != GttAllocationUsage::Doorbell) {
+  if (usage != MemoryAllocationUsage::Doorbell) {
     const MemoryStatus gpu_mapped =
-        map_gtt(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
+        map_memory(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
     if (!gpu_mapped) {
-      return rollback_gtt(gpu_mapped, kfd_fd, std::move(allocation), syscalls);
+      return rollback_memory(gpu_mapped, kfd_fd, std::move(allocation),
+                             syscalls);
     }
   }
 
@@ -392,15 +415,15 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
 
   void *backing_address =
       reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address));
-  RawGttAllocation allocation{reservation,
-                              reservation_size,
-                              backing_address,
-                              aligned_size,
-                              0,
-                              std::move(gpu_ids),
-                              0,
-                              0,
-                              false};
+  RawMemoryAllocation allocation{reservation,
+                                 reservation_size,
+                                 backing_address,
+                                 aligned_size,
+                                 0,
+                                 std::move(gpu_ids),
+                                 0,
+                                 0,
+                                 false};
   if (integrated) {
     void *mapped = syscalls.mmap_function(
         backing_address, static_cast<size_t>(aligned_size),
@@ -460,7 +483,7 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
   allocation.handle = arguments.handle;
 
   const MemoryStatus mapped =
-      map_gtt(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
+      map_memory(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
   if (!mapped) {
     return rollback_scratch(mapped, kfd_fd, std::move(allocation), gpu_address,
                             integrated, syscalls);
@@ -468,28 +491,28 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
   return {{}, std::move(allocation), gpu_address, false, true};
 }
 
-MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
-                     const std::vector<uint32_t> &gpu_ids,
-                     MemorySyscalls syscalls) {
+MemoryStatus map_memory(int kfd_fd, RawMemoryAllocation *allocation,
+                        const std::vector<uint32_t> &gpu_ids,
+                        MemorySyscalls syscalls) {
   if (kfd_fd < 0 || allocation == nullptr || allocation->handle == 0 ||
       !valid_syscalls(syscalls)) {
     return {MemoryError::InvalidSession, 0,
-            "GTT GPU mapping requires an allocated KFD buffer"};
+            "KFD memory GPU mapping requires an allocated KFD buffer"};
   }
   if (gpu_ids.empty() ||
       gpu_ids.size() > std::numeric_limits<uint32_t>::max()) {
     return {MemoryError::InvalidNode, 0,
-            "GTT GPU mapping requires at least one GPU ID"};
+            "KFD memory GPU mapping requires at least one GPU ID"};
   }
   for (size_t index = 0; index < gpu_ids.size(); ++index) {
     if (gpu_ids[index] == 0) {
       return {MemoryError::InvalidNode, 0,
-              "GTT GPU mapping received an invalid zero GPU ID"};
+              "KFD memory GPU mapping received an invalid zero GPU ID"};
     }
     for (size_t previous = 0; previous < index; ++previous) {
       if (gpu_ids[previous] == gpu_ids[index]) {
         return {MemoryError::InvalidNode, 0,
-                "GTT GPU mapping received a duplicate GPU ID"};
+                "KFD memory GPU mapping received a duplicate GPU ID"};
       }
     }
   }
@@ -498,18 +521,18 @@ MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
       allocation->gpu_ids = gpu_ids;
     } catch (const std::bad_alloc &) {
       return {MemoryError::AllocateState, 0,
-              "failed to allocate GTT GPU mapping state"};
+              "failed to allocate KFD memory GPU mapping state"};
     }
   } else if (allocation->gpu_ids != gpu_ids ||
              allocation->unmapped_device_count != 0) {
     return {MemoryError::MapToGpu, 0,
-            "GTT GPU mapping retry does not match the pending mapping"};
+            "KFD memory GPU mapping retry does not match the pending mapping"};
   }
 
   const uint32_t device_count = static_cast<uint32_t>(gpu_ids.size());
   if (allocation->mapped_device_count > device_count) {
     return {MemoryError::MapToGpu, 0,
-            "GTT GPU mapping retained invalid progress"};
+            "KFD memory GPU mapping retained invalid progress"};
   }
   if (allocation->mapped_device_count == device_count &&
       allocation->map_complete) {
@@ -540,7 +563,7 @@ MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
   allocation->mapped_device_count = arguments.n_success;
   if (!succeeded) {
     return system_failure(MemoryError::MapToGpu, system_error,
-                          "AMDKFD_IOC_MAP_MEMORY_TO_GPU(GTT)");
+                          "AMDKFD_IOC_MAP_MEMORY_TO_GPU(memory)");
   }
   if (arguments.n_success != device_count) {
     return {MemoryError::MapToGpu, 0,
@@ -550,8 +573,8 @@ MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
   return {};
 }
 
-MemoryStatus unmap_gtt(int kfd_fd, RawGttAllocation *allocation,
-                       MemorySyscalls syscalls) {
+MemoryStatus unmap_memory(int kfd_fd, RawMemoryAllocation *allocation,
+                          MemorySyscalls syscalls) {
   if (allocation == nullptr || allocation->mapped_device_count == 0) {
     if (allocation != nullptr) {
       allocation->gpu_ids.clear();
@@ -562,12 +585,12 @@ MemoryStatus unmap_gtt(int kfd_fd, RawGttAllocation *allocation,
   }
   if (kfd_fd < 0 || allocation->handle == 0 || !valid_syscalls(syscalls)) {
     return {MemoryError::InvalidSession, 0,
-            "GTT GPU unmapping requires an allocated KFD buffer"};
+            "KFD memory GPU unmapping requires an allocated KFD buffer"};
   }
   if (allocation->mapped_device_count > allocation->gpu_ids.size() ||
       allocation->unmapped_device_count > allocation->mapped_device_count) {
     return {MemoryError::UnmapFromGpu, 0,
-            "GTT GPU unmapping retained invalid progress"};
+            "KFD memory GPU unmapping retained invalid progress"};
   }
   kfd_ioctl_unmap_memory_from_gpu_args arguments{};
   arguments.handle = allocation->handle;
@@ -591,7 +614,7 @@ MemoryStatus unmap_gtt(int kfd_fd, RawGttAllocation *allocation,
   allocation->unmapped_device_count = arguments.n_success;
   if (!succeeded) {
     return system_failure(MemoryError::UnmapFromGpu, system_error,
-                          "AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU(GTT)");
+                          "AMDKFD_IOC_UNMAP_MEMORY_FROM_GPU(memory)");
   }
   if (arguments.n_success != allocation->mapped_device_count) {
     return {MemoryError::UnmapFromGpu, 0,
@@ -606,17 +629,17 @@ MemoryStatus unmap_gtt(int kfd_fd, RawGttAllocation *allocation,
   return {};
 }
 
-MemoryStatus release_gtt(int kfd_fd, RawGttAllocation *allocation,
-                         MemorySyscalls syscalls) {
+MemoryStatus release_memory(int kfd_fd, RawMemoryAllocation *allocation,
+                            MemorySyscalls syscalls) {
   if (allocation == nullptr ||
       (allocation->reservation_address == nullptr && allocation->handle == 0)) {
     return {};
   }
   if (kfd_fd < 0 || !valid_syscalls(syscalls)) {
     return {MemoryError::InvalidSession, 0,
-            "GTT release requires an open KFD session"};
+            "KFD memory release requires an open KFD session"};
   }
-  const MemoryStatus unmapped = unmap_gtt(kfd_fd, allocation, syscalls);
+  const MemoryStatus unmapped = unmap_memory(kfd_fd, allocation, syscalls);
   if (!unmapped) {
     return unmapped;
   }
@@ -625,7 +648,7 @@ MemoryStatus release_gtt(int kfd_fd, RawGttAllocation *allocation,
             allocation->reservation_address,
             static_cast<size_t>(allocation->reservation_size)) != 0) {
       return system_failure(MemoryError::UnmapHost, errno,
-                            "munmap(GTT host mapping)");
+                            "munmap(KFD memory host mapping)");
     }
     allocation->reservation_address = nullptr;
     allocation->reservation_size = 0;
@@ -638,8 +661,8 @@ MemoryStatus release_gtt(int kfd_fd, RawGttAllocation *allocation,
     int system_error = 0;
     if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_FREE_MEMORY_OF_GPU, &arguments,
                       syscalls.ioctl_function, &system_error)) {
-      return system_failure(MemoryError::FreeGtt, system_error,
-                            "AMDKFD_IOC_FREE_MEMORY_OF_GPU(GTT)");
+      return system_failure(MemoryError::FreeMemory, system_error,
+                            "AMDKFD_IOC_FREE_MEMORY_OF_GPU(memory)");
     }
   }
   *allocation = {};
@@ -666,8 +689,8 @@ const char *memory_error_name(MemoryError error) {
     return "reserve_va";
   case MemoryError::SetScratchBacking:
     return "set_scratch_backing";
-  case MemoryError::AllocateGtt:
-    return "allocate_gtt";
+  case MemoryError::AllocateMemory:
+    return "allocate_memory";
   case MemoryError::AllocateScratch:
     return "allocate_scratch";
   case MemoryError::ScratchAlreadyReserved:
@@ -682,22 +705,28 @@ const char *memory_error_name(MemoryError error) {
     return "unmap_from_gpu";
   case MemoryError::UnmapHost:
     return "unmap_host";
-  case MemoryError::FreeGtt:
-    return "free_gtt";
+  case MemoryError::FreeMemory:
+    return "free_memory";
   }
   return "unknown";
 }
 
-GttAllocationResult
+MemoryAllocationResult
 KfdSession::allocate_gtt(const runtime::Node &node, uint64_t size,
                          const std::string &dri_root) const {
-  return allocate_gtt_impl(node, size, dri_root, GttUsage::General);
+  return allocate_memory_impl(node, size, dri_root, MemoryUsage::General);
 }
 
-GttAllocationResult
+MemoryAllocationResult
+KfdSession::allocate_vram(const runtime::Node &node, uint64_t size,
+                          const std::string &dri_root) const {
+  return allocate_memory_impl(node, size, dri_root, MemoryUsage::Vram);
+}
+
+MemoryAllocationResult
 KfdSession::allocate_executable_gtt(const runtime::Node &node, uint64_t size,
                                     const std::string &dri_root) const {
-  return allocate_gtt_impl(node, size, dri_root, GttUsage::Executable);
+  return allocate_memory_impl(node, size, dri_root, MemoryUsage::Executable);
 }
 
 ScratchAllocationResult
@@ -741,7 +770,7 @@ KfdSession::allocate_scratch(const runtime::Node &node, uint64_t size,
 
   detail::RawScratchAllocationResult allocated = detail::allocate_scratch(
       state_->fd, acquired.aperture, size, node.integrated, real_syscalls());
-  detail::RawGttAllocation &raw = allocated.allocation;
+  detail::RawMemoryAllocation &raw = allocated.allocation;
   if (!allocated && raw.reservation_address == nullptr && raw.handle == 0) {
     detail::release_scratch_reservation(state_, node.gpu_id);
     return {std::move(allocated.status), {}};
@@ -755,32 +784,33 @@ KfdSession::allocate_scratch(const runtime::Node &node, uint64_t size,
   return {std::move(allocated.status), std::move(owner)};
 }
 
-GttAllocationResult KfdSession::allocate_gtt_impl(const runtime::Node &node,
-                                                  uint64_t size,
-                                                  const std::string &dri_root,
-                                                  GttUsage usage) const {
+MemoryAllocationResult
+KfdSession::allocate_memory_impl(const runtime::Node &node, uint64_t size,
+                                 const std::string &dri_root,
+                                 MemoryUsage usage) const {
   if (state_ == nullptr) {
     return {{MemoryError::InvalidSession, 0,
-             "GTT allocation requires an open KFD session"},
+             "KFD memory allocation requires an open KFD session"},
             {}};
   }
   if (!node.is_gpu() || node.gpu_id == 0 || node.drm_render_minor < 0) {
     return {{MemoryError::InvalidNode, 0,
-             "GTT allocation requires a GPU node with a render minor"},
+             "KFD memory allocation requires a GPU node with a render minor"},
             {}};
   }
   if (size == 0 || size % kMemoryPageSize != 0) {
     return {{MemoryError::InvalidSize, 0,
-             "GTT allocation size must be a non-zero multiple of 4096 bytes"},
+             "KFD memory allocation size must be a non-zero multiple of 4096 "
+             "bytes"},
             {}};
   }
 
   const VmResult acquired = acquire_vm(node, dri_root);
   if (!acquired) {
-    return {
-        {MemoryError::AcquireVm, acquired.status.system_error,
-         "failed to acquire VM for GTT allocation: " + acquired.status.message},
-        {}};
+    return {{MemoryError::AcquireVm, acquired.status.system_error,
+             "failed to acquire VM for KFD memory allocation: " +
+                 acquired.status.message},
+            {}};
   }
 
   int render_fd = -1;
@@ -796,42 +826,46 @@ GttAllocationResult KfdSession::allocate_gtt_impl(const runtime::Node &node,
     render_fd = device->second.render_fd;
   }
 
-  detail::RawGttAllocationResult allocated = detail::allocate_gtt(
+  detail::RawMemoryAllocationResult allocated = detail::allocate_memory(
       state_->fd, render_fd, acquired.aperture, size,
-      usage == GttUsage::AqlRing      ? detail::GttAllocationUsage::AqlRing
-      : usage == GttUsage::Doorbell   ? detail::GttAllocationUsage::Doorbell
-      : usage == GttUsage::Eop        ? detail::GttAllocationUsage::Eop
-      : usage == GttUsage::Executable ? detail::GttAllocationUsage::Executable
-                                      : detail::GttAllocationUsage::General,
+      usage == MemoryUsage::AqlRing    ? detail::MemoryAllocationUsage::AqlRing
+      : usage == MemoryUsage::Doorbell ? detail::MemoryAllocationUsage::Doorbell
+      : usage == MemoryUsage::Eop      ? detail::MemoryAllocationUsage::Eop
+      : usage == MemoryUsage::Vram     ? detail::MemoryAllocationUsage::Vram
+      : usage == MemoryUsage::Executable
+          ? detail::MemoryAllocationUsage::Executable
+          : detail::MemoryAllocationUsage::General,
       real_syscalls());
   if (!allocated) {
-    detail::RawGttAllocation &raw = allocated.allocation;
+    detail::RawMemoryAllocation &raw = allocated.allocation;
     if (raw.reservation_address == nullptr && raw.handle == 0) {
       return {std::move(allocated.status), {}};
     }
     return {std::move(allocated.status),
-            GttAllocation(state_, raw.reservation_address, raw.reservation_size,
-                          raw.host_address, raw.size, raw.handle,
-                          std::move(raw.gpu_ids), raw.mapped_device_count,
-                          raw.unmapped_device_count, raw.map_complete)};
+            MemoryAllocation(state_, raw.reservation_address,
+                             raw.reservation_size, raw.host_address, raw.size,
+                             raw.handle, std::move(raw.gpu_ids),
+                             raw.mapped_device_count, raw.unmapped_device_count,
+                             raw.map_complete)};
   }
-  detail::RawGttAllocation &raw = allocated.allocation;
+  detail::RawMemoryAllocation &raw = allocated.allocation;
   return {{},
-          GttAllocation(state_, raw.reservation_address, raw.reservation_size,
-                        raw.host_address, raw.size, raw.handle,
-                        std::move(raw.gpu_ids), raw.mapped_device_count,
-                        raw.unmapped_device_count, raw.map_complete)};
+          MemoryAllocation(state_, raw.reservation_address,
+                           raw.reservation_size, raw.host_address, raw.size,
+                           raw.handle, std::move(raw.gpu_ids),
+                           raw.mapped_device_count, raw.unmapped_device_count,
+                           raw.map_complete)};
 }
 
 MemoryStatus
-KfdSession::map_pending_allocation(GttAllocation *allocation) const {
+KfdSession::map_pending_allocation(MemoryAllocation *allocation) const {
   if (state_ == nullptr || allocation == nullptr ||
       allocation->state_ != state_ || allocation->handle_ == 0) {
     return {MemoryError::InvalidSession, 0,
             "GPU mapping requires an allocation owned by this KFD session"};
   }
 
-  detail::RawGttAllocation raw;
+  detail::RawMemoryAllocation raw;
   try {
     raw.gpu_ids = allocation->gpu_ids_;
   } catch (const std::bad_alloc &) {
@@ -847,8 +881,8 @@ KfdSession::map_pending_allocation(GttAllocation *allocation) const {
   raw.unmapped_device_count = allocation->unmapped_device_count_;
   raw.map_complete = allocation->map_complete_;
 
-  const MemoryStatus status =
-      detail::map_gtt(state_->fd, &raw, allocation->gpu_ids_, real_syscalls());
+  const MemoryStatus status = detail::map_memory(
+      state_->fd, &raw, allocation->gpu_ids_, real_syscalls());
   allocation->gpu_ids_ = std::move(raw.gpu_ids);
   allocation->mapped_device_count_ = raw.mapped_device_count;
   allocation->unmapped_device_count_ = raw.unmapped_device_count;
@@ -856,7 +890,7 @@ KfdSession::map_pending_allocation(GttAllocation *allocation) const {
   return status;
 }
 
-GttAllocation::GttAllocation(GttAllocation &&other) noexcept
+MemoryAllocation::MemoryAllocation(MemoryAllocation &&other) noexcept
     : state_(std::move(other.state_)),
       reservation_address_(other.reservation_address_),
       reservation_size_(other.reservation_size_),
@@ -868,27 +902,28 @@ GttAllocation::GttAllocation(GttAllocation &&other) noexcept
   other.reset();
 }
 
-GttAllocation::~GttAllocation() { (void)release(); }
+MemoryAllocation::~MemoryAllocation() { (void)release(); }
 
-MemoryStatus GttAllocation::release() {
+MemoryStatus MemoryAllocation::release() {
   if (reservation_address_ == nullptr && handle_ == 0) {
     return {};
   }
   if (state_ == nullptr) {
     return {MemoryError::InvalidSession, 0,
-            "GTT release requires an open KFD session"};
+            "KFD memory release requires an open KFD session"};
   }
 
-  detail::RawGttAllocation raw{reservation_address_,
-                               reservation_size_,
-                               host_address_,
-                               size_,
-                               handle_,
-                               std::move(gpu_ids_),
-                               mapped_device_count_,
-                               unmapped_device_count_,
-                               map_complete_};
-  MemoryStatus status = detail::release_gtt(state_->fd, &raw, real_syscalls());
+  detail::RawMemoryAllocation raw{reservation_address_,
+                                  reservation_size_,
+                                  host_address_,
+                                  size_,
+                                  handle_,
+                                  std::move(gpu_ids_),
+                                  mapped_device_count_,
+                                  unmapped_device_count_,
+                                  map_complete_};
+  MemoryStatus status =
+      detail::release_memory(state_->fd, &raw, real_syscalls());
   reservation_address_ = raw.reservation_address;
   reservation_size_ = raw.reservation_size;
   host_address_ = raw.host_address;
@@ -904,7 +939,7 @@ MemoryStatus GttAllocation::release() {
   return status;
 }
 
-void GttAllocation::reset() {
+void MemoryAllocation::reset() {
   state_.reset();
   reservation_address_ = nullptr;
   reservation_size_ = 0;
@@ -941,7 +976,7 @@ MemoryStatus ScratchAllocation::release() {
             "scratch release requires an open KFD session"};
   }
 
-  detail::RawGttAllocation raw{
+  detail::RawMemoryAllocation raw{
       reservation_address_,
       reservation_size_,
       reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address_)),
@@ -952,7 +987,7 @@ MemoryStatus ScratchAllocation::release() {
       unmapped_device_count_,
       map_complete_};
   const MemoryStatus status =
-      detail::release_gtt(state_->fd, &raw, real_syscalls());
+      detail::release_memory(state_->fd, &raw, real_syscalls());
   reservation_address_ = raw.reservation_address;
   reservation_size_ = raw.reservation_size;
   size_ = raw.size;

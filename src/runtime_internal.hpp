@@ -201,11 +201,11 @@ struct lr_queue_t {
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
   struct PendingDispatch {
     PendingDispatch(light_rocr::transport::kfd::UserSignal &&signal,
-                    light_rocr::transport::kfd::GttAllocation &&kernarg)
+                    light_rocr::transport::kfd::MemoryAllocation &&kernarg)
         : completion_signal(std::move(signal)), kernarg(std::move(kernarg)) {}
 
     light_rocr::transport::kfd::UserSignal completion_signal;
-    light_rocr::transport::kfd::GttAllocation kernarg;
+    light_rocr::transport::kfd::MemoryAllocation kernarg;
   };
 
   light_rocr::transport::kfd::AqlQueue queue;

@@ -73,12 +73,13 @@ private:
                                const uint8_t *, size_t,
                                const loader::CodeObject &, const std::string &);
 
-  ExecutableImage(GttAllocation allocation, runtime::ExecutableImageInfo image)
+  ExecutableImage(MemoryAllocation allocation,
+                  runtime::ExecutableImageInfo image)
       : allocation_(std::move(allocation)), image_(std::move(image)) {}
 
   void invalidate();
 
-  GttAllocation allocation_;
+  MemoryAllocation allocation_;
   runtime::ExecutableImageInfo image_;
 };
 

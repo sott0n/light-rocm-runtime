@@ -10,6 +10,7 @@
 namespace light_rocr::transport::kfd {
 
 inline constexpr uint64_t kMemoryPageSize = 4096;
+inline constexpr uint64_t kVramAllocationGranule = 2U * 1024U * 1024U;
 
 enum class MemoryError {
   None,
@@ -20,7 +21,7 @@ enum class MemoryError {
   AcquireVm,
   ReserveVa,
   SetScratchBacking,
-  AllocateGtt,
+  AllocateMemory,
   AllocateScratch,
   ScratchAlreadyReserved,
   MapHost,
@@ -28,7 +29,7 @@ enum class MemoryError {
   MapToGpu,
   UnmapFromGpu,
   UnmapHost,
-  FreeGtt,
+  FreeMemory,
 };
 
 struct MemoryStatus {
@@ -41,14 +42,14 @@ struct MemoryStatus {
 
 struct KfdState;
 
-class GttAllocation {
+class MemoryAllocation {
 public:
-  GttAllocation() = default;
-  GttAllocation(const GttAllocation &) = delete;
-  GttAllocation &operator=(const GttAllocation &) = delete;
-  GttAllocation(GttAllocation &&other) noexcept;
-  GttAllocation &operator=(GttAllocation &&other) noexcept = delete;
-  ~GttAllocation();
+  MemoryAllocation() = default;
+  MemoryAllocation(const MemoryAllocation &) = delete;
+  MemoryAllocation &operator=(const MemoryAllocation &) = delete;
+  MemoryAllocation(MemoryAllocation &&other) noexcept;
+  MemoryAllocation &operator=(MemoryAllocation &&other) noexcept = delete;
+  ~MemoryAllocation();
 
   [[nodiscard]] void *host_address() const { return host_address_; }
   [[nodiscard]] uint64_t gpu_address() const {
@@ -70,11 +71,11 @@ public:
 
 private:
   friend class KfdSession;
-  GttAllocation(std::shared_ptr<KfdState> state, void *reservation_address,
-                uint64_t reservation_size, void *host_address, uint64_t size,
-                uint64_t handle, std::vector<uint32_t> gpu_ids,
-                uint32_t mapped_device_count, uint32_t unmapped_device_count,
-                bool map_complete)
+  MemoryAllocation(std::shared_ptr<KfdState> state, void *reservation_address,
+                   uint64_t reservation_size, void *host_address, uint64_t size,
+                   uint64_t handle, std::vector<uint32_t> gpu_ids,
+                   uint32_t mapped_device_count, uint32_t unmapped_device_count,
+                   bool map_complete)
       : state_(std::move(state)), reservation_address_(reservation_address),
         reservation_size_(reservation_size), host_address_(host_address),
         size_(size), handle_(handle), gpu_ids_(std::move(gpu_ids)),
@@ -95,9 +96,9 @@ private:
   bool map_complete_ = false;
 };
 
-struct GttAllocationResult {
+struct MemoryAllocationResult {
   MemoryStatus status;
-  GttAllocation allocation;
+  MemoryAllocation allocation;
 
   explicit operator bool() const { return static_cast<bool>(status); }
 };

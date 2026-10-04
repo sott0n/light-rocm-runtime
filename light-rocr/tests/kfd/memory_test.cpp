@@ -25,7 +25,7 @@ constexpr uint64_t kHandle = 0x1234;
 constexpr uint64_t kMmapOffset = 0x200000;
 
 static_assert(
-    !std::is_move_assignable_v<light_rocr::transport::kfd::GttAllocation>);
+    !std::is_move_assignable_v<light_rocr::transport::kfd::MemoryAllocation>);
 static_assert(
     !std::is_move_assignable_v<light_rocr::transport::kfd::ScratchAllocation>);
 
@@ -188,12 +188,13 @@ void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
     }
     return address;
   }
-  fake->contract_valid = fake->contract_valid &&
-                         address == reinterpret_cast<void *>(kHostAddress) &&
-                         length == fake->expected_host_mapping_size &&
-                         protection == fake->expected_host_protection &&
-                         flags == (MAP_SHARED | MAP_FIXED) && fd == 23 &&
-                         offset == static_cast<off_t>(kMmapOffset);
+  fake->contract_valid =
+      fake->contract_valid &&
+      address == reinterpret_cast<void *>(fake->expected_va_address) &&
+      length == fake->expected_host_mapping_size &&
+      protection == fake->expected_host_protection &&
+      flags == (MAP_SHARED | MAP_FIXED) && fd == 23 &&
+      offset == static_cast<off_t>(kMmapOffset);
   fake->calls.emplace_back("map_host");
   if (fake->host_mmap_fails) {
     errno = ENXIO;
@@ -255,7 +256,7 @@ std::shared_ptr<light_rocr::transport::kfd::KfdState> scratch_state() {
 
   auto state = std::make_shared<KfdState>(-1, KfdVersion{1, 16});
   state->device_vms.emplace(
-      42, DeviceVmState{-1, -1, true, true, false, aperture()});
+      42, DeviceVmState{-1, -1, true, true, true, false, aperture()});
   return state;
 }
 
@@ -288,7 +289,7 @@ using TestFunction = std::function<void(TestContext *)>;
 void successful_round_trip(TestContext *context) {
   FakeSystem state;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(state.contract_valid, "allocation syscall contract changed");
@@ -301,7 +302,7 @@ void successful_round_trip(TestContext *context) {
                       allocated.allocation.mapped_device_count == 1 &&
                       allocated.allocation.map_complete,
                   "allocation result was not retained");
-  auto released = light_rocr::transport::kfd::detail::release_gtt(
+  auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(
@@ -317,7 +318,7 @@ void successful_round_trip(TestContext *context) {
 void invalid_size_does_not_reserve(TestContext *context) {
   FakeSystem state;
   fake = &state;
-  const auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 4095, syscalls());
   context->expect(!allocated, "unaligned allocation unexpectedly succeeded");
   context->expect(allocated.status.error ==
@@ -335,15 +336,15 @@ void aql_ring_uses_double_uncached_backing(TestContext *context) {
       KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
       KFD_IOC_ALLOC_MEM_FLAGS_AQL_QUEUE_MEM | KFD_IOC_ALLOC_MEM_FLAGS_UNCACHED);
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192,
-      light_rocr::transport::kfd::detail::GttAllocationUsage::AqlRing,
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::AqlRing,
       syscalls());
   context->expect(allocated && allocated.allocation.size == 8192,
                   allocated.status.message);
   context->expect(state.contract_valid,
                   "AQL ring backing allocation contract changed");
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   fake = nullptr;
@@ -353,14 +354,36 @@ void executable_gtt_sets_kfd_flag(TestContext *context) {
   FakeSystem state;
   state.expected_extra_allocation_flags = KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192,
-      light_rocr::transport::kfd::detail::GttAllocationUsage::Executable,
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::Executable,
       syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(state.contract_valid,
                   "executable GTT allocation contract changed");
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  fake = nullptr;
+}
+
+void host_mapped_vram_sets_kfd_flags(TestContext *context) {
+  FakeSystem state;
+  state.expected_va_address = 0x200000;
+  state.expected_reservation_size =
+      8192 + 2 * 4096 + light_rocr::transport::kfd::kVramAllocationGranule;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
+      17, 23, aperture(), 8192,
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::Vram,
+      syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(state.contract_valid,
+                  "host-mapped VRAM allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   fake = nullptr;
@@ -372,9 +395,9 @@ void doorbell_reserves_gpuvm_without_render_mapping(TestContext *context) {
       KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
       KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, -1, aperture(), 8192,
-      light_rocr::transport::kfd::detail::GttAllocationUsage::Doorbell,
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::Doorbell,
       syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(
@@ -382,7 +405,7 @@ void doorbell_reserves_gpuvm_without_render_mapping(TestContext *context) {
           allocated.allocation.host_address ==
               reinterpret_cast<void *>(kHostAddress),
       "doorbell allocation unexpectedly used a render-node host mapping");
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   fake = nullptr;
@@ -396,13 +419,14 @@ void eop_uses_inaccessible_executable_vram(TestContext *context) {
       KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   state.expected_host_protection = PROT_NONE;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192,
-      light_rocr::transport::kfd::detail::GttAllocationUsage::Eop, syscalls());
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::Eop,
+      syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(state.contract_valid,
                   "EOP allocation does not match KFD VRAM requirements");
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   fake = nullptr;
@@ -419,7 +443,7 @@ void discrete_scratch_round_trip(TestContext *context) {
           allocated.allocation.size == 64 * 1024 &&
           allocated.allocation.handle == kHandle && allocated.gpu_mapped,
       "discrete scratch allocation contract changed");
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(state.calls ==
@@ -441,7 +465,7 @@ void integrated_scratch_round_trip(TestContext *context) {
                       allocated.allocation.size == 64 * 1024 &&
                       allocated.allocation.handle == 0 && allocated.gpu_mapped,
                   "integrated scratch allocation contract changed");
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(
@@ -487,7 +511,7 @@ void scratch_setup_cleanup_is_retryable(TestContext *context) {
                   "scratch cleanup failure was not diagnosed");
 
   state.munmap_fails = false;
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(released &&
                       allocated.allocation.reservation_address == nullptr,
@@ -529,12 +553,12 @@ void allocation_failure_releases_va(TestContext *context) {
   FakeSystem state;
   state.allocate_fails = true;
   fake = &state;
-  const auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated, "failed ioctl unexpectedly succeeded");
   context->expect(
       allocated.status.error ==
-              light_rocr::transport::kfd::MemoryError::AllocateGtt &&
+              light_rocr::transport::kfd::MemoryError::AllocateMemory &&
           allocated.status.system_error == ENOMEM,
       "allocation errno was not preserved");
   context->expect(state.calls ==
@@ -548,7 +572,7 @@ void rollback_unmap_failure_retains_va(TestContext *context) {
   state.allocate_fails = true;
   state.munmap_fails = true;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated, "failed ioctl unexpectedly succeeded");
   context->expect(allocated.allocation.reservation_address ==
@@ -560,7 +584,7 @@ void rollback_unmap_failure_retains_va(TestContext *context) {
                   "rollback munmap failure was not added to the diagnostic");
 
   state.munmap_fails = false;
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(allocated.allocation.reservation_address == nullptr &&
@@ -573,7 +597,7 @@ void host_map_failure_frees_handle(TestContext *context) {
   FakeSystem state;
   state.host_mmap_fails = true;
   fake = &state;
-  const auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated, "failed host map unexpectedly succeeded");
   context->expect(allocated.status.error ==
@@ -592,7 +616,7 @@ void cleanup_failure_retains_handle(TestContext *context) {
   state.host_mmap_fails = true;
   state.free_fails = true;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated, "failed host map unexpectedly succeeded");
   context->expect(allocated.allocation.host_address == nullptr &&
@@ -603,7 +627,7 @@ void cleanup_failure_retains_handle(TestContext *context) {
                   "cleanup failure was not added to the diagnostic");
 
   state.free_fails = false;
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(allocated.allocation.handle == 0,
@@ -615,7 +639,7 @@ void dontfork_failure_cleans_up(TestContext *context) {
   FakeSystem state;
   state.madvise_fails = true;
   fake = &state;
-  const auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated, "failed madvise unexpectedly succeeded");
   context->expect(allocated.status.error ==
@@ -633,7 +657,7 @@ void map_failure_cleans_up(TestContext *context) {
   state.map_fails = true;
   state.map_result_n_success = 0;
   fake = &state;
-  const auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  const auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated, "failed GPU map unexpectedly succeeded");
   context->expect(allocated.status.error ==
@@ -655,7 +679,7 @@ void partial_map_cleanup_is_retryable(TestContext *context) {
   state.unmap_gpu_fails = true;
   state.unmap_result_n_success = 0;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   context->expect(!allocated,
                   "partially failed GPU map unexpectedly succeeded");
@@ -671,7 +695,7 @@ void partial_map_cleanup_is_retryable(TestContext *context) {
 
   state.unmap_gpu_fails = false;
   state.unmap_result_n_success = std::numeric_limits<uint32_t>::max();
-  const auto released = light_rocr::transport::kfd::detail::release_gtt(
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(released && allocated.allocation.handle == 0,
                   "partial-map cleanup could not be retried");
@@ -689,10 +713,10 @@ void partial_progress_is_retryable(TestContext *context) {
   state.map_fails = true;
   state.map_result_n_success = 2;
   fake = &state;
-  light_rocr::transport::kfd::detail::RawGttAllocation allocation;
+  light_rocr::transport::kfd::detail::RawMemoryAllocation allocation;
   allocation.handle = kHandle;
 
-  auto status = light_rocr::transport::kfd::detail::map_gtt(
+  auto status = light_rocr::transport::kfd::detail::map_memory(
       17, &allocation, state.expected_gpu_ids, syscalls());
   context->expect(!status &&
                       status.error ==
@@ -701,20 +725,20 @@ void partial_progress_is_retryable(TestContext *context) {
                   "partial GPU map progress was not retained");
 
   state.map_result_n_success = 1;
-  status = light_rocr::transport::kfd::detail::map_gtt(
+  status = light_rocr::transport::kfd::detail::map_memory(
       17, &allocation, state.expected_gpu_ids, syscalls());
   context->expect(!status && allocation.mapped_device_count == 2,
                   "non-monotonic GPU map progress was accepted");
 
   state.map_result_n_success = std::numeric_limits<uint32_t>::max();
-  status = light_rocr::transport::kfd::detail::map_gtt(
+  status = light_rocr::transport::kfd::detail::map_memory(
       17, &allocation, state.expected_gpu_ids, syscalls());
   context->expect(!status && allocation.mapped_device_count == 3 &&
                       !allocation.map_complete,
                   "failed full-progress GPU map was marked complete");
 
   state.map_fails = false;
-  status = light_rocr::transport::kfd::detail::map_gtt(
+  status = light_rocr::transport::kfd::detail::map_memory(
       17, &allocation, state.expected_gpu_ids, syscalls());
   context->expect(status && allocation.mapped_device_count == 3 &&
                       allocation.map_complete &&
@@ -723,8 +747,8 @@ void partial_progress_is_retryable(TestContext *context) {
 
   state.unmap_gpu_fails = true;
   state.unmap_result_n_success = 1;
-  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
-                                                         syscalls());
+  status = light_rocr::transport::kfd::detail::unmap_memory(17, &allocation,
+                                                            syscalls());
   context->expect(
       !status &&
           status.error ==
@@ -733,35 +757,35 @@ void partial_progress_is_retryable(TestContext *context) {
       "partial GPU unmap progress was not retained");
 
   state.unmap_result_n_success = 0;
-  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
-                                                         syscalls());
+  status = light_rocr::transport::kfd::detail::unmap_memory(17, &allocation,
+                                                            syscalls());
   context->expect(!status && allocation.unmapped_device_count == 1,
                   "non-monotonic GPU unmap progress was accepted");
 
   state.unmap_result_n_success = 4;
-  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
-                                                         syscalls());
+  status = light_rocr::transport::kfd::detail::unmap_memory(17, &allocation,
+                                                            syscalls());
   context->expect(!status && allocation.unmapped_device_count == 1,
                   "out-of-range GPU unmap progress was retained");
 
   state.unmap_result_n_success = std::numeric_limits<uint32_t>::max();
-  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
-                                                         syscalls());
+  status = light_rocr::transport::kfd::detail::unmap_memory(17, &allocation,
+                                                            syscalls());
   context->expect(!status && allocation.unmapped_device_count == 3 &&
                       allocation.map_complete,
                   "failed full-progress GPU unmap was marked complete");
 
   state.unmap_gpu_fails = false;
-  status = light_rocr::transport::kfd::detail::unmap_gtt(17, &allocation,
-                                                         syscalls());
+  status = light_rocr::transport::kfd::detail::unmap_memory(17, &allocation,
+                                                            syscalls());
   context->expect(
       status && allocation.gpu_ids.empty() &&
           allocation.mapped_device_count == 0 && !allocation.map_complete &&
           state.unmap_starts == std::vector<uint32_t>{0, 1, 1, 1, 3},
       "GPU unmap retry did not resume after the unmapped prefix");
 
-  status = light_rocr::transport::kfd::detail::release_gtt(17, &allocation,
-                                                           syscalls());
+  status = light_rocr::transport::kfd::detail::release_memory(17, &allocation,
+                                                              syscalls());
   context->expect(status && allocation.handle == 0,
                   "mapped allocation handle was not released");
   context->expect(state.contract_valid, "GPU map/unmap contract changed");
@@ -771,11 +795,11 @@ void partial_progress_is_retryable(TestContext *context) {
 void gpu_unmap_failure_blocks_release(TestContext *context) {
   FakeSystem state;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   state.unmap_gpu_fails = true;
   state.unmap_result_n_success = 0;
-  auto released = light_rocr::transport::kfd::detail::release_gtt(
+  auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(!released &&
                       released.error ==
@@ -789,7 +813,7 @@ void gpu_unmap_failure_blocks_release(TestContext *context) {
 
   state.unmap_gpu_fails = false;
   state.unmap_result_n_success = std::numeric_limits<uint32_t>::max();
-  released = light_rocr::transport::kfd::detail::release_gtt(
+  released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(released && allocated.allocation.handle == 0,
                   "GPU unmap retry did not finish release");
@@ -799,10 +823,10 @@ void gpu_unmap_failure_blocks_release(TestContext *context) {
 void release_failures_are_retryable(TestContext *context) {
   FakeSystem state;
   fake = &state;
-  auto allocated = light_rocr::transport::kfd::detail::allocate_gtt(
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
       17, 23, aperture(), 8192, syscalls());
   state.munmap_fails = true;
-  auto released = light_rocr::transport::kfd::detail::release_gtt(
+  auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(!released &&
                       released.error ==
@@ -814,18 +838,18 @@ void release_failures_are_retryable(TestContext *context) {
 
   state.munmap_fails = false;
   state.free_fails = true;
-  released = light_rocr::transport::kfd::detail::release_gtt(
+  released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(!released &&
                       released.error ==
-                          light_rocr::transport::kfd::MemoryError::FreeGtt,
+                          light_rocr::transport::kfd::MemoryError::FreeMemory,
                   "free failure was not reported");
   context->expect(allocated.allocation.host_address == nullptr &&
                       allocated.allocation.handle == kHandle,
                   "free failure discarded the retryable handle");
 
   state.free_fails = false;
-  released = light_rocr::transport::kfd::detail::release_gtt(
+  released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
   context->expect(state.calls.back() == "free" &&
@@ -860,6 +884,7 @@ int main() {
       {"invalid size", invalid_size_does_not_reserve},
       {"AQL ring backing", aql_ring_uses_double_uncached_backing},
       {"executable GTT", executable_gtt_sets_kfd_flag},
+      {"host-mapped VRAM", host_mapped_vram_sets_kfd_flags},
       {"doorbell GPUVM", doorbell_reserves_gpuvm_without_render_mapping},
       {"EOP VRAM", eop_uses_inaccessible_executable_vram},
       {"discrete scratch", discrete_scratch_round_trip},

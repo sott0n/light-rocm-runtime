@@ -62,6 +62,36 @@ int main() {
     return 1;
   }
 
+  auto vram = opened.session.allocate_vram(node, 8192);
+  if (!vram || vram.allocation.host_address() == nullptr ||
+      !vram.allocation.gpu_mapped() ||
+      vram.allocation.gpu_address() !=
+          static_cast<uint64_t>(
+              reinterpret_cast<uintptr_t>(vram.allocation.host_address()))) {
+    std::cerr << (vram ? "host-mapped VRAM allocation metadata is invalid"
+                       : vram.status.message)
+              << '\n';
+    return 1;
+  }
+  auto *vram_words = static_cast<uint32_t *>(vram.allocation.host_address());
+  for (uint32_t index = 0; index < 2048; ++index) {
+    vram_words[index] = index ^ 0x5a5a5a5aU;
+  }
+  for (uint32_t index = 0; index < 2048; ++index) {
+    if (vram_words[index] != (index ^ 0x5a5a5a5aU)) {
+      std::cerr << "host-mapped VRAM did not retain CPU-written data\n";
+      return 1;
+    }
+  }
+  const auto vram_released = vram.allocation.release();
+  if (!vram_released || vram.allocation) {
+    std::cerr << (vram_released
+                      ? "released host-mapped VRAM allocation retained state"
+                      : vram_released.message)
+              << '\n';
+    return 1;
+  }
+
   auto scratch = opened.session.allocate_scratch(node, 8192);
   if (!scratch) {
     std::cerr << scratch.status.message << '\n';

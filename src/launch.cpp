@@ -140,7 +140,8 @@ lr_status_t submit_direct_kfd_kernel_locked(
     queue->available_dispatches.erase(reusable);
     pending->completion_signal.store_relaxed(1);
   } else {
-    std::optional<light_rocr::transport::kfd::GttAllocation> kernarg_allocation;
+    std::optional<light_rocr::transport::kfd::MemoryAllocation>
+        kernarg_allocation;
     if (allocation_size != 0) {
       auto allocated =
           g_kfd_session->allocate_gtt(device->node, allocation_size);
@@ -160,7 +161,7 @@ lr_status_t submit_direct_kfd_kernel_locked(
       return LR_ERROR_RUNTIME;
     }
     try {
-      light_rocr::transport::kfd::GttAllocation empty_kernarg;
+      light_rocr::transport::kfd::MemoryAllocation empty_kernarg;
       pending = std::make_unique<lr_queue_t::PendingDispatch>(
           std::move(signal.signal), kernarg_allocation.has_value()
                                         ? std::move(*kernarg_allocation)

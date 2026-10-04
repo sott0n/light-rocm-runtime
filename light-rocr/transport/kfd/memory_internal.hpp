@@ -26,7 +26,7 @@ struct MemorySyscalls {
   MadviseFunction madvise_function = nullptr;
 };
 
-struct RawGttAllocation {
+struct RawMemoryAllocation {
   void *reservation_address = nullptr;
   uint64_t reservation_size = 0;
   void *host_address = nullptr;
@@ -38,16 +38,16 @@ struct RawGttAllocation {
   bool map_complete = false;
 };
 
-struct RawGttAllocationResult {
+struct RawMemoryAllocationResult {
   MemoryStatus status;
-  RawGttAllocation allocation;
+  RawMemoryAllocation allocation;
 
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
 struct RawScratchAllocationResult {
   MemoryStatus status;
-  RawGttAllocation allocation;
+  RawMemoryAllocation allocation;
   uint64_t gpu_address = 0;
   bool integrated = false;
   bool gpu_mapped = false;
@@ -61,30 +61,35 @@ enum class ScratchReservationResult {
   InvalidState,
 };
 
-enum class GttAllocationUsage {
+enum class MemoryAllocationUsage {
   General,
+  Vram,
   Executable,
   AqlRing,
   Doorbell,
   Eop,
 };
 
-[[nodiscard]] RawGttAllocationResult
-allocate_gtt(int kfd_fd, int render_fd, const ProcessAperture &aperture,
-             uint64_t size, GttAllocationUsage usage, MemorySyscalls syscalls);
-[[nodiscard]] inline RawGttAllocationResult
-allocate_gtt(int kfd_fd, int render_fd, const ProcessAperture &aperture,
-             uint64_t size, MemorySyscalls syscalls) {
-  return allocate_gtt(kfd_fd, render_fd, aperture, size,
-                      GttAllocationUsage::General, syscalls);
+[[nodiscard]] RawMemoryAllocationResult
+allocate_memory(int kfd_fd, int render_fd, const ProcessAperture &aperture,
+                uint64_t size, MemoryAllocationUsage usage,
+                MemorySyscalls syscalls);
+[[nodiscard]] inline RawMemoryAllocationResult
+allocate_memory(int kfd_fd, int render_fd, const ProcessAperture &aperture,
+                uint64_t size, MemorySyscalls syscalls) {
+  return allocate_memory(kfd_fd, render_fd, aperture, size,
+                         MemoryAllocationUsage::General, syscalls);
 }
-[[nodiscard]] MemoryStatus map_gtt(int kfd_fd, RawGttAllocation *allocation,
-                                   const std::vector<uint32_t> &gpu_ids,
-                                   MemorySyscalls syscalls);
-[[nodiscard]] MemoryStatus unmap_gtt(int kfd_fd, RawGttAllocation *allocation,
-                                     MemorySyscalls syscalls);
-[[nodiscard]] MemoryStatus release_gtt(int kfd_fd, RawGttAllocation *allocation,
-                                       MemorySyscalls syscalls);
+[[nodiscard]] MemoryStatus map_memory(int kfd_fd,
+                                      RawMemoryAllocation *allocation,
+                                      const std::vector<uint32_t> &gpu_ids,
+                                      MemorySyscalls syscalls);
+[[nodiscard]] MemoryStatus unmap_memory(int kfd_fd,
+                                        RawMemoryAllocation *allocation,
+                                        MemorySyscalls syscalls);
+[[nodiscard]] MemoryStatus release_memory(int kfd_fd,
+                                          RawMemoryAllocation *allocation,
+                                          MemorySyscalls syscalls);
 [[nodiscard]] RawScratchAllocationResult
 allocate_scratch(int kfd_fd, const ProcessAperture &aperture, uint64_t size,
                  bool integrated, MemorySyscalls syscalls);

@@ -31,7 +31,7 @@ namespace {
 
 using light_rocr::transport::kfd::AqlQueue;
 using light_rocr::transport::kfd::ExecutableImage;
-using light_rocr::transport::kfd::GttAllocation;
+using light_rocr::transport::kfd::MemoryAllocation;
 using light_rocr::transport::kfd::UserSignal;
 
 constexpr size_t kElementCount = 64;
@@ -120,7 +120,7 @@ int fail_signal(const light_rocr::transport::kfd::UserSignalStatus &status) {
   return 1;
 }
 
-int cleanup(AqlQueue &queue, UserSignal &signal, GttAllocation &data,
+int cleanup(AqlQueue &queue, UserSignal &signal, MemoryAllocation &data,
             ExecutableImage &image) {
   const auto queue_status = queue.release();
   if (!queue_status) {

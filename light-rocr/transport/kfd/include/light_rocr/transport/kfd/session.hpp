@@ -50,10 +50,13 @@ public:
   [[nodiscard]] VmResult
   acquire_vm(const runtime::Node &node,
              const std::string &dri_root = "/dev/dri") const;
-  [[nodiscard]] GttAllocationResult
+  [[nodiscard]] MemoryAllocationResult
   allocate_gtt(const runtime::Node &node, uint64_t size,
                const std::string &dri_root = "/dev/dri") const;
-  [[nodiscard]] GttAllocationResult
+  [[nodiscard]] MemoryAllocationResult
+  allocate_vram(const runtime::Node &node, uint64_t size,
+                const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] MemoryAllocationResult
   allocate_executable_gtt(const runtime::Node &node, uint64_t size,
                           const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] ScratchAllocationResult
@@ -74,19 +77,20 @@ public:
   explicit operator bool() const { return state_ != nullptr; }
 
 private:
-  enum class GttUsage {
+  enum class MemoryUsage {
     General,
+    Vram,
     Executable,
     AqlRing,
     Doorbell,
     Eop,
   };
 
-  [[nodiscard]] GttAllocationResult
-  allocate_gtt_impl(const runtime::Node &node, uint64_t size,
-                    const std::string &dri_root, GttUsage usage) const;
+  [[nodiscard]] MemoryAllocationResult
+  allocate_memory_impl(const runtime::Node &node, uint64_t size,
+                       const std::string &dri_root, MemoryUsage usage) const;
   [[nodiscard]] MemoryStatus
-  map_pending_allocation(GttAllocation *allocation) const;
+  map_pending_allocation(MemoryAllocation *allocation) const;
   explicit KfdSession(std::shared_ptr<KfdState> state)
       : state_(std::move(state)) {}
 

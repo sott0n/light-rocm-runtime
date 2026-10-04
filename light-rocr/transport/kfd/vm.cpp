@@ -94,6 +94,35 @@ VmStatus query_aperture_count(int kfd_fd, uint32_t *count,
 
 namespace detail {
 
+VmStatus configure_memory_policy(int kfd_fd, uint32_t gpu_id,
+                                 IoctlFunction ioctl_function) {
+  if (kfd_fd < 0 || gpu_id == 0 || ioctl_function == nullptr) {
+    return {VmError::InvalidSession, 0,
+            "memory policy configuration requires an open KFD session and "
+            "GPU"};
+  }
+
+  // Match ROCr's large-machine-model policy: GPU-only addresses default to
+  // noncoherent while the canonical userspace VA range remains coherent for
+  // allocations that are also mapped by the CPU.
+  constexpr uint64_t kAlternateApertureBase = 2U * 1024U * 1024U;
+  constexpr uint64_t kUserAddressLimit = uint64_t{1} << 47U;
+  kfd_ioctl_set_memory_policy_args arguments{};
+  arguments.alternate_aperture_base = kAlternateApertureBase;
+  arguments.alternate_aperture_size =
+      kUserAddressLimit - kAlternateApertureBase;
+  arguments.gpu_id = gpu_id;
+  arguments.default_policy = KFD_IOC_CACHE_POLICY_NONCOHERENT;
+  arguments.alternate_policy = KFD_IOC_CACHE_POLICY_COHERENT;
+  int system_error = 0;
+  if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_SET_MEMORY_POLICY, &arguments,
+                    ioctl_function, &system_error)) {
+    return system_failure(VmError::ConfigureMemoryPolicy, system_error,
+                          "AMDKFD_IOC_SET_MEMORY_POLICY");
+  }
+  return {};
+}
+
 VmResult query_process_aperture(int kfd_fd, uint32_t gpu_id,
                                 IoctlFunction ioctl_function) {
   if (kfd_fd < 0 || gpu_id == 0 || ioctl_function == nullptr) {
@@ -197,6 +226,8 @@ const char *vm_error_name(VmError error) {
     return "allocate_state";
   case VmError::AcquireVm:
     return "acquire_vm";
+  case VmError::ConfigureMemoryPolicy:
+    return "configure_memory_policy";
   case VmError::QueryApertureCount:
     return "query_aperture_count";
   case VmError::InvalidApertureCount:
@@ -265,6 +296,7 @@ VmResult KfdSession::acquire_vm(const runtime::Node &node,
                                                          false,
                                                          false,
                                                          false,
+                                                         false,
                                                          {}})
                      .first;
     } catch (const std::bad_alloc &) {
@@ -290,6 +322,15 @@ VmResult KfdSession::acquire_vm(const runtime::Node &node,
               {}};
     }
     device.acquired = true;
+  }
+
+  if (!device.memory_policy_configured) {
+    const VmStatus policy =
+        detail::configure_memory_policy(state_->fd, node.gpu_id, real_ioctl);
+    if (!policy) {
+      return {policy, {}};
+    }
+    device.memory_policy_configured = true;
   }
 
   VmResult queried =

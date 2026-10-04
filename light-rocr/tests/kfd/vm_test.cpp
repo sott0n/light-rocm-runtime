@@ -40,6 +40,30 @@ struct FakeIoctlState {
 };
 
 FakeIoctlState *g_fake_ioctl = nullptr;
+bool g_policy_contract_valid = false;
+int g_policy_error = 0;
+
+int fake_policy_ioctl(int fd, unsigned long request, void *arguments) {
+  if (fd != 17 || request != AMDKFD_IOC_SET_MEMORY_POLICY ||
+      arguments == nullptr) {
+    errno = EINVAL;
+    return -1;
+  }
+  const auto *policy =
+      static_cast<kfd_ioctl_set_memory_policy_args *>(arguments);
+  g_policy_contract_valid =
+      policy->gpu_id == 22 &&
+      policy->default_policy == KFD_IOC_CACHE_POLICY_NONCOHERENT &&
+      policy->alternate_policy == KFD_IOC_CACHE_POLICY_COHERENT &&
+      policy->alternate_aperture_base == 2U * 1024U * 1024U &&
+      policy->alternate_aperture_size ==
+          (uint64_t{1} << 47U) - 2U * 1024U * 1024U;
+  if (g_policy_error != 0) {
+    errno = g_policy_error;
+    return -1;
+  }
+  return 0;
+}
 
 int fake_ioctl(int fd, unsigned long request, void *arguments) {
   if (g_fake_ioctl == nullptr || fd != 17 ||
@@ -119,6 +143,32 @@ void successful_query(TestContext *context) {
                   "selected aperture was not converted");
 }
 
+void memory_policy_matches_rocr(TestContext *context) {
+  g_policy_contract_valid = false;
+  g_policy_error = 0;
+  const auto status =
+      light_rocr::transport::kfd::detail::configure_memory_policy(
+          17, 22, fake_policy_ioctl);
+  context->expect(static_cast<bool>(status), status.message);
+  context->expect(g_policy_contract_valid,
+                  "memory policy does not match ROCr's KFD contract");
+}
+
+void memory_policy_failure_preserves_errno(TestContext *context) {
+  g_policy_contract_valid = false;
+  g_policy_error = EIO;
+  const auto status =
+      light_rocr::transport::kfd::detail::configure_memory_policy(
+          17, 22, fake_policy_ioctl);
+  context->expect(
+      !status && g_policy_contract_valid &&
+          status.error ==
+              light_rocr::transport::kfd::VmError::ConfigureMemoryPolicy &&
+          status.system_error == EIO,
+      "memory policy failure did not preserve its cause");
+  g_policy_error = 0;
+}
+
 void changed_count_is_retried(TestContext *context) {
   FakeIoctlState state{{{1, {}, 0},
                         {1, {aperture(11, 0x1000)}, 0},
@@ -183,6 +233,8 @@ void invalid_session_is_reported(TestContext *context) {
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"successful query", successful_query},
+      {"ROCr memory policy", memory_policy_matches_rocr},
+      {"memory policy failure", memory_policy_failure_preserves_errno},
       {"changed count retry", changed_count_is_retried},
       {"duplicate GPU", duplicate_gpu_is_rejected},
       {"invalid range", invalid_range_is_rejected},

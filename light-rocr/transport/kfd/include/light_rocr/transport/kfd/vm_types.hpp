@@ -24,6 +24,7 @@ enum class VmError {
   OpenRenderNode,
   AllocateState,
   AcquireVm,
+  ConfigureMemoryPolicy,
   QueryApertureCount,
   InvalidApertureCount,
   AllocateApertures,

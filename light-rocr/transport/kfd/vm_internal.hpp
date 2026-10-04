@@ -7,6 +7,9 @@ namespace light_rocr::transport::kfd::detail {
 
 using IoctlFunction = int (*)(int fd, unsigned long request, void *arguments);
 
+[[nodiscard]] VmStatus configure_memory_policy(int kfd_fd, uint32_t gpu_id,
+                                               IoctlFunction ioctl_function);
+
 [[nodiscard]] VmResult query_process_aperture(int kfd_fd, uint32_t gpu_id,
                                               IoctlFunction ioctl_function);
 
