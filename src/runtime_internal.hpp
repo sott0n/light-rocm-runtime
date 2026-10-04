@@ -236,6 +236,7 @@ struct lr_queue_t {
 
   light_rocr::transport::kfd::AqlQueue queue;
   std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
+  size_t pending_dispatch_head = 0;
   std::vector<std::unique_ptr<PendingDispatch>> available_dispatches;
   std::vector<std::unique_ptr<KernargArena>> kernarg_arenas;
 #endif

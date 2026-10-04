@@ -162,6 +162,15 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
                       ~(light_rocr::transport::kfd::kMemoryPageSize - 1);
   }
 
+  if (queue->pending_dispatch_head != 0 &&
+      queue->pending_dispatches.size() ==
+          queue->pending_dispatches.capacity()) {
+    queue->pending_dispatches.erase(
+        queue->pending_dispatches.begin(),
+        queue->pending_dispatches.begin() +
+            static_cast<std::ptrdiff_t>(queue->pending_dispatch_head));
+    queue->pending_dispatch_head = 0;
+  }
   try {
     queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
     queue->available_dispatches.reserve(queue->available_dispatches.size() + 1);
@@ -232,7 +241,8 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
   const auto submitted = submit_aql_kernel_dispatch(
       light_rocr_kfd_producer_ops(&queue->queue,
                                   valid_direct_kfd_dispatch_packet),
-      parameters, {queue->pending_dispatches.size(), false});
+      parameters,
+      {queue->pending_dispatches.size() - queue->pending_dispatch_head, false});
   if (!submitted) {
     queue->available_dispatches.push_back(std::move(pending));
     return aql_submit_status(submitted.error);

@@ -1304,8 +1304,10 @@ lr_status_t release_direct_kfd_dispatch(lr_queue_t::PendingDispatch *dispatch) {
 
 lr_status_t reap_direct_kfd_dispatches_locked(lr_queue_t *queue) {
   size_t completed_count = 0;
-  while (completed_count < queue->pending_dispatches.size()) {
-    auto &dispatch = *queue->pending_dispatches[completed_count];
+  while (queue->pending_dispatch_head + completed_count <
+         queue->pending_dispatches.size()) {
+    auto &dispatch = *queue->pending_dispatches[queue->pending_dispatch_head +
+                                                completed_count];
     if (dispatch.completion_signal.load_acquire() != 0) {
       break;
     }
@@ -1321,13 +1323,14 @@ lr_status_t reap_direct_kfd_dispatches_locked(lr_queue_t *queue) {
     return LR_ERROR_RUNTIME;
   }
   for (size_t index = 0; index < completed_count; ++index) {
-    queue->available_dispatches.push_back(
-        std::move(queue->pending_dispatches[index]));
+    queue->available_dispatches.push_back(std::move(
+        queue->pending_dispatches[queue->pending_dispatch_head + index]));
   }
-  queue->pending_dispatches.erase(
-      queue->pending_dispatches.begin(),
-      queue->pending_dispatches.begin() +
-          static_cast<std::ptrdiff_t>(completed_count));
+  queue->pending_dispatch_head += completed_count;
+  if (queue->pending_dispatch_head == queue->pending_dispatches.size()) {
+    queue->pending_dispatches.clear();
+    queue->pending_dispatch_head = 0;
+  }
   return LR_SUCCESS;
 }
 
@@ -1365,10 +1368,11 @@ lr_status_t release_direct_kfd_kernarg_arenas_locked(lr_queue_t *queue) {
 } // namespace
 
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
-  while (!queue->pending_dispatches.empty()) {
+  while (queue->pending_dispatch_head != queue->pending_dispatches.size()) {
     const auto waited =
-        queue->pending_dispatches.front()->completion_signal.wait_until_equal(
-            0, std::chrono::steady_clock::time_point::max());
+        queue->pending_dispatches[queue->pending_dispatch_head]
+            ->completion_signal.wait_until_equal(
+                0, std::chrono::steady_clock::time_point::max());
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }
@@ -1397,12 +1401,13 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     if (write_index - read_index < queue->queue.packet_count()) {
       return LR_SUCCESS;
     }
-    if (queue->pending_dispatches.empty()) {
+    if (queue->pending_dispatch_head == queue->pending_dispatches.size()) {
       return LR_ERROR_RUNTIME;
     }
     const auto waited =
-        queue->pending_dispatches.front()->completion_signal.wait_until_equal(
-            0, std::chrono::steady_clock::time_point::max());
+        queue->pending_dispatches[queue->pending_dispatch_head]
+            ->completion_signal.wait_until_equal(
+                0, std::chrono::steady_clock::time_point::max());
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }
