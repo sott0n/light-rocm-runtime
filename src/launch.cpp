@@ -171,14 +171,20 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
 
   std::unique_ptr<lr_queue_t::PendingDispatch> pending;
   auto reusable = std::find_if(
-      queue->available_dispatches.begin(), queue->available_dispatches.end(),
+      queue->available_dispatches.rbegin(), queue->available_dispatches.rend(),
       [allocation_size](const auto &dispatch) {
         return allocation_size == 0 ||
                (dispatch->kernarg && dispatch->kernarg.size >= allocation_size);
       });
-  if (reusable != queue->available_dispatches.end()) {
-    pending = std::move(*reusable);
-    queue->available_dispatches.erase(reusable);
+  if (reusable != queue->available_dispatches.rend()) {
+    const size_t reusable_index = static_cast<size_t>(
+        std::distance(reusable, queue->available_dispatches.rend()) - 1);
+    pending = std::move(queue->available_dispatches[reusable_index]);
+    if (reusable_index + 1 != queue->available_dispatches.size()) {
+      queue->available_dispatches[reusable_index] =
+          std::move(queue->available_dispatches.back());
+    }
+    queue->available_dispatches.pop_back();
     pending->completion_signal.store_relaxed(1);
   } else {
     const auto kernarg =
