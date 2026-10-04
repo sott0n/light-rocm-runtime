@@ -125,6 +125,8 @@ and the final drain; allocation and validation are excluded.
   transfer sweep.
 - Use `--chunks`, `--warmup-chunks`, `--chunk-size-mib`, and
   `--compute-rounds` to control the pipeline workload.
+- Use `--warmup-iterations` on the Qwen Triton benchmark when automatic GPU
+  clock scaling requires a longer in-process warm-up.
 - Set `NO_COLOR=1` when capturing output for automated processing.
 - Compare multiple interleaved runs from the same build and machine rather than
   treating this snapshot as a hardware specification.

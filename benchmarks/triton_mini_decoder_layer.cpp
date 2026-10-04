@@ -90,12 +90,14 @@ struct Measurements {
 
 struct Options {
   uint32_t iterations;
+  uint32_t warmup_iterations;
   const char *weights_path;
   const char *weights_dir;
   uint32_t layers;
   uint32_t valid_keys;
   bool has_valid_keys;
   bool layer_sweep;
+  bool has_warmup_iterations;
   bool no_warmup;
   bool no_model_tail;
   bool e2e_check;
@@ -169,8 +171,8 @@ uint32_t parse_u32(const char *text, const char *label) {
 }
 
 Options parse_options(int argc, char **argv) {
-  Options options{20,    nullptr, nullptr, 0,     0,     false, false,
-                  false, false,   false,   false, false, false};
+  Options options{20,    0,     nullptr, nullptr, 0,     0,     false, false,
+                  false, false, false,   false,   false, false, false};
   bool saw_iterations = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--weights") == 0) {
@@ -196,6 +198,12 @@ Options parse_options(int argc, char **argv) {
       options.has_valid_keys = true;
     } else if (strcmp(argv[i], "--layer-sweep") == 0) {
       options.layer_sweep = true;
+    } else if (strcmp(argv[i], "--warmup-iterations") == 0) {
+      if (++i >= argc) {
+        throw std::invalid_argument("--warmup-iterations requires a count");
+      }
+      options.warmup_iterations = parse_u32(argv[i], "warm-up count");
+      options.has_warmup_iterations = true;
     } else if (strcmp(argv[i], "--no-warmup") == 0) {
       options.no_warmup = true;
     } else if (strcmp(argv[i], "--no-model-tail") == 0) {
@@ -215,7 +223,8 @@ Options parse_options(int argc, char **argv) {
       throw std::invalid_argument(
           "usage: lrrt_triton_mini_decoder_layer_benchmark [count] "
           "[--weights weights.json | --weights-dir dir --layers count] "
-          "[--valid-keys count] [--layer-sweep] [--no-warmup] "
+          "[--valid-keys count] [--layer-sweep] "
+          "[--warmup-iterations count | --no-warmup] "
           "[--no-model-tail] [--e2e-check] [--sync-stack] "
           "[--trace-setup] [--trace-run]");
     }
@@ -241,6 +250,10 @@ Options parse_options(int argc, char **argv) {
   }
   if (options.sync_stack && !options.weights_dir) {
     throw std::invalid_argument("--sync-stack requires --weights-dir");
+  }
+  if (options.has_warmup_iterations && options.no_warmup) {
+    throw std::invalid_argument(
+        "--warmup-iterations and --no-warmup are mutually exclusive");
   }
   return options;
 }
@@ -979,7 +992,10 @@ int main(int argc, char **argv) {
     const Options options = parse_options(argc, argv);
     const uint32_t iterations = options.iterations;
     const uint32_t warmup_iterations =
-        options.no_warmup ? 0 : std::min(iterations, 5u);
+        options.no_warmup
+            ? 0
+            : (options.has_warmup_iterations ? options.warmup_iterations
+                                             : std::min(iterations, 5u));
 
     lrrt::Runtime runtime;
     if (runtime.device_count() == 0) {
@@ -1167,8 +1183,9 @@ int main(int argc, char **argv) {
            "followed by one final synchronize() with steady_clock.\n",
            colors.label, colors.reset);
     if (options.weights_dir) {
-      printf("%sGPU burst%s is n/a for decoder stacks because cross-queue HSA "
-             "event timing can hang on the current multi-queue pipeline.\n",
+      printf("%sGPU burst%s is n/a for decoder stacks; the comparable "
+             "ROCr/direct-KFD path does not currently collect a device "
+             "timestamp interval.\n",
              colors.label, colors.reset);
     } else {
       printf("%sGPU burst%s measures HSA event elapsed time around repeated "

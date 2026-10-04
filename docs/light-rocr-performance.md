@@ -6,30 +6,29 @@ hardware performance guarantee.
 
 ## Summary
 
-The direct KFD backend is now performance-competitive with ROCr, but it has not
-yet demonstrated equal or better end-to-end performance. The conservative
-result is:
+The direct KFD backend now outperforms ROCr in the measured launch and Qwen
+paths:
 
 | Area | Result | Verdict |
 | --- | --- | --- |
 | Qwen correctness | Identical top-five logits | Equivalent |
-| Qwen end-to-end | Direct KFD 58.9-59.8 ms; ROCr 47.5-61.4 ms | Inconclusive under automatic DPM; direct KFD is 24% slower than the best observed ROCr result |
-| Qwen CPU submission | Direct KFD 9.9 ms; ROCr 14.1 ms | Direct KFD is about 30% faster |
-| Empty-kernel sustained throughput | Direct KFD 57.5k/s; ROCr 64.3k/s | Direct KFD is about 11% slower |
-| Synchronized launch round trip | Direct KFD 35.1 us; ROCr 48.8 us | Direct KFD is about 28% faster |
+| Qwen end-to-end | Direct KFD 43.9-44.5 ms; ROCr 51.2 ms | Direct KFD is 13-14% faster in both backend orders |
+| Qwen CPU submission | Direct KFD 8.70-8.73 ms; ROCr 10.43-10.56 ms | Direct KFD is about 17% faster |
+| Empty-kernel sustained throughput | Direct KFD 72.6k/s; ROCr 66.0k/s | Direct KFD is about 10% faster |
+| Synchronized launch round trip | Direct KFD 30.9 us; ROCr 47.4 us | Direct KFD is about 35% faster |
 
-This is a large improvement over the earlier approximately 2.5x Qwen
-slowdown. That gap was caused by model pages remaining in system memory after
-CPU writes to host-mapped VRAM, and GPU-only VRAM initialization removed it.
-What remains is not a general 2.5x runtime penalty: direct KFD wins the measured
-host-side paths, loses empty-kernel batch throughput, and still needs a
-fixed-clock Qwen comparison before end-to-end parity can be claimed.
+The earlier approximately 2.5x Qwen slowdown came from model pages remaining
+in system memory after CPU writes to host-mapped VRAM. GPU-only VRAM
+initialization removed that gap. Placing executable images in VRAM rather than
+host-visible GTT subsequently removed the remaining empty-kernel throughput
+deficit. The Qwen comparison now also favors direct KFD, although fixed-clock
+measurements are still required for a hardware-independent performance claim.
 
 ## Measurement conditions
 
 | Item | Value |
 | --- | --- |
-| Revision | `bbd4ddb` |
+| Runtime revision | `e4e26e5` |
 | Date | 2026-10-04 |
 | GPU | AMD Radeon RX 7800 XT (`gfx1101`, 60 CUs) |
 | CPU | AMD Ryzen Threadripper 3970X, 32 cores / 64 threads |
@@ -40,24 +39,25 @@ fixed-clock Qwen comparison before end-to-end parity can be claimed.
 
 The two backends were measured in alternating order. The system was otherwise
 idle. GPU performance level remained `auto`; setting a fixed performance level
-was not available without administrator privileges.
+was not available without administrator privileges. Qwen used 350 in-process
+warm-up iterations, and SCLK was sampled throughout each process.
 
 ## Launch overhead
 
-The table reports the median of three alternating runs of 10,000 empty-kernel
-launches.
+The table reports one 10,000-launch check after the executable placement
+change.
 
 | Metric | ROCr | Direct KFD | Direct KFD relative to ROCr |
 | --- | ---: | ---: | ---: |
-| Host enqueue, final sync excluded | 8.337 us | 0.492 us | 94.1% lower |
-| Submit and synchronize, one final sync | 15.543 us | 17.380 us | 11.8% higher |
-| Launch round trip, sync after every launch | 48.814 us | 35.053 us | 28.2% lower |
-| Sustained throughput | 64,337 launches/s | 57,538 launches/s | 10.6% lower |
+| Host enqueue, final sync excluded | 8.137 us | 0.492 us | 94.0% lower |
+| Submit and synchronize, one final sync | 15.158 us | 13.776 us | 9.1% lower |
+| Launch round trip, sync after every launch | 47.360 us | 30.932 us | 34.7% lower |
+| Sustained throughput | 65,970 launches/s | 72,591 launches/s | 10.0% higher |
 
-The direct KFD producer has a much cheaper host enqueue path. Its lower
-sustained throughput indicates that queue consumption and synchronization,
-rather than AQL packet construction, account for the remaining empty-kernel
-batch difference.
+The direct KFD producer has a much cheaper host enqueue path. Executable images
+now use GPU-local VRAM, matching ROCr's placement policy and avoiding
+instruction fetches through host-visible GTT. With that change, direct KFD also
+wins the measured batch throughput and synchronized round trip.
 
 ## Qwen workload
 
@@ -71,24 +71,21 @@ The model measurement uses the converted FP32 Qwen2.5-0.5B-Instruct bundle:
 | Live device allocation | 1,887.943 MiB |
 | Model tail | Final RMSNorm and 151,936-element logits |
 
-Each recorded process followed a separate 100-iteration warm-up process for
-the same backend. The recorded process then ran 50 iterations, including its
-own five warm-up iterations. The second pair reversed backend order.
+Each process performed 350 warm-up iterations after model setup and then 50
+recorded iterations. The second pair reversed backend order.
 
 | Pair | ROCr | Direct KFD | Observation |
 | --- | ---: | ---: | --- |
-| ROCr then direct KFD | 61.410 ms | 59.766 ms | Direct KFD was 2.7% faster in this order |
-| Direct KFD then ROCr | 47.511 ms | 58.914 ms | Direct KFD was 24.0% slower in this order |
+| ROCr then direct KFD | 51.150 ms | 43.895 ms | Direct KFD was 14.2% faster |
+| Direct KFD then ROCr | 51.226 ms | 44.509 ms | Direct KFD was 13.1% faster |
 
-These values must not be averaged into a backend speedup claim. During longer
-runs, the observed GPU SCLK rose from approximately 454 MHz to 2,680 MHz. The
-same workload also fell from approximately 150 ms to approximately 60 ms as
-the clock increased. Process-level warm-up did not make the automatic DPM
-state reproducible across backend order.
-
-Therefore, the current evidence supports "competitive and no longer
-pathologically slower," but not "faster than ROCr." The best observed ROCr
-result remains lower than the direct KFD results.
+Automatic DPM still raised SCLK during the recorded interval. In the first
+pair, ROCr entered the interval at approximately 1.85 GHz and reached 2.08 GHz;
+direct KFD entered at approximately 1.74 GHz and reached 2.15 GHz. The second
+pair followed the same trajectory. Direct KFD therefore did not win by being
+measured at a higher initial clock, and reversing backend order did not change
+the result. Fixed-clock repetition remains desirable, but the former
+order-dependent ambiguity is no longer present in these measurements.
 
 CPU submission time is stable because it does not depend on GPU clock. Summing
 the benchmark's six decoder-stage submission measurements over 24 layers and
@@ -96,13 +93,36 @@ three keys gives:
 
 | Backend | CPU submission per stack |
 | --- | ---: |
-| ROCr | 14.09-14.11 ms |
-| Direct KFD | 9.89-9.93 ms |
+| ROCr | 10.43-10.56 ms |
+| Direct KFD | 8.70-8.73 ms |
 
-The direct KFD result includes constant-time reuse of dispatch owners. Before
-that change, removing a reusable owner from the front of a 5,618-element
-vector caused quadratic pointer movement; decoder-stage submission was about
-43% higher.
+The CPU submission gap is about 1.8 ms per stack, but submission overlaps GPU
+execution and therefore cannot be subtracted directly from the approximately
+7.0 ms end-to-end gap. Direct KFD uses persistent kernarg arenas, reusable
+completion signals, direct queue-index atomics, and a direct MMIO doorbell
+store. The ROCr path goes through the HSA entry points and its queue, lifetime,
+signal, and kernarg bookkeeping. This explains the measured host-side
+submission advantage, but not the complete end-to-end difference.
+
+The following diagnostic A/B changes did not explain the remaining gap:
+
+- disabling ROCr queue profiling changed Qwen from 51.150 ms to 51.035 ms;
+- using mailbox-free `AMD_GPU_ONLY` signals for ROCr internal dispatch
+  retirement changed empty-kernel throughput from 65,970/s to 67,388/s;
+- changing the direct KFD AQL ring from dedicated `AQL_QUEUE_MEM` GTT to the
+  same USERPTR backing used by ROCr changed throughput from 72,591/s to
+  72,793/s.
+
+The two paths use identical kernel text and AQL packet construction. Their KFD
+queues also use the same ring size, queue percentage, priority, EOP size, and
+CWSR sizes. Executable allocations use the same
+`VRAM | WRITABLE | EXECUTABLE | NO_SUBSTITUTE` policy.
+
+Consequently, the full 13-14% Qwen difference is measured but not yet causally
+attributed. A fixed-clock run and direct KFD device timestamps are required to
+separate GPU execution, queue consumption, and automatic DPM effects. The
+current result must not be interpreted as proof that direct KFD makes the
+kernels themselves execute faster.
 
 ## Correctness
 
@@ -128,6 +148,7 @@ cmake -S . -B build-rocr-perf \
   -DCMAKE_BUILD_TYPE=Release \
   -DLRRT_BACKEND=rocr \
   -DLRRT_BUILD_BENCHMARKS=ON \
+  -DLRRT_ENABLE_TRITON_EXAMPLES=ON \
   -DLRRT_BUILD_TRITON_BENCHMARKS=ON \
   -DLRRT_AMDGPU_TARGET=gfx1101
 
@@ -136,6 +157,7 @@ cmake -S . -B build-kfd-perf \
   -DLRRT_BACKEND=light-rocr \
   -DLRRT_LIGHT_ROCR_TRANSPORT=kfd \
   -DLRRT_BUILD_BENCHMARKS=ON \
+  -DLRRT_ENABLE_TRITON_EXAMPLES=ON \
   -DLRRT_BUILD_TRITON_BENCHMARKS=ON \
   -DLRRT_AMDGPU_TARGET=gfx1101
 
@@ -156,10 +178,12 @@ with identical arguments:
 
 ```sh
 ./build-rocr-perf/lrrt_triton_mini_decoder_layer_benchmark 50 \
-  --weights-dir /path/to/qwen-bundle --layers 24 --valid-keys 3
+  --weights-dir /path/to/qwen-bundle --layers 24 --valid-keys 3 \
+  --warmup-iterations 350
 
 ./build-kfd-perf/lrrt_triton_mini_decoder_layer_benchmark 50 \
-  --weights-dir /path/to/qwen-bundle --layers 24 --valid-keys 3
+  --weights-dir /path/to/qwen-bundle --layers 24 --valid-keys 3 \
+  --warmup-iterations 350
 ```
 
 For an end-to-end latency claim, fix the GPU performance level or record SCLK
