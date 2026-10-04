@@ -104,13 +104,6 @@ struct Options {
   bool trace_run;
 };
 
-struct StackSubmission {
-  std::vector<std::unique_ptr<lrrt::Event>> source_complete;
-  std::vector<std::unique_ptr<lrrt::Event>> handoff_complete;
-  std::unique_ptr<lrrt::Event> tail_source_complete;
-  std::unique_ptr<lrrt::Event> tail_handoff_complete;
-};
-
 struct SetupBreakdown {
   double construct_ns = 0.0;
   double model_copy_ns = 0.0;
@@ -582,6 +575,7 @@ measure_stack_case(lrrt::Device &device,
   auto layer_bundles = lrrt::examples::triton::mini::make_decoder_layer_bundles(
       device, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
       shape.head_dim, shape.intermediate);
+  auto stack_queue = std::make_shared<lrrt::Queue>(device);
   std::vector<std::unique_ptr<lrrt::examples::triton::mini::DecoderLayer>>
       executors;
   executors.reserve(layer_count);
@@ -599,7 +593,7 @@ measure_stack_case(lrrt::Device &device,
     executors.push_back(
         std::make_unique<lrrt::examples::triton::mini::DecoderLayer>(
             device, layer.keys, layer.hidden, layer.heads, layer.kv_heads,
-            layer.head_dim, layer.intermediate, layer_bundles));
+            layer.head_dim, layer.intermediate, layer_bundles, stack_queue));
     auto construct_end = Clock::now();
     setup_breakdown.construct_ns += elapsed_ns(construct_begin, construct_end);
     if (trace_setup) {
@@ -637,7 +631,8 @@ measure_stack_case(lrrt::Device &device,
     auto tail_bundles = lrrt::examples::triton::mini::make_model_tail_bundles(
         device, tail_weights->hidden);
     tail = std::make_unique<lrrt::examples::triton::mini::ModelTail>(
-        device, tail_weights->hidden, tail_weights->vocab, tail_bundles);
+        device, tail_weights->hidden, tail_weights->vocab, tail_bundles,
+        stack_queue);
     std::vector<float> first_token_embedding(
         tail_weights->token_embeddings.begin(),
         tail_weights->token_embeddings.begin() + tail_weights->hidden);
@@ -655,74 +650,35 @@ measure_stack_case(lrrt::Device &device,
   auto setup_end = Clock::now();
 
   const uint32_t valid_keys = shape.valid_keys;
-  const auto handoff_index = [valid_keys](size_t layer, uint32_t key) {
-    return layer * valid_keys + (key - 1);
-  };
-
-  auto synchronize_stack = [&]() {
-    for (const auto &executor : executors) {
-      executor->synchronize();
-    }
-    if (tail) {
-      tail->synchronize();
-    }
-  };
+  auto synchronize_stack = [&]() { stack_queue->synchronize(); };
 
   auto submit_stack = [&](lrrt::Event *gpu_start, lrrt::Event *gpu_end,
-                          StageBreakdown *stage_breakdown) -> StackSubmission {
-    StackSubmission submission;
-    const size_t handoff_count =
-        layer_count > 1 ? (layer_count - 1) * valid_keys : 0;
-    submission.source_complete.reserve(handoff_count);
-    submission.handoff_complete.reserve(handoff_count);
-    for (size_t i = 0; i < handoff_count; ++i) {
-      submission.source_complete.push_back(
-          std::make_unique<lrrt::Event>(device));
-      submission.handoff_complete.push_back(
-          std::make_unique<lrrt::Event>(device));
-    }
+                          StageBreakdown *stage_breakdown) {
     if (gpu_start) {
       gpu_start->record(executors.front()->queue());
     }
 
     for (size_t layer = 0; layer < layer_count; ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
-        std::vector<const lrrt::Event *> dependencies;
-        if (layer > 0) {
-          dependencies.push_back(
-              submission.handoff_complete[handoff_index(layer - 1, key)].get());
-        }
         lrrt::examples::triton::mini::DecoderLayerStageTiming timing;
-        executors[layer]->run(key, dependencies,
-                              stage_breakdown ? &timing : nullptr);
+        if (layer + 1 < layer_count) {
+          executors[layer]->run_to_hidden_state(
+              key, *executors[layer + 1], key - 1,
+              stage_breakdown ? &timing : nullptr);
+        } else if (tail) {
+          executors[layer]->run_to_buffer(key, tail->hidden_buffer(),
+                                          stage_breakdown ? &timing : nullptr);
+        } else {
+          executors[layer]->run(key, {}, stage_breakdown ? &timing : nullptr);
+        }
         if (stage_breakdown) {
           accumulate_stage_breakdown(*stage_breakdown, timing);
-        }
-        if (layer + 1 < layer_count) {
-          const size_t index = handoff_index(layer, key);
-          auto copy_begin = Clock::now();
-          executors[layer]->copy_output_to_hidden_state_async(
-              *executors[layer + 1], key - 1,
-              *submission.source_complete[index],
-              *submission.handoff_complete[index]);
-          if (stage_breakdown) {
-            auto copy_end = Clock::now();
-            stage_breakdown->handoff_copy_ns +=
-                elapsed_ns(copy_begin, copy_end);
-            ++stage_breakdown->handoff_copies;
-          }
         }
       }
     }
     if (tail) {
-      submission.tail_source_complete = std::make_unique<lrrt::Event>(device);
-      submission.tail_handoff_complete = std::make_unique<lrrt::Event>(device);
-      executors.back()->copy_output_to_buffer_async(
-          tail->hidden_buffer(), *submission.tail_source_complete,
-          *submission.tail_handoff_complete);
       lrrt::examples::triton::mini::ModelTailStageTiming timing;
-      tail->run({submission.tail_handoff_complete.get()},
-                stage_breakdown ? &timing : nullptr);
+      tail->run({}, stage_breakdown ? &timing : nullptr);
       if (stage_breakdown) {
         accumulate_stage_breakdown(*stage_breakdown, timing);
       }
@@ -734,11 +690,10 @@ measure_stack_case(lrrt::Device &device,
         gpu_end->record(executors.back()->queue());
       }
     }
-    return submission;
   };
 
   auto run_stack = [&]() {
-    StackSubmission submission = submit_stack(nullptr, nullptr, nullptr);
+    submit_stack(nullptr, nullptr, nullptr);
     synchronize_stack();
   };
 
@@ -746,26 +701,23 @@ measure_stack_case(lrrt::Device &device,
     for (size_t layer = 0; layer < layer_count; ++layer) {
       for (uint32_t key = 1; key <= valid_keys; ++key) {
         lrrt::examples::triton::mini::DecoderLayerStageTiming timing;
-        executors[layer]->run(key, {}, stage_breakdown ? &timing : nullptr);
+        if (layer + 1 < layer_count) {
+          executors[layer]->run_to_hidden_state(
+              key, *executors[layer + 1], key - 1,
+              stage_breakdown ? &timing : nullptr);
+        } else if (tail) {
+          executors[layer]->run_to_buffer(key, tail->hidden_buffer(),
+                                          stage_breakdown ? &timing : nullptr);
+        } else {
+          executors[layer]->run(key, {}, stage_breakdown ? &timing : nullptr);
+        }
         executors[layer]->synchronize();
         if (stage_breakdown) {
           accumulate_stage_breakdown(*stage_breakdown, timing);
         }
-        if (layer + 1 < layer_count) {
-          auto copy_begin = Clock::now();
-          executors[layer]->copy_output_to_hidden_state(*executors[layer + 1],
-                                                        key - 1);
-          if (stage_breakdown) {
-            auto copy_end = Clock::now();
-            stage_breakdown->handoff_copy_ns +=
-                elapsed_ns(copy_begin, copy_end);
-            ++stage_breakdown->handoff_copies;
-          }
-        }
       }
     }
     if (tail) {
-      executors.back()->copy_output_to_buffer(tail->hidden_buffer());
       lrrt::examples::triton::mini::ModelTailStageTiming timing;
       tail->run({}, stage_breakdown ? &timing : nullptr);
       tail->synchronize();
@@ -804,8 +756,7 @@ measure_stack_case(lrrt::Device &device,
     if (sync_stack) {
       run_stack_synchronous(&stage_breakdown);
     } else {
-      StackSubmission submission =
-          submit_stack(nullptr, nullptr, &stage_breakdown);
+      submit_stack(nullptr, nullptr, &stage_breakdown);
       synchronize_stack();
     }
     auto end = Clock::now();
@@ -823,7 +774,7 @@ measure_stack_case(lrrt::Device &device,
   size_t non_finite_norm_hidden = 0;
   if (tail && tail_weights) {
     std::vector<float> hidden(tail_weights->hidden);
-    executors.back()->copy_output(hidden);
+    tail->copy_hidden(hidden);
     non_finite_hidden = count_non_finite(hidden);
     std::vector<float> norm_hidden(tail_weights->hidden);
     tail->copy_norm_hidden(norm_hidden);
@@ -955,16 +906,16 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
   } else {
     snprintf(gpu_burst_text, sizeof(gpu_burst_text), "%11s", "n/a");
   }
-  printf(
-      "%-26s %6zu %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u "
-      "%s%11.3f%s "
-      "%s%11s%s %s%s%s\n",
-      measurements.produced_logits ? "decoder stack+logits" : "decoder stack",
-      layer_count, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
-      shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
-      shape.valid_keys, dispatches_per_stack, colors.time,
-      measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
-      "runtime-copy", colors.reset, colors.time, gpu_burst_text, colors.reset);
+  printf("%-26s %6zu %5u %7u %5u %7u %8u %7u %5u %12u %10u %10u "
+         "%s%11.3f%s "
+         "%s%11s%s %s%s%s\n",
+         measurements.produced_logits ? "decoder stack+logits"
+                                      : "decoder stack",
+         layer_count, shape.keys, shape.hidden, shape.heads, shape.kv_heads,
+         shape.head_dim, qkv_dim(shape), kv_dim(shape), shape.intermediate,
+         shape.valid_keys, dispatches_per_stack, colors.time,
+         measurements.cpu_round_trip_ns / 1.0e3, colors.reset, colors.time,
+         "direct-out", colors.reset, colors.time, gpu_burst_text, colors.reset);
   if (measurements.produced_logits && measurements.top_logits.empty()) {
     printf("%sTop logits%s unavailable; non-finite hidden=%zu norm_hidden=%zu "
            "logits=%zu/%u\n",
@@ -1105,7 +1056,7 @@ int main(int argc, char **argv) {
     printf("Data type:          FP32 inputs / FP32 accumulation\n");
     printf("Cache layout:       [kv_heads, keys, head_dim]\n");
     printf("Queueing:           %s\n",
-           options.weights_dir ? "ordered launches on one lrrt queue per layer"
+           options.weights_dir ? "ordered launches on one shared lrrt queue"
                                : "ordered launches on one lrrt queue");
     printf("Timing source:      %s\n",
            options.weights_dir
@@ -1132,8 +1083,8 @@ int main(int argc, char **argv) {
       }
       printf("Stack handoff:      %s\n",
              options.sync_stack
-                 ? "synchronized device-to-device copy between layers"
-                 : "queued async device-to-device copy between layers");
+                 ? "direct next-layer write with per-step synchronization"
+                 : "direct next-layer write on the shared queue");
       if (options.sync_stack) {
         printf("Stack sync mode:    enabled for correctness check\n");
       }
@@ -1227,13 +1178,13 @@ int main(int argc, char **argv) {
     if (options.weights_dir) {
       if (options.sync_stack) {
         printf("%sdecoder stack%s runs a synchronized correctness path: each "
-               "layer/key launch completes before the device-to-device handoff "
-               "copy feeds the next layer.\n",
+               "layer/key launch completes after writing directly into the "
+               "next layer input.\n",
                colors.label, colors.reset);
       } else {
-        printf("%sdecoder stack%s records source-layer completion events, "
-               "queues async device-to-device handoff copies, and launches the "
-               "next layer after copy events without per-layer host sync.\n",
+        printf("%sdecoder stack%s uses shared-queue ordering and writes each "
+               "layer's final kernel output directly into the next layer "
+               "input without handoff copies or per-layer host sync.\n",
                colors.label, colors.reset);
       }
       printf("%sstage submit avg%s measures CPU time spent enqueueing each "

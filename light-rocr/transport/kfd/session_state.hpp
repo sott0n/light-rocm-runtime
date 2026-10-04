@@ -4,10 +4,14 @@
 #include "light_rocr/runtime/topology.hpp"
 #include "light_rocr/transport/kfd/vm_types.hpp"
 
+#include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <vector>
 
 namespace light_rocr::transport::kfd {
+
+struct SignalPage;
 
 struct DeviceVmState {
   int render_fd = -1;
@@ -29,6 +33,7 @@ struct KfdState {
   runtime::KfdVersion version;
   std::mutex mutex;
   std::unordered_map<uint32_t, DeviceVmState> device_vms;
+  std::vector<std::weak_ptr<SignalPage>> signal_pages;
 };
 
 } // namespace light_rocr::transport::kfd

@@ -126,7 +126,7 @@ hsa_status_t create_queue(lr_device_t device_handle, DeviceState *device,
     return HSA_STATUS_ERROR_INVALID_QUEUE_CREATION;
   }
 
-  uint32_t queue_size = 1024;
+  uint32_t queue_size = 8192;
   while (queue_size > max_queue_size) {
     queue_size >>= 1;
   }
@@ -1254,11 +1254,12 @@ lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
     return LR_ERROR_RUNTIME;
   }
 
-  auto *created_queue =
-      new (std::nothrow) lr_queue_t{device_handle, is_default, {}, {}, {}};
+  auto *created_queue = new (std::nothrow) lr_queue_t{};
   if (!created_queue) {
     return LR_ERROR_RUNTIME;
   }
+  created_queue->device = device_handle;
+  created_queue->is_default = is_default;
 
   auto created = g_kfd_session->create_aql_queue(
       device->node, light_rocr::transport::kfd::kAqlRingDefaultSize);
@@ -1298,9 +1299,7 @@ bool valid_direct_kfd_queue_locked(lr_queue_t *queue) {
 namespace {
 
 lr_status_t release_direct_kfd_dispatch(lr_queue_t::PendingDispatch *dispatch) {
-  const auto kernarg_status = dispatch->kernarg.release();
-  const auto signal_status = dispatch->completion_signal.release();
-  return kernarg_status && signal_status ? LR_SUCCESS : LR_ERROR_RUNTIME;
+  return dispatch->completion_signal.release() ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
 
 lr_status_t reap_direct_kfd_dispatches_locked(lr_queue_t *queue) {
@@ -1345,6 +1344,21 @@ lr_status_t release_direct_kfd_dispatch_pool_locked(lr_queue_t *queue) {
       std::remove(queue->available_dispatches.begin(),
                   queue->available_dispatches.end(), nullptr),
       queue->available_dispatches.end());
+  return result;
+}
+
+lr_status_t release_direct_kfd_kernarg_arenas_locked(lr_queue_t *queue) {
+  lr_status_t result = LR_SUCCESS;
+  for (auto &arena : queue->kernarg_arenas) {
+    if (arena->allocation.release()) {
+      arena.reset();
+    } else {
+      result = LR_ERROR_RUNTIME;
+    }
+  }
+  queue->kernarg_arenas.erase(std::remove(queue->kernarg_arenas.begin(),
+                                          queue->kernarg_arenas.end(), nullptr),
+                              queue->kernarg_arenas.end());
   return result;
 }
 
@@ -1453,6 +1467,9 @@ lr_status_t restore_direct_kfd_default_queue_locked(lr_device_t device_handle,
   if (release_direct_kfd_dispatch_pool_locked(queue) != LR_SUCCESS) {
     return LR_ERROR_RUNTIME;
   }
+  if (release_direct_kfd_kernarg_arenas_locked(queue) != LR_SUCCESS) {
+    return LR_ERROR_RUNTIME;
+  }
 
   auto device_queue =
       std::find(device->queues.begin(), device->queues.end(), queue);
@@ -1486,6 +1503,15 @@ void release_direct_kfd_queues_locked(lr_status_t *result) {
       if (pool_status != LR_SUCCESS) {
         if (*result == LR_SUCCESS) {
           *result = pool_status;
+        }
+        ++index;
+        continue;
+      }
+      const lr_status_t arena_status =
+          release_direct_kfd_kernarg_arenas_locked(queue);
+      if (arena_status != LR_SUCCESS) {
+        if (*result == LR_SUCCESS) {
+          *result = arena_status;
         }
         ++index;
         continue;
@@ -1656,6 +1682,11 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
       release_direct_kfd_dispatch_pool_locked(queue);
   if (pool_status != LR_SUCCESS) {
     return pool_status;
+  }
+  const lr_status_t arena_status =
+      release_direct_kfd_kernarg_arenas_locked(queue);
+  if (arena_status != LR_SUCCESS) {
+    return arena_status;
   }
   if (!queue->queue.release()) {
     return LR_ERROR_RUNTIME;

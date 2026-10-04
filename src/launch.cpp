@@ -45,6 +45,48 @@ static_assert(kAqlPacketHeaderBarrierShift ==
 static_assert(kAqlKernelDispatchHeader ==
               light_rocr::runtime::kAqlKernelDispatchHeader);
 
+constexpr uint64_t kDirectKfdKernargArenaSize = 8U * 1024U * 1024U;
+
+std::optional<lr_queue_t::KernargSlice>
+allocate_direct_kfd_kernarg_locked(DeviceState *device, lr_queue_t *queue,
+                                   uint64_t size) {
+  if (size == 0) {
+    return lr_queue_t::KernargSlice{};
+  }
+  for (const auto &arena : queue->kernarg_arenas) {
+    if (arena->allocation.size() - arena->used >= size) {
+      const lr_queue_t::KernargSlice slice{arena.get(), arena->used, size};
+      arena->used += size;
+      return slice;
+    }
+  }
+
+  const uint64_t arena_size = std::max(kDirectKfdKernargArenaSize, size);
+  auto allocated = g_kfd_session->allocate_gtt(device->node, arena_size);
+  if (!allocated) {
+    (void)allocated.allocation.release();
+    return std::nullopt;
+  }
+  try {
+    auto arena = std::make_unique<lr_queue_t::KernargArena>(
+        std::move(allocated.allocation));
+    const lr_queue_t::KernargSlice slice{arena.get(), 0, size};
+    arena->used = size;
+    queue->kernarg_arenas.push_back(std::move(arena));
+    return slice;
+  } catch (const std::bad_alloc &) {
+    (void)allocated.allocation.release();
+    return std::nullopt;
+  }
+}
+
+void rollback_direct_kfd_kernarg_locked(lr_queue_t::KernargSlice slice) {
+  if (slice.arena != nullptr &&
+      slice.offset + slice.size == slice.arena->used) {
+    slice.arena->used = slice.offset;
+  }
+}
+
 bool valid_direct_kfd_dispatch_packet(void *context,
                                       const AqlKernelDispatchPacket &packet) {
   using namespace light_rocr::runtime;
@@ -132,44 +174,30 @@ lr_status_t submit_direct_kfd_kernel_locked(
       queue->available_dispatches.begin(), queue->available_dispatches.end(),
       [allocation_size](const auto &dispatch) {
         return allocation_size == 0 ||
-               (dispatch->kernarg &&
-                dispatch->kernarg.size() >= allocation_size);
+               (dispatch->kernarg && dispatch->kernarg.size >= allocation_size);
       });
   if (reusable != queue->available_dispatches.end()) {
     pending = std::move(*reusable);
     queue->available_dispatches.erase(reusable);
     pending->completion_signal.store_relaxed(1);
   } else {
-    std::optional<light_rocr::transport::kfd::MemoryAllocation>
-        kernarg_allocation;
-    if (allocation_size != 0) {
-      auto allocated =
-          g_kfd_session->allocate_gtt(device->node, allocation_size);
-      kernarg_allocation.emplace(std::move(allocated.allocation));
-      if (!allocated) {
-        (void)kernarg_allocation->release();
-        return LR_ERROR_RUNTIME;
-      }
+    const auto kernarg =
+        allocate_direct_kfd_kernarg_locked(device, queue, allocation_size);
+    if (!kernarg.has_value()) {
+      return LR_ERROR_RUNTIME;
     }
 
     auto signal = g_kfd_session->create_user_signal(device->node, 1);
     if (!signal) {
-      if (kernarg_allocation.has_value()) {
-        (void)kernarg_allocation->release();
-      }
+      rollback_direct_kfd_kernarg_locked(*kernarg);
       (void)signal.signal.release();
       return LR_ERROR_RUNTIME;
     }
     try {
-      light_rocr::transport::kfd::MemoryAllocation empty_kernarg;
       pending = std::make_unique<lr_queue_t::PendingDispatch>(
-          std::move(signal.signal), kernarg_allocation.has_value()
-                                        ? std::move(*kernarg_allocation)
-                                        : std::move(empty_kernarg));
+          std::move(signal.signal), *kernarg);
     } catch (const std::bad_alloc &) {
-      if (kernarg_allocation.has_value()) {
-        (void)kernarg_allocation->release();
-      }
+      rollback_direct_kfd_kernarg_locked(*kernarg);
       (void)signal.signal.release();
       return LR_ERROR_RUNTIME;
     }
@@ -179,7 +207,7 @@ lr_status_t submit_direct_kfd_kernel_locked(
   if (requirements.storage_size != 0) {
     const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
         kernel_info, args, args_size, pending->kernarg.host_address(),
-        pending->kernarg.size(), pending->kernarg.gpu_address());
+        pending->kernarg.size, pending->kernarg.gpu_address());
     if (!materialized ||
         !populate_light_rocr_hidden_kernargs(kernel_info, *config,
                                              pending->kernarg.host_address(),

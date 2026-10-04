@@ -12,7 +12,7 @@ namespace light_rocr::transport::hsakmt {
 inline constexpr uint64_t kAqlPacketSize = 64;
 inline constexpr uint64_t kAqlRingMinimumSize = 4096;
 inline constexpr uint64_t kAqlRingMaximumSize = 131072 * kAqlPacketSize;
-inline constexpr uint64_t kAqlRingDefaultSize = 64 * 1024;
+inline constexpr uint64_t kAqlRingDefaultSize = 512 * 1024;
 
 enum class AqlQueueError {
   None,

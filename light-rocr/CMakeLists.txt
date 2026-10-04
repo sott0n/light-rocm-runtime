@@ -542,6 +542,26 @@ if(LIGHT_ROCR_BUILD_TESTS)
       )
 
       add_executable(
+        light_rocr_kfd_signal_device_tests
+        tests/kfd/signal_device_test.cpp
+      )
+      target_link_libraries(
+        light_rocr_kfd_signal_device_tests
+        PRIVATE light_rocr::transport_kfd
+      )
+      light_rocr_enable_warnings(light_rocr_kfd_signal_device_tests)
+      add_test(
+        NAME light_rocr_kfd_signal_device_tests
+        COMMAND light_rocr_kfd_signal_device_tests
+      )
+      set_tests_properties(
+        light_rocr_kfd_signal_device_tests
+        PROPERTIES
+          RESOURCE_LOCK light_rocr_gpu
+          TIMEOUT 20
+      )
+
+      add_executable(
         light_rocr_kfd_queue_device_tests
         tests/kfd/queue_device_test.cpp
       )

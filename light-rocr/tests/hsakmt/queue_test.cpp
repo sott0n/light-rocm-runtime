@@ -252,7 +252,7 @@ void successful_round_trip(TestContext *context) {
     context->expect(static_cast<bool>(released), released.message);
     expect_calls(context, {"open", "acquire", "allocate:ring", "map:ring:7",
                            "allocate:control", "map:control:7",
-                           "create:7:65536", "destroy", "unmap:control",
+                           "create:7:524288", "destroy", "unmap:control",
                            "free:control", "unmap:ring", "free:ring"});
   }
   context->expect(fake.calls.size() >= 2 &&
@@ -379,7 +379,7 @@ void create_failure_releases_both_allocations(TestContext *context) {
         "wrong queue creation failure");
   }
   expect_calls(context, {"open", "acquire", "allocate:ring", "map:ring:5",
-                         "allocate:control", "map:control:5", "create:5:65536",
+                         "allocate:control", "map:control:5", "create:5:524288",
                          "unmap:control", "free:control", "unmap:ring",
                          "free:ring", "release", "close"});
 }
@@ -406,7 +406,7 @@ void destroy_failure_is_retryable(TestContext *context) {
     context->expect(static_cast<bool>(released), released.message);
   }
   expect_calls(context, {"open", "acquire", "allocate:ring", "map:ring:2",
-                         "allocate:control", "map:control:2", "create:2:65536",
+                         "allocate:control", "map:control:2", "create:2:524288",
                          "destroy", "destroy", "unmap:control", "free:control",
                          "unmap:ring", "free:ring", "release", "close"});
 }
@@ -444,7 +444,7 @@ void queue_keeps_session_open(TestContext *context) {
         opened.session.create_aql_queue(gfx1101_node(4), kAqlRingDefaultSize);
     queue = std::move(created.queue);
   }
-  context->expect(fake.calls.back() == "create:4:65536",
+  context->expect(fake.calls.back() == "create:4:524288",
                   "KFD closed while a queue was live");
   const auto released = queue.release();
   context->expect(static_cast<bool>(released), released.message);
@@ -465,7 +465,7 @@ void destructor_cleans_up_in_order(TestContext *context) {
     }
   }
   expect_calls(context, {"open", "acquire", "allocate:ring", "map:ring:6",
-                         "allocate:control", "map:control:6", "create:6:65536",
+                         "allocate:control", "map:control:6", "create:6:524288",
                          "destroy", "unmap:control", "free:control",
                          "unmap:ring", "free:ring", "release", "close"});
 }
@@ -513,7 +513,7 @@ void scratch_backed_queue_populates_firmware_control(TestContext *context) {
   expect_calls(context,
                {"open", "acquire", "allocate:ring", "map:ring:7",
                 "allocate:control", "map:control:7", "allocate:scratch",
-                "map-scratch:33423360", "create:7:65536", "destroy",
+                "map-scratch:33423360", "create:7:524288", "destroy",
                 "unmap:scratch", "free:scratch", "unmap:control",
                 "free:control", "unmap:ring", "free:ring"});
 }
@@ -598,7 +598,7 @@ void scratch_cleanup_failure_is_retryable(TestContext *context) {
   expect_calls(context,
                {"open", "acquire", "allocate:ring", "map:ring:7",
                 "allocate:control", "map:control:7", "allocate:scratch",
-                "map-scratch:33423360", "create:7:65536", "destroy",
+                "map-scratch:33423360", "create:7:524288", "destroy",
                 "unmap:scratch", "unmap:scratch", "free:scratch",
                 "unmap:control", "free:control", "unmap:ring", "free:ring",
                 "release", "close"});

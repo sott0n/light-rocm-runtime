@@ -199,18 +199,45 @@ struct lr_queue_t {
   std::vector<PendingBarrier> pending_barriers;
   std::vector<lr_event_t *> pending_events;
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  struct KernargArena {
+    explicit KernargArena(
+        light_rocr::transport::kfd::MemoryAllocation &&created_allocation)
+        : allocation(std::move(created_allocation)) {}
+
+    light_rocr::transport::kfd::MemoryAllocation allocation;
+    uint64_t used = 0;
+  };
+
+  struct KernargSlice {
+    KernargArena *arena = nullptr;
+    uint64_t offset = 0;
+    uint64_t size = 0;
+
+    [[nodiscard]] void *host_address() const {
+      return arena == nullptr
+                 ? nullptr
+                 : static_cast<std::byte *>(arena->allocation.host_address()) +
+                       offset;
+    }
+    [[nodiscard]] uint64_t gpu_address() const {
+      return arena == nullptr ? 0 : arena->allocation.gpu_address() + offset;
+    }
+    explicit operator bool() const { return arena != nullptr; }
+  };
+
   struct PendingDispatch {
     PendingDispatch(light_rocr::transport::kfd::UserSignal &&signal,
-                    light_rocr::transport::kfd::MemoryAllocation &&kernarg)
-        : completion_signal(std::move(signal)), kernarg(std::move(kernarg)) {}
+                    KernargSlice kernarg_slice)
+        : completion_signal(std::move(signal)), kernarg(kernarg_slice) {}
 
     light_rocr::transport::kfd::UserSignal completion_signal;
-    light_rocr::transport::kfd::MemoryAllocation kernarg;
+    KernargSlice kernarg;
   };
 
   light_rocr::transport::kfd::AqlQueue queue;
   std::vector<std::unique_ptr<PendingDispatch>> pending_dispatches;
   std::vector<std::unique_ptr<PendingDispatch>> available_dispatches;
+  std::vector<std::unique_ptr<KernargArena>> kernarg_arenas;
 #endif
 };
 

@@ -184,12 +184,23 @@ public:
   DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
                uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
                uint32_t intermediate, std::shared_ptr<BundleSet> bundles)
-      : queue_(device), bundles_(std::move(bundles)), buffers_(device, true),
-        keys_(keys), hidden_(hidden), heads_(heads), kv_heads_(kv_heads),
-        head_dim_(head_dim), q_dim_(heads * head_dim),
+      : DecoderLayer(device, keys, hidden, heads, kv_heads, head_dim,
+                     intermediate, std::move(bundles),
+                     std::make_shared<lrrt::Queue>(device)) {}
+
+  DecoderLayer(lrrt::Device &device, uint32_t keys, uint32_t hidden,
+               uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
+               uint32_t intermediate, std::shared_ptr<BundleSet> bundles,
+               std::shared_ptr<lrrt::Queue> queue)
+      : queue_(std::move(queue)), bundles_(std::move(bundles)),
+        buffers_(device, true), keys_(keys), hidden_(hidden), heads_(heads),
+        kv_heads_(kv_heads), head_dim_(head_dim), q_dim_(heads * head_dim),
         kv_dim_(kv_heads * head_dim), intermediate_(intermediate),
         scale_(1.0f / sqrtf((float)head_dim)) {
     validate_decoder_layer_shape(heads, kv_heads, head_dim);
+    if (!queue_) {
+      throw std::runtime_error("mini decoder layer queue is null");
+    }
     if (!bundles_) {
       throw std::runtime_error("mini decoder layer bundles are null");
     }
@@ -261,6 +272,42 @@ public:
   void run(uint32_t valid_keys,
            const std::vector<const lrrt::Event *> &dependencies = {},
            DecoderLayerStageTiming *timing = nullptr) {
+    run_with_output(valid_keys, dependencies, timing, nullptr);
+  }
+
+  void run_to_hidden_state(uint32_t valid_keys, DecoderLayer &dst,
+                           uint32_t dst_position,
+                           DecoderLayerStageTiming *timing = nullptr) {
+    if (hidden_ != dst.hidden_) {
+      throw std::runtime_error(
+          "mini decoder layer direct handoff hidden size mismatch");
+    }
+    if (queue_ != dst.queue_) {
+      throw std::runtime_error(
+          "mini decoder layer direct handoff requires a shared queue");
+    }
+    if (dst_position >= dst.keys_) {
+      throw std::runtime_error(
+          "mini decoder layer direct handoff position is out of range");
+    }
+    run_with_output(valid_keys, {}, timing,
+                    dst.buffers_.ptr<float>("hidden_states") +
+                        static_cast<size_t>(dst_position) * dst.hidden_);
+  }
+
+  void run_to_buffer(uint32_t valid_keys, lrrt::DeviceBuffer &dst,
+                     DecoderLayerStageTiming *timing = nullptr) {
+    if (dst.size() < static_cast<size_t>(hidden_) * sizeof(float)) {
+      throw std::runtime_error(
+          "mini decoder layer direct output buffer is too small");
+    }
+    run_with_output(valid_keys, {}, timing, static_cast<float *>(dst.data()));
+  }
+
+private:
+  void run_with_output(uint32_t valid_keys,
+                       const std::vector<const lrrt::Event *> &dependencies,
+                       DecoderLayerStageTiming *timing, float *output) {
     if (valid_keys == 0 || valid_keys > keys_) {
       throw std::runtime_error("mini decoder layer valid_keys is out of range");
     }
@@ -268,7 +315,7 @@ public:
     const uint32_t half = head_dim_ / 2;
     const uint32_t query_position = valid_keys - 1;
     auto stage_begin = std::chrono::steady_clock::now();
-    launch(queue_, bundles_->get("attention_norm"), keys_,
+    launch(*queue_, bundles_->get("attention_norm"), keys_,
            {
                arg("x", buffers_.ptr<float>("hidden_states")),
                arg("weight", buffers_.ptr<float>("attention_norm_weight")),
@@ -284,7 +331,7 @@ public:
       stage_begin = stage_end;
     }
 
-    launch(queue_, bundles_->get("q_projection"), q_dim_,
+    launch(*queue_, bundles_->get("q_projection"), q_dim_,
            {
                arg("x", buffers_.ptr<float>("attention_norm_states",
                                             query_position * hidden_)),
@@ -295,7 +342,7 @@ public:
            });
     for (uint32_t position = 0; position < valid_keys; ++position) {
       launch(
-          queue_, bundles_->get("k_projection"), kv_dim_,
+          *queue_, bundles_->get("k_projection"), kv_dim_,
           {
               arg("x", buffers_.ptr<float>("attention_norm_states",
                                            position * hidden_)),
@@ -305,7 +352,7 @@ public:
               arg("hidden", (int32_t)hidden_),
           });
       launch(
-          queue_, bundles_->get("v_projection"), kv_dim_,
+          *queue_, bundles_->get("v_projection"), kv_dim_,
           {
               arg("x", buffers_.ptr<float>("attention_norm_states",
                                            position * hidden_)),
@@ -326,7 +373,7 @@ public:
       const uint32_t cache_offset = kv_head * keys_ * head_dim_;
       for (uint32_t position = 0; position < valid_keys; ++position) {
         launch(
-            queue_, bundles_->get("rope"), 1,
+            *queue_, bundles_->get("rope"), 1,
             {
                 arg("x", buffers_.ptr<float>("source_k", position * kv_dim_ +
                                                              kv_head_offset)),
@@ -338,7 +385,7 @@ public:
                 arg("head_dim", (int32_t)head_dim_),
             });
         launch(
-            queue_, bundles_->get("kv_update"), 1,
+            *queue_, bundles_->get("kv_update"), 1,
             {
                 arg("k", buffers_.ptr<float>("k_rope")),
                 arg("v", buffers_.ptr<float>("source_v", position * kv_dim_ +
@@ -363,7 +410,7 @@ public:
       const uint32_t cache_offset = kv_head * keys_ * head_dim_;
       const uint32_t scores_offset = head * keys_;
 
-      launch(queue_, bundles_->get("rope"), 1,
+      launch(*queue_, bundles_->get("rope"), 1,
              {
                  arg("x", buffers_.ptr<float>("q", head_offset)),
                  arg("cos", buffers_.ptr<float>("cos", query_position * half)),
@@ -374,7 +421,7 @@ public:
                  arg("head_dim", (int32_t)head_dim_),
              });
 
-      launch(queue_, bundles_->get("score"), keys_,
+      launch(*queue_, bundles_->get("score"), keys_,
              {
                  arg("q", buffers_.ptr<float>("q_rope", head_offset)),
                  arg("k", buffers_.ptr<float>("k_cache", cache_offset)),
@@ -383,7 +430,7 @@ public:
                  arg("head_dim", (int32_t)head_dim_),
                  arg("scale", scale_),
              });
-      launch(queue_, bundles_->get("softmax"), 1,
+      launch(*queue_, bundles_->get("softmax"), 1,
              {
                  arg("x", buffers_.ptr<float>("scores", scores_offset)),
                  arg("out", buffers_.ptr<float>("probs", scores_offset)),
@@ -391,7 +438,7 @@ public:
                  arg("hidden", (int32_t)keys_),
                  arg("query_start", (int32_t)(valid_keys - 1)),
              });
-      launch(queue_, bundles_->get("aggregation"), head_dim_,
+      launch(*queue_, bundles_->get("aggregation"), head_dim_,
              {
                  arg("probs", buffers_.ptr<float>("probs", scores_offset)),
                  arg("v", buffers_.ptr<float>("v_cache", cache_offset)),
@@ -405,7 +452,7 @@ public:
       timing->attention_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
     }
-    launch(queue_, bundles_->get("out_projection"), hidden_,
+    launch(*queue_, bundles_->get("out_projection"), hidden_,
            {
                arg("x", buffers_.ptr<float>("attention_out")),
                arg("weight", buffers_.ptr<float>("out_weight")),
@@ -413,7 +460,7 @@ public:
                arg("outputs", (int32_t)hidden_),
                arg("hidden", (int32_t)q_dim_),
            });
-    launch(queue_, bundles_->get("residual_add"), hidden_,
+    launch(*queue_, bundles_->get("residual_add"), hidden_,
            {
                arg("x", buffers_.ptr<float>("hidden_states",
                                             query_position * hidden_)),
@@ -427,7 +474,7 @@ public:
       stage_begin = stage_end;
     }
 
-    launch(queue_, bundles_->get("mlp_norm"), 1,
+    launch(*queue_, bundles_->get("mlp_norm"), 1,
            {
                arg("x", buffers_.ptr<float>("attention_residual")),
                arg("weight", buffers_.ptr<float>("mlp_norm_weight")),
@@ -436,7 +483,7 @@ public:
                arg("rows", (int32_t)1),
                arg("hidden", (int32_t)hidden_),
            });
-    launch(queue_, bundles_->get("gate_projection"), intermediate_,
+    launch(*queue_, bundles_->get("gate_projection"), intermediate_,
            {
                arg("x", buffers_.ptr<float>("mlp_norm_hidden")),
                arg("weight", buffers_.ptr<float>("gate_weight")),
@@ -444,7 +491,7 @@ public:
                arg("outputs", (int32_t)intermediate_),
                arg("hidden", (int32_t)hidden_),
            });
-    launch(queue_, bundles_->get("up_projection"), intermediate_,
+    launch(*queue_, bundles_->get("up_projection"), intermediate_,
            {
                arg("x", buffers_.ptr<float>("mlp_norm_hidden")),
                arg("weight", buffers_.ptr<float>("up_weight")),
@@ -452,14 +499,14 @@ public:
                arg("outputs", (int32_t)intermediate_),
                arg("hidden", (int32_t)hidden_),
            });
-    launch(queue_, bundles_->get("silu_mul"), intermediate_,
+    launch(*queue_, bundles_->get("silu_mul"), intermediate_,
            {
                arg("gate", buffers_.ptr<float>("gate")),
                arg("up", buffers_.ptr<float>("up")),
                arg("out", buffers_.ptr<float>("activated")),
                arg("n", (int32_t)intermediate_),
            });
-    launch(queue_, bundles_->get("down_projection"), hidden_,
+    launch(*queue_, bundles_->get("down_projection"), hidden_,
            {
                arg("x", buffers_.ptr<float>("activated")),
                arg("weight", buffers_.ptr<float>("down_weight")),
@@ -467,11 +514,11 @@ public:
                arg("outputs", (int32_t)hidden_),
                arg("hidden", (int32_t)intermediate_),
            });
-    launch(queue_, bundles_->get("residual_add"), hidden_,
+    launch(*queue_, bundles_->get("residual_add"), hidden_,
            {
                arg("x", buffers_.ptr<float>("attention_residual")),
                arg("y", buffers_.ptr<float>("projected_mlp")),
-               arg("out", buffers_.ptr<float>("out")),
+               arg("out", output ? output : buffers_.ptr<float>("out")),
                arg("n", (int32_t)hidden_),
            });
     if (timing) {
@@ -480,9 +527,10 @@ public:
     }
   }
 
-  void synchronize() const { queue_.synchronize(); }
+public:
+  void synchronize() const { queue_->synchronize(); }
 
-  const lrrt::Queue &queue() const { return queue_; }
+  const lrrt::Queue &queue() const { return *queue_; }
 
   void copy_output(std::vector<float> &out) const {
     if (out.size() != hidden_) {
@@ -519,7 +567,7 @@ public:
       throw std::runtime_error(
           "mini decoder layer handoff position is out of range");
     }
-    source_complete.record(queue_);
+    source_complete.record(*queue_);
     lrrt::copy_device_to_device_async(
         dst.buffers_.get("hidden_states"),
         static_cast<size_t>(dst_position) * dst.hidden_ * sizeof(float),
@@ -533,7 +581,7 @@ public:
     if (dst.size() < static_cast<size_t>(hidden_) * sizeof(float)) {
       throw std::runtime_error("mini decoder layer output buffer is too small");
     }
-    source_complete.record(queue_);
+    source_complete.record(*queue_);
     lrrt::copy_device_to_device_async(dst, 0, buffers_.get("out"), 0,
                                       static_cast<size_t>(hidden_) *
                                           sizeof(float),
@@ -604,7 +652,7 @@ private:
     }
   }
 
-  lrrt::Queue queue_;
+  std::shared_ptr<lrrt::Queue> queue_;
   std::shared_ptr<BundleSet> bundles_;
   BufferSet buffers_;
   uint32_t keys_;
@@ -626,10 +674,19 @@ public:
 
   ModelTail(lrrt::Device &device, uint32_t hidden, uint32_t vocab,
             std::shared_ptr<BundleSet> bundles)
-      : queue_(device), bundles_(std::move(bundles)), buffers_(device, true),
-        hidden_(hidden), vocab_(vocab) {
+      : ModelTail(device, hidden, vocab, std::move(bundles),
+                  std::make_shared<lrrt::Queue>(device)) {}
+
+  ModelTail(lrrt::Device &device, uint32_t hidden, uint32_t vocab,
+            std::shared_ptr<BundleSet> bundles,
+            std::shared_ptr<lrrt::Queue> queue)
+      : queue_(std::move(queue)), bundles_(std::move(bundles)),
+        buffers_(device, true), hidden_(hidden), vocab_(vocab) {
     if (hidden == 0 || vocab == 0) {
       throw std::runtime_error("mini model tail invalid shape");
+    }
+    if (!queue_) {
+      throw std::runtime_error("mini model tail queue is null");
     }
     if (!bundles_) {
       throw std::runtime_error("mini model tail bundles are null");
@@ -661,7 +718,7 @@ public:
   void run(const std::vector<const lrrt::Event *> &dependencies = {},
            ModelTailStageTiming *timing = nullptr) {
     auto stage_begin = std::chrono::steady_clock::now();
-    launch(queue_, bundles_->get("final_norm"), 1,
+    launch(*queue_, bundles_->get("final_norm"), 1,
            {
                arg("x", buffers_.ptr<float>("hidden")),
                arg("weight", buffers_.ptr<float>("final_norm_weight")),
@@ -676,7 +733,7 @@ public:
       timing->final_norm_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
     }
-    launch(queue_, bundles_->get("lm_head"), vocab_,
+    launch(*queue_, bundles_->get("lm_head"), vocab_,
            {
                arg("x", buffers_.ptr<float>("norm_hidden")),
                arg("weight", buffers_.ptr<float>("lm_head_weight")),
@@ -690,9 +747,9 @@ public:
     }
   }
 
-  void synchronize() const { queue_.synchronize(); }
+  void synchronize() const { queue_->synchronize(); }
 
-  const lrrt::Queue &queue() const { return queue_; }
+  const lrrt::Queue &queue() const { return *queue_; }
 
   lrrt::DeviceBuffer &hidden_buffer() const { return buffers_.get("hidden"); }
 
@@ -703,6 +760,13 @@ public:
     buffers_.copy_from(out, "logits");
   }
 
+  void copy_hidden(std::vector<float> &out) const {
+    if (out.size() != hidden_) {
+      throw std::runtime_error("mini model tail hidden shape mismatch");
+    }
+    buffers_.copy_from(out, "hidden");
+  }
+
   void copy_norm_hidden(std::vector<float> &out) const {
     if (out.size() != hidden_) {
       throw std::runtime_error("mini model tail norm hidden shape mismatch");
@@ -711,7 +775,7 @@ public:
   }
 
 private:
-  lrrt::Queue queue_;
+  std::shared_ptr<lrrt::Queue> queue_;
   std::shared_ptr<BundleSet> bundles_;
   BufferSet buffers_;
   uint32_t hidden_;

@@ -38,7 +38,8 @@ int main() {
       created.queue.ring_gpu_address() == 0 ||
       created.queue.ring_size() !=
           light_rocr::transport::kfd::kAqlRingDefaultSize ||
-      created.queue.packet_count() != 1024 ||
+      created.queue.packet_count() !=
+          light_rocr::transport::kfd::kAqlRingDefaultSize / 64 ||
       created.queue.read_index_acquire() != 0 ||
       created.queue.write_index_relaxed() != 0) {
     std::cerr << "direct KFD AQL queue metadata is invalid\n";

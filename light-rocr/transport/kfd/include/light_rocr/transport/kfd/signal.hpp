@@ -5,11 +5,15 @@
 #include "light_rocr/transport/kfd/memory_types.hpp"
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 
 namespace light_rocr::transport::kfd {
+
+struct SignalPage;
 
 enum class UserSignalError {
   None,
@@ -34,7 +38,7 @@ public:
   UserSignal &operator=(const UserSignal &) = delete;
   UserSignal(UserSignal &&) noexcept = default;
   UserSignal &operator=(UserSignal &&) noexcept = delete;
-  ~UserSignal() = default;
+  ~UserSignal();
 
   [[nodiscard]] const runtime::AmdSignal *host_address() const;
   [[nodiscard]] uint64_t gpu_handle() const;
@@ -45,18 +49,19 @@ public:
   [[nodiscard]] runtime::SignalWaitResult
   wait_until_equal(int64_t expected_value,
                    std::chrono::steady_clock::time_point deadline) const;
-  explicit operator bool() const { return static_cast<bool>(storage_); }
+  explicit operator bool() const { return page_ != nullptr; }
 
   [[nodiscard]] UserSignalStatus release();
 
 private:
   friend class KfdSession;
-  explicit UserSignal(MemoryAllocation storage)
-      : storage_(std::move(storage)) {}
+  UserSignal(std::shared_ptr<SignalPage> page, size_t slot)
+      : page_(std::move(page)), slot_(slot) {}
   [[nodiscard]] runtime::AmdSignal &abi();
   [[nodiscard]] const runtime::AmdSignal &abi() const;
 
-  MemoryAllocation storage_;
+  std::shared_ptr<SignalPage> page_;
+  size_t slot_ = 0;
 };
 
 struct UserSignalResult {
