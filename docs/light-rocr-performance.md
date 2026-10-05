@@ -177,12 +177,18 @@ producer also removed a duplicate pair of read/write-index loads.
 
 The final three-iteration run spent approximately 8.55 ms in the benchmark's
 decoder and tail submission timers, down from the earlier 8.70-8.73 ms range.
-The remaining measured direct-KFD subphases were 0.027 us for argument layout,
-0.031 us for dispatch-resource reuse, 0.063 us for kernarg materialization,
-and 0.023 us for pending-dispatch bookkeeping per launch. Kernarg preparation
-is therefore the largest individually identified direct-KFD phase, while most
-of the residual lies outside these small leaf operations in runtime and
-executor call overhead.
+At that point, the remaining measured direct-KFD subphases were 0.027 us for
+argument layout, 0.031 us for dispatch-resource reuse, 0.063 us for kernarg
+materialization, and 0.023 us for pending-dispatch bookkeeping per launch.
+
+The next optimization reused the validated kernarg requirements during
+materialization and skipped the metadata's explicit-argument prefix while
+populating hidden launch arguments. In a same-session before/after Qwen run,
+kernarg materialization fell from 0.062 us to 0.048-0.049 us per dispatch. The
+three post-change repetitions reported 0.922-0.933 us total profiled runtime
+cost, compared with 0.949 us before the change. The top-five logits remained
+identical. Most residual CPU submission time still lies outside the measured
+leaf operations in runtime and executor call overhead.
 
 ### Stage-level GPU diagnostic
 

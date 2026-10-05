@@ -273,7 +273,7 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
         profile ? &profile->direct_kfd.kernarg_materialization_ns : nullptr);
     if (requirements.storage_size != 0) {
       const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
-          kernel_info, args, args_size, pending->kernarg.host_address(),
+          requirements, args, args_size, pending->kernarg.host_address(),
           pending->kernarg.size, pending->kernarg.gpu_address());
       if (!materialized ||
           !populate_light_rocr_hidden_kernargs(kernel_info, *config,

@@ -21,6 +21,7 @@ int main() {
 
   light_rocr::loader::KernelInfo kernel;
   kernel.kernarg_size = 96;
+  kernel.explicit_argument_size = 8;
   kernel.arguments = {
       {0, 8, KernelArgumentKind::GlobalBuffer},
       {8, 4, KernelArgumentKind::HiddenBlockCountX},

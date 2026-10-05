@@ -114,6 +114,41 @@ void supports_overlapping_argument_source(TestContext *context) {
                   "overlapping kernarg source was not copied safely");
 }
 
+void materializes_prevalidated_request(TestContext *context) {
+  const auto kernel = make_kernel();
+  KernargFixture fixture;
+  for (size_t index = 0; index < fixture.arguments.size(); ++index) {
+    fixture.arguments[index] = static_cast<uint8_t>(index + 1U);
+  }
+  fixture.storage.fill(0xa5);
+  const auto requirements = light_rocr::runtime::kernarg_buffer_requirements(
+      kernel, fixture.arguments.data(), fixture.arguments.size());
+  const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
+      requirements, fixture.arguments.data(), fixture.arguments.size(),
+      fixture.storage.data(), fixture.storage.size(), kKernargGpuAddress);
+
+  context->expect(static_cast<bool>(materialized), materialized.status.message);
+  context->expect(materialized.buffer.kernarg_size() == kernel.kernarg_size &&
+                      materialized.buffer.alignment() ==
+                          kernel.kernarg_alignment,
+                  "prevalidated kernarg metadata was not retained");
+  context->expect(std::equal(fixture.arguments.begin(), fixture.arguments.end(),
+                             fixture.storage.begin()),
+                  "prevalidated kernarg prefix was not copied");
+
+  fixture.storage.fill(0xa5);
+  const auto oversized = light_rocr::runtime::materialize_kernarg_buffer(
+      requirements, fixture.arguments.data(), kernel.kernarg_size + 1U,
+      fixture.storage.data(), fixture.storage.size(), kKernargGpuAddress);
+  context->expect(
+      oversized.status.error ==
+          light_rocr::runtime::KernargBufferError::ArgumentSizeExceeded,
+      "prevalidated kernarg accepted a different oversized argument buffer");
+  context->expect(std::all_of(fixture.storage.begin(), fixture.storage.end(),
+                              [](uint8_t byte) { return byte == 0xa5; }),
+                  "prevalidated kernarg wrote before argument revalidation");
+}
+
 void supports_canonical_empty_kernarg(TestContext *context) {
   const auto kernel = make_kernel(0);
   const auto requirements =
@@ -235,6 +270,7 @@ int main() {
        materializes_argument_prefix_and_zero_tail},
       {"supports_overlapping_argument_source",
        supports_overlapping_argument_source},
+      {"materializes_prevalidated_request", materializes_prevalidated_request},
       {"supports_canonical_empty_kernarg", supports_canonical_empty_kernarg},
       {"rejects_invalid_requests_before_writing",
        rejects_invalid_requests_before_writing},

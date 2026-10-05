@@ -1,5 +1,6 @@
 #include "light_rocr_kernargs.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -49,51 +50,60 @@ bool populate_light_rocr_hidden_kernargs(
   const uint32_t grid[] = {config.grid.x, config.grid.y, config.grid.z};
   const uint32_t block[] = {config.block.x, config.block.y, config.block.z};
   using light_rocr::loader::KernelArgumentKind;
-  for (const auto &argument : kernel.arguments) {
+  // Loader validation sorts arguments by offset and rejects explicit
+  // arguments after the first hidden argument. Skip the immutable explicit
+  // prefix instead of classifying every argument on every dispatch.
+  const auto first_hidden = std::lower_bound(
+      kernel.arguments.begin(), kernel.arguments.end(),
+      kernel.explicit_argument_size,
+      [](const light_rocr::loader::KernelArgumentInfo &argument,
+         uint32_t offset) { return argument.offset < offset; });
+  for (auto argument = first_hidden; argument != kernel.arguments.end();
+       ++argument) {
     bool written = true;
-    switch (argument.kind) {
+    switch (argument->kind) {
     case KernelArgumentKind::HiddenBlockCountX:
       written =
-          write_argument(bytes, kernarg_size, argument, grid[0] / block[0]);
+          write_argument(bytes, kernarg_size, *argument, grid[0] / block[0]);
       break;
     case KernelArgumentKind::HiddenBlockCountY:
       written =
-          write_argument(bytes, kernarg_size, argument, grid[1] / block[1]);
+          write_argument(bytes, kernarg_size, *argument, grid[1] / block[1]);
       break;
     case KernelArgumentKind::HiddenBlockCountZ:
       written =
-          write_argument(bytes, kernarg_size, argument, grid[2] / block[2]);
+          write_argument(bytes, kernarg_size, *argument, grid[2] / block[2]);
       break;
     case KernelArgumentKind::HiddenGroupSizeX:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                static_cast<uint16_t>(block[0]));
       break;
     case KernelArgumentKind::HiddenGroupSizeY:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                static_cast<uint16_t>(block[1]));
       break;
     case KernelArgumentKind::HiddenGroupSizeZ:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                static_cast<uint16_t>(block[2]));
       break;
     case KernelArgumentKind::HiddenRemainderX:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                static_cast<uint16_t>(grid[0] % block[0]));
       break;
     case KernelArgumentKind::HiddenRemainderY:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                static_cast<uint16_t>(grid[1] % block[1]));
       break;
     case KernelArgumentKind::HiddenRemainderZ:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                static_cast<uint16_t>(grid[2] % block[2]));
       break;
     case KernelArgumentKind::HiddenGridDims:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                dispatch_dimensions(config));
       break;
     case KernelArgumentKind::HiddenDynamicLdsSize:
-      written = write_argument(bytes, kernarg_size, argument,
+      written = write_argument(bytes, kernarg_size, *argument,
                                config.shared_memory_bytes);
       break;
     default:

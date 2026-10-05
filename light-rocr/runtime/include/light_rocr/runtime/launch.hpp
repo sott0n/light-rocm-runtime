@@ -59,6 +59,9 @@ private:
   friend KernargBufferMaterializationResult
   materialize_kernarg_buffer(const loader::KernelInfo &, const void *, size_t,
                              void *, uint64_t, uint64_t);
+  friend KernargBufferMaterializationResult
+  materialize_kernarg_buffer(const KernargBufferRequirementsResult &,
+                             const void *, size_t, void *, uint64_t, uint64_t);
 
   KernargBufferInfo(uint64_t gpu_address, uint32_t kernarg_size,
                     uint32_t alignment)
@@ -91,6 +94,17 @@ kernarg_buffer_requirements(const loader::KernelInfo &kernel,
 // kernarg_buffer_requirements().
 [[nodiscard]] KernargBufferMaterializationResult
 materialize_kernarg_buffer(const loader::KernelInfo &kernel,
+                           const void *arguments, size_t arguments_size,
+                           void *destination, uint64_t destination_size,
+                           uint64_t gpu_address);
+
+// Materializes a request already validated by kernarg_buffer_requirements().
+// The requirements must be an unmodified result for the same kernel. This
+// overload still validates the argument pointer and size, but avoids repeating
+// immutable kernel-metadata validation on hot paths that must inspect the
+// storage requirements before acquiring a buffer.
+[[nodiscard]] KernargBufferMaterializationResult
+materialize_kernarg_buffer(const KernargBufferRequirementsResult &requirements,
                            const void *arguments, size_t arguments_size,
                            void *destination, uint64_t destination_size,
                            uint64_t gpu_address);

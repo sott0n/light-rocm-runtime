@@ -82,8 +82,30 @@ materialize_kernarg_buffer(const loader::KernelInfo &kernel,
                            uint64_t gpu_address) {
   const KernargBufferRequirementsResult requirements =
       validate_kernarg_request(kernel, arguments, arguments_size);
+  return materialize_kernarg_buffer(requirements, arguments, arguments_size,
+                                    destination, destination_size, gpu_address);
+}
+
+KernargBufferMaterializationResult
+materialize_kernarg_buffer(const KernargBufferRequirementsResult &requirements,
+                           const void *arguments, size_t arguments_size,
+                           void *destination, uint64_t destination_size,
+                           uint64_t gpu_address) {
   if (!requirements) {
     return {requirements.status, {}};
+  }
+  if (arguments_size != 0 && arguments == nullptr) {
+    return {
+        kernarg_failure(KernargBufferError::InvalidArguments,
+                        "kernarg bytes are null but their size is non-zero"),
+        {}};
+  }
+  if (arguments_size > requirements.storage_size) {
+    return {kernarg_failure(
+                KernargBufferError::ArgumentSizeExceeded,
+                "caller-provided kernarg bytes exceed the validated kernarg "
+                "segment"),
+            {}};
   }
 
   if (requirements.storage_size == 0) {
@@ -128,7 +150,8 @@ materialize_kernarg_buffer(const loader::KernelInfo &kernel,
   std::memset(destination_bytes + arguments_size, 0,
               static_cast<size_t>(requirements.storage_size) - arguments_size);
   return {{},
-          KernargBufferInfo(gpu_address, kernel.kernarg_size,
+          KernargBufferInfo(gpu_address,
+                            static_cast<uint32_t>(requirements.storage_size),
                             requirements.alignment)};
 }
 
