@@ -71,7 +71,7 @@ static void run_case(lrrt::Device &device, uint32_t rows, uint32_t hidden,
         max_diff = fmaxf(max_diff, fabsf(actual - expected));
         row_sum += actual;
       } else {
-        max_masked_diff = fmaxf(max_masked_diff, fabsf(actual + 7.0f));
+        max_masked_diff = fmaxf(max_masked_diff, fabsf(actual));
       }
     }
     max_sum_diff = fmaxf(max_sum_diff, fabsf(row_sum - 1.0f));
