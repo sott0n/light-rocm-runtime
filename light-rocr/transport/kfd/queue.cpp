@@ -37,6 +37,7 @@ static_assert(sizeof(runtime::AmdQueueV1) <= kMemoryPageSize);
 static_assert(sizeof(uintptr_t) == sizeof(uint64_t));
 static_assert(sizeof(off_t) == sizeof(uint64_t));
 static_assert(__atomic_always_lock_free(sizeof(uint16_t), nullptr));
+static_assert(__atomic_always_lock_free(sizeof(uint32_t), nullptr));
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr));
 
 constexpr uint16_t kAqlInvalidPacketHeader = 1;
@@ -884,6 +885,33 @@ uint64_t AqlQueue::write_index_relaxed() const {
   const auto *control =
       static_cast<const runtime::AmdQueueV1 *>(state_->control->host_address());
   return __atomic_load_n(&control->write_dispatch_id, __ATOMIC_RELAXED);
+}
+
+void AqlQueue::set_profiling_enabled(bool enabled) {
+  if (!state_ || !state_->control || !state_->control->host_address()) {
+    return;
+  }
+  auto *queue =
+      static_cast<runtime::AmdQueueV1 *>(state_->control->host_address());
+  if (enabled) {
+    __atomic_fetch_or(&queue->queue_properties,
+                      runtime::kAmdQueuePropertyEnableProfiling,
+                      __ATOMIC_RELEASE);
+  } else {
+    __atomic_fetch_and(&queue->queue_properties,
+                       ~runtime::kAmdQueuePropertyEnableProfiling,
+                       __ATOMIC_RELEASE);
+  }
+}
+
+bool AqlQueue::profiling_enabled() const {
+  if (!state_ || !state_->control || !state_->control->host_address()) {
+    return false;
+  }
+  const auto *queue =
+      static_cast<const runtime::AmdQueueV1 *>(state_->control->host_address());
+  return (__atomic_load_n(&queue->queue_properties, __ATOMIC_ACQUIRE) &
+          runtime::kAmdQueuePropertyEnableProfiling) != 0;
 }
 
 AqlQueueIndexResult AqlQueue::add_write_index_scacq_screl(uint64_t increment) {

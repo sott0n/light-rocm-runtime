@@ -10,6 +10,7 @@ namespace light_rocr::runtime {
 inline constexpr uint32_t kHsaQueueTypeMulti = 0;
 inline constexpr uint32_t kHsaQueueFeatureKernelDispatch = 1;
 inline constexpr uint32_t kAmdQueuePropertyIsPointer64 = 1U << 1U;
+inline constexpr uint32_t kAmdQueuePropertyEnableProfiling = 1U << 3U;
 
 // The public HSA queue prefix is reproduced here so the native runtime does
 // not need a build-time dependency on ROCr. This project currently targets

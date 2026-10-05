@@ -18,6 +18,12 @@ void initialize_user_signal(AmdSignal &signal, int64_t initial_value) {
   signal_store_relaxed(signal, initial_value);
 }
 
+void reset_user_signal(AmdSignal &signal, int64_t initial_value) {
+  __atomic_store_n(&signal.start_ts, uint64_t{0}, __ATOMIC_RELAXED);
+  __atomic_store_n(&signal.end_ts, uint64_t{0}, __ATOMIC_RELAXED);
+  __atomic_store_n(&signal.value, initial_value, __ATOMIC_RELEASE);
+}
+
 int64_t signal_load_relaxed(const AmdSignal &signal) {
   return __atomic_load_n(&signal.value, __ATOMIC_RELAXED);
 }
@@ -47,6 +53,14 @@ signal_wait_until_equal(const AmdSignal &signal, int64_t expected_value,
     }
     std::this_thread::yield();
   }
+}
+
+uint64_t signal_start_timestamp_acquire(const AmdSignal &signal) {
+  return __atomic_load_n(&signal.start_ts, __ATOMIC_ACQUIRE);
+}
+
+uint64_t signal_end_timestamp_acquire(const AmdSignal &signal) {
+  return __atomic_load_n(&signal.end_ts, __ATOMIC_ACQUIRE);
 }
 
 } // namespace light_rocr::runtime

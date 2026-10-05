@@ -46,6 +46,9 @@ public:
   [[nodiscard]] int64_t load_acquire() const;
   void store_relaxed(int64_t value);
   void store_release(int64_t value);
+  void reset(int64_t initial_value);
+  [[nodiscard]] uint64_t start_timestamp_acquire() const;
+  [[nodiscard]] uint64_t end_timestamp_acquire() const;
   [[nodiscard]] runtime::SignalWaitResult
   wait_until_equal(int64_t expected_value,
                    std::chrono::steady_clock::time_point deadline) const;

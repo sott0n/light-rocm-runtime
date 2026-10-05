@@ -194,7 +194,7 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
           std::move(queue->available_dispatches.back());
     }
     queue->available_dispatches.pop_back();
-    pending->completion_signal.store_relaxed(1);
+    pending->completion_signal.reset(1);
   } else {
     const auto kernarg =
         allocate_direct_kfd_kernarg_locked(device, queue, allocation_size);

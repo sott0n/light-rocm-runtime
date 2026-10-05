@@ -1368,15 +1368,23 @@ lr_status_t release_direct_kfd_kernarg_arenas_locked(lr_queue_t *queue) {
 } // namespace
 
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
-  while (queue->pending_dispatch_head != queue->pending_dispatches.size()) {
+  while (queue->pending_dispatch_head != queue->pending_dispatches.size() ||
+         !queue->pending_events.empty()) {
     const auto waited =
-        queue->pending_dispatches[queue->pending_dispatch_head]
-            ->completion_signal.wait_until_equal(
-                0, std::chrono::steady_clock::time_point::max());
+        queue->pending_dispatch_head != queue->pending_dispatches.size()
+            ? queue->pending_dispatches[queue->pending_dispatch_head]
+                  ->completion_signal.wait_until_equal(
+                      0, std::chrono::steady_clock::time_point::max())
+            : queue->pending_events.front()->signal.wait_until_equal(
+                  0, std::chrono::steady_clock::time_point::max());
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }
-    const lr_status_t status = reap_direct_kfd_dispatches_locked(queue);
+    lr_status_t status = reap_direct_kfd_dispatches_locked(queue);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+    status = reap_completed_direct_kfd_events_locked(queue);
     if (status != LR_SUCCESS) {
       return status;
     }
@@ -1393,6 +1401,11 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     if (reap_status != LR_SUCCESS) {
       return reap_status;
     }
+    const lr_status_t event_status =
+        reap_completed_direct_kfd_events_locked(queue);
+    if (event_status != LR_SUCCESS) {
+      return event_status;
+    }
     const uint64_t read_index = queue->queue.read_index_acquire();
     const uint64_t write_index = queue->queue.write_index_relaxed();
     if (write_index < read_index) {
@@ -1401,13 +1414,17 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     if (write_index - read_index < queue->queue.packet_count()) {
       return LR_SUCCESS;
     }
-    if (queue->pending_dispatch_head == queue->pending_dispatches.size()) {
+    if (queue->pending_dispatch_head == queue->pending_dispatches.size() &&
+        queue->pending_events.empty()) {
       return LR_ERROR_RUNTIME;
     }
     const auto waited =
-        queue->pending_dispatches[queue->pending_dispatch_head]
-            ->completion_signal.wait_until_equal(
-                0, std::chrono::steady_clock::time_point::max());
+        queue->pending_dispatch_head != queue->pending_dispatches.size()
+            ? queue->pending_dispatches[queue->pending_dispatch_head]
+                  ->completion_signal.wait_until_equal(
+                      0, std::chrono::steady_clock::time_point::max())
+            : queue->pending_events.front()->signal.wait_until_equal(
+                  0, std::chrono::steady_clock::time_point::max());
     if (!waited) {
       return LR_ERROR_RUNTIME;
     }

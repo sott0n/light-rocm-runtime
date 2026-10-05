@@ -148,6 +148,20 @@ struct lr_event_t {
   size_t active_synchronizers = 0;
   bool destroying = false;
   lr_queue_t *recorded_queue = nullptr;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  lr_event_t(lr_device_t device_handle,
+             light_rocr::transport::kfd::UserSignal &&created_signal)
+      : device(device_handle), signal(std::move(created_signal)) {}
+
+  light_rocr::transport::kfd::UserSignal signal;
+  bool pending = false;
+  bool completed = false;
+  bool destroying = false;
+  uint64_t start_tick = 0;
+  uint64_t completion_tick = 0;
+  light_rocr::transport::kfd::ClockCounters record_clock;
+  light_rocr::transport::kfd::ClockCounters completion_clock;
+  lr_queue_t *recorded_queue = nullptr;
 #endif
 };
 
@@ -239,6 +253,7 @@ struct lr_queue_t {
   size_t pending_dispatch_head = 0;
   std::vector<std::unique_ptr<PendingDispatch>> available_dispatches;
   std::vector<std::unique_ptr<KernargArena>> kernarg_arenas;
+  std::vector<lr_event_t *> pending_events;
 #endif
 };
 
@@ -388,6 +403,10 @@ lr_status_t ensure_direct_kfd_queue_scratch_locked(DeviceState *device,
 lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_device_locked(DeviceState *device);
+lr_status_t reap_completed_direct_kfd_events_locked(lr_queue_t *queue);
+lr_status_t wait_for_direct_kfd_event_locked(lr_event_t *event);
+void release_direct_kfd_events_locked(lr_status_t *result);
+bool valid_event_locked(lr_event_t *event);
 lr_status_t submit_direct_kfd_kernel_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,

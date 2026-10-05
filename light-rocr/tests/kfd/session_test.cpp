@@ -79,6 +79,19 @@ void invalid_session_rejects_signal_creation(TestContext *context) {
                   "invalid session returned signal resource ownership");
 }
 
+void invalid_session_rejects_clock_query(TestContext *context) {
+  light_rocr::transport::kfd::KfdSession session;
+  light_rocr::runtime::Node node;
+  node.gpu_id = 1;
+  const auto queried = session.query_clock_counters(node);
+  context->expect(!queried,
+                  "invalid session unexpectedly returned clock counters");
+  context->expect(
+      queried.status.error ==
+          light_rocr::transport::kfd::SessionError::QueryClockCounters,
+      "wrong invalid-session clock error");
+}
+
 } // namespace
 
 int main() {
@@ -87,6 +100,7 @@ int main() {
       {"missing device", missing_device_is_reported},
       {"ioctl failure", ioctl_failure_is_reported},
       {"invalid signal session", invalid_session_rejects_signal_creation},
+      {"invalid clock session", invalid_session_rejects_clock_query},
   };
 
   int failures = 0;

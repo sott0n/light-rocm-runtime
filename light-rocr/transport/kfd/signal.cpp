@@ -221,6 +221,18 @@ void UserSignal::store_release(int64_t value) {
   runtime::signal_store_release(abi(), value);
 }
 
+void UserSignal::reset(int64_t initial_value) {
+  runtime::reset_user_signal(abi(), initial_value);
+}
+
+uint64_t UserSignal::start_timestamp_acquire() const {
+  return runtime::signal_start_timestamp_acquire(abi());
+}
+
+uint64_t UserSignal::end_timestamp_acquire() const {
+  return runtime::signal_end_timestamp_acquire(abi());
+}
+
 runtime::SignalWaitResult UserSignal::wait_until_equal(
     int64_t expected_value,
     std::chrono::steady_clock::time_point deadline) const {

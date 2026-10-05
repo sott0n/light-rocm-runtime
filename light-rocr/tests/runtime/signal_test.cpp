@@ -76,6 +76,20 @@ void atomic_load_store(TestContext *context) {
                   "release/acquire atomic round trip failed");
 }
 
+void reset_clears_profiling_timestamps(TestContext *context) {
+  AmdSignal signal;
+  light_rocr::runtime::initialize_user_signal(signal, 0);
+  signal.start_ts = 17;
+  signal.end_ts = 23;
+  light_rocr::runtime::reset_user_signal(signal, 1);
+  context->expect(light_rocr::runtime::signal_load_acquire(signal) == 1,
+                  "reset did not publish the initial value");
+  context->expect(
+      light_rocr::runtime::signal_start_timestamp_acquire(signal) == 0 &&
+          light_rocr::runtime::signal_end_timestamp_acquire(signal) == 0,
+      "reset retained stale profiling timestamps");
+}
+
 void wait_observes_release(TestContext *context) {
   AmdSignal signal;
   light_rocr::runtime::initialize_user_signal(signal, 1);
@@ -125,6 +139,7 @@ int main() {
       {"abi_layout", abi_layout},
       {"initialization_zeros_abi_fields", initialization_zeros_abi_fields},
       {"atomic_load_store", atomic_load_store},
+      {"reset_clears_profiling_timestamps", reset_clears_profiling_timestamps},
       {"wait_observes_release", wait_observes_release},
       {"wait_reports_timeout", wait_reports_timeout},
       {"expired_wait_can_already_be_satisfied",

@@ -781,6 +781,19 @@ measure_stack_case(lrrt::Device &device,
   }
   cpu_round_trip_ns /= static_cast<double>(iterations);
 
+  double gpu_burst_interval_ns = -1.0;
+  if (!sync_stack) {
+    lrrt::Event gpu_start(device);
+    lrrt::Event gpu_end(device);
+    gpu_start.record(*stack_queue);
+    gpu_start.synchronize();
+    submit_stack(nullptr, nullptr, nullptr);
+    gpu_end.record(*stack_queue);
+    gpu_end.synchronize();
+    gpu_burst_interval_ns =
+        static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end));
+  }
+
   std::vector<LogitEntry> summary;
   size_t non_finite_logits = 0;
   size_t non_finite_hidden = 0;
@@ -799,7 +812,7 @@ measure_stack_case(lrrt::Device &device,
 
   return {cpu_round_trip_ns,
           cpu_round_trip_ns,
-          -1.0,
+          gpu_burst_interval_ns,
           elapsed_ns(setup_begin, setup_end),
           elapsed_ns(warmup_begin, warmup_end),
           setup_breakdown.construct_ns,
@@ -1074,10 +1087,8 @@ int main(int argc, char **argv) {
     printf("Queueing:           %s\n",
            options.weights_dir ? "ordered launches on one shared lrrt queue"
                                : "ordered launches on one lrrt queue");
-    printf("Timing source:      %s\n",
-           options.weights_dir
-               ? "CPU steady_clock; stack GPU event timing disabled"
-               : "CPU steady_clock and HSA GPU event markers");
+    printf("Timing source:      CPU steady_clock and profiled GPU event "
+           "markers\n");
     printf("Weight source:      %s\n",
            options.weights_path
                ? options.weights_path
@@ -1183,9 +1194,9 @@ int main(int argc, char **argv) {
            "followed by one final synchronize() with steady_clock.\n",
            colors.label, colors.reset);
     if (options.weights_dir) {
-      printf("%sGPU burst%s is n/a for decoder stacks; the comparable "
-             "ROCr/direct-KFD path does not currently collect a device "
-             "timestamp interval.\n",
+      printf("%sGPU burst%s measures the profiled device timestamp interval "
+             "around one decoder-stack submission. It includes time the GPU "
+             "waits for host submission and is n/a for --sync-stack.\n",
              colors.label, colors.reset);
     } else {
       printf("%sGPU burst%s measures HSA event elapsed time around repeated "

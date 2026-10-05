@@ -63,6 +63,10 @@ tree based on revision `a8dd546`.
 The host-enqueue measurement excludes the final synchronization. The device
 batch interval is measured with HSA event timestamps.
 
+The Qwen decoder-stack benchmark reports a profiled GPU interval on both the
+ROCr and direct KFD backends. It synchronizes the start marker before stack
+submission so the marker itself does not remain a pending runtime dependency.
+
 ### Asynchronous dependencies
 
 The copy-to-launch cases use a 4 MiB D2D copy. The launch-to-copy case uses a

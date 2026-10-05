@@ -94,6 +94,8 @@ public:
   [[nodiscard]] uint64_t scratch_size() const;
   [[nodiscard]] uint64_t read_index_acquire() const;
   [[nodiscard]] uint64_t write_index_relaxed() const;
+  void set_profiling_enabled(bool enabled);
+  [[nodiscard]] bool profiling_enabled() const;
   // Packet producers own capacity checks, ring writes, header publication,
   // and the doorbell value. These operations only expose queue mechanics.
   [[nodiscard]] AqlQueueIndexResult

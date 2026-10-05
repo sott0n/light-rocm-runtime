@@ -47,6 +47,7 @@ struct SignalWaitResult {
 };
 
 void initialize_user_signal(AmdSignal &signal, int64_t initial_value);
+void reset_user_signal(AmdSignal &signal, int64_t initial_value);
 [[nodiscard]] int64_t signal_load_relaxed(const AmdSignal &signal);
 [[nodiscard]] int64_t signal_load_acquire(const AmdSignal &signal);
 void signal_store_relaxed(AmdSignal &signal, int64_t value);
@@ -54,6 +55,8 @@ void signal_store_release(AmdSignal &signal, int64_t value);
 [[nodiscard]] SignalWaitResult
 signal_wait_until_equal(const AmdSignal &signal, int64_t expected_value,
                         std::chrono::steady_clock::time_point deadline);
+[[nodiscard]] uint64_t signal_start_timestamp_acquire(const AmdSignal &signal);
+[[nodiscard]] uint64_t signal_end_timestamp_acquire(const AmdSignal &signal);
 
 } // namespace light_rocr::runtime
 

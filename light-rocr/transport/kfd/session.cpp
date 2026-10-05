@@ -83,6 +83,8 @@ const char *session_error_name(SessionError error) {
     return "unsupported_kfd_version";
   case SessionError::AllocateState:
     return "allocate_state";
+  case SessionError::QueryClockCounters:
+    return "query_clock_counters";
   }
   return "unknown";
 }
@@ -164,6 +166,40 @@ SessionResult KfdSession::open(const std::string &device_path) {
 
 runtime::KfdVersion KfdSession::version() const {
   return state_ ? state_->version : runtime::KfdVersion{};
+}
+
+ClockCountersResult
+KfdSession::query_clock_counters(const runtime::Node &node) const {
+  if (!state_) {
+    return {{SessionError::QueryClockCounters, 0,
+             "clock counters require an open KFD session"},
+            {}};
+  }
+  if (node.gpu_id == 0) {
+    return {{SessionError::QueryClockCounters, 0,
+             "clock counters require a GPU node"},
+            {}};
+  }
+
+  kfd_ioctl_get_clock_counters_args arguments{};
+  arguments.gpu_id = node.gpu_id;
+  int result = 0;
+  do {
+    result = ::ioctl(state_->fd, AMDKFD_IOC_GET_CLOCK_COUNTERS, &arguments);
+  } while (result < 0 && errno == EINTR);
+  if (result < 0) {
+    return {system_failure(SessionError::QueryClockCounters, errno,
+                           "AMDKFD_IOC_GET_CLOCK_COUNTERS"),
+            {}};
+  }
+  if (arguments.system_clock_freq == 0) {
+    return {{SessionError::QueryClockCounters, 0,
+             "KFD returned a zero system clock frequency"},
+            {}};
+  }
+  return {{},
+          {arguments.gpu_clock_counter, arguments.cpu_clock_counter,
+           arguments.system_clock_counter, arguments.system_clock_freq}};
 }
 
 } // namespace light_rocr::transport::kfd

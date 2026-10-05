@@ -72,6 +72,7 @@ if(
       lrrt_direct_kfd_queue_device_tests direct_kfd_queue.cpp
       lrrt_direct_kfd_module_device_tests direct_kfd_module.cpp
       lrrt_direct_kfd_launch_device_tests direct_kfd_launch.cpp
+      lrrt_direct_kfd_event_device_tests direct_kfd_event.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )

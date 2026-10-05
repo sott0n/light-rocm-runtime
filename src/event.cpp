@@ -1,6 +1,8 @@
 #include "aql_producer.hpp"
 #if LRRT_ENABLE_LIGHT_ROCR
 #include "light_rocr_aql_queue.hpp"
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr_kfd_aql_queue.hpp"
 #endif
 #include "runtime_internal.hpp"
 
@@ -14,7 +16,7 @@
 
 namespace lrrt_internal {
 
-#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR
+#if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 std::unordered_set<lr_event_t *> g_events;
 
 bool valid_event_locked(lr_event_t *event) {
@@ -471,6 +473,114 @@ void release_light_rocr_events_locked(lr_status_t *result) {
     event = g_events.erase(event);
   }
 }
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+namespace {
+
+void remove_direct_kfd_pending_event(std::vector<lr_event_t *> *events,
+                                     lr_event_t *event) {
+  const auto found = std::find(events->begin(), events->end(), event);
+  if (found != events->end()) {
+    *found = events->back();
+    events->pop_back();
+  }
+}
+
+lr_status_t finish_direct_kfd_event_wait_locked(lr_event_t *event) {
+  if (!event->pending) {
+    return event->completed ? LR_SUCCESS : LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (event->signal.load_acquire() != 0 || !g_kfd_session ||
+      event->device.index >= g_devices.size()) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  DeviceState &device = g_devices[event->device.index];
+  const auto clock = g_kfd_session->query_clock_counters(device.node);
+  const uint64_t start_tick = event->signal.start_timestamp_acquire();
+  const uint64_t end_tick = event->signal.end_timestamp_acquire();
+  if (event->recorded_queue) {
+    remove_direct_kfd_pending_event(&event->recorded_queue->pending_events,
+                                    event);
+  }
+  remove_direct_kfd_pending_event(&device.pending_events, event);
+  event->recorded_queue = nullptr;
+  event->pending = false;
+  if (!clock || start_tick == 0 || end_tick < start_tick) {
+    event->completed = false;
+    return LR_ERROR_RUNTIME;
+  }
+  event->start_tick = start_tick;
+  event->completion_tick = end_tick;
+  event->completion_clock = clock.counters;
+  event->completed = true;
+  return LR_SUCCESS;
+}
+
+lr_status_t direct_kfd_event_submit_status(AqlSubmitError error) {
+  return error == AqlSubmitError::InvalidPacket ||
+                 error == AqlSubmitError::InvalidQueue
+             ? LR_ERROR_INVALID_ARGUMENT
+             : LR_ERROR_RUNTIME;
+}
+
+bool valid_clock_span(const light_rocr::transport::kfd::ClockCounters &begin,
+                      const light_rocr::transport::kfd::ClockCounters &end) {
+  return begin.system_frequency_hz != 0 &&
+         begin.system_frequency_hz == end.system_frequency_hz &&
+         end.gpu > begin.gpu && end.system >= begin.system;
+}
+
+uint64_t gpu_ticks_to_ns(uint64_t ticks,
+                         const light_rocr::transport::kfd::ClockCounters &begin,
+                         const light_rocr::transport::kfd::ClockCounters &end) {
+  const uint64_t gpu_span = end.gpu - begin.gpu;
+  const uint64_t system_span = end.system - begin.system;
+  const unsigned __int128 system_ticks =
+      (static_cast<unsigned __int128>(ticks) * system_span) / gpu_span;
+  return static_cast<uint64_t>((system_ticks * 1000000000ULL) /
+                               begin.system_frequency_hz);
+}
+
+} // namespace
+
+lr_status_t reap_completed_direct_kfd_events_locked(lr_queue_t *queue) {
+  while (!queue->pending_events.empty()) {
+    lr_event_t *event = queue->pending_events.front();
+    if (event->signal.load_acquire() != 0) {
+      break;
+    }
+    const lr_status_t status = finish_direct_kfd_event_wait_locked(event);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+  }
+  return LR_SUCCESS;
+}
+
+lr_status_t wait_for_direct_kfd_event_locked(lr_event_t *event) {
+  if (!event->pending) {
+    return event->completed ? LR_SUCCESS : LR_ERROR_INVALID_ARGUMENT;
+  }
+  const auto waited = event->signal.wait_until_equal(
+      0, std::chrono::steady_clock::time_point::max());
+  return waited ? finish_direct_kfd_event_wait_locked(event) : LR_ERROR_RUNTIME;
+}
+
+void release_direct_kfd_events_locked(lr_status_t *result) {
+  auto event = g_events.begin();
+  while (event != g_events.end()) {
+    lr_event_t *current = *event;
+    if (!current->signal.release()) {
+      if (*result == LR_SUCCESS) {
+        *result = LR_ERROR_RUNTIME;
+      }
+      ++event;
+      continue;
+    }
+    delete current;
+    event = g_events.erase(event);
+  }
+}
 #endif
 
 } // namespace lrrt_internal
@@ -545,6 +655,33 @@ lr_status_t lr_event_create(lr_device_t device, lr_event_t **event) {
   }
   *event = created_event;
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() ||
+      !g_devices[device.index].default_queue || !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  auto created_signal =
+      g_kfd_session->create_user_signal(g_devices[device.index].node, 1);
+  if (!created_signal) {
+    return LR_ERROR_RUNTIME;
+  }
+  auto *created_event =
+      new (std::nothrow) lr_event_t(device, std::move(created_signal.signal));
+  if (!created_event) {
+    (void)created_signal.signal.release();
+    return LR_ERROR_RUNTIME;
+  }
+  try {
+    g_events.insert(created_event);
+  } catch (const std::bad_alloc &) {
+    (void)created_event->signal.release();
+    delete created_event;
+    return LR_ERROR_RUNTIME;
+  }
+  *event = created_event;
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -615,6 +752,28 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
     return LR_ERROR_RUNTIME;
   }
 
+  g_events.erase(event_entry);
+  delete event;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  const auto event_entry = g_events.find(event);
+  if (event_entry == g_events.end() || event->destroying ||
+      event->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  event->destroying = true;
+  if (event->pending) {
+    const lr_status_t wait_status = wait_for_direct_kfd_event_locked(event);
+    if (wait_status != LR_SUCCESS) {
+      event->destroying = false;
+      return wait_status;
+    }
+  }
+  if (!event->signal.release()) {
+    event->destroying = false;
+    return LR_ERROR_RUNTIME;
+  }
   g_events.erase(event_entry);
   delete event;
   return LR_SUCCESS;
@@ -780,6 +939,78 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
     return light_rocr_submit_status(submitted.error);
   }
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_event_locked(event) || event->destroying ||
+      event->device.index >= g_devices.size() || !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (event->pending) {
+    const lr_status_t wait_status = wait_for_direct_kfd_event_locked(event);
+    if (wait_status != LR_SUCCESS) {
+      return wait_status;
+    }
+  }
+
+  DeviceState &device = g_devices[event->device.index];
+  if (use_default_queue) {
+    queue = device.default_queue;
+  }
+  if (!queue || !valid_direct_kfd_queue_locked(queue) ||
+      queue->device.index != event->device.index) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const lr_status_t capacity_status =
+      ensure_direct_kfd_queue_capacity_locked(queue);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
+  }
+  const auto clock = g_kfd_session->query_clock_counters(device.node);
+  if (!clock) {
+    return LR_ERROR_RUNTIME;
+  }
+  try {
+    queue->pending_events.reserve(queue->pending_events.size() + 1);
+    device.pending_events.reserve(device.pending_events.size() + 1);
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  const bool was_completed = event->completed;
+  const uint64_t previous_start_tick = event->start_tick;
+  const uint64_t previous_completion_tick = event->completion_tick;
+  const auto previous_record_clock = event->record_clock;
+  const auto previous_completion_clock = event->completion_clock;
+  queue->queue.set_profiling_enabled(true);
+  event->signal.reset(1);
+  event->pending = true;
+  event->completed = false;
+  event->start_tick = 0;
+  event->completion_tick = 0;
+  event->record_clock = clock.counters;
+  event->completion_clock = {};
+  event->recorded_queue = queue;
+  queue->pending_events.push_back(event);
+  device.pending_events.push_back(event);
+
+  AqlBarrierAndParameters parameters;
+  parameters.completion_signal = event->signal.gpu_handle();
+  const AqlSubmitResult submitted = submit_aql_barrier_and(
+      light_rocr_kfd_producer_ops(&queue->queue), parameters);
+  if (!submitted) {
+    queue->pending_events.pop_back();
+    device.pending_events.pop_back();
+    event->recorded_queue = nullptr;
+    event->pending = false;
+    event->completed = was_completed;
+    event->start_tick = previous_start_tick;
+    event->completion_tick = previous_completion_tick;
+    event->record_clock = previous_record_clock;
+    event->completion_clock = previous_completion_clock;
+    event->signal.store_relaxed(0);
+    return direct_kfd_event_submit_status(submitted.error);
+  }
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -853,6 +1084,13 @@ lr_status_t lr_event_synchronize(lr_event_t *event) {
   --event->active_synchronizers;
   g_event_state_changed.notify_all();
   return result;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_event_locked(event) || event->destroying ||
+      event->device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  return event->pending ? wait_for_direct_kfd_event_locked(event) : LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -892,6 +1130,21 @@ lr_status_t lr_event_elapsed_time_ns(const lr_event_t *start,
   *elapsed_ns = static_cast<uint64_t>(
       (static_cast<unsigned __int128>(ticks) * 1000000000ULL) / frequency);
   return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (g_events.find(const_cast<lr_event_t *>(start)) == g_events.end() ||
+      g_events.find(const_cast<lr_event_t *>(end)) == g_events.end() ||
+      start->device.index != end->device.index || start->pending ||
+      end->pending || !start->completed || !end->completed ||
+      end->completion_tick < start->completion_tick) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!valid_clock_span(start->record_clock, end->completion_clock)) {
+    return LR_ERROR_RUNTIME;
+  }
+  *elapsed_ns = gpu_ticks_to_ns(end->completion_tick - start->completion_tick,
+                                start->record_clock, end->completion_clock);
+  return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
@@ -928,6 +1181,19 @@ lr_status_t lr_event_duration_ns(const lr_event_t *event,
   const uint64_t ticks = event->completion_tick - event->start_tick;
   *duration_ns = static_cast<uint64_t>(
       (static_cast<unsigned __int128>(ticks) * 1000000000ULL) / frequency);
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (g_events.find(const_cast<lr_event_t *>(event)) == g_events.end() ||
+      event->device.index >= g_devices.size() || event->pending ||
+      !event->completed || event->completion_tick < event->start_tick) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!valid_clock_span(event->record_clock, event->completion_clock)) {
+    return LR_ERROR_RUNTIME;
+  }
+  *duration_ns = gpu_ticks_to_ns(event->completion_tick - event->start_tick,
+                                 event->record_clock, event->completion_clock);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;

@@ -28,8 +28,8 @@ measurements are still required for a hardware-independent performance claim.
 
 | Item | Value |
 | --- | --- |
-| Runtime revision | `e4e26e5` |
-| Date | 2026-10-04 |
+| Runtime revision | `f312a8a` plus the direct KFD timestamp change |
+| Date | 2026-10-05 |
 | GPU | AMD Radeon RX 7800 XT (`gfx1101`, 60 CUs) |
 | CPU | AMD Ryzen Threadripper 3970X, 32 cores / 64 threads |
 | ROCm | 6.4.4-129 |
@@ -97,12 +97,32 @@ three keys gives:
 | Direct KFD | 8.70-8.73 ms |
 
 The CPU submission gap is about 1.8 ms per stack, but submission overlaps GPU
-execution and therefore cannot be subtracted directly from the approximately
-7.0 ms end-to-end gap. Direct KFD uses persistent kernarg arenas, reusable
+execution and therefore cannot be subtracted directly from the end-to-end gap.
+Direct KFD uses persistent kernarg arenas, reusable
 completion signals, direct queue-index atomics, and a direct MMIO doorbell
 store. The ROCr path goes through the HSA entry points and its queue, lifetime,
-signal, and kernarg bookkeeping. This explains the measured host-side
-submission advantage, but not the complete end-to-end difference.
+signal, and kernarg bookkeeping.
+
+Direct KFD event profiling now separates the device interval from the CPU
+round trip. A Release diagnostic pass after 350 warm-up iterations measured:
+
+| Backend | CPU round trip | Profiled GPU interval | Decoder-stage CPU submission |
+| --- | ---: | ---: | ---: |
+| ROCr | 48.981 ms | 41.684 ms | approximately 10.55 ms |
+| Direct KFD | 44.101 ms | 44.383 ms | approximately 8.90 ms |
+
+The start marker is synchronized before the stack is submitted. Leaving that
+marker pending materially perturbs the ROCr path and produces a non-comparable
+interval. The CPU and GPU columns are separate passes, so their small run-to-run
+difference must not be interpreted as an exact subtraction.
+
+This result rules out faster kernel execution as the source of the direct KFD
+end-to-end win: ROCr's measured device interval was about 6% shorter. The
+advantage is on the host runtime path. Direct KFD submits the stack about 16%
+faster and returns from the complete submit-and-synchronize round trip sooner;
+the residual is consistent with additional completion-retirement and queue
+synchronization work in the ROCr path. A phase profile inside ROCr queue
+synchronization is still needed to divide that remaining host cost exactly.
 
 The following diagnostic A/B changes did not explain the remaining gap:
 
@@ -118,11 +138,10 @@ queues also use the same ring size, queue percentage, priority, EOP size, and
 CWSR sizes. Executable allocations use the same
 `VRAM | WRITABLE | EXECUTABLE | NO_SUBSTITUTE` policy.
 
-Consequently, the full 13-14% Qwen difference is measured but not yet causally
-attributed. A fixed-clock run and direct KFD device timestamps are required to
-separate GPU execution, queue consumption, and automatic DPM effects. The
-current result must not be interpreted as proof that direct KFD makes the
-kernels themselves execute faster.
+Consequently, the Qwen advantage is attributable to the lighter host runtime
+path rather than faster kernels. Fixed-clock repetition is still required for
+a hardware-independent percentage, but it does not change which side of the
+runtime/device boundary contains the measured advantage.
 
 ## Correctness
 

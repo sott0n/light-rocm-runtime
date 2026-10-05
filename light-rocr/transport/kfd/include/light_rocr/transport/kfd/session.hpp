@@ -22,6 +22,7 @@ enum class SessionError {
   QueryKfdVersion,
   UnsupportedKfdVersion,
   AllocateState,
+  QueryClockCounters,
 };
 
 struct SessionStatus {
@@ -35,6 +36,20 @@ struct SessionStatus {
 struct KfdState;
 struct SessionResult;
 class ExecutableImage;
+
+struct ClockCounters {
+  uint64_t gpu = 0;
+  uint64_t cpu = 0;
+  uint64_t system = 0;
+  uint64_t system_frequency_hz = 0;
+};
+
+struct ClockCountersResult {
+  SessionStatus status;
+  ClockCounters counters;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
 
 class KfdSession {
 public:
@@ -72,6 +87,8 @@ public:
   [[nodiscard]] UserSignalResult
   create_user_signal(const runtime::Node &node, int64_t initial_value,
                      const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] ClockCountersResult
+  query_clock_counters(const runtime::Node &node) const;
   [[nodiscard]] bool owns_aql_queue(const AqlQueue &queue,
                                     const runtime::Node &node) const;
   [[nodiscard]] bool owns_executable_image(const ExecutableImage &image,
