@@ -122,22 +122,32 @@ int main() {
       0};
 
   lr_queue_t *queue = nullptr;
+  lr_queue_t *second_queue = nullptr;
   output.fill(0.0F);
   if (!expect_status(lr_queue_create(device, &queue), LR_SUCCESS,
                      "lr_queue_create") ||
+      !expect_status(lr_queue_create(device, &second_queue), LR_SUCCESS,
+                     "lr_queue_create second") ||
       !expect_status(lr_launch_on_queue(queue, kernel, &config, &arguments,
                                         sizeof(arguments)),
                      LR_SUCCESS, "lr_launch_on_queue") ||
+      !expect_status(lr_launch_on_queue(second_queue, kernel, &config,
+                                        &arguments, sizeof(arguments)),
+                     LR_SUCCESS, "lr_launch_on_queue second") ||
       !expect_status(lr_launch_on_queue(queue, kernel, &config, &arguments,
                                         sizeof(arguments)),
                      LR_SUCCESS, "lr_launch_on_queue ordered") ||
       !expect_status(lr_queue_synchronize(queue), LR_SUCCESS,
                      "lr_queue_synchronize") ||
+      !expect_status(lr_queue_synchronize(second_queue), LR_SUCCESS,
+                     "lr_queue_synchronize second") ||
       !expect_status(lr_launch_on_queue(queue, kernel, &config, &arguments,
                                         sizeof(arguments)),
                      LR_SUCCESS, "lr_launch_on_queue before destroy") ||
       !expect_status(lr_queue_destroy(queue), LR_SUCCESS,
                      "lr_queue_destroy with pending launch") ||
+      !expect_status(lr_queue_destroy(second_queue), LR_SUCCESS,
+                     "lr_queue_destroy second") ||
       !expect_status(lr_memcpy(device, output.data(), device_output,
                                sizeof(output), LR_MEMCPY_DEVICE_TO_HOST),
                      LR_SUCCESS, "copy explicit queue output") ||
@@ -179,6 +189,7 @@ int main() {
     return 1;
   }
 
-  std::printf("direct_kfd_launch: default=ok explicit=ok cleanup=ok\n");
+  std::printf(
+      "direct_kfd_launch: default=ok explicit_two_queue=ok cleanup=ok\n");
   return 0;
 }

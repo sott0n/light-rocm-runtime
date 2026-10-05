@@ -296,8 +296,8 @@ VmResult KfdSession::acquire_vm(const runtime::Node &node,
                                                          false,
                                                          false,
                                                          false,
-                                                         false,
-                                                         {}})
+                                                         {},
+                                                         nullptr})
                      .first;
     } catch (const std::bad_alloc &) {
       (void)::close(render_fd);

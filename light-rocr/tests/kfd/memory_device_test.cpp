@@ -128,12 +128,13 @@ int main() {
     std::cerr << second_opened.status.message << '\n';
     return 1;
   }
-  const auto duplicate = second_opened.session.allocate_scratch(node, 4096);
-  if (duplicate ||
-      duplicate.status.error !=
-          light_rocr::transport::kfd::MemoryError::ScratchAlreadyReserved ||
-      duplicate.allocation) {
-    std::cerr << "duplicate scratch reservation was accepted\n";
+  auto second_scratch = second_opened.session.allocate_scratch(node, 4096);
+  if (!second_scratch || !second_scratch.allocation.gpu_mapped() ||
+      second_scratch.allocation.gpu_address() ==
+          scratch.allocation.gpu_address()) {
+    std::cerr << (second_scratch ? "scratch pool reused a live allocation range"
+                                 : second_scratch.status.message)
+              << '\n';
     return 1;
   }
 
@@ -144,6 +145,14 @@ int main() {
     std::cerr << (scratch_released
                       ? "released scratch allocation retained state"
                       : scratch_released.message)
+              << '\n';
+    return 1;
+  }
+  const auto second_scratch_released = second_scratch.allocation.release();
+  if (!second_scratch_released || second_scratch.allocation) {
+    std::cerr << (second_scratch_released
+                      ? "released second scratch allocation retained state"
+                      : second_scratch_released.message)
               << '\n';
     return 1;
   }

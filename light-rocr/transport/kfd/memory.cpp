@@ -21,6 +21,9 @@ namespace light_rocr::transport::kfd {
 namespace {
 
 constexpr uint64_t kGuardPageCount = 2;
+// GFX11 exposes a 4 GiB hidden-private aperture per XCC. Reserve that virtual
+// span once; discrete GPUs receive physical backing only for live queue ranges.
+constexpr uint64_t kGfx11ScratchPoolSize = uint64_t{4} * 1024 * 1024 * 1024;
 
 MemoryStatus system_failure(MemoryError error, int system_error,
                             const std::string &operation) {
@@ -75,37 +78,6 @@ bool valid_syscalls(detail::MemorySyscalls syscalls) {
 
 namespace detail {
 
-ScratchReservationResult
-acquire_scratch_reservation(const std::shared_ptr<KfdState> &state,
-                            uint32_t gpu_id) {
-  if (state == nullptr || gpu_id == 0) {
-    return ScratchReservationResult::InvalidState;
-  }
-  const std::lock_guard<std::mutex> lock(state->mutex);
-  const auto device = state->device_vms.find(gpu_id);
-  if (device == state->device_vms.end() || !device->second.acquired ||
-      !device->second.aperture_valid) {
-    return ScratchReservationResult::InvalidState;
-  }
-  if (device->second.scratch_reserved) {
-    return ScratchReservationResult::AlreadyReserved;
-  }
-  device->second.scratch_reserved = true;
-  return ScratchReservationResult::Acquired;
-}
-
-void release_scratch_reservation(const std::shared_ptr<KfdState> &state,
-                                 uint32_t gpu_id) {
-  if (state == nullptr || gpu_id == 0) {
-    return;
-  }
-  const std::lock_guard<std::mutex> lock(state->mutex);
-  const auto device = state->device_vms.find(gpu_id);
-  if (device != state->device_vms.end()) {
-    device->second.scratch_reserved = false;
-  }
-}
-
 namespace {
 
 bool uses_vram_backing(MemoryAllocationUsage usage) {
@@ -124,17 +96,180 @@ RawMemoryAllocationResult rollback_memory(MemoryStatus status, int kfd_fd,
   return {std::move(status), std::move(allocation)};
 }
 
-RawScratchAllocationResult rollback_scratch(MemoryStatus status, int kfd_fd,
-                                            RawMemoryAllocation allocation,
-                                            uint64_t gpu_address,
-                                            bool integrated,
-                                            MemorySyscalls syscalls) {
-  const MemoryStatus cleanup = release_memory(kfd_fd, &allocation, syscalls);
-  if (!cleanup) {
-    status.message += "; cleanup failed: " + cleanup.message;
+MemoryStatus add_free_scratch_range(ScratchPoolState *pool, uint64_t offset,
+                                    uint64_t size) {
+  std::map<uint64_t, uint64_t>::iterator inserted;
+  try {
+    const auto result = pool->free_ranges.emplace(offset, size);
+    if (!result.second) {
+      return {MemoryError::InvalidSize, 0,
+              "scratch pool received a duplicate free range"};
+    }
+    inserted = result.first;
+  } catch (const std::bad_alloc &) {
+    return {MemoryError::AllocateState, 0,
+            "failed to return a range to the scratch pool"};
   }
-  return {std::move(status), std::move(allocation), gpu_address, integrated,
-          false};
+
+  if (inserted != pool->free_ranges.begin()) {
+    const auto previous = std::prev(inserted);
+    if (previous->first + previous->second == inserted->first) {
+      auto merged = pool->free_ranges.extract(inserted);
+      merged.key() = previous->first;
+      merged.mapped() += previous->second;
+      pool->free_ranges.erase(previous);
+      inserted = pool->free_ranges.insert(std::move(merged)).position;
+    }
+  }
+  const auto next = std::next(inserted);
+  if (next != pool->free_ranges.end() &&
+      inserted->first + inserted->second == next->first) {
+    inserted->second += next->second;
+    pool->free_ranges.erase(next);
+  }
+  return {};
+}
+
+MemoryStatus release_pool_reservation(ScratchPoolState *pool,
+                                      MemorySyscalls syscalls) {
+  if (pool == nullptr || pool->reservation_address == nullptr) {
+    return {};
+  }
+  if (syscalls.munmap_function(pool->reservation_address,
+                               static_cast<size_t>(pool->reservation_size)) !=
+      0) {
+    return system_failure(MemoryError::UnmapHost, errno,
+                          "munmap(scratch pool reservation)");
+  }
+  pool->reservation_address = nullptr;
+  pool->reservation_size = 0;
+  pool->gpu_address = 0;
+  pool->size = 0;
+  pool->configured = false;
+  pool->free_ranges.clear();
+  return {};
+}
+
+MemoryStatus initialize_scratch_pool(int kfd_fd,
+                                     const ProcessAperture &aperture,
+                                     bool integrated, ScratchPoolState *pool,
+                                     MemorySyscalls syscalls) {
+  if (kGfx11ScratchPoolSize > std::numeric_limits<size_t>::max() ||
+      kGfx11ScratchPoolSize > std::numeric_limits<uint64_t>::max() -
+                                  kScratchBackingAlignment -
+                                  kGuardPageCount * kMemoryPageSize) {
+    return {MemoryError::InvalidSize, 0,
+            "scratch pool exceeds the host address range"};
+  }
+  const uint64_t reservation_size = kGfx11ScratchPoolSize +
+                                    kScratchBackingAlignment +
+                                    kGuardPageCount * kMemoryPageSize;
+  if (reservation_size > std::numeric_limits<size_t>::max()) {
+    return {MemoryError::InvalidSize, 0,
+            "scratch pool reservation exceeds the host size range"};
+  }
+
+  void *reservation = syscalls.mmap_function(
+      nullptr, static_cast<size_t>(reservation_size), PROT_NONE,
+      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+  if (reservation == MAP_FAILED) {
+    return system_failure(MemoryError::ReserveVa, errno,
+                          "mmap(scratch pool reservation)");
+  }
+  pool->reservation_address = reservation;
+  pool->reservation_size = reservation_size;
+  pool->integrated = integrated;
+
+  const uint64_t reservation_address =
+      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reservation));
+  if (reservation_address >
+      std::numeric_limits<uint64_t>::max() - reservation_size) {
+    MemoryStatus status{MemoryError::ReserveVa, 0,
+                        "scratch pool reservation overflows the host address "
+                        "range"};
+    const MemoryStatus cleanup = release_pool_reservation(pool, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+    }
+    return status;
+  }
+  const uint64_t first_usable = reservation_address + kMemoryPageSize;
+  const uint64_t gpu_address = (first_usable + kScratchBackingAlignment - 1U) &
+                               ~(kScratchBackingAlignment - 1U);
+  const uint64_t reservation_end = reservation_address + reservation_size;
+  if (gpu_address < aperture.gpuvm_base || gpu_address > aperture.gpuvm_limit ||
+      kGfx11ScratchPoolSize - 1U > aperture.gpuvm_limit - gpu_address ||
+      gpu_address > reservation_end ||
+      reservation_end - gpu_address < kMemoryPageSize ||
+      kGfx11ScratchPoolSize > reservation_end - gpu_address - kMemoryPageSize) {
+    MemoryStatus status{MemoryError::ReserveVa, 0,
+                        "64 KiB-aligned scratch pool is outside the KFD "
+                        "GPUVM aperture"};
+    const MemoryStatus cleanup = release_pool_reservation(pool, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+    }
+    return status;
+  }
+  pool->gpu_address = gpu_address;
+  pool->size = kGfx11ScratchPoolSize;
+
+  if (integrated) {
+    void *mapped = syscalls.mmap_function(
+        reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address)),
+        static_cast<size_t>(pool->size), PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    if (mapped == MAP_FAILED) {
+      MemoryStatus status = system_failure(MemoryError::MapHost, errno,
+                                           "mmap(integrated scratch pool)");
+      const MemoryStatus cleanup = release_pool_reservation(pool, syscalls);
+      if (!cleanup) {
+        status.message += "; cleanup failed: " + cleanup.message;
+      }
+      return status;
+    }
+  }
+  if (syscalls.madvise_function(
+          reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address)),
+          static_cast<size_t>(pool->size), MADV_DONTFORK) != 0) {
+    MemoryStatus status = system_failure(MemoryError::AdviseDontFork, errno,
+                                         "madvise(scratch pool MADV_DONTFORK)");
+    const MemoryStatus cleanup = release_pool_reservation(pool, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+    }
+    return status;
+  }
+
+  kfd_ioctl_set_scratch_backing_va_args arguments{};
+  arguments.va_addr = gpu_address >> 16U;
+  arguments.gpu_id = aperture.gpu_id;
+  int system_error = 0;
+  if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_SET_SCRATCH_BACKING_VA, &arguments,
+                    syscalls.ioctl_function, &system_error)) {
+    MemoryStatus status =
+        system_failure(MemoryError::SetScratchBacking, system_error,
+                       "AMDKFD_IOC_SET_SCRATCH_BACKING_VA");
+    const MemoryStatus cleanup = release_pool_reservation(pool, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+    }
+    return status;
+  }
+
+  try {
+    pool->free_ranges.emplace(0, pool->size);
+  } catch (const std::bad_alloc &) {
+    MemoryStatus status{MemoryError::AllocateState, 0,
+                        "failed to allocate scratch pool range state"};
+    const MemoryStatus cleanup = release_pool_reservation(pool, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+    }
+    return status;
+  }
+  pool->configured = true;
+  return {};
 }
 
 } // namespace
@@ -341,11 +476,12 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
   return {{}, std::move(allocation)};
 }
 
-RawScratchAllocationResult allocate_scratch(int kfd_fd,
-                                            const ProcessAperture &aperture,
-                                            uint64_t size, bool integrated,
-                                            MemorySyscalls syscalls) {
-  if (kfd_fd < 0 || aperture.gpu_id == 0 || !valid_syscalls(syscalls)) {
+RawScratchAllocationResult
+allocate_scratch(const std::shared_ptr<KfdState> &state, int kfd_fd,
+                 const ProcessAperture &aperture, uint64_t size,
+                 bool integrated, MemorySyscalls syscalls) {
+  if (state == nullptr || kfd_fd < 0 || aperture.gpu_id == 0 ||
+      !valid_syscalls(syscalls)) {
     return {{MemoryError::InvalidSession, 0,
              "scratch allocation requires an acquired KFD VM"},
             {}};
@@ -359,147 +495,236 @@ RawScratchAllocationResult allocate_scratch(int kfd_fd,
   }
   const uint64_t aligned_size =
       (size + kScratchBackingAlignment - 1U) & ~(kScratchBackingAlignment - 1U);
-  if (aligned_size > std::numeric_limits<uint64_t>::max() -
-                         kScratchBackingAlignment - 2U * kMemoryPageSize) {
-    return {{MemoryError::InvalidSize, 0,
-             "scratch reservation size exceeds the address range"},
+  const std::lock_guard<std::mutex> lock(state->mutex);
+  const auto device = state->device_vms.find(aperture.gpu_id);
+  if (device == state->device_vms.end() || !device->second.acquired ||
+      !device->second.aperture_valid) {
+    return {{MemoryError::InvalidSession, 0,
+             "scratch allocation requires acquired GPU VM state"},
             {}};
   }
-  const uint64_t reservation_size =
-      aligned_size + kScratchBackingAlignment + 2U * kMemoryPageSize;
-  if (reservation_size > std::numeric_limits<size_t>::max()) {
-    return {{MemoryError::InvalidSize, 0,
-             "scratch reservation exceeds the host size range"},
-            {}};
+  if (device->second.scratch_pool != nullptr &&
+      !device->second.scratch_pool->configured) {
+    const MemoryStatus cleanup =
+        release_pool_reservation(device->second.scratch_pool.get(), syscalls);
+    if (!cleanup) {
+      return {cleanup, {}};
+    }
+    device->second.scratch_pool.reset();
   }
-
-  std::vector<uint32_t> gpu_ids;
-  if (!integrated) {
+  if (device->second.scratch_pool == nullptr) {
     try {
-      gpu_ids.push_back(aperture.gpu_id);
+      device->second.scratch_pool = std::make_unique<ScratchPoolState>();
     } catch (const std::bad_alloc &) {
       return {{MemoryError::AllocateState, 0,
-               "failed to allocate scratch GPU mapping state"},
+               "failed to allocate scratch pool state"},
               {}};
     }
-  }
-
-  void *reservation = syscalls.mmap_function(
-      nullptr, static_cast<size_t>(reservation_size), PROT_NONE,
-      MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-  if (reservation == MAP_FAILED) {
-    return {system_failure(MemoryError::ReserveVa, errno,
-                           "mmap(scratch address reservation)"),
-            {}};
-  }
-
-  const uint64_t reservation_address =
-      static_cast<uint64_t>(reinterpret_cast<uintptr_t>(reservation));
-  if (reservation_address >
-      std::numeric_limits<uint64_t>::max() - reservation_size) {
-    return rollback_scratch(
-        {MemoryError::ReserveVa, 0,
-         "scratch reservation overflows the host address range"},
-        kfd_fd,
-        {reservation, reservation_size, nullptr, 0, aligned_size, 0,
-         std::move(gpu_ids), 0, 0, false},
-        0, integrated, syscalls);
-  }
-  const uint64_t first_usable = reservation_address + kMemoryPageSize;
-  const uint64_t gpu_address = (first_usable + kScratchBackingAlignment - 1U) &
-                               ~(kScratchBackingAlignment - 1U);
-  const uint64_t reservation_end = reservation_address + reservation_size;
-  if (gpu_address < aperture.gpuvm_base || gpu_address > aperture.gpuvm_limit ||
-      aligned_size - 1U > aperture.gpuvm_limit - gpu_address ||
-      gpu_address > reservation_end ||
-      reservation_end - gpu_address < kMemoryPageSize ||
-      aligned_size > reservation_end - gpu_address - kMemoryPageSize) {
-    return rollback_scratch(
-        {MemoryError::ReserveVa, 0,
-         "64 KiB-aligned scratch VA is outside the KFD GPUVM aperture"},
-        kfd_fd,
-        {reservation, reservation_size, nullptr, gpu_address, aligned_size, 0,
-         std::move(gpu_ids), 0, 0, false},
-        gpu_address, integrated, syscalls);
-  }
-
-  void *backing_address =
-      reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address));
-  RawMemoryAllocation allocation{reservation,
-                                 reservation_size,
-                                 backing_address,
-                                 gpu_address,
-                                 aligned_size,
-                                 0,
-                                 std::move(gpu_ids),
-                                 0,
-                                 0,
-                                 false};
-  if (integrated) {
-    void *mapped = syscalls.mmap_function(
-        backing_address, static_cast<size_t>(aligned_size),
-        PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-    if (mapped == MAP_FAILED) {
-      return rollback_scratch(
-          system_failure(MemoryError::MapHost, errno,
-                         "mmap(integrated scratch backing)"),
-          kfd_fd, std::move(allocation), gpu_address, integrated, syscalls);
+    MemoryStatus initialized =
+        initialize_scratch_pool(kfd_fd, aperture, integrated,
+                                device->second.scratch_pool.get(), syscalls);
+    if (!initialized) {
+      if (device->second.scratch_pool->reservation_address == nullptr) {
+        device->second.scratch_pool.reset();
+      }
+      return {std::move(initialized), {}};
     }
   }
-  if (syscalls.madvise_function(backing_address,
-                                static_cast<size_t>(aligned_size),
-                                MADV_DONTFORK) != 0) {
-    return rollback_scratch(system_failure(MemoryError::AdviseDontFork, errno,
-                                           "madvise(scratch MADV_DONTFORK)"),
-                            kfd_fd, std::move(allocation), gpu_address,
-                            integrated, syscalls);
+
+  ScratchPoolState *pool = device->second.scratch_pool.get();
+  if (pool->integrated != integrated) {
+    return {{MemoryError::InvalidNode, 0,
+             "scratch pool memory type does not match the GPU topology"},
+            {}};
+  }
+  auto range = pool->free_ranges.begin();
+  while (range != pool->free_ranges.end() && range->second < aligned_size) {
+    ++range;
+  }
+  if (range == pool->free_ranges.end()) {
+    return {{MemoryError::ScratchPoolExhausted, 0,
+             "scratch pool has no contiguous range large enough for the "
+             "queue"},
+            {}};
+  }
+  const uint64_t offset = range->first;
+  const uint64_t remaining = range->second - aligned_size;
+  if (remaining == 0) {
+    pool->free_ranges.erase(range);
+  } else {
+    auto remainder = pool->free_ranges.extract(range);
+    remainder.key() = offset + aligned_size;
+    remainder.mapped() = remaining;
+    pool->free_ranges.insert(std::move(remainder));
   }
 
-  kfd_ioctl_set_scratch_backing_va_args scratch_arguments{};
-  scratch_arguments.va_addr = gpu_address >> 16U;
-  scratch_arguments.gpu_id = aperture.gpu_id;
-  int system_error = 0;
-  if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_SET_SCRATCH_BACKING_VA,
-                    &scratch_arguments, syscalls.ioctl_function,
-                    &system_error)) {
-    return rollback_scratch(
-        system_failure(MemoryError::SetScratchBacking, system_error,
-                       "AMDKFD_IOC_SET_SCRATCH_BACKING_VA"),
-        kfd_fd, std::move(allocation), gpu_address, integrated, syscalls);
-  }
-
+  const uint64_t gpu_address = pool->gpu_address + offset;
+  RawMemoryAllocation allocation{
+      nullptr, 0, nullptr, gpu_address, aligned_size, 0, {}, 0, 0, false};
   if (integrated) {
-    return {{}, std::move(allocation), gpu_address, true, true};
+    return {{},
+            std::move(allocation),
+            gpu_address,
+            aligned_size,
+            aperture.gpu_id,
+            true,
+            true,
+            true};
   }
 
+  try {
+    allocation.gpu_ids.push_back(aperture.gpu_id);
+  } catch (const std::bad_alloc &) {
+    MemoryStatus status{MemoryError::AllocateState, 0,
+                        "failed to allocate scratch GPU mapping state"};
+    const MemoryStatus restored =
+        add_free_scratch_range(pool, offset, aligned_size);
+    if (!restored) {
+      status.message += "; cleanup failed: " + restored.message;
+      return {std::move(status),
+              std::move(allocation),
+              gpu_address,
+              aligned_size,
+              aperture.gpu_id,
+              integrated,
+              false,
+              true};
+    }
+    return {std::move(status), {}};
+  }
   kfd_ioctl_alloc_memory_of_gpu_args arguments{};
   arguments.va_addr = gpu_address;
   arguments.size = aligned_size;
   arguments.gpu_id = aperture.gpu_id;
   arguments.flags = static_cast<uint32_t>(KFD_IOC_ALLOC_MEM_FLAGS_VRAM |
                                           KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE);
+  int system_error = 0;
   if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_ALLOC_MEMORY_OF_GPU, &arguments,
                     syscalls.ioctl_function, &system_error)) {
-    return rollback_scratch(
+    MemoryStatus status =
         system_failure(MemoryError::AllocateScratch, system_error,
-                       "AMDKFD_IOC_ALLOC_MEMORY_OF_GPU(scratch)"),
-        kfd_fd, std::move(allocation), gpu_address, integrated, syscalls);
+                       "AMDKFD_IOC_ALLOC_MEMORY_OF_GPU(scratch)");
+    const MemoryStatus restored =
+        add_free_scratch_range(pool, offset, aligned_size);
+    if (!restored) {
+      status.message += "; cleanup failed: " + restored.message;
+      return {std::move(status),
+              std::move(allocation),
+              gpu_address,
+              aligned_size,
+              aperture.gpu_id,
+              integrated,
+              false,
+              true};
+    }
+    return {std::move(status), {}};
   }
   if (arguments.handle == 0) {
-    return rollback_scratch({MemoryError::AllocateScratch, 0,
-                             "KFD returned an invalid zero scratch handle"},
-                            kfd_fd, std::move(allocation), gpu_address,
-                            integrated, syscalls);
+    MemoryStatus status{MemoryError::AllocateScratch, 0,
+                        "KFD returned an invalid zero scratch handle"};
+    const MemoryStatus restored =
+        add_free_scratch_range(pool, offset, aligned_size);
+    if (!restored) {
+      status.message += "; cleanup failed: " + restored.message;
+      return {std::move(status),
+              std::move(allocation),
+              gpu_address,
+              aligned_size,
+              aperture.gpu_id,
+              integrated,
+              false,
+              true};
+    }
+    return {std::move(status), {}};
   }
   allocation.handle = arguments.handle;
 
   const MemoryStatus mapped =
       map_memory(kfd_fd, &allocation, allocation.gpu_ids, syscalls);
   if (!mapped) {
-    return rollback_scratch(mapped, kfd_fd, std::move(allocation), gpu_address,
-                            integrated, syscalls);
+    MemoryStatus status = mapped;
+    const MemoryStatus cleanup = release_memory(kfd_fd, &allocation, syscalls);
+    if (!cleanup) {
+      status.message += "; cleanup failed: " + cleanup.message;
+      return {std::move(status),
+              std::move(allocation),
+              gpu_address,
+              aligned_size,
+              aperture.gpu_id,
+              false,
+              false,
+              true};
+    }
+    const MemoryStatus restored =
+        add_free_scratch_range(pool, offset, aligned_size);
+    if (!restored) {
+      status.message += "; cleanup failed: " + restored.message;
+      return {std::move(status),
+              std::move(allocation),
+              gpu_address,
+              aligned_size,
+              aperture.gpu_id,
+              integrated,
+              false,
+              true};
+    }
+    return {std::move(status), {}};
   }
-  return {{}, std::move(allocation), gpu_address, false, true};
+  return {{},
+          std::move(allocation),
+          gpu_address,
+          aligned_size,
+          aperture.gpu_id,
+          false,
+          true,
+          true};
+}
+
+MemoryStatus release_scratch(const std::shared_ptr<KfdState> &state, int kfd_fd,
+                             RawScratchAllocationResult *allocation,
+                             MemorySyscalls syscalls) {
+  if (state == nullptr || kfd_fd < 0 || allocation == nullptr ||
+      !allocation->pool_range_owned || allocation->gpu_id == 0 ||
+      allocation->size == 0 || !valid_syscalls(syscalls)) {
+    return {MemoryError::InvalidSession, 0,
+            "scratch release requires a live pool allocation"};
+  }
+
+  const std::lock_guard<std::mutex> lock(state->mutex);
+  const auto device = state->device_vms.find(allocation->gpu_id);
+  if (device == state->device_vms.end() ||
+      device->second.scratch_pool == nullptr ||
+      !device->second.scratch_pool->configured) {
+    return {MemoryError::InvalidSession, 0,
+            "scratch release requires a live GPU scratch pool"};
+  }
+  ScratchPoolState *pool = device->second.scratch_pool.get();
+  if (allocation->gpu_address < pool->gpu_address ||
+      allocation->gpu_address - pool->gpu_address > pool->size ||
+      allocation->size >
+          pool->size - (allocation->gpu_address - pool->gpu_address)) {
+    return {MemoryError::InvalidSize, 0,
+            "scratch allocation is outside its GPU pool"};
+  }
+  if (!allocation->integrated) {
+    const MemoryStatus released =
+        release_memory(kfd_fd, &allocation->allocation, syscalls);
+    if (!released) {
+      return released;
+    }
+  }
+  allocation->gpu_mapped = false;
+  const MemoryStatus restored = add_free_scratch_range(
+      pool, allocation->gpu_address - pool->gpu_address, allocation->size);
+  if (!restored) {
+    return restored;
+  }
+  allocation->gpu_address = 0;
+  allocation->size = 0;
+  allocation->gpu_id = 0;
+  allocation->gpu_mapped = false;
+  allocation->pool_range_owned = false;
+  return {};
 }
 
 MemoryStatus map_memory(int kfd_fd, RawMemoryAllocation *allocation,
@@ -704,8 +929,8 @@ const char *memory_error_name(MemoryError error) {
     return "allocate_memory";
   case MemoryError::AllocateScratch:
     return "allocate_scratch";
-  case MemoryError::ScratchAlreadyReserved:
-    return "scratch_already_reserved";
+  case MemoryError::ScratchPoolExhausted:
+    return "scratch_pool_exhausted";
   case MemoryError::MapHost:
     return "map_host";
   case MemoryError::AdviseDontFork:
@@ -773,31 +998,20 @@ KfdSession::allocate_scratch(const runtime::Node &node, uint64_t size,
             {}};
   }
 
-  const detail::ScratchReservationResult reserved =
-      detail::acquire_scratch_reservation(state_, node.gpu_id);
-  if (reserved == detail::ScratchReservationResult::InvalidState) {
-    return {{MemoryError::AcquireVm, 0, "acquired KFD VM state is unavailable"},
-            {}};
-  }
-  if (reserved == detail::ScratchReservationResult::AlreadyReserved) {
-    return {{MemoryError::ScratchAlreadyReserved, 0,
-             "scratch backing is already reserved for this process and GPU"},
-            {}};
-  }
-
-  detail::RawScratchAllocationResult allocated = detail::allocate_scratch(
-      state_->fd, acquired.aperture, size, node.integrated, real_syscalls());
+  detail::RawScratchAllocationResult allocated =
+      detail::allocate_scratch(state_, state_->fd, acquired.aperture, size,
+                               node.integrated, real_syscalls());
   detail::RawMemoryAllocation &raw = allocated.allocation;
-  if (!allocated && raw.reservation_address == nullptr && raw.handle == 0) {
-    detail::release_scratch_reservation(state_, node.gpu_id);
+  if (!allocated && !allocated.pool_range_owned) {
     return {std::move(allocated.status), {}};
   }
 
-  ScratchAllocation owner(
-      state_, raw.reservation_address, raw.reservation_size,
-      allocated.gpu_address, raw.size, raw.handle, std::move(raw.gpu_ids),
-      raw.mapped_device_count, raw.unmapped_device_count, raw.map_complete,
-      node.gpu_id, allocated.integrated, allocated.gpu_mapped);
+  ScratchAllocation owner(state_, raw.reservation_address, raw.reservation_size,
+                          allocated.gpu_address, raw.size, raw.handle,
+                          std::move(raw.gpu_ids), raw.mapped_device_count,
+                          raw.unmapped_device_count, raw.map_complete,
+                          node.gpu_id, allocated.integrated,
+                          allocated.gpu_mapped, allocated.pool_range_owned);
   return {std::move(allocated.status), std::move(owner)};
 }
 
@@ -985,14 +1199,15 @@ ScratchAllocation::ScratchAllocation(ScratchAllocation &&other) noexcept
       mapped_device_count_(other.mapped_device_count_),
       unmapped_device_count_(other.unmapped_device_count_),
       map_complete_(other.map_complete_), gpu_id_(other.gpu_id_),
-      integrated_(other.integrated_), gpu_mapped_(other.gpu_mapped_) {
+      integrated_(other.integrated_), gpu_mapped_(other.gpu_mapped_),
+      pool_range_owned_(other.pool_range_owned_) {
   other.reset();
 }
 
 ScratchAllocation::~ScratchAllocation() { (void)release(); }
 
 MemoryStatus ScratchAllocation::release() {
-  if (reservation_address_ == nullptr && handle_ == 0) {
+  if (!pool_range_owned_) {
     return {};
   }
   if (state_ == nullptr) {
@@ -1000,33 +1215,35 @@ MemoryStatus ScratchAllocation::release() {
             "scratch release requires an open KFD session"};
   }
 
-  detail::RawMemoryAllocation raw{
-      reservation_address_,
-      reservation_size_,
-      reinterpret_cast<void *>(static_cast<uintptr_t>(gpu_address_)),
+  detail::RawScratchAllocationResult raw{
+      {},
+      {reservation_address_, reservation_size_, nullptr, gpu_address_, size_,
+       handle_, std::move(gpu_ids_), mapped_device_count_,
+       unmapped_device_count_, map_complete_},
       gpu_address_,
       size_,
-      handle_,
-      std::move(gpu_ids_),
-      mapped_device_count_,
-      unmapped_device_count_,
-      map_complete_};
+      gpu_id_,
+      integrated_,
+      gpu_mapped_,
+      pool_range_owned_};
   const MemoryStatus status =
-      detail::release_memory(state_->fd, &raw, real_syscalls());
-  reservation_address_ = raw.reservation_address;
-  reservation_size_ = raw.reservation_size;
+      detail::release_scratch(state_, state_->fd, &raw, real_syscalls());
+  detail::RawMemoryAllocation &memory = raw.allocation;
+  reservation_address_ = memory.reservation_address;
+  reservation_size_ = memory.reservation_size;
+  gpu_address_ = raw.gpu_address;
   size_ = raw.size;
-  handle_ = raw.handle;
-  gpu_ids_ = std::move(raw.gpu_ids);
-  mapped_device_count_ = raw.mapped_device_count;
-  unmapped_device_count_ = raw.unmapped_device_count;
-  map_complete_ = raw.map_complete;
-  gpu_mapped_ = integrated_ ? reservation_address_ != nullptr : map_complete_;
+  handle_ = memory.handle;
+  gpu_ids_ = std::move(memory.gpu_ids);
+  mapped_device_count_ = memory.mapped_device_count;
+  unmapped_device_count_ = memory.unmapped_device_count;
+  map_complete_ = memory.map_complete;
+  gpu_mapped_ = raw.gpu_mapped;
+  pool_range_owned_ = raw.pool_range_owned;
   if (!status) {
     return status;
   }
 
-  detail::release_scratch_reservation(state_, gpu_id_);
   reset();
   return {};
 }
@@ -1045,6 +1262,7 @@ void ScratchAllocation::reset() {
   gpu_id_ = 0;
   integrated_ = false;
   gpu_mapped_ = false;
+  pool_range_owned_ = false;
 }
 
 } // namespace light_rocr::transport::kfd

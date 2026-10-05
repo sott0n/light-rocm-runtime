@@ -10,6 +10,7 @@
 #include <new>
 #include <string>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <system_error>
 #include <unistd.h>
@@ -36,6 +37,15 @@ KfdState::KfdState(int opened_fd, runtime::KfdVersion queried_version)
     : fd(opened_fd), version(queried_version) {}
 
 KfdState::~KfdState() {
+  for (auto &[gpu_id, device] : device_vms) {
+    (void)gpu_id;
+    if (device.scratch_pool != nullptr &&
+        device.scratch_pool->reservation_address != nullptr) {
+      (void)::munmap(
+          device.scratch_pool->reservation_address,
+          static_cast<size_t>(device.scratch_pool->reservation_size));
+    }
+  }
   if (fd >= 0) {
     (void)::close(fd);
   }

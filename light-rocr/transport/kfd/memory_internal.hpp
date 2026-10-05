@@ -50,16 +50,13 @@ struct RawScratchAllocationResult {
   MemoryStatus status;
   RawMemoryAllocation allocation;
   uint64_t gpu_address = 0;
+  uint64_t size = 0;
+  uint32_t gpu_id = 0;
   bool integrated = false;
   bool gpu_mapped = false;
+  bool pool_range_owned = false;
 
   explicit operator bool() const { return static_cast<bool>(status); }
-};
-
-enum class ScratchReservationResult {
-  Acquired,
-  AlreadyReserved,
-  InvalidState,
 };
 
 enum class MemoryAllocationUsage {
@@ -93,13 +90,13 @@ allocate_memory(int kfd_fd, int render_fd, const ProcessAperture &aperture,
                                           RawMemoryAllocation *allocation,
                                           MemorySyscalls syscalls);
 [[nodiscard]] RawScratchAllocationResult
-allocate_scratch(int kfd_fd, const ProcessAperture &aperture, uint64_t size,
+allocate_scratch(const std::shared_ptr<KfdState> &state, int kfd_fd,
+                 const ProcessAperture &aperture, uint64_t size,
                  bool integrated, MemorySyscalls syscalls);
-[[nodiscard]] ScratchReservationResult
-acquire_scratch_reservation(const std::shared_ptr<KfdState> &state,
-                            uint32_t gpu_id);
-void release_scratch_reservation(const std::shared_ptr<KfdState> &state,
-                                 uint32_t gpu_id);
+[[nodiscard]] MemoryStatus
+release_scratch(const std::shared_ptr<KfdState> &state, int kfd_fd,
+                RawScratchAllocationResult *allocation,
+                MemorySyscalls syscalls);
 
 } // namespace light_rocr::transport::kfd::detail
 

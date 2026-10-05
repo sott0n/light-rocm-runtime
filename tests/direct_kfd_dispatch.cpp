@@ -303,6 +303,21 @@ int main() {
     std::cerr << "direct KFD queue did not retain kernel scratch backing\n";
     return 1;
   }
+  auto second_signal = opened.session.create_user_signal(node, 1);
+  if (!second_signal) {
+    return fail_signal(second_signal.status);
+  }
+  auto second_queue = opened.session.create_aql_queue(
+      node, light_rocr::transport::kfd::kAqlRingDefaultSize,
+      kernel.private_segment_size);
+  if (!second_queue) {
+    return fail_queue(second_queue.status);
+  }
+  if (second_queue.queue.scratch_gpu_address() ==
+      queue.queue.scratch_gpu_address()) {
+    std::cerr << "scratch-backed queues share a live scratch range\n";
+    return 1;
+  }
 
   auto mismatched_node = node;
   ++mismatched_node.gpu_id;
@@ -354,8 +369,19 @@ int main() {
               << static_cast<int>(submitted.error) << '\n';
     return 1;
   }
+  parameters.completion_signal = second_signal.signal.gpu_handle();
+  const auto second_submitted = lrrt_internal::submit_aql_kernel_dispatch(
+      lrrt_internal::light_rocr_kfd_producer_ops(&second_queue.queue),
+      parameters, {});
+  if (!second_submitted) {
+    std::cerr << "second AQL submission failed with error "
+              << static_cast<int>(second_submitted.error) << '\n';
+    return 1;
+  }
 
   const auto waited = signal.signal.wait_until_equal(
+      0, std::chrono::steady_clock::now() + std::chrono::seconds(2));
+  const auto second_waited = second_signal.signal.wait_until_equal(
       0, std::chrono::steady_clock::now() + std::chrono::seconds(2));
   const uint64_t observed_write_index = queue.queue.write_index_relaxed();
   uint64_t observed_read_index = queue.queue.read_index_acquire();
@@ -367,15 +393,16 @@ int main() {
     observed_read_index = queue.queue.read_index_acquire();
   }
 
-  bool output_matches = static_cast<bool>(waited);
-  for (size_t index = 0; waited && index < kElementCount; ++index) {
+  bool output_matches =
+      static_cast<bool>(waited) && static_cast<bool>(second_waited);
+  for (size_t index = 0; output_matches && index < kElementCount; ++index) {
     if (output[index] != input_a[index] + input_b[index]) {
       output_matches = false;
       std::cerr << "vector_add mismatch at index " << index << '\n';
       break;
     }
   }
-  const bool correct = waited && output_matches &&
+  const bool correct = waited && second_waited && output_matches &&
                        observed_write_index == submitted.packet_id + 1 &&
                        observed_read_index == observed_write_index;
   if (!correct) {
@@ -384,12 +411,21 @@ int main() {
     std::cerr << "read_index=" << observed_read_index << '\n';
     std::cerr << "write_index=" << observed_write_index << '\n';
     std::cerr << "signal_value=" << waited.observed_value << '\n';
+    std::cerr << "second_signal_value=" << second_waited.observed_value << '\n';
   }
 
+  const auto second_queue_status = second_queue.queue.release();
+  if (!second_queue_status) {
+    return fail_queue(second_queue_status);
+  }
+  const auto second_signal_status = second_signal.signal.release();
+  if (!second_signal_status) {
+    return fail_signal(second_signal_status);
+  }
   const int cleanup_status =
       cleanup(queue.queue, signal.signal, data.allocation, loaded.image);
   if (correct && cleanup_status == 0) {
-    std::cout << "direct KFD scratch-backed HSACO vector add: ok\n";
+    std::cout << "direct KFD two-queue scratch-backed HSACO vector add: ok\n";
   }
   return correct && cleanup_status == 0 ? 0 : 1;
 }

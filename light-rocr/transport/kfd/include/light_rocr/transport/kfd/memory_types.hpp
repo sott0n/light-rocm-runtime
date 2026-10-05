@@ -23,7 +23,7 @@ enum class MemoryError {
   SetScratchBacking,
   AllocateMemory,
   AllocateScratch,
-  ScratchAlreadyReserved,
+  ScratchPoolExhausted,
   MapHost,
   AdviseDontFork,
   MapToGpu,
@@ -116,9 +116,7 @@ public:
   }
   [[nodiscard]] bool gpu_mapped() const { return gpu_mapped_; }
   [[nodiscard]] uint64_t size() const { return size_; }
-  explicit operator bool() const {
-    return reservation_address_ != nullptr || handle_ != 0;
-  }
+  explicit operator bool() const { return pool_range_owned_; }
 
   [[nodiscard]] MemoryStatus release();
 
@@ -129,14 +127,15 @@ private:
                     uint64_t size, uint64_t handle,
                     std::vector<uint32_t> gpu_ids, uint32_t mapped_device_count,
                     uint32_t unmapped_device_count, bool map_complete,
-                    uint32_t gpu_id, bool integrated, bool gpu_mapped)
+                    uint32_t gpu_id, bool integrated, bool gpu_mapped,
+                    bool pool_range_owned)
       : state_(std::move(state)), reservation_address_(reservation_address),
         reservation_size_(reservation_size), gpu_address_(gpu_address),
         size_(size), handle_(handle), gpu_ids_(std::move(gpu_ids)),
         mapped_device_count_(mapped_device_count),
         unmapped_device_count_(unmapped_device_count),
         map_complete_(map_complete), gpu_id_(gpu_id), integrated_(integrated),
-        gpu_mapped_(gpu_mapped) {}
+        gpu_mapped_(gpu_mapped), pool_range_owned_(pool_range_owned) {}
   void reset();
 
   std::shared_ptr<KfdState> state_;
@@ -152,6 +151,7 @@ private:
   uint32_t gpu_id_ = 0;
   bool integrated_ = false;
   bool gpu_mapped_ = false;
+  bool pool_range_owned_ = false;
 };
 
 struct ScratchAllocationResult {

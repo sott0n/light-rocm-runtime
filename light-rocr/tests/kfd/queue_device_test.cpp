@@ -82,6 +82,18 @@ int main() {
     std::cerr << "direct KFD scratch-backed queue metadata is invalid\n";
     return 1;
   }
+  auto second_scratch_created = opened.session.create_aql_queue(
+      node, light_rocr::transport::kfd::kAqlRingDefaultSize,
+      kPrivateSegmentSize);
+  if (!second_scratch_created ||
+      second_scratch_created.queue.scratch_gpu_address() ==
+          scratch_created.queue.scratch_gpu_address()) {
+    std::cerr << (second_scratch_created
+                      ? "scratch-backed queues share a live scratch range"
+                      : second_scratch_created.status.message)
+              << '\n';
+    return 1;
+  }
   const auto scratch_released = scratch_created.queue.release();
   if (!scratch_released || scratch_created.queue) {
     std::cerr << (scratch_released
@@ -90,8 +102,16 @@ int main() {
               << '\n';
     return 1;
   }
+  const auto second_scratch_released = second_scratch_created.queue.release();
+  if (!second_scratch_released || second_scratch_created.queue) {
+    std::cerr << (second_scratch_released
+                      ? "released second scratch-backed queue retained state"
+                      : second_scratch_released.message)
+              << '\n';
+    return 1;
+  }
 
   std::cout << "created and destroyed direct KFD AQL queue " << queue_id
-            << " and a scratch-backed queue\n";
+            << " and two simultaneous scratch-backed queues\n";
   return 0;
 }

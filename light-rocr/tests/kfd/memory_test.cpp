@@ -5,6 +5,7 @@
 
 #include <linux/kfd_ioctl.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <functional>
@@ -256,8 +257,17 @@ std::shared_ptr<light_rocr::transport::kfd::KfdState> scratch_state() {
 
   auto state = std::make_shared<KfdState>(-1, KfdVersion{1, 16});
   state->device_vms.emplace(
-      42, DeviceVmState{-1, -1, true, true, true, false, aperture()});
+      42, DeviceVmState{-1, -1, true, true, true, aperture(), nullptr});
   return state;
+}
+
+void discard_fake_scratch_pool(
+    const std::shared_ptr<light_rocr::transport::kfd::KfdState> &state) {
+  auto &pool = state->device_vms.at(42).scratch_pool;
+  if (pool != nullptr) {
+    pool->reservation_address = nullptr;
+    pool->reservation_size = 0;
+  }
 }
 
 FakeSystem scratch_system(bool integrated) {
@@ -266,8 +276,9 @@ FakeSystem scratch_system(bool integrated) {
   state.integrated_scratch = integrated;
   state.expected_va_address = kScratchAddress;
   state.expected_allocation_size = 64 * 1024;
-  state.expected_reservation_size = 2 * 64 * 1024 + 2 * 4096;
-  state.expected_host_mapping_size = 64 * 1024;
+  state.expected_reservation_size =
+      size_t{4} * 1024 * 1024 * 1024 + 64 * 1024 + 2 * 4096;
+  state.expected_host_mapping_size = size_t{4} * 1024 * 1024 * 1024;
   state.expected_allocation_flags = static_cast<uint32_t>(
       KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE);
   return state;
@@ -466,53 +477,58 @@ void eop_uses_inaccessible_executable_vram(TestContext *context) {
 
 void discrete_scratch_round_trip(TestContext *context) {
   FakeSystem state = scratch_system(false);
+  auto owner = scratch_state();
   fake = &state;
   auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
-      17, aperture(), 8192, false, syscalls());
+      owner, 17, aperture(), 8192, false, syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(
       state.contract_valid && allocated.gpu_address == kScratchAddress &&
           allocated.allocation.size == 64 * 1024 &&
           allocated.allocation.handle == kHandle && allocated.gpu_mapped,
       "discrete scratch allocation contract changed");
-  const auto released = light_rocr::transport::kfd::detail::release_memory(
-      17, &allocated.allocation, syscalls());
+  const auto released = light_rocr::transport::kfd::detail::release_scratch(
+      owner, 17, &allocated, syscalls());
   context->expect(static_cast<bool>(released), released.message);
-  context->expect(state.calls ==
-                      std::vector<std::string>{
-                          "reserve", "dontfork", "set_scratch", "allocate",
-                          "map_gpu", "unmap_gpu", "unmap", "free"},
+  context->expect(state.calls == std::vector<std::string>{"reserve", "dontfork",
+                                                          "set_scratch",
+                                                          "allocate", "map_gpu",
+                                                          "unmap_gpu", "free"},
                   "unexpected discrete scratch call order");
+  discard_fake_scratch_pool(owner);
   fake = nullptr;
 }
 
 void integrated_scratch_round_trip(TestContext *context) {
   FakeSystem state = scratch_system(true);
+  auto owner = scratch_state();
   fake = &state;
   auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
-      17, aperture(), 8192, true, syscalls());
+      owner, 17, aperture(), 8192, true, syscalls());
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(state.contract_valid &&
                       allocated.gpu_address == kScratchAddress &&
                       allocated.allocation.size == 64 * 1024 &&
                       allocated.allocation.handle == 0 && allocated.gpu_mapped,
                   "integrated scratch allocation contract changed");
-  const auto released = light_rocr::transport::kfd::detail::release_memory(
-      17, &allocated.allocation, syscalls());
+  const auto released = light_rocr::transport::kfd::detail::release_scratch(
+      owner, 17, &allocated, syscalls());
   context->expect(static_cast<bool>(released), released.message);
-  context->expect(
-      state.calls == std::vector<std::string>{"reserve", "map_host", "dontfork",
-                                              "set_scratch", "unmap"},
-      "unexpected integrated scratch call order");
+  context->expect(state.calls == std::vector<std::string>{"reserve", "map_host",
+                                                          "dontfork",
+                                                          "set_scratch"},
+                  "unexpected integrated scratch call order");
+  discard_fake_scratch_pool(owner);
   fake = nullptr;
 }
 
 void scratch_setup_failure_releases_reservation(TestContext *context) {
   FakeSystem state = scratch_system(false);
+  auto owner = scratch_state();
   state.set_scratch_fails = true;
   fake = &state;
   const auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
-      17, aperture(), 8192, false, syscalls());
+      owner, 17, aperture(), 8192, false, syscalls());
   context->expect(
       !allocated &&
           allocated.status.error ==
@@ -529,56 +545,56 @@ void scratch_setup_failure_releases_reservation(TestContext *context) {
 
 void scratch_setup_cleanup_is_retryable(TestContext *context) {
   FakeSystem state = scratch_system(false);
+  auto owner = scratch_state();
   state.set_scratch_fails = true;
   state.munmap_fails = true;
   fake = &state;
   auto allocated = light_rocr::transport::kfd::detail::allocate_scratch(
-      17, aperture(), 8192, false, syscalls());
+      owner, 17, aperture(), 8192, false, syscalls());
   context->expect(!allocated &&
-                      allocated.allocation.reservation_address ==
-                          reinterpret_cast<void *>(kReservationAddress),
-                  "scratch cleanup failure discarded its VA owner");
+                      owner->device_vms.at(42).scratch_pool != nullptr,
+                  "scratch cleanup failure discarded its pool owner");
   context->expect(allocated.status.message.find("cleanup failed") !=
                       std::string::npos,
                   "scratch cleanup failure was not diagnosed");
 
   state.munmap_fails = false;
-  const auto released = light_rocr::transport::kfd::detail::release_memory(
-      17, &allocated.allocation, syscalls());
-  context->expect(released &&
-                      allocated.allocation.reservation_address == nullptr,
-                  "scratch cleanup could not be retried");
+  state.set_scratch_fails = false;
+  state.calls.clear();
+  allocated = light_rocr::transport::kfd::detail::allocate_scratch(
+      owner, 17, aperture(), 8192, false, syscalls());
+  context->expect(static_cast<bool>(allocated),
+                  "scratch pool cleanup could not be retried");
+  const auto released = light_rocr::transport::kfd::detail::release_scratch(
+      owner, 17, &allocated, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  discard_fake_scratch_pool(owner);
   fake = nullptr;
 }
 
-void scratch_reservation_follows_kfd_state(TestContext *context) {
-  using light_rocr::transport::kfd::detail::ScratchReservationResult;
-
+void scratch_pool_supports_multiple_allocations(TestContext *context) {
+  FakeSystem system = scratch_system(false);
   auto state = scratch_state();
-  auto second_session = state;
+  fake = &system;
+  auto first = light_rocr::transport::kfd::detail::allocate_scratch(
+      state, 17, aperture(), 8192, false, syscalls());
+  system.expected_va_address = kScratchAddress + 64 * 1024;
+  auto second = light_rocr::transport::kfd::detail::allocate_scratch(
+      state, 17, aperture(), 8192, false, syscalls());
+  context->expect(first && second && first.gpu_address == kScratchAddress &&
+                      second.gpu_address == kScratchAddress + 64 * 1024,
+                  "scratch pool did not assign distinct queue ranges");
   context->expect(
-      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
-          state, 42) == ScratchReservationResult::Acquired,
-      "first session could not reserve scratch");
-  context->expect(
-      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
-          second_session, 42) == ScratchReservationResult::AlreadyReserved,
-      "second session bypassed shared scratch reservation");
-  light_rocr::transport::kfd::detail::release_scratch_reservation(state, 42);
-  context->expect(
-      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
-          second_session, 42) == ScratchReservationResult::Acquired,
-      "released scratch reservation could not be reused");
-
-  state.reset();
-  second_session.reset();
-  auto replacement = scratch_state();
-  context->expect(
-      light_rocr::transport::kfd::detail::acquire_scratch_reservation(
-          replacement, 42) == ScratchReservationResult::Acquired,
-      "destroyed KFD state left a stale scratch reservation");
-  light_rocr::transport::kfd::detail::release_scratch_reservation(replacement,
-                                                                  42);
+      std::count(system.calls.begin(), system.calls.end(), "set_scratch") == 1,
+      "scratch backing VA was reprogrammed for the second queue");
+  auto released = light_rocr::transport::kfd::detail::release_scratch(
+      state, 17, &first, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  released = light_rocr::transport::kfd::detail::release_scratch(
+      state, 17, &second, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  discard_fake_scratch_pool(state);
+  fake = nullptr;
 }
 
 void allocation_failure_releases_va(TestContext *context) {
@@ -924,7 +940,8 @@ int main() {
       {"integrated scratch", integrated_scratch_round_trip},
       {"scratch setup failure", scratch_setup_failure_releases_reservation},
       {"scratch cleanup retry", scratch_setup_cleanup_is_retryable},
-      {"scratch reservation state", scratch_reservation_follows_kfd_state},
+      {"multiple scratch allocations",
+       scratch_pool_supports_multiple_allocations},
       {"allocation failure", allocation_failure_releases_va},
       {"rollback unmap failure", rollback_unmap_failure_retains_va},
       {"host map failure", host_map_failure_frees_handle},
