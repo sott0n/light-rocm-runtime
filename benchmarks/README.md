@@ -73,6 +73,13 @@ The reported stage values subtract each boundary marker packet's own duration,
 while the uninstrumented `GPU burst` value remains the primary performance
 measurement.
 
+Pass `--cpu-submit-profile` with a weight directory to run one additional
+decoder stack with thread-local runtime profiling enabled. It separates AQL
+packet construction and validation, queue-capacity checks, write-index
+reservation, ring publication, and the doorbell store. The profiler calls a
+CPU clock around each sub-microsecond operation, so use the result to locate
+submission cost rather than as the primary latency measurement.
+
 ### Asynchronous dependencies
 
 The copy-to-launch cases use a 4 MiB D2D copy. The launch-to-copy case uses a

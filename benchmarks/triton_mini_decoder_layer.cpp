@@ -1,4 +1,5 @@
 #include "executor/qwen/weight_bundle.hpp"
+#include "launch_profile.hpp"
 #include "mini_decoder_layer.hpp"
 
 #include <algorithm>
@@ -103,6 +104,8 @@ struct Measurements {
   size_t non_finite_logits;
   size_t non_finite_hidden;
   size_t non_finite_norm_hidden;
+  lrrt_internal::LaunchProfile cpu_submit_profile{};
+  bool has_cpu_submit_profile = false;
 };
 
 struct Options {
@@ -122,6 +125,7 @@ struct Options {
   bool trace_setup;
   bool trace_run;
   bool gpu_stage_profile;
+  bool cpu_submit_profile = false;
 };
 
 struct DecoderStageEventSample {
@@ -265,6 +269,8 @@ Options parse_options(int argc, char **argv) {
       options.trace_run = true;
     } else if (strcmp(argv[i], "--gpu-stage-profile") == 0) {
       options.gpu_stage_profile = true;
+    } else if (strcmp(argv[i], "--cpu-submit-profile") == 0) {
+      options.cpu_submit_profile = true;
     } else if (!saw_iterations) {
       options.iterations = parse_u32(argv[i], "benchmark count");
       saw_iterations = true;
@@ -275,7 +281,8 @@ Options parse_options(int argc, char **argv) {
           "[--valid-keys count] [--layer-sweep] "
           "[--warmup-iterations count | --no-warmup] "
           "[--no-model-tail] [--e2e-check] [--sync-stack] "
-          "[--trace-setup] [--trace-run] [--gpu-stage-profile]");
+          "[--trace-setup] [--trace-run] [--gpu-stage-profile] "
+          "[--cpu-submit-profile]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -302,6 +309,9 @@ Options parse_options(int argc, char **argv) {
   }
   if (options.gpu_stage_profile && !options.weights_dir) {
     throw std::invalid_argument("--gpu-stage-profile requires --weights-dir");
+  }
+  if (options.cpu_submit_profile && !options.weights_dir) {
+    throw std::invalid_argument("--cpu-submit-profile requires --weights-dir");
   }
   if (options.gpu_stage_profile && options.sync_stack) {
     throw std::invalid_argument(
@@ -618,7 +628,7 @@ measure_stack_case(lrrt::Device &device,
                    const lrrt::executor::qwen::ModelTailWeights *tail_weights,
                    uint32_t iterations, uint32_t warmup_iterations,
                    bool trace_setup, bool trace_run, bool sync_stack,
-                   bool gpu_stage_profile) {
+                   bool gpu_stage_profile, bool cpu_submit_profile) {
   device.reset_memory_stats();
   if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
@@ -852,6 +862,21 @@ measure_stack_case(lrrt::Device &device,
         static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end));
   }
 
+  lrrt_internal::LaunchProfile launch_profile;
+  if (cpu_submit_profile) {
+    lrrt_internal::reset_thread_launch_profile();
+    lrrt_internal::set_thread_launch_profiling(true);
+    try {
+      submit_stack(nullptr, nullptr, nullptr);
+    } catch (...) {
+      lrrt_internal::set_thread_launch_profiling(false);
+      throw;
+    }
+    lrrt_internal::set_thread_launch_profiling(false);
+    synchronize_stack();
+    launch_profile = lrrt_internal::thread_launch_profile();
+  }
+
   GpuStageBreakdown gpu_stages;
   if (gpu_stage_profile) {
     const size_t decoder_run_count =
@@ -949,23 +974,26 @@ measure_stack_case(lrrt::Device &device,
     summary = top_logits(logits, 5, &non_finite_logits);
   }
 
-  return {cpu_round_trip_ns,
-          cpu_round_trip_ns,
-          gpu_burst_interval_ns,
-          elapsed_ns(setup_begin, setup_end),
-          elapsed_ns(warmup_begin, warmup_end),
-          setup_breakdown.construct_ns,
-          setup_breakdown.model_copy_ns,
-          setup_breakdown.tail_model_copy_ns,
-          stage_breakdown,
-          gpu_stages,
-          device.memory_stats(),
-          tail != nullptr,
-          tail_weights ? tail_weights->vocab : 0,
-          summary,
-          non_finite_logits,
-          non_finite_hidden,
-          non_finite_norm_hidden};
+  Measurements measurements = {cpu_round_trip_ns,
+                               cpu_round_trip_ns,
+                               gpu_burst_interval_ns,
+                               elapsed_ns(setup_begin, setup_end),
+                               elapsed_ns(warmup_begin, warmup_end),
+                               setup_breakdown.construct_ns,
+                               setup_breakdown.model_copy_ns,
+                               setup_breakdown.tail_model_copy_ns,
+                               stage_breakdown,
+                               gpu_stages,
+                               device.memory_stats(),
+                               tail != nullptr,
+                               tail_weights ? tail_weights->vocab : 0,
+                               summary,
+                               non_finite_logits,
+                               non_finite_hidden,
+                               non_finite_norm_hidden};
+  measurements.cpu_submit_profile = launch_profile;
+  measurements.has_cpu_submit_profile = cpu_submit_profile;
+  return measurements;
 }
 
 uint32_t estimated_stack_dispatches(const std::vector<BenchmarkCase> &layers,
@@ -1105,6 +1133,63 @@ void print_gpu_stage_breakdown(const Measurements &measurements,
   }
 }
 
+void print_cpu_submit_profile(const Measurements &measurements,
+                              const Colors &colors) {
+  if (!measurements.has_cpu_submit_profile) {
+    return;
+  }
+  const auto &profile = measurements.cpu_submit_profile;
+  if (profile.launch_count == 0) {
+    printf("%sCPU submit profile%s unavailable\n", colors.label, colors.reset);
+    return;
+  }
+  const double divisor = static_cast<double>(profile.launch_count) * 1.0e3;
+  const auto &aql = profile.aql;
+  const uint64_t aql_ns = aql.packet_build_ns + aql.packet_validation_ns +
+                          aql.queue_capacity_ns + aql.queue_reservation_ns +
+                          aql.ring_publication_ns + aql.doorbell_ns;
+  const uint64_t runtime_ns =
+      profile.total_ns > aql_ns ? profile.total_ns - aql_ns : 0;
+  printf("%sCPU submit profile%s dispatches=%" PRIu64
+         " total=%s%.3f%s us/dispatch runtime-outside-AQL=%s%.3f%s us\n",
+         colors.label, colors.reset, profile.launch_count, colors.time,
+         static_cast<double>(profile.total_ns) / divisor, colors.reset,
+         colors.time, static_cast<double>(runtime_ns) / divisor, colors.reset);
+  printf("%sAQL submit profile%s build=%s%.3f%s us validate=%s%.3f%s us "
+         "capacity=%s%.3f%s us reserve=%s%.3f%s us ring=%s%.3f%s us "
+         "doorbell=%s%.3f%s us\n",
+         colors.label, colors.reset, colors.time,
+         static_cast<double>(aql.packet_build_ns) / divisor, colors.reset,
+         colors.time, static_cast<double>(aql.packet_validation_ns) / divisor,
+         colors.reset, colors.time,
+         static_cast<double>(aql.queue_capacity_ns) / divisor, colors.reset,
+         colors.time, static_cast<double>(aql.queue_reservation_ns) / divisor,
+         colors.reset, colors.time,
+         static_cast<double>(aql.ring_publication_ns) / divisor, colors.reset,
+         colors.time, static_cast<double>(aql.doorbell_ns) / divisor,
+         colors.reset);
+  const auto &direct = profile.direct_kfd;
+  const uint64_t direct_ns =
+      direct.queue_capacity_ns + direct.argument_layout_ns +
+      direct.resource_acquisition_ns + direct.kernarg_materialization_ns +
+      direct.bookkeeping_ns;
+  if (direct_ns != 0) {
+    printf("%sdirect KFD runtime profile%s capacity=%s%.3f%s us "
+           "arg-layout=%s%.3f%s us resource=%s%.3f%s us "
+           "kernarg=%s%.3f%s us bookkeeping=%s%.3f%s us\n",
+           colors.label, colors.reset, colors.time,
+           static_cast<double>(direct.queue_capacity_ns) / divisor,
+           colors.reset, colors.time,
+           static_cast<double>(direct.argument_layout_ns) / divisor,
+           colors.reset, colors.time,
+           static_cast<double>(direct.resource_acquisition_ns) / divisor,
+           colors.reset, colors.time,
+           static_cast<double>(direct.kernarg_materialization_ns) / divisor,
+           colors.reset, colors.time,
+           static_cast<double>(direct.bookkeeping_ns) / divisor, colors.reset);
+  }
+}
+
 void print_stack_case(const std::vector<BenchmarkCase> &layers,
                       size_t layer_count, const Measurements &measurements,
                       const Colors &colors) {
@@ -1161,6 +1246,7 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
          colors.label, colors.reset, measurements.setup_construct_ns / 1.0e6,
          measurements.setup_model_copy_ns / 1.0e6,
          measurements.setup_tail_model_copy_ns / 1.0e6);
+  print_cpu_submit_profile(measurements, colors);
   print_stage_breakdown(measurements, colors);
   print_gpu_stage_breakdown(measurements, colors);
   print_memory_stats(measurements, colors);
@@ -1346,7 +1432,7 @@ int main(int argc, char **argv) {
               device, cases, count, tail_weights.get(), iterations,
               warmup_iterations, options.trace_setup,
               options.trace_setup || options.trace_run, options.sync_stack,
-              options.gpu_stage_profile);
+              options.gpu_stage_profile, options.cpu_submit_profile);
           print_stack_case(cases, count, measurements, colors);
           if (options.e2e_check && count == options.layers) {
             validate_e2e_result(measurements);
@@ -1360,7 +1446,7 @@ int main(int argc, char **argv) {
             device, cases, cases.size(), tail_weights.get(), iterations,
             warmup_iterations, options.trace_setup,
             options.trace_setup || options.trace_run, options.sync_stack,
-            options.gpu_stage_profile);
+            options.gpu_stage_profile, options.cpu_submit_profile);
         print_stack_case(cases, cases.size(), measurements, colors);
         if (options.e2e_check) {
           validate_e2e_result(measurements);

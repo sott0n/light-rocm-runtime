@@ -400,6 +400,7 @@ lr_status_t restore_direct_kfd_default_queue_locked(lr_device_t device_handle,
 lr_status_t ensure_direct_kfd_queue_scratch_locked(DeviceState *device,
                                                    lr_queue_t *queue,
                                                    uint32_t private_size);
+lr_status_t reap_completed_direct_kfd_dispatches_locked(lr_queue_t *queue);
 lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_device_locked(DeviceState *device);

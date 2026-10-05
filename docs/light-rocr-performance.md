@@ -143,6 +143,47 @@ path rather than faster kernels. Fixed-clock repetition is still required for
 a hardware-independent percentage, but it does not change which side of the
 runtime/device boundary contains the measured advantage.
 
+### CPU submission diagnostic
+
+The Qwen benchmark's `--cpu-submit-profile` mode instruments one additional
+stack after the ordinary measurements. It measures each runtime launch and
+splits AQL submission into packet construction, validation, capacity checking,
+write-index reservation, ring publication, and the doorbell store. These are
+diagnostic values: reading the CPU clock around every sub-microsecond phase
+adds overhead and the ordinary stage submission timers remain the performance
+measurement.
+
+A matched Release run with 20 warm-up iterations and 5,618 dispatches reported:
+
+| Profiled runtime cost | ROCr | Direct KFD |
+| --- | ---: | ---: |
+| Total per dispatch | 1.547 us | 0.937 us |
+| Outside measured AQL phases | 1.376 us | 0.809 us |
+| AQL packet build | 0.025 us | 0.025 us |
+| AQL validation | 0.025 us | 0.027 us |
+| AQL capacity check | 0.038 us | skipped after the locked runtime check |
+| AQL write-index reservation | 0.032 us | 0.027 us |
+| AQL ring publication | 0.025 us | 0.023 us |
+| AQL doorbell store | 0.027 us | 0.025 us |
+
+The result shows that packet construction, ring publication, and the MMIO
+doorbell are not the dominant direct-KFD CPU cost. Before this measurement,
+the direct path polled and attempted to retire the oldest completion signal
+before every dispatch even when the AQL ring had capacity and its reusable
+dispatch pool was populated. Moving retirement to ring-backpressure or
+resource-pool-empty paths reduced its profiled capacity phase from 0.091 us to
+0.044 us per dispatch. Reusing the runtime's locked capacity result in the AQL
+producer also removed a duplicate pair of read/write-index loads.
+
+The final three-iteration run spent approximately 8.55 ms in the benchmark's
+decoder and tail submission timers, down from the earlier 8.70-8.73 ms range.
+The remaining measured direct-KFD subphases were 0.027 us for argument layout,
+0.031 us for dispatch-resource reuse, 0.063 us for kernarg materialization,
+and 0.023 us for pending-dispatch bookkeeping per launch. Kernarg preparation
+is therefore the largest individually identified direct-KFD phase, while most
+of the residual lies outside these small leaf operations in runtime and
+executor call overhead.
+
 ### Stage-level GPU diagnostic
 
 The benchmark can insert GPU timestamp markers after each decoder stage in a

@@ -1,6 +1,7 @@
 #ifndef LRRT_LAUNCH_PROFILE_HPP_
 #define LRRT_LAUNCH_PROFILE_HPP_
 
+#include "aql_producer.hpp"
 #include "lrrt/lrrt.h"
 
 #include <array>
@@ -31,6 +32,14 @@ struct LaunchProfile {
   uint64_t initial_global_lock_hold_ns = 0;
   std::array<uint64_t, static_cast<size_t>(LaunchProfilePhase::Count)>
       phase_ns{};
+  AqlSubmitProfile aql;
+  struct {
+    uint64_t queue_capacity_ns = 0;
+    uint64_t argument_layout_ns = 0;
+    uint64_t resource_acquisition_ns = 0;
+    uint64_t kernarg_materialization_ns = 0;
+    uint64_t bookkeeping_ns = 0;
+  } direct_kfd;
 };
 
 // These hooks are private to the runtime benchmarks. Profiling is disabled by

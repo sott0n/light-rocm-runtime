@@ -1367,6 +1367,10 @@ lr_status_t release_direct_kfd_kernarg_arenas_locked(lr_queue_t *queue) {
 
 } // namespace
 
+lr_status_t reap_completed_direct_kfd_dispatches_locked(lr_queue_t *queue) {
+  return reap_direct_kfd_dispatches_locked(queue);
+}
+
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
   while (queue->pending_dispatch_head != queue->pending_dispatches.size() ||
          !queue->pending_events.empty()) {
@@ -1397,6 +1401,26 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   while (true) {
+    if (queue->available_dispatches.empty() &&
+        queue->pending_dispatch_head != queue->pending_dispatches.size()) {
+      const lr_status_t reap_status = reap_direct_kfd_dispatches_locked(queue);
+      if (reap_status != LR_SUCCESS) {
+        return reap_status;
+      }
+    }
+    const uint64_t read_index = queue->queue.read_index_acquire();
+    const uint64_t write_index = queue->queue.write_index_relaxed();
+    if (write_index < read_index) {
+      return LR_ERROR_RUNTIME;
+    }
+    if (write_index - read_index < queue->queue.packet_count()) {
+      return LR_SUCCESS;
+    }
+
+    // Completed-dispatch retirement is only needed when the ring applies
+    // backpressure. On the common path, synchronize() replenishes the resource
+    // pool between stacks; polling the oldest completion signal before every
+    // packet only adds CPU submission latency.
     const lr_status_t reap_status = reap_direct_kfd_dispatches_locked(queue);
     if (reap_status != LR_SUCCESS) {
       return reap_status;
@@ -1406,12 +1430,13 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     if (event_status != LR_SUCCESS) {
       return event_status;
     }
-    const uint64_t read_index = queue->queue.read_index_acquire();
-    const uint64_t write_index = queue->queue.write_index_relaxed();
-    if (write_index < read_index) {
+    const uint64_t refreshed_read_index = queue->queue.read_index_acquire();
+    const uint64_t refreshed_write_index = queue->queue.write_index_relaxed();
+    if (refreshed_write_index < refreshed_read_index) {
       return LR_ERROR_RUNTIME;
     }
-    if (write_index - read_index < queue->queue.packet_count()) {
+    if (refreshed_write_index - refreshed_read_index <
+        queue->queue.packet_count()) {
       return LR_SUCCESS;
     }
     if (queue->pending_dispatch_head == queue->pending_dispatches.size() &&

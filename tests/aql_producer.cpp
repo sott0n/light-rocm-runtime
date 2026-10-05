@@ -172,6 +172,27 @@ int main() {
     return 1;
   }
 
+  FakeQueue prevalidated_queue;
+  prevalidated_queue.read_index = 0;
+  prevalidated_queue.write_index = prevalidated_queue.packet_count;
+  const AqlKernelDispatchPacket prevalidated =
+      lrrt_internal::build_aql_kernel_dispatch_packet(dispatch_parameters(),
+                                                      {0, false});
+  prevalidated_queue.expected_at_doorbell = &prevalidated;
+  const auto prevalidated_result = lrrt_internal::submit_aql_kernel_dispatch(
+      producer_ops(&prevalidated_queue), dispatch_parameters(), {0, false},
+      nullptr, true);
+  if (!prevalidated_result || prevalidated_result.packet_id != 2 ||
+      prevalidated_queue.doorbell != 2 ||
+      !prevalidated_queue.packet_complete_at_doorbell ||
+      !operations_are(prevalidated_queue,
+                      std::array{QueueOperation::Validate,
+                                 QueueOperation::Reserve,
+                                 QueueOperation::RingDoorbell})) {
+    std::cerr << "prevalidated capacity still loaded queue indices\n";
+    return 1;
+  }
+
   FakeQueue barrier_queue;
   barrier_queue.ring.fill(0x7c);
   const lrrt_internal::AqlBarrierAndParameters barrier_parameters = {

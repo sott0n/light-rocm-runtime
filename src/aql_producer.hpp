@@ -136,6 +136,16 @@ struct AqlSubmitResult {
   explicit operator bool() const { return error == AqlSubmitError::None; }
 };
 
+struct AqlSubmitProfile {
+  uint64_t submission_count = 0;
+  uint64_t packet_build_ns = 0;
+  uint64_t packet_validation_ns = 0;
+  uint64_t queue_capacity_ns = 0;
+  uint64_t queue_reservation_ns = 0;
+  uint64_t ring_publication_ns = 0;
+  uint64_t doorbell_ns = 0;
+};
+
 [[nodiscard]] AqlKernelDispatchPacket
 build_aql_kernel_dispatch_packet(const AqlKernelDispatchParameters &parameters,
                                  const AqlDispatchOrdering &ordering);
@@ -145,10 +155,14 @@ valid_aql_kernel_dispatch_packet(const AqlKernelDispatchPacket &packet);
 build_aql_barrier_and_packet(const AqlBarrierAndParameters &parameters);
 [[nodiscard]] bool
 valid_aql_barrier_and_packet(const AqlBarrierAndPacket &packet);
+// capacity_prevalidated may only be set by a serialized producer that has
+// already established that one queue slot is available.
 [[nodiscard]] AqlSubmitResult
 submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
                            const AqlKernelDispatchParameters &parameters,
-                           const AqlDispatchOrdering &ordering);
+                           const AqlDispatchOrdering &ordering,
+                           AqlSubmitProfile *profile = nullptr,
+                           bool capacity_prevalidated = false);
 [[nodiscard]] AqlSubmitResult
 submit_aql_barrier_and(const AqlQueueProducerOps &queue,
                        const AqlBarrierAndParameters &parameters);

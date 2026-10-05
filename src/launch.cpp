@@ -35,6 +35,7 @@ aql_dispatch_parameters(const lr_launch_config_t *config,
                         uint32_t group_segment_size, uint64_t kernel_object,
                         uint64_t kernarg_address, uint64_t completion_signal);
 lr_status_t aql_submit_status(AqlSubmitError error);
+LaunchProfile *current_launch_profile();
 } // namespace
 
 #if LRRT_ENABLE_LIGHT_ROCR_KFD
@@ -46,6 +47,27 @@ static_assert(kAqlKernelDispatchHeader ==
               light_rocr::runtime::kAqlKernelDispatchHeader);
 
 constexpr uint64_t kDirectKfdKernargArenaSize = 8U * 1024U * 1024U;
+
+class ScopedDirectKfdProfile {
+public:
+  explicit ScopedDirectKfdProfile(uint64_t *elapsed_ns)
+      : elapsed_ns_(elapsed_ns),
+        begin_(elapsed_ns ? std::chrono::steady_clock::now()
+                          : std::chrono::steady_clock::time_point{}) {}
+
+  ~ScopedDirectKfdProfile() {
+    if (elapsed_ns_) {
+      *elapsed_ns_ += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - begin_)
+              .count());
+    }
+  }
+
+private:
+  uint64_t *elapsed_ns_;
+  std::chrono::steady_clock::time_point begin_;
+};
 
 std::optional<lr_queue_t::KernargSlice>
 allocate_direct_kfd_kernarg_locked(DeviceState *device, lr_queue_t *queue,
@@ -113,6 +135,7 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
     const void *args, size_t args_size) {
+  LaunchProfile *profile = current_launch_profile();
   if (!device || !queue || !config || !args || !g_kfd_session ||
       !executable_image ||
       image_kernel_index >= executable_image.code_object().kernels.size() ||
@@ -135,102 +158,132 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     return scratch_status;
   }
 
-  const lr_status_t capacity_status =
-      ensure_direct_kfd_queue_capacity_locked(queue);
-  if (capacity_status != LR_SUCCESS) {
-    return capacity_status;
-  }
-
-  const auto requirements = light_rocr::runtime::kernarg_buffer_requirements(
-      kernel_info, args, args_size);
-  if (!requirements) {
-    return requirements.status.error ==
-                   light_rocr::runtime::KernargBufferError::UnsupportedAlignment
-               ? LR_ERROR_NOT_SUPPORTED
-               : LR_ERROR_INVALID_ARGUMENT;
-  }
-
-  uint64_t allocation_size = 0;
-  if (requirements.storage_size != 0) {
-    if (requirements.storage_size >
-        std::numeric_limits<uint64_t>::max() -
-            (light_rocr::transport::kfd::kMemoryPageSize - 1)) {
-      return LR_ERROR_INVALID_ARGUMENT;
+  {
+    ScopedDirectKfdProfile phase(
+        profile ? &profile->direct_kfd.queue_capacity_ns : nullptr);
+    const lr_status_t capacity_status =
+        ensure_direct_kfd_queue_capacity_locked(queue);
+    if (capacity_status != LR_SUCCESS) {
+      return capacity_status;
     }
-    allocation_size = (requirements.storage_size +
-                       light_rocr::transport::kfd::kMemoryPageSize - 1) &
-                      ~(light_rocr::transport::kfd::kMemoryPageSize - 1);
   }
 
-  if (queue->pending_dispatch_head != 0 &&
-      queue->pending_dispatches.size() ==
-          queue->pending_dispatches.capacity()) {
-    queue->pending_dispatches.erase(
-        queue->pending_dispatches.begin(),
-        queue->pending_dispatches.begin() +
-            static_cast<std::ptrdiff_t>(queue->pending_dispatch_head));
-    queue->pending_dispatch_head = 0;
-  }
-  try {
-    queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
-    queue->available_dispatches.reserve(queue->available_dispatches.size() + 1);
-  } catch (const std::bad_alloc &) {
-    return LR_ERROR_RUNTIME;
+  light_rocr::runtime::KernargBufferRequirementsResult requirements;
+  uint64_t allocation_size = 0;
+  {
+    ScopedDirectKfdProfile phase(
+        profile ? &profile->direct_kfd.argument_layout_ns : nullptr);
+    requirements = light_rocr::runtime::kernarg_buffer_requirements(
+        kernel_info, args, args_size);
+    if (!requirements) {
+      return requirements.status.error ==
+                     light_rocr::runtime::KernargBufferError::
+                         UnsupportedAlignment
+                 ? LR_ERROR_NOT_SUPPORTED
+                 : LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (requirements.storage_size != 0) {
+      if (requirements.storage_size >
+          std::numeric_limits<uint64_t>::max() -
+              (light_rocr::transport::kfd::kMemoryPageSize - 1)) {
+        return LR_ERROR_INVALID_ARGUMENT;
+      }
+      allocation_size = (requirements.storage_size +
+                         light_rocr::transport::kfd::kMemoryPageSize - 1) &
+                        ~(light_rocr::transport::kfd::kMemoryPageSize - 1);
+    }
   }
 
   std::unique_ptr<lr_queue_t::PendingDispatch> pending;
-  auto reusable = std::find_if(
-      queue->available_dispatches.rbegin(), queue->available_dispatches.rend(),
-      [allocation_size](const auto &dispatch) {
-        return allocation_size == 0 ||
-               (dispatch->kernarg && dispatch->kernarg.size >= allocation_size);
-      });
-  if (reusable != queue->available_dispatches.rend()) {
-    const size_t reusable_index = static_cast<size_t>(
-        std::distance(reusable, queue->available_dispatches.rend()) - 1);
-    pending = std::move(queue->available_dispatches[reusable_index]);
-    if (reusable_index + 1 != queue->available_dispatches.size()) {
-      queue->available_dispatches[reusable_index] =
-          std::move(queue->available_dispatches.back());
+  {
+    ScopedDirectKfdProfile resource_phase(
+        profile ? &profile->direct_kfd.resource_acquisition_ns : nullptr);
+    if (queue->pending_dispatch_head != 0 &&
+        queue->pending_dispatches.size() ==
+            queue->pending_dispatches.capacity()) {
+      queue->pending_dispatches.erase(
+          queue->pending_dispatches.begin(),
+          queue->pending_dispatches.begin() +
+              static_cast<std::ptrdiff_t>(queue->pending_dispatch_head));
+      queue->pending_dispatch_head = 0;
     }
-    queue->available_dispatches.pop_back();
-    pending->completion_signal.reset(1);
-  } else {
-    const auto kernarg =
-        allocate_direct_kfd_kernarg_locked(device, queue, allocation_size);
-    if (!kernarg.has_value()) {
+    try {
+      queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
+      queue->available_dispatches.reserve(queue->available_dispatches.size() +
+                                          1);
+    } catch (const std::bad_alloc &) {
       return LR_ERROR_RUNTIME;
     }
 
-    auto signal = g_kfd_session->create_user_signal(device->node, 1);
-    if (!signal) {
-      rollback_direct_kfd_kernarg_locked(*kernarg);
-      (void)signal.signal.release();
-      return LR_ERROR_RUNTIME;
+    const auto find_reusable = [&] {
+      return std::find_if(queue->available_dispatches.rbegin(),
+                          queue->available_dispatches.rend(),
+                          [allocation_size](const auto &dispatch) {
+                            return allocation_size == 0 ||
+                                   (dispatch->kernarg &&
+                                    dispatch->kernarg.size >= allocation_size);
+                          });
+    };
+    auto reusable = find_reusable();
+    if (reusable == queue->available_dispatches.rend()) {
+      const lr_status_t reap_status =
+          reap_completed_direct_kfd_dispatches_locked(queue);
+      if (reap_status != LR_SUCCESS) {
+        return reap_status;
+      }
+      reusable = find_reusable();
     }
-    try {
-      pending = std::make_unique<lr_queue_t::PendingDispatch>(
-          std::move(signal.signal), *kernarg);
-    } catch (const std::bad_alloc &) {
-      rollback_direct_kfd_kernarg_locked(*kernarg);
-      (void)signal.signal.release();
-      return LR_ERROR_RUNTIME;
+    if (reusable != queue->available_dispatches.rend()) {
+      const size_t reusable_index = static_cast<size_t>(
+          std::distance(reusable, queue->available_dispatches.rend()) - 1);
+      pending = std::move(queue->available_dispatches[reusable_index]);
+      if (reusable_index + 1 != queue->available_dispatches.size()) {
+        queue->available_dispatches[reusable_index] =
+            std::move(queue->available_dispatches.back());
+      }
+      queue->available_dispatches.pop_back();
+      pending->completion_signal.reset(1);
+    } else {
+      const auto kernarg =
+          allocate_direct_kfd_kernarg_locked(device, queue, allocation_size);
+      if (!kernarg.has_value()) {
+        return LR_ERROR_RUNTIME;
+      }
+
+      auto signal = g_kfd_session->create_user_signal(device->node, 1);
+      if (!signal) {
+        rollback_direct_kfd_kernarg_locked(*kernarg);
+        (void)signal.signal.release();
+        return LR_ERROR_RUNTIME;
+      }
+      try {
+        pending = std::make_unique<lr_queue_t::PendingDispatch>(
+            std::move(signal.signal), *kernarg);
+      } catch (const std::bad_alloc &) {
+        rollback_direct_kfd_kernarg_locked(*kernarg);
+        (void)signal.signal.release();
+        return LR_ERROR_RUNTIME;
+      }
     }
   }
 
   uint64_t kernarg_address = 0;
-  if (requirements.storage_size != 0) {
-    const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
-        kernel_info, args, args_size, pending->kernarg.host_address(),
-        pending->kernarg.size, pending->kernarg.gpu_address());
-    if (!materialized ||
-        !populate_light_rocr_hidden_kernargs(kernel_info, *config,
-                                             pending->kernarg.host_address(),
-                                             kernel_info.kernarg_size)) {
-      queue->available_dispatches.push_back(std::move(pending));
-      return LR_ERROR_INVALID_ARGUMENT;
+  {
+    ScopedDirectKfdProfile phase(
+        profile ? &profile->direct_kfd.kernarg_materialization_ns : nullptr);
+    if (requirements.storage_size != 0) {
+      const auto materialized = light_rocr::runtime::materialize_kernarg_buffer(
+          kernel_info, args, args_size, pending->kernarg.host_address(),
+          pending->kernarg.size, pending->kernarg.gpu_address());
+      if (!materialized ||
+          !populate_light_rocr_hidden_kernargs(kernel_info, *config,
+                                               pending->kernarg.host_address(),
+                                               kernel_info.kernarg_size)) {
+        queue->available_dispatches.push_back(std::move(pending));
+        return LR_ERROR_INVALID_ARGUMENT;
+      }
+      kernarg_address = materialized.buffer.gpu_address();
     }
-    kernarg_address = materialized.buffer.gpu_address();
   }
 
   const auto parameters = aql_dispatch_parameters(
@@ -238,16 +291,24 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
       kernel_info.group_segment_size + config->shared_memory_bytes,
       executable_image.kernels()[image_kernel_index].descriptor_gpu_address,
       kernarg_address, pending->completion_signal.gpu_handle());
+  // Capacity was checked above while the global producer lock was held. The
+  // GPU can only advance the read index before this reservation, so repeating
+  // both index loads in the common AQL producer cannot make the result safer.
   const auto submitted = submit_aql_kernel_dispatch(
       light_rocr_kfd_producer_ops(&queue->queue,
                                   valid_direct_kfd_dispatch_packet),
       parameters,
-      {queue->pending_dispatches.size() - queue->pending_dispatch_head, false});
+      {queue->pending_dispatches.size() - queue->pending_dispatch_head, false},
+      profile ? &profile->aql : nullptr, true);
   if (!submitted) {
     queue->available_dispatches.push_back(std::move(pending));
     return aql_submit_status(submitted.error);
   }
-  queue->pending_dispatches.push_back(std::move(pending));
+  {
+    ScopedDirectKfdProfile phase(profile ? &profile->direct_kfd.bookkeeping_ns
+                                         : nullptr);
+    queue->pending_dispatches.push_back(std::move(pending));
+  }
   return LR_SUCCESS;
 }
 
@@ -304,13 +365,7 @@ lr_status_t aql_submit_status(AqlSubmitError error) {
 
 } // namespace
 
-#if LRRT_ENABLE_HSA
 namespace {
-
-static_assert(sizeof(AqlKernelDispatchPacket) ==
-              sizeof(hsa_kernel_dispatch_packet_t));
-static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) ==
-              offsetof(hsa_kernel_dispatch_packet_t, completion_signal));
 
 #if LRRT_ENABLE_LAUNCH_PROFILING
 using ProfileClock = std::chrono::steady_clock;
@@ -406,6 +461,24 @@ public:
   void finish() {}
 };
 #endif
+
+LaunchProfile *current_launch_profile() {
+#if LRRT_ENABLE_LAUNCH_PROFILING
+  return g_launch_profiling_enabled ? &g_thread_launch_profile : nullptr;
+#else
+  return nullptr;
+#endif
+}
+
+} // namespace
+
+#if LRRT_ENABLE_HSA
+namespace {
+
+static_assert(sizeof(AqlKernelDispatchPacket) ==
+              sizeof(hsa_kernel_dispatch_packet_t));
+static_assert(offsetof(AqlKernelDispatchPacket, completion_signal) ==
+              offsetof(hsa_kernel_dispatch_packet_t, completion_signal));
 
 class LaunchSubmissionPins {
 public:
@@ -773,7 +846,7 @@ lr_status_t submit_light_rocr_kernel_locked(
 namespace lrrt_internal {
 
 void set_thread_launch_profiling(bool enabled) {
-#if LRRT_ENABLE_HSA && LRRT_ENABLE_LAUNCH_PROFILING
+#if LRRT_ENABLE_LAUNCH_PROFILING
   g_launch_profiling_enabled = enabled;
 #else
   (void)enabled;
@@ -781,13 +854,13 @@ void set_thread_launch_profiling(bool enabled) {
 }
 
 void reset_thread_launch_profile() {
-#if LRRT_ENABLE_HSA && LRRT_ENABLE_LAUNCH_PROFILING
+#if LRRT_ENABLE_LAUNCH_PROFILING
   g_thread_launch_profile = LaunchProfile{};
 #endif
 }
 
 LaunchProfile thread_launch_profile() {
-#if LRRT_ENABLE_HSA && LRRT_ENABLE_LAUNCH_PROFILING
+#if LRRT_ENABLE_LAUNCH_PROFILING
   return g_thread_launch_profile;
 #else
   return LaunchProfile{};
@@ -803,9 +876,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
             const void *args, size_t args_size, lr_queue_t *execution_queue,
             bool use_default_queue, lr_event_t *const *explicit_dependencies,
             size_t dependency_count, bool use_implicit_dependencies) {
-#if LRRT_ENABLE_HSA
   ScopedLaunchProfile launch_profile;
-#endif
   if (!g_initialized.load()) {
     return LR_ERROR_NOT_INITIALIZED;
   }
@@ -1022,6 +1093,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
     ScopedLaunchPhase phase(LaunchProfilePhase::PacketPublication);
     std::memset(kernarg.ptr, 0, kernel->kernarg_size);
     std::memcpy(kernarg.ptr, args, args_size);
+    LaunchProfile *profile = current_launch_profile();
     // Keep packets on the same lrrt queue completion-ordered. Several executor
     // pipelines pass one kernel's output directly to the next kernel.
     const AqlSubmitResult submitted = submit_aql_kernel_dispatch(
@@ -1034,7 +1106,8 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
             signal.handle),
         {queue.pending_dispatches.size(), use_implicit_dependencies
                                               ? !queue.pending_barriers.empty()
-                                              : !event_dependencies.empty()});
+                                              : !event_dependencies.empty()},
+        profile ? &profile->aql : nullptr);
     if (!submitted) {
       queue.signal_pool.push_back(signal);
       queue.kernarg_pool.push_back(kernarg);
@@ -1078,7 +1151,11 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   if (dependency_count != 0 || explicit_dependencies != nullptr) {
     return LR_ERROR_NOT_SUPPORTED;
   }
-  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex, std::defer_lock);
+  {
+    ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
+    lock.lock();
+  }
   if (!valid_kernel_locked(kernel)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }

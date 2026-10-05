@@ -62,6 +62,7 @@ if(LRRT_BUILD_TRITON_BENCHMARKS AND UV_EXECUTABLE)
     lrrt_triton_mini_decoder_layer_benchmark
     PRIVATE
       "${PROJECT_SOURCE_DIR}"
+      "${PROJECT_SOURCE_DIR}/src"
       "${PROJECT_SOURCE_DIR}/executor/triton"
       "${PROJECT_SOURCE_DIR}/examples/triton"
   )

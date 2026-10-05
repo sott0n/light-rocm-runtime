@@ -1,10 +1,47 @@
 #include "aql_producer.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 
+#ifndef LRRT_ENABLE_LAUNCH_PROFILING
+#define LRRT_ENABLE_LAUNCH_PROFILING 0
+#endif
+
 namespace lrrt_internal {
 namespace {
+
+using ProfileClock = std::chrono::steady_clock;
+
+class ScopedProfile {
+public:
+  explicit ScopedProfile(uint64_t *elapsed_ns)
+      : elapsed_ns_(elapsed_ns),
+        begin_(elapsed_ns ? ProfileClock::now() : ProfileClock::time_point{}) {}
+
+  ~ScopedProfile() {
+    if (elapsed_ns_) {
+      *elapsed_ns_ += static_cast<uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              ProfileClock::now() - begin_)
+              .count());
+    }
+  }
+
+private:
+  uint64_t *elapsed_ns_;
+  ProfileClock::time_point begin_;
+};
+
+template <uint64_t AqlSubmitProfile::*Field>
+uint64_t *profile_field(AqlSubmitProfile *profile) {
+#if LRRT_ENABLE_LAUNCH_PROFILING
+  return profile ? &(profile->*Field) : nullptr;
+#else
+  (void)profile;
+  return nullptr;
+#endif
+}
 
 bool is_power_of_two(uint64_t value) {
   return value != 0 && (value & (value - 1)) == 0;
@@ -43,23 +80,39 @@ bool valid_queue(const AqlQueueProducerOps &queue) {
 
 template <typename Packet>
 AqlSubmitResult submit_packet(const AqlQueueProducerOps &queue,
-                              const Packet &packet) {
-  const uint64_t read_index = queue.load_read_index(queue.context);
-  const uint64_t write_index = queue.load_write_index(queue.context);
-  if (write_index < read_index ||
-      write_index - read_index >= queue.packet_count) {
-    return {AqlSubmitError::QueueFull, 0};
+                              const Packet &packet, AqlSubmitProfile *profile,
+                              bool capacity_prevalidated) {
+  if (!capacity_prevalidated) {
+    ScopedProfile phase(
+        profile_field<&AqlSubmitProfile::queue_capacity_ns>(profile));
+    const uint64_t read_index = queue.load_read_index(queue.context);
+    const uint64_t write_index = queue.load_write_index(queue.context);
+    if (write_index < read_index ||
+        write_index - read_index >= queue.packet_count) {
+      return {AqlSubmitError::QueueFull, 0};
+    }
   }
 
   uint64_t packet_id = 0;
-  if (!queue.reserve_packet(queue.context, 1, &packet_id)) {
-    return {AqlSubmitError::ReserveFailed, 0};
+  {
+    ScopedProfile phase(
+        profile_field<&AqlSubmitProfile::queue_reservation_ns>(profile));
+    if (!queue.reserve_packet(queue.context, 1, &packet_id)) {
+      return {AqlSubmitError::ReserveFailed, 0};
+    }
   }
   const uint64_t slot_index = packet_id & (queue.packet_count - 1);
   auto *slot = static_cast<uint8_t *>(queue.ring_base) +
                static_cast<size_t>(slot_index * sizeof(packet));
-  publish_packet(slot, packet);
-  queue.ring_doorbell(queue.context, packet_id);
+  {
+    ScopedProfile phase(
+        profile_field<&AqlSubmitProfile::ring_publication_ns>(profile));
+    publish_packet(slot, packet);
+  }
+  {
+    ScopedProfile phase(profile_field<&AqlSubmitProfile::doorbell_ns>(profile));
+    queue.ring_doorbell(queue.context, packet_id);
+  }
   return {AqlSubmitError::None, packet_id};
 }
 
@@ -133,19 +186,34 @@ bool valid_aql_barrier_and_packet(const AqlBarrierAndPacket &packet) {
 AqlSubmitResult
 submit_aql_kernel_dispatch(const AqlQueueProducerOps &queue,
                            const AqlKernelDispatchParameters &parameters,
-                           const AqlDispatchOrdering &ordering) {
-  if (!valid_queue(queue)) {
-    return {AqlSubmitError::InvalidQueue, 0};
+                           const AqlDispatchOrdering &ordering,
+                           AqlSubmitProfile *profile,
+                           bool capacity_prevalidated) {
+#if LRRT_ENABLE_LAUNCH_PROFILING
+  if (profile) {
+    ++profile->submission_count;
   }
-  const AqlKernelDispatchPacket packet =
-      build_aql_kernel_dispatch_packet(parameters, ordering);
-  if (!valid_aql_kernel_dispatch_packet(packet) ||
-      (queue.validate_packet != nullptr &&
-       !queue.validate_packet(queue.context, packet))) {
-    return {AqlSubmitError::InvalidPacket, 0};
+#endif
+  AqlKernelDispatchPacket packet;
+  {
+    ScopedProfile phase(
+        profile_field<&AqlSubmitProfile::packet_build_ns>(profile));
+    packet = build_aql_kernel_dispatch_packet(parameters, ordering);
+  }
+  {
+    ScopedProfile phase(
+        profile_field<&AqlSubmitProfile::packet_validation_ns>(profile));
+    if (!valid_queue(queue)) {
+      return {AqlSubmitError::InvalidQueue, 0};
+    }
+    if (!valid_aql_kernel_dispatch_packet(packet) ||
+        (queue.validate_packet != nullptr &&
+         !queue.validate_packet(queue.context, packet))) {
+      return {AqlSubmitError::InvalidPacket, 0};
+    }
   }
 
-  return submit_packet(queue, packet);
+  return submit_packet(queue, packet, profile, capacity_prevalidated);
 }
 
 AqlSubmitResult
