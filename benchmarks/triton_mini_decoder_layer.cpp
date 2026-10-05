@@ -2,6 +2,7 @@
 #include "mini_decoder_layer.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -69,6 +70,21 @@ struct StageBreakdown {
   uint64_t tail_runs = 0;
 };
 
+struct GpuStageBreakdown {
+  double attention_norm_ns = 0.0;
+  double qkv_projection_ns = 0.0;
+  double kv_cache_ns = 0.0;
+  double attention_ns = 0.0;
+  double attention_output_ns = 0.0;
+  double mlp_ns = 0.0;
+  double tail_final_norm_ns = 0.0;
+  double tail_lm_head_ns = 0.0;
+  double instrumented_interval_ns = 0.0;
+  double marker_packet_ns = 0.0;
+  uint64_t decoder_runs = 0;
+  uint64_t tail_runs = 0;
+};
+
 struct Measurements {
   double cpu_round_trip_ns;
   double cpu_burst_interval_ns;
@@ -79,6 +95,7 @@ struct Measurements {
   double setup_model_copy_ns;
   double setup_tail_model_copy_ns;
   StageBreakdown stage_breakdown;
+  GpuStageBreakdown gpu_stage_breakdown;
   lrrt::MemoryStats memory_stats;
   bool produced_logits;
   uint32_t vocab;
@@ -104,6 +121,36 @@ struct Options {
   bool sync_stack;
   bool trace_setup;
   bool trace_run;
+  bool gpu_stage_profile;
+};
+
+struct DecoderStageEventSample {
+  explicit DecoderStageEventSample(lrrt::Device &device) {
+    for (auto &event : events) {
+      event = std::make_unique<lrrt::Event>(device);
+    }
+  }
+
+  lrrt::examples::triton::mini::DecoderLayerStageMarkers markers() {
+    return {events[0].get(), events[1].get(), events[2].get(),
+            events[3].get(), events[4].get(), events[5].get()};
+  }
+
+  std::array<std::unique_ptr<lrrt::Event>, 6> events;
+};
+
+struct TailStageEventSample {
+  explicit TailStageEventSample(lrrt::Device &device) {
+    for (auto &event : events) {
+      event = std::make_unique<lrrt::Event>(device);
+    }
+  }
+
+  lrrt::examples::triton::mini::ModelTailStageMarkers markers() {
+    return {events[0].get(), events[1].get()};
+  }
+
+  std::array<std::unique_ptr<lrrt::Event>, 2> events;
 };
 
 struct SetupBreakdown {
@@ -172,7 +219,7 @@ uint32_t parse_u32(const char *text, const char *label) {
 
 Options parse_options(int argc, char **argv) {
   Options options{20,    0,     nullptr, nullptr, 0,     0,     false, false,
-                  false, false, false,   false,   false, false, false};
+                  false, false, false,   false,   false, false, false, false};
   bool saw_iterations = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--weights") == 0) {
@@ -216,6 +263,8 @@ Options parse_options(int argc, char **argv) {
       options.trace_setup = true;
     } else if (strcmp(argv[i], "--trace-run") == 0) {
       options.trace_run = true;
+    } else if (strcmp(argv[i], "--gpu-stage-profile") == 0) {
+      options.gpu_stage_profile = true;
     } else if (!saw_iterations) {
       options.iterations = parse_u32(argv[i], "benchmark count");
       saw_iterations = true;
@@ -226,7 +275,7 @@ Options parse_options(int argc, char **argv) {
           "[--valid-keys count] [--layer-sweep] "
           "[--warmup-iterations count | --no-warmup] "
           "[--no-model-tail] [--e2e-check] [--sync-stack] "
-          "[--trace-setup] [--trace-run]");
+          "[--trace-setup] [--trace-run] [--gpu-stage-profile]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -250,6 +299,13 @@ Options parse_options(int argc, char **argv) {
   }
   if (options.sync_stack && !options.weights_dir) {
     throw std::invalid_argument("--sync-stack requires --weights-dir");
+  }
+  if (options.gpu_stage_profile && !options.weights_dir) {
+    throw std::invalid_argument("--gpu-stage-profile requires --weights-dir");
+  }
+  if (options.gpu_stage_profile && options.sync_stack) {
+    throw std::invalid_argument(
+        "--gpu-stage-profile and --sync-stack are mutually exclusive");
   }
   if (options.has_warmup_iterations && options.no_warmup) {
     throw std::invalid_argument(
@@ -546,6 +602,7 @@ Measurements measure_case(lrrt::Device &device,
           0.0,
           0.0,
           stage_breakdown,
+          {},
           device.memory_stats(),
           false,
           0,
@@ -560,7 +617,8 @@ measure_stack_case(lrrt::Device &device,
                    const std::vector<BenchmarkCase> &layers, size_t layer_count,
                    const lrrt::executor::qwen::ModelTailWeights *tail_weights,
                    uint32_t iterations, uint32_t warmup_iterations,
-                   bool trace_setup, bool trace_run, bool sync_stack) {
+                   bool trace_setup, bool trace_run, bool sync_stack,
+                   bool gpu_stage_profile) {
   device.reset_memory_stats();
   if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
@@ -794,6 +852,87 @@ measure_stack_case(lrrt::Device &device,
         static_cast<double>(lrrt::elapsed_time_ns(gpu_start, gpu_end));
   }
 
+  GpuStageBreakdown gpu_stages;
+  if (gpu_stage_profile) {
+    const size_t decoder_run_count =
+        layer_count * static_cast<size_t>(valid_keys);
+    std::vector<DecoderStageEventSample> decoder_samples;
+    decoder_samples.reserve(decoder_run_count);
+    for (size_t index = 0; index < decoder_run_count; ++index) {
+      decoder_samples.emplace_back(device);
+    }
+    std::unique_ptr<TailStageEventSample> tail_sample;
+    if (tail) {
+      tail_sample = std::make_unique<TailStageEventSample>(device);
+    }
+
+    lrrt::Event profile_start(device);
+    profile_start.record(*stack_queue);
+    profile_start.synchronize();
+
+    size_t sample_index = 0;
+    for (size_t layer = 0; layer < layer_count; ++layer) {
+      for (uint32_t key = 1; key <= valid_keys; ++key) {
+        auto markers = decoder_samples[sample_index++].markers();
+        if (layer + 1 < layer_count) {
+          executors[layer]->run_to_hidden_state(key, *executors[layer + 1],
+                                                key - 1, nullptr, &markers);
+        } else if (tail) {
+          executors[layer]->run_to_buffer(key, tail->hidden_buffer(), nullptr,
+                                          &markers);
+        } else {
+          executors[layer]->run(key, {}, nullptr, &markers);
+        }
+      }
+    }
+    if (tail) {
+      auto markers = tail_sample->markers();
+      tail->run({}, nullptr, &markers);
+    }
+
+    lrrt::Event *profile_end = tail_sample
+                                   ? tail_sample->events.back().get()
+                                   : decoder_samples.back().events.back().get();
+    profile_end->synchronize();
+    for (DecoderStageEventSample &sample : decoder_samples) {
+      for (auto &event : sample.events) {
+        event->synchronize();
+      }
+    }
+    if (tail_sample) {
+      for (auto &event : tail_sample->events) {
+        event->synchronize();
+      }
+    }
+
+    gpu_stages.instrumented_interval_ns =
+        static_cast<double>(lrrt::elapsed_time_ns(profile_start, *profile_end));
+    const lrrt::Event *previous = &profile_start;
+    auto accumulate_interval = [&](const lrrt::Event &end, double *stage_ns) {
+      const double elapsed =
+          static_cast<double>(lrrt::elapsed_time_ns(*previous, end));
+      const double marker = static_cast<double>(lrrt::duration_ns(end));
+      *stage_ns += std::max(0.0, elapsed - marker);
+      gpu_stages.marker_packet_ns += marker;
+      previous = &end;
+    };
+    for (DecoderStageEventSample &sample : decoder_samples) {
+      accumulate_interval(*sample.events[0], &gpu_stages.attention_norm_ns);
+      accumulate_interval(*sample.events[1], &gpu_stages.qkv_projection_ns);
+      accumulate_interval(*sample.events[2], &gpu_stages.kv_cache_ns);
+      accumulate_interval(*sample.events[3], &gpu_stages.attention_ns);
+      accumulate_interval(*sample.events[4], &gpu_stages.attention_output_ns);
+      accumulate_interval(*sample.events[5], &gpu_stages.mlp_ns);
+      ++gpu_stages.decoder_runs;
+    }
+    if (tail_sample) {
+      accumulate_interval(*tail_sample->events[0],
+                          &gpu_stages.tail_final_norm_ns);
+      accumulate_interval(*tail_sample->events[1], &gpu_stages.tail_lm_head_ns);
+      ++gpu_stages.tail_runs;
+    }
+  }
+
   std::vector<LogitEntry> summary;
   size_t non_finite_logits = 0;
   size_t non_finite_hidden = 0;
@@ -819,6 +958,7 @@ measure_stack_case(lrrt::Device &device,
           setup_breakdown.model_copy_ns,
           setup_breakdown.tail_model_copy_ns,
           stage_breakdown,
+          gpu_stages,
           device.memory_stats(),
           tail != nullptr,
           tail_weights ? tail_weights->vocab : 0,
@@ -919,6 +1059,52 @@ void print_stage_breakdown(const Measurements &measurements,
   }
 }
 
+void print_gpu_stage_breakdown(const Measurements &measurements,
+                               const Colors &colors) {
+  const GpuStageBreakdown &stages = measurements.gpu_stage_breakdown;
+  if (stages.decoder_runs == 0) {
+    return;
+  }
+  const double decoder_ns =
+      stages.attention_norm_ns + stages.qkv_projection_ns + stages.kv_cache_ns +
+      stages.attention_ns + stages.attention_output_ns + stages.mlp_ns;
+  const double tail_ns = stages.tail_final_norm_ns + stages.tail_lm_head_ns;
+  const double work_ns = decoder_ns + tail_ns;
+  auto percentage = [work_ns](double value) {
+    return work_ns == 0.0 ? 0.0 : value * 100.0 / work_ns;
+  };
+
+  printf("%sGPU stage profile%s marker-excluded work=%.3f ms "
+         "instrumented-interval=%.3f ms marker-packets=%.3f ms\n",
+         colors.label, colors.reset, work_ns / 1.0e6,
+         stages.instrumented_interval_ns / 1.0e6,
+         stages.marker_packet_ns / 1.0e6);
+  printf(
+      "%sGPU decoder stages%s attention-norm=%s%.3f%s ms (%.1f%%) "
+      "qkv=%s%.3f%s ms (%.1f%%) kv-cache=%s%.3f%s ms (%.1f%%) "
+      "attention=%s%.3f%s ms (%.1f%%) attn-out=%s%.3f%s ms (%.1f%%) "
+      "mlp=%s%.3f%s ms (%.1f%%)\n",
+      colors.label, colors.reset, colors.time, stages.attention_norm_ns / 1.0e6,
+      colors.reset, percentage(stages.attention_norm_ns), colors.time,
+      stages.qkv_projection_ns / 1.0e6, colors.reset,
+      percentage(stages.qkv_projection_ns), colors.time,
+      stages.kv_cache_ns / 1.0e6, colors.reset, percentage(stages.kv_cache_ns),
+      colors.time, stages.attention_ns / 1.0e6, colors.reset,
+      percentage(stages.attention_ns), colors.time,
+      stages.attention_output_ns / 1.0e6, colors.reset,
+      percentage(stages.attention_output_ns), colors.time,
+      stages.mlp_ns / 1.0e6, colors.reset, percentage(stages.mlp_ns));
+  if (stages.tail_runs != 0) {
+    printf("%sGPU tail stages%s final-norm=%s%.3f%s ms (%.1f%%) "
+           "lm-head=%s%.3f%s ms (%.1f%%)\n",
+           colors.label, colors.reset, colors.time,
+           stages.tail_final_norm_ns / 1.0e6, colors.reset,
+           percentage(stages.tail_final_norm_ns), colors.time,
+           stages.tail_lm_head_ns / 1.0e6, colors.reset,
+           percentage(stages.tail_lm_head_ns));
+  }
+}
+
 void print_stack_case(const std::vector<BenchmarkCase> &layers,
                       size_t layer_count, const Measurements &measurements,
                       const Colors &colors) {
@@ -976,6 +1162,7 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
          measurements.setup_model_copy_ns / 1.0e6,
          measurements.setup_tail_model_copy_ns / 1.0e6);
   print_stage_breakdown(measurements, colors);
+  print_gpu_stage_breakdown(measurements, colors);
   print_memory_stats(measurements, colors);
   fflush(stdout);
 }
@@ -1158,7 +1345,8 @@ int main(int argc, char **argv) {
           Measurements measurements = measure_stack_case(
               device, cases, count, tail_weights.get(), iterations,
               warmup_iterations, options.trace_setup,
-              options.trace_setup || options.trace_run, options.sync_stack);
+              options.trace_setup || options.trace_run, options.sync_stack,
+              options.gpu_stage_profile);
           print_stack_case(cases, count, measurements, colors);
           if (options.e2e_check && count == options.layers) {
             validate_e2e_result(measurements);
@@ -1171,7 +1359,8 @@ int main(int argc, char **argv) {
         Measurements measurements = measure_stack_case(
             device, cases, cases.size(), tail_weights.get(), iterations,
             warmup_iterations, options.trace_setup,
-            options.trace_setup || options.trace_run, options.sync_stack);
+            options.trace_setup || options.trace_run, options.sync_stack,
+            options.gpu_stage_profile);
         print_stack_case(cases, cases.size(), measurements, colors);
         if (options.e2e_check) {
           validate_e2e_result(measurements);
@@ -1218,6 +1407,12 @@ int main(int argc, char **argv) {
       printf("%sstage submit avg%s measures CPU time spent enqueueing each "
              "executor stage, not GPU kernel execution time.\n",
              colors.label, colors.reset);
+      if (options.gpu_stage_profile) {
+        printf("%sGPU stage profile%s is a separate one-stack diagnostic "
+               "pass. Stage values exclude marker packet duration; marker "
+               "insertion can still perturb scheduling.\n",
+               colors.label, colors.reset);
+      }
       if (tail_weights) {
         printf(
             "%smodel tail%s initializes the first layer input from %zu token "

@@ -66,6 +66,12 @@ batch interval is measured with HSA event timestamps.
 The Qwen decoder-stack benchmark reports a profiled GPU interval on both the
 ROCr and direct KFD backends. It synchronizes the start marker before stack
 submission so the marker itself does not remain a pending runtime dependency.
+Pass `--gpu-stage-profile` with a weight directory to run an additional,
+separately instrumented stack. It reports GPU time for attention norm, QKV,
+KV-cache update, attention, attention output, MLP, final norm, and LM head.
+The reported stage values subtract each boundary marker packet's own duration,
+while the uninstrumented `GPU burst` value remains the primary performance
+measurement.
 
 ### Asynchronous dependencies
 

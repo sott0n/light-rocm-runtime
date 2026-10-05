@@ -143,6 +143,48 @@ path rather than faster kernels. Fixed-clock repetition is still required for
 a hardware-independent percentage, but it does not change which side of the
 runtime/device boundary contains the measured advantage.
 
+### Stage-level GPU diagnostic
+
+The benchmark can insert GPU timestamp markers after each decoder stage in a
+separate pass with `--gpu-stage-profile`. It subtracts every ending marker
+packet's own profiled duration from the adjacent-marker interval. The result
+therefore contains stage kernels and any GPU idle interval before the ending
+marker, but not the marker packet itself. The ordinary `GPU burst` pass remains
+uninstrumented.
+
+Two 50-warm-up comparisons were run in opposite backend orders because a
+longer 350-warm-up run reset the GPU in this measurement session. Automatic
+DPM remained enabled, so these values diagnose the location and stability of
+the difference rather than establish a fixed-clock performance ratio:
+
+| Backend order | ROCr marker-excluded work | Direct KFD marker-excluded work |
+| --- | ---: | ---: |
+| Direct KFD then ROCr | 84.835 ms | 82.503 ms |
+| ROCr then direct KFD | 89.117 ms | 81.956 ms |
+
+The closest pair had the following stage totals for one 24-layer, three-key
+stack:
+
+| GPU stage | ROCr | Direct KFD |
+| --- | ---: | ---: |
+| Attention norm | 1.397 ms | 1.423 ms |
+| QKV projection | 6.212 ms | 6.201 ms |
+| KV-cache update | 7.293 ms | 7.215 ms |
+| Attention | 53.055 ms | 51.145 ms |
+| Attention output | 2.698 ms | 2.645 ms |
+| MLP | 13.027 ms | 12.723 ms |
+| Final norm and LM head | 1.153 ms | 1.151 ms |
+| Marker packets, excluded above | 2.236 ms | 2.219 ms |
+
+Both backends spent approximately 62% of the measured work in attention and
+15-16% in MLP. The difference scaled across the compute-heavy stages instead
+of appearing as an isolated stage or extra direct-KFD dispatch gap. Marker
+cost was also equivalent. Combined with the order-sensitive totals and the
+earlier run in which ROCr's device interval was shorter, this does not support
+a stable runtime-specific 6% GPU execution deficit. A fixed-SCLK comparison is
+required before changing queue behavior or kernel placement to address that
+earlier observation.
+
 ## Correctness
 
 Both backends produced finite outputs and the same top five logits:

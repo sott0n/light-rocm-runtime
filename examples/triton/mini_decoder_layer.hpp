@@ -70,6 +70,20 @@ struct ModelTailStageTiming {
   double lm_head_ns = 0.0;
 };
 
+struct DecoderLayerStageMarkers {
+  lrrt::Event *attention_norm = nullptr;
+  lrrt::Event *qkv_projection = nullptr;
+  lrrt::Event *kv_cache = nullptr;
+  lrrt::Event *attention = nullptr;
+  lrrt::Event *attention_output = nullptr;
+  lrrt::Event *mlp = nullptr;
+};
+
+struct ModelTailStageMarkers {
+  lrrt::Event *final_norm = nullptr;
+  lrrt::Event *lm_head = nullptr;
+};
+
 inline double elapsed_stage_ns(std::chrono::steady_clock::time_point begin,
                                std::chrono::steady_clock::time_point end) {
   return static_cast<double>(
@@ -271,13 +285,15 @@ public:
 
   void run(uint32_t valid_keys,
            const std::vector<const lrrt::Event *> &dependencies = {},
-           DecoderLayerStageTiming *timing = nullptr) {
-    run_with_output(valid_keys, dependencies, timing, nullptr);
+           DecoderLayerStageTiming *timing = nullptr,
+           DecoderLayerStageMarkers *markers = nullptr) {
+    run_with_output(valid_keys, dependencies, timing, markers, nullptr);
   }
 
   void run_to_hidden_state(uint32_t valid_keys, DecoderLayer &dst,
                            uint32_t dst_position,
-                           DecoderLayerStageTiming *timing = nullptr) {
+                           DecoderLayerStageTiming *timing = nullptr,
+                           DecoderLayerStageMarkers *markers = nullptr) {
     if (hidden_ != dst.hidden_) {
       throw std::runtime_error(
           "mini decoder layer direct handoff hidden size mismatch");
@@ -290,26 +306,34 @@ public:
       throw std::runtime_error(
           "mini decoder layer direct handoff position is out of range");
     }
-    run_with_output(valid_keys, {}, timing,
+    run_with_output(valid_keys, {}, timing, markers,
                     dst.buffers_.ptr<float>("hidden_states") +
                         static_cast<size_t>(dst_position) * dst.hidden_);
   }
 
   void run_to_buffer(uint32_t valid_keys, lrrt::DeviceBuffer &dst,
-                     DecoderLayerStageTiming *timing = nullptr) {
+                     DecoderLayerStageTiming *timing = nullptr,
+                     DecoderLayerStageMarkers *markers = nullptr) {
     if (dst.size() < static_cast<size_t>(hidden_) * sizeof(float)) {
       throw std::runtime_error(
           "mini decoder layer direct output buffer is too small");
     }
-    run_with_output(valid_keys, {}, timing, static_cast<float *>(dst.data()));
+    run_with_output(valid_keys, {}, timing, markers,
+                    static_cast<float *>(dst.data()));
   }
 
 private:
   void run_with_output(uint32_t valid_keys,
                        const std::vector<const lrrt::Event *> &dependencies,
-                       DecoderLayerStageTiming *timing, float *output) {
+                       DecoderLayerStageTiming *timing,
+                       DecoderLayerStageMarkers *markers, float *output) {
     if (valid_keys == 0 || valid_keys > keys_) {
       throw std::runtime_error("mini decoder layer valid_keys is out of range");
+    }
+    if (markers && (!markers->attention_norm || !markers->qkv_projection ||
+                    !markers->kv_cache || !markers->attention ||
+                    !markers->attention_output || !markers->mlp)) {
+      throw std::runtime_error("mini decoder layer stage marker is null");
     }
 
     const uint32_t half = head_dim_ / 2;
@@ -329,6 +353,9 @@ private:
       auto stage_end = std::chrono::steady_clock::now();
       timing->attention_norm_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
+    }
+    if (markers) {
+      markers->attention_norm->record(*queue_);
     }
 
     launch(*queue_, bundles_->get("q_projection"), q_dim_,
@@ -367,6 +394,9 @@ private:
       timing->qkv_projection_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
     }
+    if (markers) {
+      markers->qkv_projection->record(*queue_);
+    }
 
     for (uint32_t kv_head = 0; kv_head < kv_heads_; ++kv_head) {
       const uint32_t kv_head_offset = kv_head * head_dim_;
@@ -402,6 +432,9 @@ private:
       auto stage_end = std::chrono::steady_clock::now();
       timing->kv_cache_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
+    }
+    if (markers) {
+      markers->kv_cache->record(*queue_);
     }
 
     for (uint32_t head = 0; head < heads_; ++head) {
@@ -452,6 +485,9 @@ private:
       timing->attention_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
     }
+    if (markers) {
+      markers->attention->record(*queue_);
+    }
     launch(*queue_, bundles_->get("out_projection"), hidden_,
            {
                arg("x", buffers_.ptr<float>("attention_out")),
@@ -472,6 +508,9 @@ private:
       auto stage_end = std::chrono::steady_clock::now();
       timing->attention_output_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
+    }
+    if (markers) {
+      markers->attention_output->record(*queue_);
     }
 
     launch(*queue_, bundles_->get("mlp_norm"), 1,
@@ -524,6 +563,9 @@ private:
     if (timing) {
       auto stage_end = std::chrono::steady_clock::now();
       timing->mlp_ns += elapsed_stage_ns(stage_begin, stage_end);
+    }
+    if (markers) {
+      markers->mlp->record(*queue_);
     }
   }
 
@@ -716,7 +758,11 @@ public:
   }
 
   void run(const std::vector<const lrrt::Event *> &dependencies = {},
-           ModelTailStageTiming *timing = nullptr) {
+           ModelTailStageTiming *timing = nullptr,
+           ModelTailStageMarkers *markers = nullptr) {
+    if (markers && (!markers->final_norm || !markers->lm_head)) {
+      throw std::runtime_error("mini model tail stage marker is null");
+    }
     auto stage_begin = std::chrono::steady_clock::now();
     launch(*queue_, bundles_->get("final_norm"), 1,
            {
@@ -733,6 +779,9 @@ public:
       timing->final_norm_ns += elapsed_stage_ns(stage_begin, stage_end);
       stage_begin = stage_end;
     }
+    if (markers) {
+      markers->final_norm->record(*queue_);
+    }
     launch(*queue_, bundles_->get("lm_head"), vocab_,
            {
                arg("x", buffers_.ptr<float>("norm_hidden")),
@@ -744,6 +793,9 @@ public:
     if (timing) {
       auto stage_end = std::chrono::steady_clock::now();
       timing->lm_head_ns += elapsed_stage_ns(stage_begin, stage_end);
+    }
+    if (markers) {
+      markers->lm_head->record(*queue_);
     }
   }
 
