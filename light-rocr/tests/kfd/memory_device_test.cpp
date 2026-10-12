@@ -62,6 +62,37 @@ int main() {
     return 1;
   }
 
+  auto host = opened.session.allocate_host(node, 8192);
+  if (!host || host.allocation.host_address() == nullptr ||
+      !host.allocation.gpu_mapped() ||
+      host.allocation.gpu_address() !=
+          static_cast<uint64_t>(
+              reinterpret_cast<uintptr_t>(host.allocation.host_address())) ||
+      host.allocation.size() != 8192) {
+    std::cerr << (host ? "host USERPTR allocation metadata is invalid"
+                       : host.status.message)
+              << '\n';
+    return 1;
+  }
+  auto *host_words = static_cast<uint32_t *>(host.allocation.host_address());
+  for (uint32_t index = 0; index < 2048; ++index) {
+    host_words[index] = index ^ 0x3c3c3c3cU;
+  }
+  for (uint32_t index = 0; index < 2048; ++index) {
+    if (host_words[index] != (index ^ 0x3c3c3c3cU)) {
+      std::cerr << "host USERPTR did not retain CPU-written data\n";
+      return 1;
+    }
+  }
+  const auto host_released = host.allocation.release();
+  if (!host_released || host.allocation || host.allocation.gpu_mapped()) {
+    std::cerr << (host_released
+                      ? "released host USERPTR allocation retained state"
+                      : host_released.message)
+              << '\n';
+    return 1;
+  }
+
   auto vram = opened.session.allocate_vram(node, 8192);
   if (!vram || vram.allocation.host_address() == nullptr ||
       !vram.allocation.gpu_mapped() ||

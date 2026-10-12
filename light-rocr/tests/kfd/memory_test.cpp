@@ -27,6 +27,8 @@ constexpr uint64_t kMmapOffset = 0x200000;
 
 static_assert(
     !std::is_move_assignable_v<light_rocr::transport::kfd::MemoryAllocation>);
+static_assert(!std::is_move_assignable_v<
+              light_rocr::transport::kfd::HostMemoryAllocation>);
 static_assert(
     !std::is_move_assignable_v<light_rocr::transport::kfd::ScratchAllocation>);
 
@@ -51,6 +53,7 @@ struct FakeSystem {
       KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
       KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   uint32_t expected_extra_allocation_flags = 0;
+  bool host_userptr_mode = false;
   bool scratch_mode = false;
   bool integrated_scratch = false;
   std::vector<uint32_t> map_starts;
@@ -85,17 +88,21 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
     auto *args = static_cast<kfd_ioctl_alloc_memory_of_gpu_args *>(arguments);
     const uint32_t expected_flags =
         fake->expected_allocation_flags | fake->expected_extra_allocation_flags;
-    fake->contract_valid = fake->contract_valid &&
-                           args->va_addr == fake->expected_va_address &&
-                           args->size == fake->expected_allocation_size &&
-                           args->gpu_id == 42 && args->flags == expected_flags;
+    fake->contract_valid =
+        fake->contract_valid && args->va_addr == fake->expected_va_address &&
+        args->size == fake->expected_allocation_size && args->gpu_id == 42 &&
+        args->flags == expected_flags &&
+        (!fake->host_userptr_mode ||
+         args->mmap_offset == fake->expected_va_address);
     fake->calls.emplace_back("allocate");
     if (fake->allocate_fails) {
       errno = ENOMEM;
       return -1;
     }
     args->handle = kHandle;
-    args->mmap_offset = kMmapOffset;
+    if (!fake->host_userptr_mode) {
+      args->mmap_offset = kMmapOffset;
+    }
     return 0;
   }
   if (request == AMDKFD_IOC_FREE_MEMORY_OF_GPU) {
@@ -166,11 +173,18 @@ void *fake_mmap(void *address, size_t length, int protection, int flags, int fd,
   }
   ++fake->mmap_calls;
   if (fake->mmap_calls == 1) {
-    fake->contract_valid =
-        fake->contract_valid && address == nullptr &&
-        length == fake->expected_reservation_size && protection == PROT_NONE &&
-        flags == (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE) && fd == -1 &&
-        offset == 0;
+    fake->contract_valid = fake->contract_valid && address == nullptr &&
+                           length == fake->expected_reservation_size &&
+                           fd == -1 && offset == 0;
+    if (fake->host_userptr_mode) {
+      fake->contract_valid = fake->contract_valid &&
+                             protection == (PROT_READ | PROT_WRITE) &&
+                             flags == (MAP_SHARED | MAP_ANONYMOUS);
+    } else {
+      fake->contract_valid =
+          fake->contract_valid && protection == PROT_NONE &&
+          flags == (MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE);
+    }
     fake->calls.emplace_back("reserve");
     return reinterpret_cast<void *>(kReservationAddress);
   }
@@ -324,6 +338,65 @@ void successful_round_trip(TestContext *context) {
       "unexpected successful allocation call order");
   context->expect(allocated.allocation.handle == 0,
                   "released allocation retained its handle");
+  fake = nullptr;
+}
+
+void host_userptr_round_trip(TestContext *context) {
+  FakeSystem state;
+  state.host_userptr_mode = true;
+  state.expected_va_address = kReservationAddress;
+  state.expected_reservation_size = 8192;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE | KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
+      KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_host_memory(
+      17, aperture(), 8192, syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(state.contract_valid &&
+                      allocated.allocation.host_address ==
+                          reinterpret_cast<void *>(kReservationAddress) &&
+                      allocated.allocation.gpu_address == kReservationAddress &&
+                      allocated.allocation.handle == kHandle &&
+                      allocated.allocation.map_complete,
+                  "USERPTR allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_host_memory(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  context->expect(
+      state.calls == std::vector<std::string>{"reserve", "dontfork", "allocate",
+                                              "map_gpu", "unmap_gpu", "free",
+                                              "unmap"},
+      "USERPTR release did not free the KFD BO before its CPU pages");
+  fake = nullptr;
+}
+
+void host_userptr_map_failure_cleans_up(TestContext *context) {
+  FakeSystem state;
+  state.host_userptr_mode = true;
+  state.expected_va_address = kReservationAddress;
+  state.expected_reservation_size = 8192;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_USERPTR | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE | KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
+      KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  state.map_fails = true;
+  state.map_result_n_success = 0;
+  fake = &state;
+  const auto allocated =
+      light_rocr::transport::kfd::detail::allocate_host_memory(
+          17, aperture(), 8192, syscalls());
+  context->expect(!allocated &&
+                      allocated.status.error ==
+                          light_rocr::transport::kfd::MemoryError::MapToGpu,
+                  "failed USERPTR GPU map returned the wrong status");
+  context->expect(
+      state.contract_valid &&
+          state.calls == std::vector<std::string>{"reserve", "dontfork",
+                                                  "allocate", "map_gpu", "free",
+                                                  "unmap"},
+      "failed USERPTR GPU map did not release resources in dependency order");
   fake = nullptr;
 }
 
@@ -938,6 +1011,11 @@ void invalid_public_inputs(TestContext *context) {
       !allocated && allocated.status.error ==
                         light_rocr::transport::kfd::MemoryError::InvalidSession,
       "invalid session was accepted");
+  const auto host = session.allocate_host(node, 4096);
+  context->expect(
+      !host && host.status.error ==
+                   light_rocr::transport::kfd::MemoryError::InvalidSession,
+      "invalid session was accepted for host allocation");
   const auto scratch = session.allocate_scratch(node, 4096);
   context->expect(
       !scratch && scratch.status.error ==
@@ -950,6 +1028,8 @@ void invalid_public_inputs(TestContext *context) {
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"successful round trip", successful_round_trip},
+      {"host USERPTR round trip", host_userptr_round_trip},
+      {"host USERPTR map failure", host_userptr_map_failure_cleans_up},
       {"invalid size", invalid_size_does_not_reserve},
       {"AQL ring backing", aql_ring_uses_double_uncached_backing},
       {"executable VRAM", executable_vram_sets_kfd_flags},

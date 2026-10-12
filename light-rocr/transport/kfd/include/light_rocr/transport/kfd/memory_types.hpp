@@ -102,6 +102,64 @@ struct MemoryAllocationResult {
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
+class HostMemoryAllocation {
+public:
+  HostMemoryAllocation() = default;
+  HostMemoryAllocation(const HostMemoryAllocation &) = delete;
+  HostMemoryAllocation &operator=(const HostMemoryAllocation &) = delete;
+  HostMemoryAllocation(HostMemoryAllocation &&other) noexcept;
+  HostMemoryAllocation &
+  operator=(HostMemoryAllocation &&other) noexcept = delete;
+  ~HostMemoryAllocation();
+
+  [[nodiscard]] void *host_address() const { return host_address_; }
+  [[nodiscard]] uint64_t gpu_address() const {
+    return gpu_mapped() ? gpu_address_ : 0;
+  }
+  [[nodiscard]] bool gpu_mapped() const {
+    return map_complete_ && !gpu_ids_.empty() &&
+           mapped_device_count_ == gpu_ids_.size() &&
+           unmapped_device_count_ == 0;
+  }
+  [[nodiscard]] uint64_t size() const { return size_; }
+  explicit operator bool() const {
+    return host_address_ != nullptr || handle_ != 0;
+  }
+
+  [[nodiscard]] MemoryStatus release();
+
+private:
+  friend class KfdSession;
+  HostMemoryAllocation(std::shared_ptr<KfdState> state, void *host_address,
+                       uint64_t gpu_address, uint64_t size, uint64_t handle,
+                       std::vector<uint32_t> gpu_ids,
+                       uint32_t mapped_device_count,
+                       uint32_t unmapped_device_count, bool map_complete)
+      : state_(std::move(state)), host_address_(host_address),
+        gpu_address_(gpu_address), size_(size), handle_(handle),
+        gpu_ids_(std::move(gpu_ids)), mapped_device_count_(mapped_device_count),
+        unmapped_device_count_(unmapped_device_count),
+        map_complete_(map_complete) {}
+  void reset();
+
+  std::shared_ptr<KfdState> state_;
+  void *host_address_ = nullptr;
+  uint64_t gpu_address_ = 0;
+  uint64_t size_ = 0;
+  uint64_t handle_ = 0;
+  std::vector<uint32_t> gpu_ids_;
+  uint32_t mapped_device_count_ = 0;
+  uint32_t unmapped_device_count_ = 0;
+  bool map_complete_ = false;
+};
+
+struct HostAllocationResult {
+  MemoryStatus status;
+  HostMemoryAllocation allocation;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
 class ScratchAllocation {
 public:
   ScratchAllocation() = default;

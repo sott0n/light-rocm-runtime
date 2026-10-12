@@ -46,6 +46,13 @@ struct RawMemoryAllocationResult {
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
+struct RawHostMemoryAllocationResult {
+  MemoryStatus status;
+  RawMemoryAllocation allocation;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
 struct RawScratchAllocationResult {
   MemoryStatus status;
   RawMemoryAllocation allocation;
@@ -90,6 +97,12 @@ allocate_memory(int kfd_fd, int render_fd, const ProcessAperture &aperture,
 [[nodiscard]] MemoryStatus release_memory(int kfd_fd,
                                           RawMemoryAllocation *allocation,
                                           MemorySyscalls syscalls);
+[[nodiscard]] RawHostMemoryAllocationResult
+allocate_host_memory(int kfd_fd, const ProcessAperture &aperture, uint64_t size,
+                     MemorySyscalls syscalls);
+[[nodiscard]] MemoryStatus release_host_memory(int kfd_fd,
+                                               RawMemoryAllocation *allocation,
+                                               MemorySyscalls syscalls);
 [[nodiscard]] RawScratchAllocationResult
 allocate_scratch(const std::shared_ptr<KfdState> &state, int kfd_fd,
                  const ProcessAperture &aperture, uint64_t size,

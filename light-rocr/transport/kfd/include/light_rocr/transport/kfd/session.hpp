@@ -79,6 +79,9 @@ public:
   [[nodiscard]] MemoryAllocationResult
   allocate_executable_vram(const runtime::Node &node, uint64_t size,
                            const std::string &dri_root = "/dev/dri") const;
+  [[nodiscard]] HostAllocationResult
+  allocate_host(const runtime::Node &node, uint64_t size,
+                const std::string &dri_root = "/dev/dri") const;
   [[nodiscard]] ScratchAllocationResult
   allocate_scratch(const runtime::Node &node, uint64_t size,
                    const std::string &dri_root = "/dev/dri") const;
