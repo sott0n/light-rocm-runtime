@@ -149,6 +149,8 @@ const char *lr_status_string(lr_status_t status) {
     return "operation is not supported by this build";
   case LR_ERROR_RUNTIME:
     return "runtime error";
+  case LR_ERROR_DEVICE_FAULT:
+    return "device fault";
   }
   return "unknown status";
 }

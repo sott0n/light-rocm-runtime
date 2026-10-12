@@ -64,6 +64,7 @@ enum class MemoryAllocationUsage {
   Vram,
   DeviceVram,
   Executable,
+  TrapHandler,
   AqlRing,
   Doorbell,
   Eop,

@@ -20,7 +20,8 @@ typedef enum lr_status_t {
   LR_ERROR_NOT_INITIALIZED = 2,
   LR_ERROR_ALREADY_INITIALIZED = 3,
   LR_ERROR_NOT_SUPPORTED = 4,
-  LR_ERROR_RUNTIME = 5
+  LR_ERROR_RUNTIME = 5,
+  LR_ERROR_DEVICE_FAULT = 6
 } lr_status_t;
 
 typedef enum lr_memcpy_kind_t {

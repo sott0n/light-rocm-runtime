@@ -1,6 +1,7 @@
 #include "light_rocr/transport/kfd/queue.hpp"
 
 #include "light_rocr/arch/gfx11/scratch.hpp"
+#include "light_rocr/arch/gfx11/trap_handler.hpp"
 #include "light_rocr/runtime/amd_queue.hpp"
 #include "light_rocr/transport/kfd/memory_types.hpp"
 #include "light_rocr/transport/kfd/session.hpp"
@@ -42,6 +43,8 @@ static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr));
 
 constexpr uint16_t kAqlInvalidPacketHeader = 1;
 constexpr uint64_t kEopBufferSize = kMemoryPageSize;
+constexpr uint64_t kEventPageSize = KFD_SIGNAL_EVENT_LIMIT * sizeof(uint64_t);
+constexpr size_t kQueueErrorReasonOffset = sizeof(runtime::AmdQueueV1);
 constexpr uint32_t kDoorbellCount = 1024;
 constexpr uint32_t kNormalQueuePriority = 7;
 constexpr uint64_t kCwsrDebugBytesPerWave = 32;
@@ -61,6 +64,7 @@ struct CwsrHeader {
 };
 
 static_assert(sizeof(CwsrHeader) == 40);
+static_assert(kQueueErrorReasonOffset + sizeof(uint64_t) <= kMemoryPageSize);
 
 AqlQueueStatus system_failure(AqlQueueError error, int system_error,
                               const std::string &operation) {
@@ -325,7 +329,8 @@ AqlQueueStatus compute_cwsr_layout(const runtime::Node &node,
   return {};
 }
 
-void initialize_cwsr(void *address, const CwsrLayout &layout) {
+void initialize_cwsr(void *address, const CwsrLayout &layout,
+                     uint64_t error_reason_address, uint32_t error_event_id) {
   std::memset(address, 0, static_cast<size_t>(layout.allocation_size));
   for (uint32_t xcc = 0; xcc < layout.xcc_count; ++xcc) {
     auto *header = reinterpret_cast<CwsrHeader *>(
@@ -334,6 +339,8 @@ void initialize_cwsr(void *address, const CwsrLayout &layout) {
     header->debug_offset =
         (layout.xcc_count - xcc) * layout.context_save_restore_size;
     header->debug_size = layout.debug_memory_size * layout.xcc_count;
+    header->error_reason = error_reason_address;
+    header->error_event_id = error_event_id;
   }
 }
 
@@ -489,6 +496,49 @@ AqlQueueStatus release_aql_queue(int kfd_fd, RawAqlQueue *queue,
   return {};
 }
 
+RawQueueErrorEventResult create_queue_error_event(int kfd_fd,
+                                                  uint64_t event_page_handle,
+                                                  QueueSyscalls syscalls) {
+  if (kfd_fd < 0 || !valid_syscalls(syscalls)) {
+    return {{AqlQueueError::InvalidSession, 0,
+             "queue error event creation requires an open KFD session"},
+            {}};
+  }
+  kfd_ioctl_create_event_args arguments{};
+  arguments.event_page_offset = event_page_handle;
+  arguments.event_type = KFD_IOC_EVENT_SIGNAL;
+  arguments.auto_reset = 0;
+  int system_error = 0;
+  if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_CREATE_EVENT, &arguments,
+                    syscalls.ioctl_function, &system_error)) {
+    return {system_failure(AqlQueueError::CreateErrorEvent, system_error,
+                           "AMDKFD_IOC_CREATE_EVENT"),
+            {}};
+  }
+  return {{}, {arguments.event_id, true}};
+}
+
+AqlQueueStatus release_queue_error_event(int kfd_fd, RawQueueErrorEvent *event,
+                                         QueueSyscalls syscalls) {
+  if (event == nullptr || !event->active) {
+    return {};
+  }
+  if (kfd_fd < 0 || !valid_syscalls(syscalls)) {
+    return {AqlQueueError::InvalidSession, 0,
+            "queue error event release requires an open KFD session"};
+  }
+  kfd_ioctl_destroy_event_args arguments{};
+  arguments.event_id = event->event_id;
+  int system_error = 0;
+  if (!invoke_ioctl(kfd_fd, AMDKFD_IOC_DESTROY_EVENT, &arguments,
+                    syscalls.ioctl_function, &system_error)) {
+    return system_failure(AqlQueueError::DestroyErrorEvent, system_error,
+                          "AMDKFD_IOC_DESTROY_EVENT");
+  }
+  *event = {};
+  return {};
+}
+
 } // namespace detail
 
 struct AqlQueueState {
@@ -499,6 +549,7 @@ struct AqlQueueState {
 
   [[nodiscard]] bool owns_resources() const {
     return queue.active || queue.doorbell_mapping != nullptr ||
+           error_event.active ||
            (ring.has_value() && static_cast<bool>(*ring)) ||
            (control.has_value() && static_cast<bool>(*control)) ||
            (eop.has_value() && static_cast<bool>(*eop)) ||
@@ -518,6 +569,7 @@ struct AqlQueueState {
   uint64_t ring_size = 0;
   uint32_t scratch_private_segment_size = 0;
   detail::RawAqlQueue queue;
+  detail::RawQueueErrorEvent error_event;
 };
 
 const char *aql_queue_error_name(AqlQueueError error) {
@@ -546,6 +598,14 @@ const char *aql_queue_error_name(AqlQueueError error) {
     return "allocate_cwsr";
   case AqlQueueError::AllocateDoorbell:
     return "allocate_doorbell";
+  case AqlQueueError::AllocateErrorEventPage:
+    return "allocate_error_event_page";
+  case AqlQueueError::CreateErrorEvent:
+    return "create_error_event";
+  case AqlQueueError::AllocateTrapHandler:
+    return "allocate_trap_handler";
+  case AqlQueueError::ConfigureTrapHandler:
+    return "configure_trap_handler";
   case AqlQueueError::ConfigureScratch:
     return "configure_scratch";
   case AqlQueueError::AllocateScratch:
@@ -558,6 +618,8 @@ const char *aql_queue_error_name(AqlQueueError error) {
     return "map_doorbell";
   case AqlQueueError::DestroyQueue:
     return "destroy_queue";
+  case AqlQueueError::DestroyErrorEvent:
+    return "destroy_error_event";
   case AqlQueueError::UnmapDoorbell:
     return "unmap_doorbell";
   case AqlQueueError::ReleaseEop:
@@ -665,6 +727,104 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
   }
   queue_state->scratch_private_segment_size = private_segment_size;
 
+  const bool exception_debugging_enabled = state_->exception_debugging_enabled;
+  bool trap_handler_configured = !exception_debugging_enabled;
+  {
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    const auto device = state_->device_vms.find(node.gpu_id);
+    trap_handler_configured = !exception_debugging_enabled ||
+                              (device != state_->device_vms.end() &&
+                               device->second.trap_handler_configured);
+  }
+  if (!trap_handler_configured) {
+    auto trap_handler = allocate_memory_impl(node, kMemoryPageSize, dri_root,
+                                             MemoryUsage::TrapHandler);
+    if (!trap_handler) {
+      return {{AqlQueueError::AllocateTrapHandler,
+               trap_handler.status.system_error,
+               "gfx11 trap handler allocation failed: " +
+                   trap_handler.status.message},
+              queue_state->owns_resources() ? AqlQueue(std::move(queue_state))
+                                            : AqlQueue{}};
+    }
+    std::memcpy(trap_handler.allocation.host_address(),
+                arch::gfx11::kKfdExceptionTrapHandler.data(),
+                arch::gfx11::kKfdExceptionTrapHandler.size());
+
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    auto device = state_->device_vms.find(node.gpu_id);
+    if (device == state_->device_vms.end()) {
+      return {{AqlQueueError::ConfigureTrapHandler, 0,
+               "acquired KFD VM state is unavailable for trap handler"},
+              AqlQueue(std::move(queue_state))};
+    }
+    if (!device->second.trap_handler_configured) {
+      kfd_ioctl_set_trap_handler_args arguments{};
+      arguments.tba_addr = trap_handler.allocation.gpu_address();
+      arguments.gpu_id = node.gpu_id;
+      int system_error = 0;
+      if (!detail::invoke_ioctl(state_->fd, AMDKFD_IOC_SET_TRAP_HANDLER,
+                                &arguments, real_syscalls().ioctl_function,
+                                &system_error)) {
+        return {system_failure(AqlQueueError::ConfigureTrapHandler,
+                               system_error, "AMDKFD_IOC_SET_TRAP_HANDLER"),
+                AqlQueue(std::move(queue_state))};
+      }
+      device->second.trap_handler.emplace(std::move(trap_handler.allocation));
+      device->second.trap_handler_configured = true;
+    }
+  }
+
+  bool needs_event_page = false;
+  {
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    needs_event_page =
+        exception_debugging_enabled && state_->queue_event_page == nullptr;
+  }
+  if (needs_event_page) {
+    auto event_page = allocate_memory_impl(node, kEventPageSize, dri_root,
+                                           MemoryUsage::General);
+    if (!event_page) {
+      return {{AqlQueueError::AllocateErrorEventPage,
+               event_page.status.system_error,
+               "queue error event page allocation failed: " +
+                   event_page.status.message},
+              queue_state->owns_resources() ? AqlQueue(std::move(queue_state))
+                                            : AqlQueue{}};
+    }
+    std::unique_ptr<QueueEventPageState> page;
+    const uint64_t allocated_event_page_handle = event_page.allocation.handle_;
+    try {
+      page = std::make_unique<QueueEventPageState>(
+          std::move(event_page.allocation), allocated_event_page_handle);
+    } catch (const std::bad_alloc &) {
+      return {{AqlQueueError::AllocateErrorEventPage, 0,
+               "failed to allocate queue error event page state"},
+              AqlQueue(std::move(queue_state))};
+    }
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    if (state_->queue_event_page == nullptr) {
+      state_->queue_event_page = std::move(page);
+    }
+  }
+  detail::RawQueueErrorEventResult error_event;
+  if (exception_debugging_enabled) {
+    const std::lock_guard<std::mutex> lock(state_->mutex);
+    const uint64_t event_page_handle = state_->queue_event_page->registered
+                                           ? 0
+                                           : state_->queue_event_page->handle;
+    error_event = detail::create_queue_error_event(
+        state_->fd, event_page_handle, real_syscalls());
+    if (error_event) {
+      state_->queue_event_page->registered = true;
+    }
+  }
+  queue_state->error_event = error_event.event;
+  if (!error_event) {
+    return {std::move(error_event.status),
+            queue_state->owns_resources() ? AqlQueue(std::move(queue_state))
+                                          : AqlQueue{}};
+  }
   if (scratch_requirements.requirements.allocation_size != 0) {
     auto scratch = allocate_scratch(
         node, scratch_requirements.requirements.allocation_size, dri_root);
@@ -727,8 +887,6 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
                                                cwsr.status, "AQL CWSR");
     return {std::move(status), AqlQueue(std::move(queue_state))};
   }
-  detail::initialize_cwsr(queue_state->cwsr->host_address(), cwsr_layout);
-
   const uint64_t doorbell_mapping_size =
       std::max<uint64_t>(kMemoryPageSize, uint64_t{kDoorbellCount} * 8U);
   auto doorbell = allocate_memory_impl(node, doorbell_mapping_size, dri_root,
@@ -742,6 +900,13 @@ AqlQueueResult KfdSession::create_aql_queue(const runtime::Node &node,
 
   std::memset(queue_state->control->host_address(), 0,
               static_cast<size_t>(queue_state->control->size()));
+  const uint64_t error_reason_address =
+      exception_debugging_enabled
+          ? queue_state->control->gpu_address() + kQueueErrorReasonOffset
+          : 0;
+  detail::initialize_cwsr(queue_state->cwsr->host_address(), cwsr_layout,
+                          error_reason_address,
+                          queue_state->error_event.event_id);
   auto *amd_queue =
       ::new (queue_state->control->host_address()) runtime::AmdQueueV1;
   amd_queue->hsa_queue.type = runtime::kHsaQueueTypeMulti;
@@ -887,6 +1052,21 @@ uint64_t AqlQueue::write_index_relaxed() const {
   return __atomic_load_n(&control->write_dispatch_id, __ATOMIC_RELAXED);
 }
 
+uint64_t AqlQueue::error_reason_acquire() const {
+  if (state_ == nullptr || !state_->control.has_value() ||
+      state_->control->host_address() == nullptr) {
+    return 0;
+  }
+  const auto *error_reason = reinterpret_cast<const uint64_t *>(
+      static_cast<const uint8_t *>(state_->control->host_address()) +
+      kQueueErrorReasonOffset);
+  const uint64_t queue_reason = __atomic_load_n(error_reason, __ATOMIC_ACQUIRE);
+  if (queue_reason != 0) {
+    return queue_reason;
+  }
+  return detail::memory_fault_acquire(state_->session) ? 1 : 0;
+}
+
 void AqlQueue::set_profiling_enabled(bool enabled) {
   if (!state_ || !state_->control || !state_->control->host_address()) {
     return;
@@ -983,6 +1163,12 @@ AqlQueueStatus AqlQueue::release() {
       real_syscalls());
   if (!queue_status) {
     return queue_status;
+  }
+  const AqlQueueStatus event_status = detail::release_queue_error_event(
+      state_->session != nullptr ? state_->session->fd : -1,
+      &state_->error_event, real_syscalls());
+  if (!event_status) {
+    return event_status;
   }
   if (state_->doorbell.has_value()) {
     const MemoryStatus doorbell_status = state_->doorbell->release();

@@ -16,6 +16,18 @@
 #include <unistd.h>
 #include <unordered_map>
 
+#ifndef AMDKFD_IOC_RUNTIME_ENABLE
+struct kfd_ioctl_runtime_enable_args {
+  __u64 r_debug;
+  __u32 mode_mask;
+  __u32 capabilities_mask;
+};
+
+#define KFD_RUNTIME_ENABLE_MODE_ENABLE_MASK 1
+#define AMDKFD_IOC_RUNTIME_ENABLE                                              \
+  AMDKFD_IOWR(0x25, struct kfd_ioctl_runtime_enable_args)
+#endif
+
 namespace light_rocr::transport::kfd {
 
 namespace {
@@ -31,12 +43,61 @@ SessionRegistry &session_registry() {
   return registry;
 }
 
+void monitor_memory_faults(KfdState *state) {
+  while (!state->stop_memory_fault_monitor.load(std::memory_order_acquire)) {
+    kfd_event_data event{};
+    event.event_id = state->memory_fault_event_id;
+    kfd_ioctl_wait_events_args arguments{};
+    arguments.events_ptr = reinterpret_cast<uint64_t>(&event);
+    arguments.num_events = 1;
+    arguments.wait_for_all = 1;
+    arguments.timeout = 10;
+    int result = 0;
+    do {
+      result = ::ioctl(state->fd, AMDKFD_IOC_WAIT_EVENTS, &arguments);
+    } while (result < 0 && errno == EINTR);
+    if (result == 0 && arguments.wait_result == KFD_IOC_WAIT_RESULT_COMPLETE) {
+      state->memory_faulted.store(true, std::memory_order_release);
+      return;
+    }
+    if (result < 0 || arguments.wait_result == KFD_IOC_WAIT_RESULT_FAIL) {
+      return;
+    }
+  }
+}
+
 } // namespace
 
 KfdState::KfdState(int opened_fd, runtime::KfdVersion queried_version)
     : fd(opened_fd), version(queried_version) {}
 
 KfdState::~KfdState() {
+  stop_memory_fault_monitor.store(true, std::memory_order_release);
+  if (memory_fault_monitor.joinable()) {
+    memory_fault_monitor.join();
+  }
+  for (auto &[gpu_id, device] : device_vms) {
+    if (device.trap_handler_configured) {
+      kfd_ioctl_set_trap_handler_args arguments{};
+      arguments.gpu_id = gpu_id;
+      (void)::ioctl(fd, AMDKFD_IOC_SET_TRAP_HANDLER, &arguments);
+      device.trap_handler_configured = false;
+    }
+    if (device.trap_handler.has_value()) {
+      (void)device.trap_handler->release();
+      device.trap_handler.reset();
+    }
+  }
+  if (queue_event_page != nullptr) {
+    (void)queue_event_page->allocation.release();
+    queue_event_page.reset();
+  }
+  if (memory_fault_event_active && fd >= 0) {
+    kfd_ioctl_destroy_event_args arguments{};
+    arguments.event_id = memory_fault_event_id;
+    (void)::ioctl(fd, AMDKFD_IOC_DESTROY_EVENT, &arguments);
+    memory_fault_event_active = false;
+  }
   for (auto &[gpu_id, device] : device_vms) {
     (void)gpu_id;
     if (device.scratch_pool != nullptr &&
@@ -46,14 +107,19 @@ KfdState::~KfdState() {
           static_cast<size_t>(device.scratch_pool->reservation_size));
     }
   }
-  if (fd >= 0) {
-    (void)::close(fd);
-  }
   for (const auto &[gpu_id, device] : device_vms) {
     (void)gpu_id;
     if (device.render_fd >= 0) {
       (void)::close(device.render_fd);
     }
+  }
+  if (exception_debugging_enabled && fd >= 0) {
+    kfd_ioctl_runtime_enable_args arguments{};
+    (void)::ioctl(fd, AMDKFD_IOC_RUNTIME_ENABLE, &arguments);
+    exception_debugging_enabled = false;
+  }
+  if (fd >= 0) {
+    (void)::close(fd);
   }
 }
 
@@ -70,6 +136,10 @@ SessionStatus system_failure(SessionError error, int system_error,
 bool version_less(runtime::KfdVersion left, runtime::KfdVersion right) {
   return left.major < right.major ||
          (left.major == right.major && left.minor < right.minor);
+}
+
+bool supports_runtime_enable(runtime::KfdVersion version) {
+  return !version_less(version, runtime::KfdVersion{1, 13});
 }
 
 } // namespace
@@ -91,6 +161,10 @@ const char *session_error_name(SessionError error) {
     return "query_kfd_version";
   case SessionError::UnsupportedKfdVersion:
     return "unsupported_kfd_version";
+  case SessionError::CreateMemoryFaultEvent:
+    return "create_memory_fault_event";
+  case SessionError::StartMemoryFaultMonitor:
+    return "start_memory_fault_monitor";
   case SessionError::AllocateState:
     return "allocate_state";
   case SessionError::QueryClockCounters:
@@ -162,6 +236,38 @@ SessionResult KfdSession::open(const std::string &device_path) {
   std::shared_ptr<KfdState> state;
   try {
     state = std::make_shared<KfdState>(fd, version);
+    if (supports_runtime_enable(version)) {
+      kfd_ioctl_runtime_enable_args runtime_arguments{};
+      runtime_arguments.r_debug =
+          reinterpret_cast<uint64_t>(&state->runtime_debug);
+      runtime_arguments.mode_mask = KFD_RUNTIME_ENABLE_MODE_ENABLE_MASK;
+      do {
+        result = ::ioctl(fd, AMDKFD_IOC_RUNTIME_ENABLE, &runtime_arguments);
+      } while (result < 0 && errno == EINTR);
+      state->exception_debugging_enabled = result == 0;
+    }
+    kfd_ioctl_create_event_args event_arguments{};
+    event_arguments.event_type = KFD_IOC_EVENT_MEMORY;
+    event_arguments.auto_reset = 0;
+    do {
+      result = ::ioctl(fd, AMDKFD_IOC_CREATE_EVENT, &event_arguments);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) {
+      return {system_failure(SessionError::CreateMemoryFaultEvent, errno,
+                             "AMDKFD_IOC_CREATE_EVENT(memory fault)"),
+              {}};
+    }
+    state->memory_fault_event_id = event_arguments.event_id;
+    state->memory_fault_event_active = true;
+    try {
+      state->memory_fault_monitor =
+          std::thread(monitor_memory_faults, state.get());
+    } catch (const std::system_error &error) {
+      return {{SessionError::StartMemoryFaultMonitor, error.code().value(),
+               "failed to start KFD memory fault monitor: " +
+                   std::string(error.what())},
+              {}};
+    }
     registry.sessions[device_info.st_rdev] = state;
     return {{}, KfdSession(std::move(state))};
   } catch (const std::bad_alloc &) {
@@ -173,6 +279,15 @@ SessionResult KfdSession::open(const std::string &device_path) {
             {}};
   }
 }
+
+namespace detail {
+
+bool memory_fault_acquire(const std::shared_ptr<KfdState> &state) {
+  return state != nullptr &&
+         state->memory_faulted.load(std::memory_order_acquire);
+}
+
+} // namespace detail
 
 runtime::KfdVersion KfdSession::version() const {
   return state_ ? state_->version : runtime::KfdVersion{};

@@ -561,9 +561,13 @@ lr_status_t wait_for_direct_kfd_event_locked(lr_event_t *event) {
   if (!event->pending) {
     return event->completed ? LR_SUCCESS : LR_ERROR_INVALID_ARGUMENT;
   }
-  const auto waited = event->signal.wait_until_equal(
-      0, std::chrono::steady_clock::time_point::max());
-  return waited ? finish_direct_kfd_event_wait_locked(event) : LR_ERROR_RUNTIME;
+  if (event->recorded_queue == nullptr) {
+    return LR_ERROR_RUNTIME;
+  }
+  const lr_status_t wait_status =
+      wait_for_direct_kfd_signal_locked(event->recorded_queue, event->signal);
+  return wait_status == LR_SUCCESS ? finish_direct_kfd_event_wait_locked(event)
+                                   : wait_status;
 }
 
 void release_direct_kfd_events_locked(lr_status_t *result) {

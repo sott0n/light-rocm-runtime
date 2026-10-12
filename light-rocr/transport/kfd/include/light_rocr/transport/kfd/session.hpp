@@ -21,6 +21,8 @@ enum class SessionError {
   InspectKfd,
   QueryKfdVersion,
   UnsupportedKfdVersion,
+  CreateMemoryFaultEvent,
+  StartMemoryFaultMonitor,
   AllocateState,
   QueryClockCounters,
 };
@@ -102,6 +104,7 @@ private:
     Vram,
     DeviceVram,
     Executable,
+    TrapHandler,
     AqlRing,
     Doorbell,
     Eop,

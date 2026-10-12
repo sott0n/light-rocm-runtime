@@ -15,6 +15,8 @@
 namespace {
 
 constexpr uint32_t kQueueId = 37;
+constexpr uint32_t kErrorEventId = 83;
+constexpr uint64_t kEventPageHandle = 0xabcdef;
 constexpr uint64_t kDoorbellMappingOffset = 0xea46000000000000ULL;
 constexpr uint64_t kDoorbellOffset = 0x38;
 constexpr uintptr_t kDoorbellMappingAddress = 0x500000;
@@ -26,6 +28,8 @@ struct FakeSystem {
   bool unmap_fails = false;
   bool advise_fails = false;
   bool contract_valid = true;
+  bool create_event_fails = false;
+  bool destroy_event_fails = false;
   std::vector<std::string> calls;
 };
 
@@ -57,6 +61,30 @@ int fake_ioctl(int fd, unsigned long request, void *arguments) {
     }
     args->queue_id = kQueueId;
     args->doorbell_offset = kDoorbellMappingOffset + kDoorbellOffset;
+    return 0;
+  }
+  if (request == AMDKFD_IOC_CREATE_EVENT) {
+    auto *args = static_cast<kfd_ioctl_create_event_args *>(arguments);
+    fake->contract_valid =
+        fake->contract_valid && args->event_page_offset == kEventPageHandle &&
+        args->event_type == KFD_IOC_EVENT_SIGNAL && args->auto_reset == 0;
+    fake->calls.emplace_back("create_event");
+    if (fake->create_event_fails) {
+      errno = ENOMEM;
+      return -1;
+    }
+    args->event_id = kErrorEventId;
+    return 0;
+  }
+  if (request == AMDKFD_IOC_DESTROY_EVENT) {
+    const auto *args = static_cast<kfd_ioctl_destroy_event_args *>(arguments);
+    fake->contract_valid =
+        fake->contract_valid && args->event_id == kErrorEventId;
+    fake->calls.emplace_back("destroy_event");
+    if (fake->destroy_event_fails) {
+      errno = EBUSY;
+      return -1;
+    }
     return 0;
   }
   if (request == AMDKFD_IOC_DESTROY_QUEUE) {
@@ -311,6 +339,45 @@ void invalid_inputs_issue_no_syscall(TestContext *context) {
   fake = nullptr;
 }
 
+void queue_error_event_round_trip(TestContext *context) {
+  FakeSystem state;
+  fake = &state;
+  auto created = light_rocr::transport::kfd::detail::create_queue_error_event(
+      17, kEventPageHandle, syscalls());
+  context->expect(created && created.event.active &&
+                      created.event.event_id == kErrorEventId,
+                  created.status.message);
+  auto released = light_rocr::transport::kfd::detail::release_queue_error_event(
+      17, &created.event, syscalls());
+  context->expect(released && !created.event.active &&
+                      created.event.event_id == 0,
+                  released.message);
+  context->expect(state.contract_valid,
+                  "KFD queue error event syscall contract changed");
+  context->expect(state.calls ==
+                      std::vector<std::string>{"create_event", "destroy_event"},
+                  "queue error event lifecycle order changed");
+  fake = nullptr;
+}
+
+void queue_error_event_destroy_is_retryable(TestContext *context) {
+  FakeSystem state;
+  fake = &state;
+  auto created = light_rocr::transport::kfd::detail::create_queue_error_event(
+      17, kEventPageHandle, syscalls());
+  state.destroy_event_fails = true;
+  auto released = light_rocr::transport::kfd::detail::release_queue_error_event(
+      17, &created.event, syscalls());
+  context->expect(!released && created.event.active,
+                  "failed event destroy discarded retry ownership");
+  state.destroy_event_fails = false;
+  released = light_rocr::transport::kfd::detail::release_queue_error_event(
+      17, &created.event, syscalls());
+  context->expect(released && !created.event.active,
+                  "queue error event destroy retry failed");
+  fake = nullptr;
+}
+
 void gfx1101_cwsr_layout(TestContext *context) {
   light_rocr::runtime::Node node;
   node.simd_count = 120;
@@ -334,13 +401,24 @@ void gfx1101_cwsr_layout(TestContext *context) {
   }
 
   std::vector<uint8_t> storage(static_cast<size_t>(layout.allocation_size));
-  light_rocr::transport::kfd::detail::initialize_cwsr(storage.data(), layout);
+  constexpr uint64_t error_reason_address = 0x12345678;
+  constexpr uint32_t error_event_id = 19;
+  light_rocr::transport::kfd::detail::initialize_cwsr(
+      storage.data(), layout, error_reason_address, error_event_id);
   uint32_t debug_offset = 0;
   uint32_t debug_size = 0;
   std::memcpy(&debug_offset, storage.data() + 16, sizeof(debug_offset));
   std::memcpy(&debug_size, storage.data() + 20, sizeof(debug_size));
+  uint64_t observed_error_reason_address = 0;
+  uint32_t observed_error_event_id = 0;
+  std::memcpy(&observed_error_reason_address, storage.data() + 24,
+              sizeof(observed_error_reason_address));
+  std::memcpy(&observed_error_event_id, storage.data() + 32,
+              sizeof(observed_error_event_id));
   context->expect(debug_offset == layout.context_save_restore_size &&
-                      debug_size == layout.debug_memory_size,
+                      debug_size == layout.debug_memory_size &&
+                      observed_error_reason_address == error_reason_address &&
+                      observed_error_event_id == error_event_id,
                   "CWSR header does not describe the debugger area");
 }
 
@@ -394,6 +472,9 @@ int main() {
       {"madvise failure", madvise_failure_releases_mapping_and_queue},
       {"unmap retry", unmap_failure_does_not_redestroy},
       {"invalid inputs", invalid_inputs_issue_no_syscall},
+      {"queue error event", queue_error_event_round_trip},
+      {"queue error event destroy retry",
+       queue_error_event_destroy_is_retryable},
       {"gfx1101 CWSR layout", gfx1101_cwsr_layout},
       {"kernel CWSR sizes", kernel_cwsr_sizes_take_precedence},
       {"inactive producer operations",

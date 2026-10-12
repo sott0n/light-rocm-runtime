@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <mutex>
 #include <new>
+#include <thread>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -1371,18 +1372,30 @@ lr_status_t reap_completed_direct_kfd_dispatches_locked(lr_queue_t *queue) {
   return reap_direct_kfd_dispatches_locked(queue);
 }
 
+lr_status_t wait_for_direct_kfd_signal_locked(
+    lr_queue_t *queue, const light_rocr::transport::kfd::UserSignal &signal) {
+  while (signal.load_acquire() != 0) {
+    if (queue->queue.error_reason_acquire() != 0) {
+      return LR_ERROR_DEVICE_FAULT;
+    }
+    std::this_thread::yield();
+  }
+  return queue->queue.error_reason_acquire() == 0 ? LR_SUCCESS
+                                                  : LR_ERROR_DEVICE_FAULT;
+}
+
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
   while (queue->pending_dispatch_head != queue->pending_dispatches.size() ||
          !queue->pending_events.empty()) {
-    const auto waited =
+    const lr_status_t wait_status =
         queue->pending_dispatch_head != queue->pending_dispatches.size()
-            ? queue->pending_dispatches[queue->pending_dispatch_head]
-                  ->completion_signal.wait_until_equal(
-                      0, std::chrono::steady_clock::time_point::max())
-            : queue->pending_events.front()->signal.wait_until_equal(
-                  0, std::chrono::steady_clock::time_point::max());
-    if (!waited) {
-      return LR_ERROR_RUNTIME;
+            ? wait_for_direct_kfd_signal_locked(
+                  queue, queue->pending_dispatches[queue->pending_dispatch_head]
+                             ->completion_signal)
+            : wait_for_direct_kfd_signal_locked(
+                  queue, queue->pending_events.front()->signal);
+    if (wait_status != LR_SUCCESS) {
+      return wait_status;
     }
     lr_status_t status = reap_direct_kfd_dispatches_locked(queue);
     if (status != LR_SUCCESS) {
@@ -1399,6 +1412,9 @@ lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
 lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
   if (!queue->queue || queue->queue.packet_count() == 0) {
     return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (queue->queue.error_reason_acquire() != 0) {
+    return LR_ERROR_DEVICE_FAULT;
   }
   while (true) {
     if (queue->available_dispatches.empty() &&
@@ -1443,15 +1459,15 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
         queue->pending_events.empty()) {
       return LR_ERROR_RUNTIME;
     }
-    const auto waited =
+    const lr_status_t wait_status =
         queue->pending_dispatch_head != queue->pending_dispatches.size()
-            ? queue->pending_dispatches[queue->pending_dispatch_head]
-                  ->completion_signal.wait_until_equal(
-                      0, std::chrono::steady_clock::time_point::max())
-            : queue->pending_events.front()->signal.wait_until_equal(
-                  0, std::chrono::steady_clock::time_point::max());
-    if (!waited) {
-      return LR_ERROR_RUNTIME;
+            ? wait_for_direct_kfd_signal_locked(
+                  queue, queue->pending_dispatches[queue->pending_dispatch_head]
+                             ->completion_signal)
+            : wait_for_direct_kfd_signal_locked(
+                  queue, queue->pending_events.front()->signal);
+    if (wait_status != LR_SUCCESS) {
+      return wait_status;
     }
   }
 }

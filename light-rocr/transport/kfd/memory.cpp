@@ -391,7 +391,8 @@ RawMemoryAllocationResult allocate_memory(int kfd_fd, int render_fd,
         KFD_IOC_ALLOC_MEM_FLAGS_COHERENT |
         KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
   }
-  if (usage == MemoryAllocationUsage::Executable) {
+  if (usage == MemoryAllocationUsage::Executable ||
+      usage == MemoryAllocationUsage::TrapHandler) {
     arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
   } else if (usage == MemoryAllocationUsage::AqlRing) {
     arguments.flags |= KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE |
@@ -1067,6 +1068,8 @@ KfdSession::allocate_memory_impl(const runtime::Node &node, uint64_t size,
           ? detail::MemoryAllocationUsage::DeviceVram
       : usage == MemoryUsage::Executable
           ? detail::MemoryAllocationUsage::Executable
+      : usage == MemoryUsage::TrapHandler
+          ? detail::MemoryAllocationUsage::TrapHandler
           : detail::MemoryAllocationUsage::General,
       real_syscalls());
   if (!allocated) {

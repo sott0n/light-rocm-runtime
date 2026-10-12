@@ -41,6 +41,18 @@ struct RawAqlQueueResult {
   explicit operator bool() const { return static_cast<bool>(status); }
 };
 
+struct RawQueueErrorEvent {
+  uint32_t event_id = 0;
+  bool active = false;
+};
+
+struct RawQueueErrorEventResult {
+  AqlQueueStatus status;
+  RawQueueErrorEvent event;
+
+  explicit operator bool() const { return static_cast<bool>(status); }
+};
+
 struct AqlQueueCreateInfo {
   uint32_t gpu_id = 0;
   uint64_t ring_address = 0;
@@ -66,13 +78,21 @@ struct CwsrLayout {
 
 [[nodiscard]] AqlQueueStatus compute_cwsr_layout(const runtime::Node &node,
                                                  CwsrLayout *layout);
-void initialize_cwsr(void *address, const CwsrLayout &layout);
+void initialize_cwsr(void *address, const CwsrLayout &layout,
+                     uint64_t error_reason_address,
+                     uint32_t error_event_id = 0);
 
 [[nodiscard]] RawAqlQueueResult create_aql_queue(int kfd_fd,
                                                  const AqlQueueCreateInfo &info,
                                                  QueueSyscalls syscalls);
 [[nodiscard]] AqlQueueStatus release_aql_queue(int kfd_fd, RawAqlQueue *queue,
                                                QueueSyscalls syscalls);
+[[nodiscard]] RawQueueErrorEventResult
+create_queue_error_event(int kfd_fd, uint64_t event_page_handle,
+                         QueueSyscalls syscalls);
+[[nodiscard]] AqlQueueStatus
+release_queue_error_event(int kfd_fd, RawQueueErrorEvent *event,
+                          QueueSyscalls syscalls);
 
 } // namespace light_rocr::transport::kfd::detail
 

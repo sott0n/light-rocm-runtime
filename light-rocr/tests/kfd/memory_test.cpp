@@ -257,7 +257,8 @@ std::shared_ptr<light_rocr::transport::kfd::KfdState> scratch_state() {
 
   auto state = std::make_shared<KfdState>(-1, KfdVersion{1, 16});
   state->device_vms.emplace(
-      42, DeviceVmState{-1, -1, true, true, true, aperture(), nullptr});
+      42,
+      DeviceVmState{-1, -1, true, true, true, aperture(), nullptr, {}, false});
   return state;
 }
 
@@ -378,6 +379,26 @@ void executable_vram_sets_kfd_flags(TestContext *context) {
   context->expect(static_cast<bool>(allocated), allocated.status.message);
   context->expect(state.contract_valid,
                   "executable VRAM allocation contract changed");
+  const auto released = light_rocr::transport::kfd::detail::release_memory(
+      17, &allocated.allocation, syscalls());
+  context->expect(static_cast<bool>(released), released.message);
+  fake = nullptr;
+}
+
+void trap_handler_uses_executable_gtt(TestContext *context) {
+  FakeSystem state;
+  state.expected_allocation_flags = static_cast<uint32_t>(
+      KFD_IOC_ALLOC_MEM_FLAGS_GTT | KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE |
+      KFD_IOC_ALLOC_MEM_FLAGS_COHERENT | KFD_IOC_ALLOC_MEM_FLAGS_NO_SUBSTITUTE);
+  state.expected_extra_allocation_flags = KFD_IOC_ALLOC_MEM_FLAGS_EXECUTABLE;
+  fake = &state;
+  auto allocated = light_rocr::transport::kfd::detail::allocate_memory(
+      17, 23, aperture(), 8192,
+      light_rocr::transport::kfd::detail::MemoryAllocationUsage::TrapHandler,
+      syscalls());
+  context->expect(static_cast<bool>(allocated), allocated.status.message);
+  context->expect(state.contract_valid,
+                  "trap handler GTT allocation contract changed");
   const auto released = light_rocr::transport::kfd::detail::release_memory(
       17, &allocated.allocation, syscalls());
   context->expect(static_cast<bool>(released), released.message);
@@ -932,6 +953,7 @@ int main() {
       {"invalid size", invalid_size_does_not_reserve},
       {"AQL ring backing", aql_ring_uses_double_uncached_backing},
       {"executable VRAM", executable_vram_sets_kfd_flags},
+      {"trap handler GTT", trap_handler_uses_executable_gtt},
       {"host-mapped VRAM", host_mapped_vram_sets_kfd_flags},
       {"device VRAM", device_vram_skips_host_mapping},
       {"doorbell GPUVM", doorbell_reserves_gpuvm_without_render_mapping},
