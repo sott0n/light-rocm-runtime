@@ -128,9 +128,10 @@ the `libhsakmt` execution transport by default. Add
 currently supports LRRT runtime and device lifecycle, device allocation,
 pinned host allocation, synchronous copies, event timing, queue lifecycle,
 HSACO module and kernel lookup, kernel launch on default and explicit queues,
-and queue or device synchronization. These operations execute scratch-backed
-Clang HSACO on simultaneous queues without `libhsakmt`. Asynchronous copies
-and explicit event dependencies remain in progress.
+asynchronous copies with copy-event dependencies, and queue or device
+synchronization. These operations execute scratch-backed Clang HSACO on
+simultaneous queues without `libhsakmt`. Explicit dependencies for public
+kernel launches remain in progress.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

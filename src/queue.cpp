@@ -1303,13 +1303,72 @@ lr_status_t release_direct_kfd_dispatch(lr_queue_t::PendingDispatch *dispatch) {
   return dispatch->completion_signal.release() ? LR_SUCCESS : LR_ERROR_RUNTIME;
 }
 
+void retain_direct_kfd_event_dependency_locked(lr_event_t *event,
+                                               lr_queue_t *queue) {
+  ++event->dependency_count;
+  auto dependency = std::find_if(
+      event->dependency_queues.begin(), event->dependency_queues.end(),
+      [queue](const auto &entry) { return entry.first == queue; });
+  if (dependency == event->dependency_queues.end()) {
+    event->dependency_queues.push_back({queue, 1});
+  } else {
+    ++dependency->second;
+  }
+}
+
+void release_direct_kfd_event_dependency_locked(lr_event_t *event,
+                                                lr_queue_t *queue) {
+  auto dependency = std::find_if(
+      event->dependency_queues.begin(), event->dependency_queues.end(),
+      [queue](const auto &entry) { return entry.first == queue; });
+  assert(event->dependency_count != 0 &&
+         dependency != event->dependency_queues.end() &&
+         dependency->second != 0);
+  --event->dependency_count;
+  if (--dependency->second == 0) {
+    *dependency = event->dependency_queues.back();
+    event->dependency_queues.pop_back();
+  }
+}
+
+void reap_completed_direct_kfd_barriers_locked(lr_queue_t *queue) {
+  size_t index = 0;
+  while (index < queue->pending_barriers.size()) {
+    lr_queue_t::PendingBarrier &barrier = queue->pending_barriers[index];
+    if (barrier.retirement_dispatch->active_completion_signal()
+            .load_acquire() != 0) {
+      ++index;
+      continue;
+    }
+    for (lr_event_t *event : barrier.dependencies) {
+      release_direct_kfd_event_dependency_locked(event, queue);
+    }
+    if (index + 1 != queue->pending_barriers.size()) {
+      barrier = std::move(queue->pending_barriers.back());
+    }
+    queue->pending_barriers.pop_back();
+  }
+}
+
 lr_status_t reap_direct_kfd_dispatches_locked(lr_queue_t *queue) {
+  // Dependency barriers borrow the following dispatch signal as proof that
+  // the GPU consumed their Event signal handles. Retire those references
+  // before recycling the dispatch and its completion signal.
+  reap_completed_direct_kfd_barriers_locked(queue);
   size_t completed_count = 0;
   while (queue->pending_dispatch_head + completed_count <
          queue->pending_dispatches.size()) {
     auto &dispatch = *queue->pending_dispatches[queue->pending_dispatch_head +
                                                 completed_count];
     if (dispatch.active_completion_signal().load_acquire() != 0) {
+      break;
+    }
+    const bool retires_pending_barrier = std::any_of(
+        queue->pending_barriers.begin(), queue->pending_barriers.end(),
+        [&dispatch](const lr_queue_t::PendingBarrier &barrier) {
+          return barrier.retirement_dispatch == &dispatch;
+        });
+    if (retires_pending_barrier) {
       break;
     }
     dispatch.completion_event = nullptr;
@@ -1369,6 +1428,16 @@ lr_status_t release_direct_kfd_kernarg_arenas_locked(lr_queue_t *queue) {
 
 } // namespace
 
+void register_direct_kfd_event_dependency_locked(lr_event_t *event,
+                                                 lr_queue_t *queue) {
+  retain_direct_kfd_event_dependency_locked(event, queue);
+}
+
+void unregister_direct_kfd_event_dependency_locked(lr_event_t *event,
+                                                   lr_queue_t *queue) {
+  release_direct_kfd_event_dependency_locked(event, queue);
+}
+
 lr_status_t reap_completed_direct_kfd_dispatches_locked(lr_queue_t *queue) {
   return reap_direct_kfd_dispatches_locked(queue);
 }
@@ -1387,7 +1456,7 @@ lr_status_t wait_for_direct_kfd_signal_locked(
 
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
   while (queue->pending_dispatch_head != queue->pending_dispatches.size() ||
-         !queue->pending_events.empty()) {
+         !queue->pending_barriers.empty() || !queue->pending_events.empty()) {
     const lr_status_t wait_status =
         queue->pending_dispatch_head != queue->pending_dispatches.size()
             ? wait_for_direct_kfd_signal_locked(
@@ -1410,8 +1479,10 @@ lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
   return LR_SUCCESS;
 }
 
-lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
-  if (!queue->queue || queue->queue.packet_count() == 0) {
+lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue,
+                                                    size_t required_packets) {
+  if (!queue->queue || required_packets == 0 ||
+      required_packets > queue->queue.packet_count()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
   if (queue->queue.error_reason_acquire() != 0) {
@@ -1430,7 +1501,8 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     if (write_index < read_index) {
       return LR_ERROR_RUNTIME;
     }
-    if (write_index - read_index < queue->queue.packet_count()) {
+    if (write_index - read_index <=
+        queue->queue.packet_count() - required_packets) {
       return LR_SUCCESS;
     }
 
@@ -1452,8 +1524,8 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
     if (refreshed_write_index < refreshed_read_index) {
       return LR_ERROR_RUNTIME;
     }
-    if (refreshed_write_index - refreshed_read_index <
-        queue->queue.packet_count()) {
+    if (refreshed_write_index - refreshed_read_index <=
+        queue->queue.packet_count() - required_packets) {
       return LR_SUCCESS;
     }
     if (queue->pending_dispatch_head == queue->pending_dispatches.size() &&

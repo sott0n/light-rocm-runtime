@@ -77,17 +77,43 @@ int main() {
                                   byte_count, LR_MEMCPY_HOST_TO_DEVICE,
                                   upload.get()),
                   LR_ERROR_NOT_SUPPORTED, "pageable async H2D copy");
-    lr_event_t *dependencies[] = {upload.get()};
+    lr_event_t *dependency = nullptr;
+    expect_status(lr_event_create(device.get(), &dependency), LR_SUCCESS,
+                  "create explicit dependency event");
+    expect_status(lr_memcpy_async(device.get(), first.data(), input.data(),
+                                  byte_count, LR_MEMCPY_HOST_TO_DEVICE,
+                                  dependency),
+                  LR_SUCCESS, "explicit dependency upload");
+    lr_event_t *dependencies[] = {dependency};
+    lr_event_t *duplicate_dependencies[] = {dependency, dependency};
+    expect_status(lr_memcpy_async_with_dependencies(
+                      device.get(), second.data(), first.data(), byte_count,
+                      LR_MEMCPY_DEVICE_TO_DEVICE, device_copy.get(),
+                      duplicate_dependencies, 2),
+                  LR_ERROR_INVALID_ARGUMENT, "duplicate copy dependencies");
     expect_status(lr_memcpy_async_with_dependencies(
                       device.get(), second.data(), first.data(), byte_count,
                       LR_MEMCPY_DEVICE_TO_DEVICE, device_copy.get(),
                       dependencies, 1),
-                  LR_ERROR_NOT_SUPPORTED, "explicit-dependency async copy");
+                  LR_SUCCESS, "explicit-dependency async copy");
+    expect_status(lr_event_destroy(dependency), LR_SUCCESS,
+                  "destroy consumed dependency event");
+    expect_status(lr_memcpy_async(device.get(), output.data(), second.data(),
+                                  byte_count, LR_MEMCPY_DEVICE_TO_HOST,
+                                  download.get()),
+                  LR_SUCCESS, "download explicit-dependency result");
+    download.synchronize();
+    for (size_t index = 0; index < element_count; ++index) {
+      if (std::fabs(output_values[index] - input_values[index]) > 0.001F) {
+        throw std::runtime_error(
+            "explicit-dependency asynchronous copy result mismatch");
+      }
+    }
 
     const lrrt::MemoryStats stats = device.memory_stats();
-    if (stats.h2d_copy_bytes != byte_count ||
-        stats.d2d_copy_bytes != byte_count ||
-        stats.d2h_copy_bytes != byte_count || stats.memcpy_count != 3) {
+    if (stats.h2d_copy_bytes != 2 * byte_count ||
+        stats.d2d_copy_bytes != 2 * byte_count ||
+        stats.d2h_copy_bytes != 2 * byte_count || stats.memcpy_count != 6) {
       throw std::runtime_error("unexpected asynchronous copy statistics");
     }
 

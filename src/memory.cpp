@@ -596,10 +596,10 @@ void release_direct_kfd_copy_states_locked(lr_status_t *result) {
   }
 }
 
-lr_status_t
-submit_direct_kfd_copy_locked(DeviceState *device, uint64_t destination,
-                              uint64_t source, uint64_t size,
-                              lr_event_t *completion_event = nullptr) {
+lr_status_t submit_direct_kfd_copy_locked(
+    DeviceState *device, uint64_t destination, uint64_t source, uint64_t size,
+    lr_event_t *completion_event = nullptr,
+    const std::vector<lr_event_t *> *dependencies = nullptr) {
   if (!device || !device->copy_state || size == 0) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -623,7 +623,7 @@ submit_direct_kfd_copy_locked(DeviceState *device, uint64_t destination,
   const lr_status_t submit_status = submit_direct_kfd_kernel_locked(
       device, device->default_queue, device->copy_state->executable_image,
       device->copy_state->image_kernel_index, &config, &arguments,
-      sizeof(arguments), completion_event);
+      sizeof(arguments), completion_event, dependencies);
   if (submit_status != LR_SUCCESS) {
     return submit_status;
   }
@@ -1606,15 +1606,26 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
       !g_devices[device.index].opened || !g_kfd_session) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  if (!use_implicit_dependencies) {
-    (void)explicit_dependencies;
-    (void)dependency_count;
-    return LR_ERROR_NOT_SUPPORTED;
-  }
   if (event->pending) {
     const lr_status_t wait_status = wait_for_direct_kfd_event_locked(event);
     if (wait_status != LR_SUCCESS) {
       return wait_status;
+    }
+  }
+  const lr_status_t consumer_status =
+      wait_for_direct_kfd_event_consumers_locked(event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
+  }
+
+  std::vector<lr_event_t *> event_dependencies;
+  if (!use_implicit_dependencies) {
+    const lr_status_t dependency_status =
+        collect_direct_kfd_event_dependencies_locked(
+            device, explicit_dependencies, dependency_count, event,
+            &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
     }
   }
 
@@ -1668,7 +1679,8 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
     return copy_state_status;
   }
   const lr_status_t submit_status = submit_direct_kfd_copy_locked(
-      &state, copy_destination, copy_source, size, event);
+      &state, copy_destination, copy_source, size, event,
+      use_implicit_dependencies ? nullptr : &event_dependencies);
   if (submit_status != LR_SUCCESS) {
     return submit_status;
   }

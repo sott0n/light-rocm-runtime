@@ -543,6 +543,39 @@ uint64_t gpu_ticks_to_ns(uint64_t ticks,
 
 } // namespace
 
+lr_status_t collect_direct_kfd_event_dependencies_locked(
+    lr_device_t device, lr_event_t *const *dependencies,
+    size_t dependency_count, const lr_event_t *completion_event,
+    std::vector<lr_event_t *> *pending_dependencies) {
+  if ((dependency_count != 0 && !dependencies) ||
+      dependency_count > UINT32_MAX) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+
+  std::unordered_set<lr_event_t *> unique_dependencies;
+  pending_dependencies->clear();
+  try {
+    unique_dependencies.reserve(dependency_count);
+    pending_dependencies->reserve(dependency_count);
+    for (size_t index = 0; index < dependency_count; ++index) {
+      lr_event_t *event = dependencies[index];
+      if (!event || event == completion_event || !valid_event_locked(event) ||
+          event->device.index != device.index || event->destroying ||
+          (!event->pending && !event->completed) ||
+          !unique_dependencies.insert(event).second) {
+        return LR_ERROR_INVALID_ARGUMENT;
+      }
+      if (event->pending && event->signal.load_acquire() != 0) {
+        pending_dependencies->push_back(event);
+      }
+    }
+  } catch (const std::bad_alloc &) {
+    pending_dependencies->clear();
+    return LR_ERROR_RUNTIME;
+  }
+  return LR_SUCCESS;
+}
+
 lr_status_t reap_completed_direct_kfd_events_locked(lr_queue_t *queue) {
   while (!queue->pending_events.empty()) {
     lr_event_t *event = queue->pending_events.front();
@@ -573,6 +606,23 @@ lr_status_t wait_for_direct_kfd_event_locked(lr_event_t *event) {
       reap_completed_direct_kfd_dispatches_locked(event->recorded_queue);
   return reap_status == LR_SUCCESS ? finish_direct_kfd_event_wait_locked(event)
                                    : reap_status;
+}
+
+lr_status_t wait_for_direct_kfd_event_consumers_locked(lr_event_t *event) {
+  while (event->dependency_count != 0) {
+    if (event->dependency_queues.empty()) {
+      return LR_ERROR_RUNTIME;
+    }
+    lr_queue_t *queue = event->dependency_queues.front().first;
+    if (!valid_direct_kfd_queue_locked(queue)) {
+      return LR_ERROR_RUNTIME;
+    }
+    const lr_status_t status = synchronize_direct_kfd_queue_locked(queue);
+    if (status != LR_SUCCESS) {
+      return status;
+    }
+  }
+  return LR_SUCCESS;
 }
 
 void release_direct_kfd_events_locked(lr_status_t *result) {
@@ -779,6 +829,12 @@ lr_status_t lr_event_destroy(lr_event_t *event) {
       return wait_status;
     }
   }
+  const lr_status_t consumer_status =
+      wait_for_direct_kfd_event_consumers_locked(event);
+  if (consumer_status != LR_SUCCESS) {
+    event->destroying = false;
+    return consumer_status;
+  }
   if (!event->signal.release()) {
     event->destroying = false;
     return LR_ERROR_RUNTIME;
@@ -959,6 +1015,11 @@ static lr_status_t event_record_impl(lr_event_t *event, lr_queue_t *queue,
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
+  }
+  const lr_status_t consumer_status =
+      wait_for_direct_kfd_event_consumers_locked(event);
+  if (consumer_status != LR_SUCCESS) {
+    return consumer_status;
   }
 
   DeviceState &device = g_devices[event->device.index];

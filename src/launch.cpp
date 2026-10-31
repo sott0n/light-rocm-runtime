@@ -134,7 +134,8 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
-    const void *args, size_t args_size, lr_event_t *completion_event) {
+    const void *args, size_t args_size, lr_event_t *completion_event,
+    const std::vector<lr_event_t *> *event_dependencies) {
   LaunchProfile *profile = current_launch_profile();
   if (!device || !queue || !config || !args || !g_kfd_session ||
       !executable_image ||
@@ -164,14 +165,44 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     return scratch_status;
   }
 
+  const size_t barrier_count =
+      event_dependencies ? (event_dependencies->size() + 4) / 5 : 0;
+
   {
     ScopedDirectKfdProfile phase(
         profile ? &profile->direct_kfd.queue_capacity_ns : nullptr);
     const lr_status_t capacity_status =
-        ensure_direct_kfd_queue_capacity_locked(queue);
+        ensure_direct_kfd_queue_capacity_locked(queue, barrier_count + 1);
     if (capacity_status != LR_SUCCESS) {
       return capacity_status;
     }
+  }
+
+  std::vector<AqlBarrierAndParameters> barrier_parameters;
+  std::vector<std::vector<lr_event_t *>> barrier_dependencies;
+  try {
+    barrier_parameters.reserve(barrier_count);
+    barrier_dependencies.reserve(barrier_count);
+    if (event_dependencies) {
+      for (size_t offset = 0; offset < event_dependencies->size();
+           offset += 5) {
+        AqlBarrierAndParameters parameters;
+        std::vector<lr_event_t *> packet_dependencies;
+        const size_t end = std::min(offset + 5, event_dependencies->size());
+        packet_dependencies.reserve(end - offset);
+        for (size_t index = offset; index < end; ++index) {
+          lr_event_t *event = (*event_dependencies)[index];
+          parameters.dependency_signals[index - offset] =
+              event->signal.gpu_handle();
+          event->dependency_queues.reserve(event->dependency_queues.size() + 1);
+          packet_dependencies.push_back(event);
+        }
+        barrier_parameters.push_back(parameters);
+        barrier_dependencies.push_back(std::move(packet_dependencies));
+      }
+    }
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
   }
 
   light_rocr::runtime::KernargBufferRequirementsResult requirements;
@@ -215,6 +246,8 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     }
     try {
       queue->pending_dispatches.reserve(queue->pending_dispatches.size() + 1);
+      queue->pending_barriers.reserve(queue->pending_barriers.size() +
+                                      barrier_count);
       queue->available_dispatches.reserve(queue->available_dispatches.size() +
                                           1);
     } catch (const std::bad_alloc &) {
@@ -331,25 +364,41 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     device->pending_events.push_back(completion_event);
   }
 
+  lr_queue_t::PendingDispatch *retirement_dispatch = pending.get();
+  const size_t preceding_dispatch_count =
+      queue->pending_dispatches.size() - queue->pending_dispatch_head;
+  queue->pending_dispatches.push_back(std::move(pending));
+  for (std::vector<lr_event_t *> &dependencies : barrier_dependencies) {
+    for (lr_event_t *event : dependencies) {
+      register_direct_kfd_event_dependency_locked(event, queue);
+    }
+    queue->pending_barriers.push_back(
+        {retirement_dispatch, std::move(dependencies)});
+  }
+
   const auto parameters = aql_dispatch_parameters(
       config, kernel_info.private_segment_size,
       kernel_info.group_segment_size + config->shared_memory_bytes,
       executable_image.kernels()[image_kernel_index].descriptor_gpu_address,
-      kernarg_address, pending->completion_signal_handle());
-  // Capacity was checked above while the global producer lock was held. The
-  // GPU can only advance the read index before this reservation, so repeating
-  // both index loads in the common AQL producer cannot make the result safer.
-  const auto submitted = submit_aql_kernel_dispatch(
-      light_rocr_kfd_producer_ops(&queue->queue,
-                                  valid_direct_kfd_dispatch_packet),
-      parameters,
-      {queue->pending_dispatches.size() - queue->pending_dispatch_head, false},
-      profile ? &profile->aql : nullptr, true);
+      kernarg_address, retirement_dispatch->completion_signal_handle());
+  const auto producer = light_rocr_kfd_producer_ops(
+      &queue->queue, valid_direct_kfd_dispatch_packet);
+  const AqlDispatchOrdering ordering = {preceding_dispatch_count,
+                                        barrier_count != 0};
+  // The dependency-free path keeps its prevalidated-capacity optimization.
+  // Barrier and dispatch packets must be reserved and published as one batch.
+  const auto submitted =
+      barrier_count == 0
+          ? submit_aql_kernel_dispatch(producer, parameters, ordering,
+                                       profile ? &profile->aql : nullptr, true)
+          : submit_aql_barriers_and_kernel_dispatch(
+                producer, barrier_parameters.data(), barrier_parameters.size(),
+                parameters, ordering);
   if (!submitted) {
     if (completion_event) {
       device->pending_events.pop_back();
       queue->pending_events.pop_back();
-      pending->completion_event = nullptr;
+      retirement_dispatch->completion_event = nullptr;
       completion_event->recorded_queue = nullptr;
       completion_event->pending = false;
       completion_event->completed = previous_completed;
@@ -359,13 +408,17 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
       completion_event->completion_clock = previous_completion_clock;
       completion_event->signal.store_relaxed(0);
     }
-    queue->available_dispatches.push_back(std::move(pending));
+    for (size_t index = 0; index < barrier_count; ++index) {
+      for (lr_event_t *event : queue->pending_barriers.back().dependencies) {
+        unregister_direct_kfd_event_dependency_locked(event, queue);
+      }
+      queue->pending_barriers.pop_back();
+    }
+    std::unique_ptr<lr_queue_t::PendingDispatch> failed_dispatch =
+        std::move(queue->pending_dispatches.back());
+    queue->pending_dispatches.pop_back();
+    queue->available_dispatches.push_back(std::move(failed_dispatch));
     return aql_submit_status(submitted.error);
-  }
-  {
-    ScopedDirectKfdProfile phase(profile ? &profile->direct_kfd.bookkeeping_ns
-                                         : nullptr);
-    queue->pending_dispatches.push_back(std::move(pending));
   }
   return LR_SUCCESS;
 }
@@ -378,10 +431,11 @@ lr_status_t submit_direct_kfd_kernel_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
-    const void *args, size_t args_size, lr_event_t *completion_event) {
-  return submit_direct_kfd_kernel_impl_locked(device, queue, executable_image,
-                                              image_kernel_index, config, args,
-                                              args_size, completion_event);
+    const void *args, size_t args_size, lr_event_t *completion_event,
+    const std::vector<lr_event_t *> *event_dependencies) {
+  return submit_direct_kfd_kernel_impl_locked(
+      device, queue, executable_image, image_kernel_index, config, args,
+      args_size, completion_event, event_dependencies);
 }
 
 } // namespace lrrt_internal
