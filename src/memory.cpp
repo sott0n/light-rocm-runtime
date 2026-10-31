@@ -596,9 +596,10 @@ void release_direct_kfd_copy_states_locked(lr_status_t *result) {
   }
 }
 
-lr_status_t submit_direct_kfd_copy_locked(DeviceState *device,
-                                          uint64_t destination, uint64_t source,
-                                          uint64_t size) {
+lr_status_t
+submit_direct_kfd_copy_locked(DeviceState *device, uint64_t destination,
+                              uint64_t source, uint64_t size,
+                              lr_event_t *completion_event = nullptr) {
   if (!device || !device->copy_state || size == 0) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
@@ -622,11 +623,13 @@ lr_status_t submit_direct_kfd_copy_locked(DeviceState *device,
   const lr_status_t submit_status = submit_direct_kfd_kernel_locked(
       device, device->default_queue, device->copy_state->executable_image,
       device->copy_state->image_kernel_index, &config, &arguments,
-      sizeof(arguments));
+      sizeof(arguments), completion_event);
   if (submit_status != LR_SUCCESS) {
     return submit_status;
   }
-  return synchronize_direct_kfd_queue_locked(device->default_queue);
+  return completion_event
+             ? LR_SUCCESS
+             : synchronize_direct_kfd_queue_locked(device->default_queue);
 }
 #endif
 
@@ -1591,6 +1594,81 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
       &state, state.default_queue, state.copy_kernel->executable_image,
       state.copy_kernel->image_kernel_index, &config, &arguments,
       sizeof(arguments), event_dependencies, event);
+  if (submit_status != LR_SUCCESS) {
+    return submit_status;
+  }
+  record_memcpy(&state, kind, size);
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size() || !valid_event_locked(event) ||
+      event->device.index != device.index || event->destroying ||
+      !g_devices[device.index].opened || !g_kfd_session) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!use_implicit_dependencies) {
+    (void)explicit_dependencies;
+    (void)dependency_count;
+    return LR_ERROR_NOT_SUPPORTED;
+  }
+  if (event->pending) {
+    const lr_status_t wait_status = wait_for_direct_kfd_event_locked(event);
+    if (wait_status != LR_SUCCESS) {
+      return wait_status;
+    }
+  }
+
+  uint64_t copy_destination = 0;
+  uint64_t copy_source = 0;
+  if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+    copy_destination = translate_direct_kfd_device_pointer(dst, device, size);
+    const void *mapped_source = nullptr;
+    const LightRocrHostPointerLookup lookup =
+        translate_light_rocr_host_pointer(src, device, size, &mapped_source);
+    if (copy_destination == 0 ||
+        lookup == LightRocrHostPointerLookup::Invalid) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == LightRocrHostPointerLookup::Unregistered) {
+      return LR_ERROR_NOT_SUPPORTED;
+    }
+    copy_source =
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mapped_source));
+  } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
+    copy_source = translate_direct_kfd_device_pointer(src, device, size);
+    const void *mapped_destination = nullptr;
+    const LightRocrHostPointerLookup lookup = translate_light_rocr_host_pointer(
+        dst, device, size, &mapped_destination);
+    if (copy_source == 0 || lookup == LightRocrHostPointerLookup::Invalid) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == LightRocrHostPointerLookup::Unregistered) {
+      return LR_ERROR_NOT_SUPPORTED;
+    }
+    copy_destination =
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mapped_destination));
+  } else {
+    copy_destination = translate_direct_kfd_device_pointer(dst, device, size);
+    copy_source = translate_direct_kfd_device_pointer(src, device, size);
+    if (copy_destination == 0 || copy_source == 0) {
+      return LR_ERROR_INVALID_ARGUMENT;
+    }
+    const uint64_t distance = copy_destination < copy_source
+                                  ? copy_source - copy_destination
+                                  : copy_destination - copy_source;
+    if (copy_destination != copy_source && distance < size) {
+      return LR_ERROR_NOT_SUPPORTED;
+    }
+  }
+
+  DeviceState &state = g_devices[device.index];
+  const lr_status_t copy_state_status =
+      ensure_direct_kfd_copy_state_locked(&state);
+  if (copy_state_status != LR_SUCCESS) {
+    return copy_state_status;
+  }
+  const lr_status_t submit_status = submit_direct_kfd_copy_locked(
+      &state, copy_destination, copy_source, size, event);
   if (submit_status != LR_SUCCESS) {
     return submit_status;
   }

@@ -75,6 +75,7 @@ if(
       lrrt_direct_kfd_event_device_tests direct_kfd_event.cpp
       lrrt_direct_kfd_fault_device_tests direct_kfd_fault.cpp
       lrrt_direct_kfd_host_memory_device_tests direct_kfd_host_memory.cpp
+      lrrt_direct_kfd_async_copy_device_tests direct_kfd_async_copy.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )

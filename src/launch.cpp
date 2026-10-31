@@ -134,12 +134,18 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
-    const void *args, size_t args_size) {
+    const void *args, size_t args_size, lr_event_t *completion_event) {
   LaunchProfile *profile = current_launch_profile();
   if (!device || !queue || !config || !args || !g_kfd_session ||
       !executable_image ||
       image_kernel_index >= executable_image.code_object().kernels.size() ||
       image_kernel_index >= executable_image.kernels().size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (completion_event &&
+      (!valid_event_locked(completion_event) || completion_event->destroying ||
+       completion_event->pending ||
+       completion_event->device.index != queue->device.index)) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
@@ -286,11 +292,50 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     }
   }
 
+  light_rocr::transport::kfd::ClockCounters record_clock{};
+  bool previous_completed = false;
+  uint64_t previous_start_tick = 0;
+  uint64_t previous_completion_tick = 0;
+  light_rocr::transport::kfd::ClockCounters previous_record_clock{};
+  light_rocr::transport::kfd::ClockCounters previous_completion_clock{};
+  if (completion_event) {
+    const auto clock = g_kfd_session->query_clock_counters(device->node);
+    if (!clock) {
+      queue->available_dispatches.push_back(std::move(pending));
+      return LR_ERROR_RUNTIME;
+    }
+    record_clock = clock.counters;
+    previous_completed = completion_event->completed;
+    previous_start_tick = completion_event->start_tick;
+    previous_completion_tick = completion_event->completion_tick;
+    previous_record_clock = completion_event->record_clock;
+    previous_completion_clock = completion_event->completion_clock;
+    try {
+      queue->pending_events.reserve(queue->pending_events.size() + 1);
+      device->pending_events.reserve(device->pending_events.size() + 1);
+    } catch (const std::bad_alloc &) {
+      queue->available_dispatches.push_back(std::move(pending));
+      return LR_ERROR_RUNTIME;
+    }
+    queue->queue.set_profiling_enabled(true);
+    completion_event->signal.reset(1);
+    completion_event->pending = true;
+    completion_event->completed = false;
+    completion_event->start_tick = 0;
+    completion_event->completion_tick = 0;
+    completion_event->record_clock = record_clock;
+    completion_event->completion_clock = {};
+    completion_event->recorded_queue = queue;
+    pending->completion_event = completion_event;
+    queue->pending_events.push_back(completion_event);
+    device->pending_events.push_back(completion_event);
+  }
+
   const auto parameters = aql_dispatch_parameters(
       config, kernel_info.private_segment_size,
       kernel_info.group_segment_size + config->shared_memory_bytes,
       executable_image.kernels()[image_kernel_index].descriptor_gpu_address,
-      kernarg_address, pending->completion_signal.gpu_handle());
+      kernarg_address, pending->completion_signal_handle());
   // Capacity was checked above while the global producer lock was held. The
   // GPU can only advance the read index before this reservation, so repeating
   // both index loads in the common AQL producer cannot make the result safer.
@@ -301,6 +346,19 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
       {queue->pending_dispatches.size() - queue->pending_dispatch_head, false},
       profile ? &profile->aql : nullptr, true);
   if (!submitted) {
+    if (completion_event) {
+      device->pending_events.pop_back();
+      queue->pending_events.pop_back();
+      pending->completion_event = nullptr;
+      completion_event->recorded_queue = nullptr;
+      completion_event->pending = false;
+      completion_event->completed = previous_completed;
+      completion_event->start_tick = previous_start_tick;
+      completion_event->completion_tick = previous_completion_tick;
+      completion_event->record_clock = previous_record_clock;
+      completion_event->completion_clock = previous_completion_clock;
+      completion_event->signal.store_relaxed(0);
+    }
     queue->available_dispatches.push_back(std::move(pending));
     return aql_submit_status(submitted.error);
   }
@@ -320,10 +378,10 @@ lr_status_t submit_direct_kfd_kernel_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
-    const void *args, size_t args_size) {
+    const void *args, size_t args_size, lr_event_t *completion_event) {
   return submit_direct_kfd_kernel_impl_locked(device, queue, executable_image,
                                               image_kernel_index, config, args,
-                                              args_size);
+                                              args_size, completion_event);
 }
 
 } // namespace lrrt_internal

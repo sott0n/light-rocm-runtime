@@ -566,8 +566,13 @@ lr_status_t wait_for_direct_kfd_event_locked(lr_event_t *event) {
   }
   const lr_status_t wait_status =
       wait_for_direct_kfd_signal_locked(event->recorded_queue, event->signal);
-  return wait_status == LR_SUCCESS ? finish_direct_kfd_event_wait_locked(event)
-                                   : wait_status;
+  if (wait_status != LR_SUCCESS) {
+    return wait_status;
+  }
+  const lr_status_t reap_status =
+      reap_completed_direct_kfd_dispatches_locked(event->recorded_queue);
+  return reap_status == LR_SUCCESS ? finish_direct_kfd_event_wait_locked(event)
+                                   : reap_status;
 }
 
 void release_direct_kfd_events_locked(lr_status_t *result) {

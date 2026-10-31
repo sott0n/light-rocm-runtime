@@ -25,9 +25,10 @@ covered by the GPU tests. The direct KFD path can materialize a Clang HSACO in
 executable GTT, invalidate the instruction cache, resolve its kernel descriptor,
 and execute a scratch-backed kernel. LRRT's public direct KFD backend supports
 device and queue lifecycle, device and pinned host memory, synchronous copies,
-events, module and kernel lookup, launch, and synchronization. Scratch-backed
-queues receive separate ranges from a process-wide GPU scratch pool, so
-multiple queues can remain active together.
+asynchronous copies using pinned host memory, events, module and kernel lookup,
+launch, and synchronization. Scratch-backed queues receive separate ranges
+from a process-wide GPU scratch pool, so multiple queues can remain active
+together.
 Current ROCr comparison results and their GPU clock caveats are recorded in the
 [performance comparison](../docs/light-rocr-performance.md).
 

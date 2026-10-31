@@ -1309,9 +1309,10 @@ lr_status_t reap_direct_kfd_dispatches_locked(lr_queue_t *queue) {
          queue->pending_dispatches.size()) {
     auto &dispatch = *queue->pending_dispatches[queue->pending_dispatch_head +
                                                 completed_count];
-    if (dispatch.completion_signal.load_acquire() != 0) {
+    if (dispatch.active_completion_signal().load_acquire() != 0) {
       break;
     }
+    dispatch.completion_event = nullptr;
     ++completed_count;
   }
   if (completed_count == 0) {
@@ -1391,7 +1392,7 @@ lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
         queue->pending_dispatch_head != queue->pending_dispatches.size()
             ? wait_for_direct_kfd_signal_locked(
                   queue, queue->pending_dispatches[queue->pending_dispatch_head]
-                             ->completion_signal)
+                             ->active_completion_signal())
             : wait_for_direct_kfd_signal_locked(
                   queue, queue->pending_events.front()->signal);
     if (wait_status != LR_SUCCESS) {
@@ -1463,7 +1464,7 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue) {
         queue->pending_dispatch_head != queue->pending_dispatches.size()
             ? wait_for_direct_kfd_signal_locked(
                   queue, queue->pending_dispatches[queue->pending_dispatch_head]
-                             ->completion_signal)
+                             ->active_completion_signal())
             : wait_for_direct_kfd_signal_locked(
                   queue, queue->pending_events.front()->signal);
     if (wait_status != LR_SUCCESS) {

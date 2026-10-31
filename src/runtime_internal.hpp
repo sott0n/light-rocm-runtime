@@ -244,8 +244,17 @@ struct lr_queue_t {
                     KernargSlice kernarg_slice)
         : completion_signal(std::move(signal)), kernarg(kernarg_slice) {}
 
+    [[nodiscard]] const light_rocr::transport::kfd::UserSignal &
+    active_completion_signal() const {
+      return completion_event ? completion_event->signal : completion_signal;
+    }
+    [[nodiscard]] uint64_t completion_signal_handle() const {
+      return active_completion_signal().gpu_handle();
+    }
+
     light_rocr::transport::kfd::UserSignal completion_signal;
     KernargSlice kernarg;
+    lr_event_t *completion_event = nullptr;
   };
 
   light_rocr::transport::kfd::AqlQueue queue;
@@ -414,7 +423,7 @@ lr_status_t submit_direct_kfd_kernel_locked(
     DeviceState *device, lr_queue_t *queue,
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
-    const void *args, size_t args_size);
+    const void *args, size_t args_size, lr_event_t *completion_event = nullptr);
 lr_status_t ensure_direct_kfd_copy_state_locked(DeviceState *device);
 void release_direct_kfd_copy_states_locked(lr_status_t *result);
 void release_direct_kfd_queues_locked(lr_status_t *result);
