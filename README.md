@@ -91,8 +91,9 @@ live under `benchmarks`.
 
 Qwen2/Qwen2.5 0.5B serves as the end-to-end model integration. The IREE path
 covers checkpoint conversion, prompt prefill, device-resident KV cache, and
-autoregressive text generation; the Triton executor runs the full decoder stack
-for correctness validation and detailed benchmarking. See the [Qwen IREE and
+autoregressive text generation; the FP32 Triton executor runs the full decoder
+stack, feeds greedy output tokens back through its KV caches, and provides
+detailed benchmarking. See the [Qwen IREE and
 Triton execution guide](examples/qwen/README.md) for prerequisites, build and
 conversion steps, validation, and benchmark commands.
 
@@ -132,7 +133,9 @@ asynchronous copies with copy-event dependencies, and queue or device
 synchronization. These operations execute scratch-backed Clang HSACO on
 simultaneous queues without `libhsakmt`. Public kernel launches support
 device-side event dependencies across queues, including CPU-wait-free
-H2D-to-kernel-to-D2H pipelines.
+H2D-to-kernel-to-D2H pipelines. The direct KFD backend has also run the full
+24-layer Qwen2.5-0.5B Triton path with autoregressive token feedback, producing
+the same generated token IDs and logits as ROCr.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

@@ -666,8 +666,8 @@ def converter_command(args: argparse.Namespace, layers: int) -> list[str]:
 
 def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
     token_ids = parse_token_ids(args.token_ids)
-    if args.keys < len(token_ids):
-        raise ValueError("--keys must be at least the number of --token-ids")
+    if args.keys < len(token_ids) + args.max_new_tokens - 1:
+        raise ValueError("--keys must cover the prompt and generated-token feedback")
 
     command = [
         str(args.python if args.python is not None else sys.executable),
@@ -682,6 +682,8 @@ def runner_command(args: argparse.Namespace, layers: int) -> list[str]:
         args.token_ids,
         "--iterations",
         str(args.iterations),
+        "--max-new-tokens",
+        str(args.max_new_tokens),
         "--valid-keys",
         str(len(token_ids)),
         "--no-warmup",

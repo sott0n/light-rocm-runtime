@@ -213,6 +213,7 @@ python3 tools/run_qwen_benchmark.py \
   --all-layers \
   --keys 4 \
   --token-ids 0,1,2 \
+  --max-new-tokens 2 \
   --iterations 1 \
   --no-warmup
 ```
@@ -221,7 +222,10 @@ Use `--no-convert` to require an already-converted bundle directory, or
 `--force-convert` to rewrite the bundle before running the benchmark. The
 wrapper uses `uv run --with-requirements tools/requirements.txt` for conversion
 when `uv` is available, and falls back to the current Python interpreter when
-`uv` is not installed.
+`uv` is not installed. With more than one new token it stores the full token
+embedding table, prints `generated_token_ids=[...]`, and feeds each greedy
+argmax token into the next available cache position. The key capacity must be
+at least `prompt tokens + max new tokens - 1`.
 
 The current wrapper starts at layer 0 because the benchmark consumes
 `layer_0..layer_N` directories.
@@ -236,7 +240,8 @@ python3 tools/run_qwen_e2e.py \
   --checkpoint-dir /path/to/qwen-checkpoint \
   --bundle-dir /tmp/lrrt-qwen-e2e \
   --keys 4 \
-  --token-ids 0,1,2
+  --token-ids 0,1,2 \
+  --max-new-tokens 2
 ```
 
 By default the E2E wrapper reads `num_hidden_layers` from the checkpoint config

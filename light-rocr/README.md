@@ -31,6 +31,9 @@ and synchronization. These dependencies can connect H2D copies, an explicit
 kernel queue, and D2H copies without an intermediate CPU wait.
 Scratch-backed queues receive separate ranges from a process-wide GPU scratch
 pool, so multiple queues can remain active together.
+The direct KFD backend has run the full 24-layer Qwen2.5-0.5B FP32 Triton path
+with autoregressive token feedback; its generated token IDs and logits match
+the ROCr backend.
 Current ROCr comparison results and their GPU clock caveats are recorded in the
 [performance comparison](../docs/light-rocr-performance.md).
 

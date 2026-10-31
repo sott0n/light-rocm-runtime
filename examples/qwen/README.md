@@ -6,9 +6,9 @@ GPU executor paths in `light-rocm-runtime`:
 - **IREE** provides the current end-to-end generation path: tokenizer input,
   prompt prefill, device-resident KV cache, greedy autoregressive decode, EOS
   handling, generated token IDs, and decoded text.
-- **Triton** is the reference executor and benchmark path: converted checkpoint
-  weights, the full decoder-layer stack, final logits validation, and detailed
-  runtime timing.
+- **Triton** is the FP32 reference executor and benchmark path: converted
+  checkpoint weights, the full decoder-layer stack, greedy autoregressive
+  feedback, final logits validation, and detailed runtime timing.
 
 Both paths are experimental Qwen 0.5B integrations rather than general model
 servers. Triton remains FP32-only. IREE can run decoder layers, hidden states,
@@ -25,7 +25,7 @@ remains FP32.
 | Prompt prefill | Yes, one token at a time | Fixed benchmark input |
 | Device-resident KV cache | Yes | Yes |
 | Compute precision | FP32, FP16, or BF16 decoder; FP32 tail | FP32 |
-| Multi-token autoregressive generation | Yes, greedy | No |
+| Multi-token autoregressive generation | Yes, greedy | Yes, greedy token IDs |
 | Generated text output | Yes | No |
 | Final logits validation | Yes | Yes |
 | Hugging Face step-by-step reference check | Optional | No |
@@ -362,12 +362,15 @@ python3 tools/run_qwen_e2e.py \
   --bundle-dir "$QWEN_ARTIFACTS/weights" \
   --layers 24 \
   --keys 4 \
-  --token-ids 0,1,2
+  --token-ids 0,1,2 \
+  --max-new-tokens 2
 ```
 
-The Triton path treats `--token-ids` as explicit embedding rows for its fixed
-input rather than as a text prompt. It does not currently perform tokenizer
-decode or autoregressive text generation.
+The Triton path treats `--token-ids` as explicit embedding rows rather than as
+a text prompt. It greedily feeds each selected token embedding into the next
+cache position and prints `generated_token_ids=[...]`; it does not currently
+perform tokenizer decode. The key capacity must be at least
+`prompt tokens + max new tokens - 1`.
 
 If the bundle was already produced by the IREE command, add `--no-convert`:
 
@@ -377,6 +380,7 @@ python3 tools/run_qwen_e2e.py \
   --layers 24 \
   --keys 4 \
   --token-ids 0,1,2 \
+  --max-new-tokens 2 \
   --no-convert
 ```
 
@@ -434,8 +438,8 @@ inference servers:
   changing the configured AMDGPU target.
 - IREE progress times are coarse host-side diagnostics and include asynchronous
   queue effects. Triton has the more detailed benchmark path.
-- Triton validates fixed token-ID inputs and logits, but does not currently
-  provide tokenizer-driven autoregressive text generation.
+- Triton provides greedy token-ID generation but not tokenizer-driven text
+  input or decoded text output.
 
 ## Artifact and Build Directory Summary
 

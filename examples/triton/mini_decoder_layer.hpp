@@ -283,11 +283,30 @@ public:
     buffers_.copy_to("hidden_states", hidden_states);
   }
 
+  void copy_hidden_state(uint32_t position,
+                         const std::vector<float> &hidden_state) {
+    if (position >= keys_) {
+      throw std::runtime_error(
+          "mini decoder layer hidden state position is out of range");
+    }
+    if (hidden_state.size() != hidden_) {
+      throw std::runtime_error(
+          "mini decoder layer hidden state row shape mismatch");
+    }
+    auto *base =
+        static_cast<unsigned char *>(buffers_.get("hidden_states").data());
+    lrrt::DeviceBuffer row = lrrt::DeviceBuffer::view(
+        buffers_.get("hidden_states").device(),
+        base + static_cast<size_t>(position) * hidden_ * sizeof(float),
+        static_cast<size_t>(hidden_) * sizeof(float));
+    lrrt::copy_to_device(row, hidden_state);
+  }
+
   void run(uint32_t valid_keys,
            const std::vector<const lrrt::Event *> &dependencies = {},
            DecoderLayerStageTiming *timing = nullptr,
            DecoderLayerStageMarkers *markers = nullptr) {
-    run_with_output(valid_keys, dependencies, timing, markers, nullptr);
+    run_with_output(valid_keys, dependencies, timing, markers, nullptr, false);
   }
 
   void run_to_hidden_state(uint32_t valid_keys, DecoderLayer &dst,
@@ -308,7 +327,8 @@ public:
     }
     run_with_output(valid_keys, {}, timing, markers,
                     dst.buffers_.ptr<float>("hidden_states") +
-                        static_cast<size_t>(dst_position) * dst.hidden_);
+                        static_cast<size_t>(dst_position) * dst.hidden_,
+                    false);
   }
 
   void run_to_buffer(uint32_t valid_keys, lrrt::DeviceBuffer &dst,
@@ -319,14 +339,44 @@ public:
           "mini decoder layer direct output buffer is too small");
     }
     run_with_output(valid_keys, {}, timing, markers,
-                    static_cast<float *>(dst.data()));
+                    static_cast<float *>(dst.data()), false);
+  }
+
+  void decode_to_hidden_state(uint32_t valid_keys, DecoderLayer &dst,
+                              uint32_t dst_position) {
+    if (hidden_ != dst.hidden_) {
+      throw std::runtime_error(
+          "mini decoder layer direct handoff hidden size mismatch");
+    }
+    if (queue_ != dst.queue_) {
+      throw std::runtime_error(
+          "mini decoder layer direct handoff requires a shared queue");
+    }
+    if (dst_position >= dst.keys_) {
+      throw std::runtime_error(
+          "mini decoder layer direct handoff position is out of range");
+    }
+    run_with_output(valid_keys, {}, nullptr, nullptr,
+                    dst.buffers_.ptr<float>("hidden_states") +
+                        static_cast<size_t>(dst_position) * dst.hidden_,
+                    true);
+  }
+
+  void decode_to_buffer(uint32_t valid_keys, lrrt::DeviceBuffer &dst) {
+    if (dst.size() < static_cast<size_t>(hidden_) * sizeof(float)) {
+      throw std::runtime_error(
+          "mini decoder layer direct output buffer is too small");
+    }
+    run_with_output(valid_keys, {}, nullptr, nullptr,
+                    static_cast<float *>(dst.data()), true);
   }
 
 private:
   void run_with_output(uint32_t valid_keys,
                        const std::vector<const lrrt::Event *> &dependencies,
                        DecoderLayerStageTiming *timing,
-                       DecoderLayerStageMarkers *markers, float *output) {
+                       DecoderLayerStageMarkers *markers, float *output,
+                       bool incremental_cache_update) {
     if (valid_keys == 0 || valid_keys > keys_) {
       throw std::runtime_error("mini decoder layer valid_keys is out of range");
     }
@@ -338,14 +388,21 @@ private:
 
     const uint32_t half = head_dim_ / 2;
     const uint32_t query_position = valid_keys - 1;
+    const uint32_t first_kv_position =
+        incremental_cache_update ? query_position : 0;
+    const uint32_t norm_position =
+        incremental_cache_update ? query_position : 0;
+    const uint32_t norm_rows = incremental_cache_update ? 1 : keys_;
     auto stage_begin = std::chrono::steady_clock::now();
-    launch(*queue_, bundles_->get("attention_norm"), keys_,
+    launch(*queue_, bundles_->get("attention_norm"), norm_rows,
            {
-               arg("x", buffers_.ptr<float>("hidden_states")),
+               arg("x", buffers_.ptr<float>("hidden_states",
+                                            norm_position * hidden_)),
                arg("weight", buffers_.ptr<float>("attention_norm_weight")),
-               arg("out", buffers_.ptr<float>("attention_norm_states")),
+               arg("out", buffers_.ptr<float>("attention_norm_states",
+                                              norm_position * hidden_)),
                arg("eps", 1.0e-5f),
-               arg("rows", (int32_t)keys_),
+               arg("rows", (int32_t)norm_rows),
                arg("hidden", (int32_t)hidden_),
            },
            dependencies);
@@ -367,7 +424,8 @@ private:
                arg("outputs", (int32_t)q_dim_),
                arg("hidden", (int32_t)hidden_),
            });
-    for (uint32_t position = 0; position < valid_keys; ++position) {
+    for (uint32_t position = first_kv_position; position < valid_keys;
+         ++position) {
       launch(
           *queue_, bundles_->get("k_projection"), kv_dim_,
           {
@@ -401,7 +459,8 @@ private:
     for (uint32_t kv_head = 0; kv_head < kv_heads_; ++kv_head) {
       const uint32_t kv_head_offset = kv_head * head_dim_;
       const uint32_t cache_offset = kv_head * keys_ * head_dim_;
-      for (uint32_t position = 0; position < valid_keys; ++position) {
+      for (uint32_t position = first_kv_position; position < valid_keys;
+           ++position) {
         launch(
             *queue_, bundles_->get("rope"), 1,
             {

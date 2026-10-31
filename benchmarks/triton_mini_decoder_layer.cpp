@@ -101,6 +101,7 @@ struct Measurements {
   bool produced_logits;
   uint32_t vocab;
   std::vector<LogitEntry> top_logits;
+  std::vector<uint32_t> generated_token_ids;
   size_t non_finite_logits;
   size_t non_finite_hidden;
   size_t non_finite_norm_hidden;
@@ -109,23 +110,25 @@ struct Measurements {
 };
 
 struct Options {
-  uint32_t iterations;
-  uint32_t warmup_iterations;
-  const char *weights_path;
-  const char *weights_dir;
-  uint32_t layers;
-  uint32_t valid_keys;
-  bool has_valid_keys;
-  bool layer_sweep;
-  bool has_warmup_iterations;
-  bool no_warmup;
-  bool no_model_tail;
-  bool e2e_check;
-  bool sync_stack;
-  bool trace_setup;
-  bool trace_run;
-  bool gpu_stage_profile;
+  uint32_t iterations = 20;
+  uint32_t warmup_iterations = 0;
+  const char *weights_path = nullptr;
+  const char *weights_dir = nullptr;
+  uint32_t layers = 0;
+  uint32_t valid_keys = 0;
+  bool has_valid_keys = false;
+  bool layer_sweep = false;
+  bool has_warmup_iterations = false;
+  bool no_warmup = false;
+  bool no_model_tail = false;
+  bool e2e_check = false;
+  bool sync_stack = false;
+  bool trace_setup = false;
+  bool trace_run = false;
+  bool gpu_stage_profile = false;
   bool cpu_submit_profile = false;
+  uint32_t max_new_tokens = 0;
+  const char *prompt_token_ids = nullptr;
 };
 
 struct DecoderStageEventSample {
@@ -221,9 +224,35 @@ uint32_t parse_u32(const char *text, const char *label) {
   return static_cast<uint32_t>(value);
 }
 
+std::vector<uint32_t> parse_u32_list(const char *text, const char *label) {
+  if (!text || text[0] == '\0') {
+    throw std::invalid_argument(std::string(label) + " is empty");
+  }
+  std::vector<uint32_t> values;
+  const char *begin = text;
+  while (*begin != '\0') {
+    char *end = nullptr;
+    unsigned long value = strtoul(begin, &end, 10);
+    if (end == begin || value > std::numeric_limits<uint32_t>::max() ||
+        (*end != ',' && *end != '\0')) {
+      throw std::invalid_argument(std::string(label) +
+                                  " must be comma-separated uint32 values");
+    }
+    values.push_back(static_cast<uint32_t>(value));
+    if (*end == '\0') {
+      break;
+    }
+    begin = end + 1;
+    if (*begin == '\0') {
+      throw std::invalid_argument(std::string(label) +
+                                  " must not end with a comma");
+    }
+  }
+  return values;
+}
+
 Options parse_options(int argc, char **argv) {
-  Options options{20,    0,     nullptr, nullptr, 0,     0,     false, false,
-                  false, false, false,   false,   false, false, false, false};
+  Options options;
   bool saw_iterations = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--weights") == 0) {
@@ -261,6 +290,16 @@ Options parse_options(int argc, char **argv) {
       options.no_model_tail = true;
     } else if (strcmp(argv[i], "--e2e-check") == 0) {
       options.e2e_check = true;
+    } else if (strcmp(argv[i], "--max-new-tokens") == 0) {
+      if (++i >= argc) {
+        throw std::invalid_argument("--max-new-tokens requires a count");
+      }
+      options.max_new_tokens = parse_u32(argv[i], "max new token count");
+    } else if (strcmp(argv[i], "--prompt-token-ids") == 0) {
+      if (++i >= argc) {
+        throw std::invalid_argument("--prompt-token-ids requires token ids");
+      }
+      options.prompt_token_ids = argv[i];
     } else if (strcmp(argv[i], "--sync-stack") == 0) {
       options.sync_stack = true;
     } else if (strcmp(argv[i], "--trace-setup") == 0) {
@@ -280,7 +319,9 @@ Options parse_options(int argc, char **argv) {
           "[--weights weights.json | --weights-dir dir --layers count] "
           "[--valid-keys count] [--layer-sweep] "
           "[--warmup-iterations count | --no-warmup] "
-          "[--no-model-tail] [--e2e-check] [--sync-stack] "
+          "[--no-model-tail] [--e2e-check] "
+          "[--max-new-tokens count --prompt-token-ids id,...] "
+          "[--sync-stack] "
           "[--trace-setup] [--trace-run] [--gpu-stage-profile] "
           "[--cpu-submit-profile]");
     }
@@ -303,6 +344,22 @@ Options parse_options(int argc, char **argv) {
   }
   if (options.e2e_check && options.no_model_tail) {
     throw std::invalid_argument("--e2e-check requires model tail");
+  }
+  if (options.max_new_tokens != 0 && !options.weights_dir) {
+    throw std::invalid_argument("--max-new-tokens requires --weights-dir");
+  }
+  if (options.max_new_tokens != 0 && options.no_model_tail) {
+    throw std::invalid_argument("--max-new-tokens requires model tail");
+  }
+  if (options.prompt_token_ids && !options.weights_dir) {
+    throw std::invalid_argument("--prompt-token-ids requires --weights-dir");
+  }
+  if (options.prompt_token_ids && options.no_model_tail) {
+    throw std::invalid_argument("--prompt-token-ids requires model tail");
+  }
+  if (options.max_new_tokens != 0 && options.layer_sweep) {
+    throw std::invalid_argument(
+        "--max-new-tokens and --layer-sweep are mutually exclusive");
   }
   if (options.sync_stack && !options.weights_dir) {
     throw std::invalid_argument("--sync-stack requires --weights-dir");
@@ -362,6 +419,22 @@ std::vector<LogitEntry> top_logits(const std::vector<float> &logits,
     }
   }
   return top;
+}
+
+std::vector<float>
+token_embedding(const lrrt::executor::qwen::ModelTailWeights &weights,
+                uint32_t token_id) {
+  auto token =
+      std::find(weights.token_ids.begin(), weights.token_ids.end(), token_id);
+  if (token == weights.token_ids.end()) {
+    throw std::runtime_error(
+        "model tail has no embedding for generated token " +
+        std::to_string(token_id));
+  }
+  const size_t index =
+      static_cast<size_t>(std::distance(weights.token_ids.begin(), token));
+  const auto begin = weights.token_embeddings.begin() + index * weights.hidden;
+  return std::vector<float>(begin, begin + weights.hidden);
 }
 
 size_t count_non_finite(const std::vector<float> &values) {
@@ -617,6 +690,7 @@ Measurements measure_case(lrrt::Device &device,
           false,
           0,
           {},
+          {},
           0,
           0,
           0};
@@ -628,7 +702,8 @@ measure_stack_case(lrrt::Device &device,
                    const lrrt::executor::qwen::ModelTailWeights *tail_weights,
                    uint32_t iterations, uint32_t warmup_iterations,
                    bool trace_setup, bool trace_run, bool sync_stack,
-                   bool gpu_stage_profile, bool cpu_submit_profile) {
+                   bool gpu_stage_profile, bool cpu_submit_profile,
+                   uint32_t max_new_tokens) {
   device.reset_memory_stats();
   if (layer_count == 0 || layer_count > layers.size()) {
     throw std::runtime_error("decoder stack benchmark has no layers");
@@ -959,19 +1034,52 @@ measure_stack_case(lrrt::Device &device,
   }
 
   std::vector<LogitEntry> summary;
+  std::vector<uint32_t> generated_token_ids;
   size_t non_finite_logits = 0;
   size_t non_finite_hidden = 0;
   size_t non_finite_norm_hidden = 0;
   if (tail && tail_weights) {
+    std::vector<float> logits(tail_weights->vocab);
+    tail->copy_logits(logits);
+    summary = top_logits(logits, 5, &non_finite_logits);
+    if (max_new_tokens != 0) {
+      if (summary.empty() || non_finite_logits != 0) {
+        throw std::runtime_error(
+            "Qwen generation failed: initial logits are not finite");
+      }
+      generated_token_ids.push_back(summary.front().token_id);
+      for (uint32_t step = 1; step < max_new_tokens; ++step) {
+        const uint32_t position = valid_keys + step - 1;
+        executors.front()->copy_hidden_state(
+            position,
+            token_embedding(*tail_weights, generated_token_ids.back()));
+        const uint32_t step_valid_keys = position + 1;
+        for (size_t layer = 0; layer < layer_count; ++layer) {
+          if (layer + 1 < layer_count) {
+            executors[layer]->decode_to_hidden_state(
+                step_valid_keys, *executors[layer + 1], position);
+          } else {
+            executors[layer]->decode_to_buffer(step_valid_keys,
+                                               tail->hidden_buffer());
+          }
+        }
+        tail->run();
+        synchronize_stack();
+        tail->copy_logits(logits);
+        summary = top_logits(logits, 5, &non_finite_logits);
+        if (summary.empty() || non_finite_logits != 0) {
+          throw std::runtime_error(
+              "Qwen generation failed: decode logits are not finite");
+        }
+        generated_token_ids.push_back(summary.front().token_id);
+      }
+    }
     std::vector<float> hidden(tail_weights->hidden);
     tail->copy_hidden(hidden);
     non_finite_hidden = count_non_finite(hidden);
     std::vector<float> norm_hidden(tail_weights->hidden);
     tail->copy_norm_hidden(norm_hidden);
     non_finite_norm_hidden = count_non_finite(norm_hidden);
-    std::vector<float> logits(tail_weights->vocab);
-    tail->copy_logits(logits);
-    summary = top_logits(logits, 5, &non_finite_logits);
   }
 
   Measurements measurements = {cpu_round_trip_ns,
@@ -988,6 +1096,7 @@ measure_stack_case(lrrt::Device &device,
                                tail != nullptr,
                                tail_weights ? tail_weights->vocab : 0,
                                summary,
+                               generated_token_ids,
                                non_finite_logits,
                                non_finite_hidden,
                                non_finite_norm_hidden};
@@ -1238,6 +1347,10 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
     }
     printf("\n");
   }
+  if (!measurements.generated_token_ids.empty()) {
+    printf("generated_token_ids=[%s]\n",
+           join_u32_values(measurements.generated_token_ids).c_str());
+  }
   printf("%sSetup/Warmup%s setup=%.3f ms warmup=%.3f ms\n", colors.label,
          colors.reset, measurements.setup_ns / 1.0e6,
          measurements.warmup_ns / 1.0e6);
@@ -1253,7 +1366,8 @@ void print_stack_case(const std::vector<BenchmarkCase> &layers,
   fflush(stdout);
 }
 
-void validate_e2e_result(const Measurements &measurements) {
+void validate_e2e_result(const Measurements &measurements,
+                         uint32_t max_new_tokens) {
   if (!measurements.produced_logits) {
     throw std::runtime_error("Qwen E2E check failed: logits were not produced");
   }
@@ -1268,6 +1382,11 @@ void validate_e2e_result(const Measurements &measurements) {
       measurements.non_finite_logits != 0) {
     throw std::runtime_error(
         "Qwen E2E check failed: non-finite hidden/norm/logit values");
+  }
+  if (max_new_tokens != 0 &&
+      measurements.generated_token_ids.size() != max_new_tokens) {
+    throw std::runtime_error(
+        "Qwen E2E check failed: generated token count mismatch");
   }
 }
 
@@ -1290,6 +1409,7 @@ int main(int argc, char **argv) {
     }
     lrrt::Device device = runtime.open_device(0);
     std::vector<BenchmarkCase> cases;
+    std::vector<uint32_t> prompt_token_ids;
     std::unique_ptr<lrrt::executor::qwen::ModelTailWeights> tail_weights;
     if (options.weights_path) {
       lrrt::executor::qwen::DecoderLayerWeights weights =
@@ -1307,14 +1427,26 @@ int main(int argc, char **argv) {
       if (!options.no_model_tail && has_tail_weights(options.weights_dir)) {
         tail_weights = std::make_unique<lrrt::executor::qwen::ModelTailWeights>(
             load_tail_weights(options.weights_dir));
+        prompt_token_ids =
+            options.prompt_token_ids
+                ? parse_u32_list(options.prompt_token_ids, "prompt token ids")
+                : tail_weights->token_ids;
+        if (options.has_valid_keys &&
+            options.valid_keys != prompt_token_ids.size()) {
+          throw std::invalid_argument(
+              "valid key count must match prompt token count");
+        }
+      }
+      if (options.max_new_tokens != 0 && !tail_weights) {
+        throw std::invalid_argument(
+            "--max-new-tokens requires model tail weights");
       }
       for (const auto &layer_weights : weights) {
         uint32_t valid_keys =
             options.has_valid_keys
                 ? options.valid_keys
-                : (tail_weights
-                       ? static_cast<uint32_t>(tail_weights->token_ids.size())
-                       : layer_weights.shape.keys);
+                : (tail_weights ? static_cast<uint32_t>(prompt_token_ids.size())
+                                : layer_weights.shape.keys);
         if (valid_keys > layer_weights.shape.keys) {
           throw std::invalid_argument(
               "valid key count exceeds weight shape keys");
@@ -1326,17 +1458,22 @@ int main(int argc, char **argv) {
           throw std::runtime_error(
               "model tail hidden size does not match decoder stack");
         }
-        if (tail_weights->token_ids.size() > cases.front().keys) {
+        if (prompt_token_ids.size() > cases.front().keys) {
           throw std::runtime_error(
-              "model tail token count exceeds decoder stack key capacity");
+              "prompt token count exceeds decoder stack key capacity");
+        }
+        if (options.max_new_tokens >
+            cases.front().keys - prompt_token_ids.size() + 1) {
+          throw std::runtime_error(
+              "max new token count exceeds decoder stack key capacity");
         }
         BenchmarkCase &first_layer = cases.front();
         for (uint32_t key = 0; key < first_layer.keys; ++key) {
-          const size_t token_index =
-              std::min<size_t>(key, tail_weights->token_ids.size() - 1);
-          const auto begin = tail_weights->token_embeddings.begin() +
-                             token_index * first_layer.hidden;
-          std::copy(begin, begin + first_layer.hidden,
+          const uint32_t token_id = prompt_token_ids[std::min<size_t>(
+              key, prompt_token_ids.size() - 1)];
+          const std::vector<float> embedding =
+              token_embedding(*tail_weights, token_id);
+          std::copy(embedding.begin(), embedding.end(),
                     first_layer.hidden_states.begin() +
                         static_cast<size_t>(key) * first_layer.hidden);
         }
@@ -1395,15 +1532,18 @@ int main(int argc, char **argv) {
                                  : "not found"));
       printf("Valid key source:   %s\n",
              options.has_valid_keys ? "--valid-keys"
-                                    : (tail_weights ? "model_tail token count"
+                                    : (tail_weights ? "prompt token count"
                                                     : "layer key capacity"));
       printf("Weight format:      lrrt.mini_decoder_weights v1, dtype=f32\n");
       if (tail_weights) {
         printf("Model tail format:  lrrt.mini_model_tail_weights v1, "
                "dtype=f32\n");
         printf("Prompt token ids:   [%s]\n",
-               join_u32_values(tail_weights->token_ids).c_str());
-        printf("Prompt tokens:      %zu\n", tail_weights->token_ids.size());
+               join_u32_values(prompt_token_ids).c_str());
+        printf("Prompt tokens:      %zu\n", prompt_token_ids.size());
+        if (options.max_new_tokens != 0) {
+          printf("Max new tokens:     %u\n", options.max_new_tokens);
+        }
         printf("Vocab size:         %u\n", tail_weights->vocab);
       }
     }
@@ -1432,10 +1572,11 @@ int main(int argc, char **argv) {
               device, cases, count, tail_weights.get(), iterations,
               warmup_iterations, options.trace_setup,
               options.trace_setup || options.trace_run, options.sync_stack,
-              options.gpu_stage_profile, options.cpu_submit_profile);
+              options.gpu_stage_profile, options.cpu_submit_profile,
+              options.max_new_tokens);
           print_stack_case(cases, count, measurements, colors);
           if (options.e2e_check && count == options.layers) {
-            validate_e2e_result(measurements);
+            validate_e2e_result(measurements, options.max_new_tokens);
           }
         }
       } else {
@@ -1446,10 +1587,11 @@ int main(int argc, char **argv) {
             device, cases, cases.size(), tail_weights.get(), iterations,
             warmup_iterations, options.trace_setup,
             options.trace_setup || options.trace_run, options.sync_stack,
-            options.gpu_stage_profile, options.cpu_submit_profile);
+            options.gpu_stage_profile, options.cpu_submit_profile,
+            options.max_new_tokens);
         print_stack_case(cases, cases.size(), measurements, colors);
         if (options.e2e_check) {
-          validate_e2e_result(measurements);
+          validate_e2e_result(measurements, options.max_new_tokens);
         }
       }
     } else {
@@ -1504,7 +1646,7 @@ int main(int argc, char **argv) {
             "%smodel tail%s initializes the first layer input from %zu token "
             "embedding row(s) and runs final RMSNorm plus lm_head matvec "
             "to produce %u logits.\n",
-            colors.label, colors.reset, tail_weights->token_ids.size(),
+            colors.label, colors.reset, prompt_token_ids.size(),
             tail_weights->vocab);
       }
     }

@@ -42,13 +42,37 @@ def infer_bundle_layer_count(bundle_dir: Path) -> int:
     return count
 
 
-def bundle_complete(bundle_dir: Path, layers: int, require_tail: bool) -> bool:
+def tail_has_full_embeddings(bundle_dir: Path) -> bool:
+    manifest = bundle_dir / "model_tail" / "weights.json"
+    if not manifest.is_file():
+        return False
+    data = read_json(manifest)
+    vocab = data.get("vocab")
+    token_ids = data.get("token_ids")
+    return (
+        isinstance(vocab, int)
+        and vocab > 0
+        and isinstance(token_ids, list)
+        and len(token_ids) == vocab
+        and token_ids[0] == 0
+        and token_ids[-1] == vocab - 1
+    )
+
+
+def bundle_complete(
+    bundle_dir: Path,
+    layers: int,
+    require_tail: bool,
+    require_full_embeddings: bool = False,
+) -> bool:
     if layers <= 0:
         return False
     for layer in range(layers):
         if not (bundle_dir / f"layer_{layer}" / "weights.json").exists():
             return False
     if require_tail and not (bundle_dir / "model_tail" / "weights.json").exists():
+        return False
+    if require_full_embeddings and not tail_has_full_embeddings(bundle_dir):
         return False
     return True
 
@@ -71,6 +95,8 @@ def converter_command(args: argparse.Namespace, layers: int) -> list[str]:
     ]
     if args.config is not None:
         converter_args.extend(["--config", str(args.config)])
+    if args.max_new_tokens > 1:
+        converter_args.append("--full-token-embeddings")
 
     if args.python is not None:
         return [str(args.python), *converter_args]
@@ -103,6 +129,15 @@ def benchmark_command(args: argparse.Namespace, layers: int) -> list[str]:
         command.append("--no-model-tail")
     if args.e2e_check:
         command.append("--e2e-check")
+    if args.max_new_tokens > 0:
+        command.extend(
+            [
+                "--prompt-token-ids",
+                args.token_ids,
+                "--max-new-tokens",
+                str(args.max_new_tokens),
+            ]
+        )
     if args.sync_stack:
         command.append("--sync-stack")
     if args.layer_sweep:
@@ -155,6 +190,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--keys", default=4, type=int)
     parser.add_argument("--token-ids", default="0,1,2")
     parser.add_argument("--iterations", default=1, type=int)
+    parser.add_argument("--max-new-tokens", default=0, type=int)
     parser.add_argument("--valid-keys", type=int)
     parser.add_argument("--force-convert", action="store_true")
     parser.add_argument("--no-convert", action="store_true")
@@ -180,8 +216,24 @@ def main(argv: list[str]) -> int:
         layers = resolve_layers(args)
         if layers <= 0:
             raise ValueError("layer count must be positive")
+        if args.max_new_tokens < 0:
+            raise ValueError("--max-new-tokens must not be negative")
+        if args.max_new_tokens > 0 and args.no_model_tail:
+            raise ValueError("--max-new-tokens requires model tail")
+        prompt_tokens = [part for part in args.token_ids.split(",") if part]
+        if args.max_new_tokens > 0 and (
+            len(prompt_tokens) + args.max_new_tokens - 1 > args.keys
+        ):
+            raise ValueError(
+                "--keys must cover the prompt and generated-token feedback"
+            )
         require_tail = not args.no_model_tail
-        complete = bundle_complete(args.bundle_dir, layers, require_tail)
+        complete = bundle_complete(
+            args.bundle_dir,
+            layers,
+            require_tail,
+            require_full_embeddings=args.max_new_tokens > 1,
+        )
         should_convert = args.force_convert or not complete
         if args.no_convert:
             should_convert = False
