@@ -27,7 +27,8 @@ and execute a scratch-backed kernel. LRRT's public direct KFD backend supports
 device and queue lifecycle, device and pinned host memory, synchronous copies,
 asynchronous copies using pinned host memory, device-side event dependencies
 between copies and kernel launches, events, module and kernel lookup, launch,
-and synchronization.
+and synchronization. These dependencies can connect H2D copies, an explicit
+kernel queue, and D2H copies without an intermediate CPU wait.
 Scratch-backed queues receive separate ranges from a process-wide GPU scratch
 pool, so multiple queues can remain active together.
 Current ROCr comparison results and their GPU clock caveats are recorded in the
