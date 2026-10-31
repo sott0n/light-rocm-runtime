@@ -1260,9 +1260,6 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
       &state, execution_queue, kernel->module->executable_image,
       kernel->image_kernel_index, config, args, args_size, event_dependencies);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
-  if (dependency_count != 0 || explicit_dependencies != nullptr) {
-    return LR_ERROR_NOT_SUPPORTED;
-  }
   RuntimeLock lock(g_devices_mutex, std::defer_lock);
   {
     ScopedLaunchPhase phase(LaunchProfilePhase::GlobalLockWait);
@@ -1284,9 +1281,20 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
       execution_queue->device.index != device.index) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
+  std::vector<lr_event_t *> event_dependencies;
+  if (!use_implicit_dependencies) {
+    const lr_status_t dependency_status =
+        collect_direct_kfd_event_dependencies_locked(
+            device, explicit_dependencies, dependency_count, nullptr,
+            &event_dependencies);
+    if (dependency_status != LR_SUCCESS) {
+      return dependency_status;
+    }
+  }
   return submit_direct_kfd_kernel_locked(
       &state, execution_queue, *kernel->module->executable_image,
-      kernel->image_kernel_index, config, args, args_size);
+      kernel->image_kernel_index, config, args, args_size, nullptr,
+      &event_dependencies);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
