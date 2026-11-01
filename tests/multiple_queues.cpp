@@ -447,29 +447,63 @@ int main() {
     independent_queue.synchronize();
 
     lrrt::copy_to_device(gate, &closed_gate, sizeof(closed_gate));
-    constexpr uint32_t queue_capacity = 1024;
     lrrt::launch(backpressure_queue, gate_kernel, config, gate_args);
-    for (uint32_t i = 1; i < queue_capacity; ++i) {
-      lrrt::launch(backpressure_queue, wait_kernel, config, filler_args);
-    }
 
     std::atomic<bool> backpressure_launch_started{false};
+    std::atomic<bool> stop_backpressure_launches{false};
     std::atomic<bool> backpressure_launch_completed{false};
+    std::atomic<uint64_t> backpressure_launch_count{0};
     std::thread backpressure_launcher([&] {
       backpressure_launch_started.store(true, std::memory_order_release);
-      lrrt::launch(backpressure_queue, wait_kernel, config, filler_args);
+      while (!stop_backpressure_launches.load(std::memory_order_acquire)) {
+        lrrt::launch(backpressure_queue, wait_kernel, config, filler_args);
+        backpressure_launch_count.fetch_add(1, std::memory_order_release);
+      }
       backpressure_launch_completed.store(true, std::memory_order_release);
     });
     while (!backpressure_launch_started.load(std::memory_order_acquire)) {
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-    lrrt::launch(independent_queue, kernel, config, concurrent_args);
-    if (backpressure_launch_completed.load(std::memory_order_acquire)) {
-      backpressure_launcher.join();
-      throw std::runtime_error(
-          "queue backpressure did not overlap an independent queue launch");
+    uint64_t previous_launch_count = 0;
+    uint32_t stable_samples = 0;
+    const auto backpressure_deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (stable_samples < 2) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      const uint64_t launch_count =
+          backpressure_launch_count.load(std::memory_order_acquire);
+      stable_samples =
+          launch_count != 0 && launch_count == previous_launch_count
+              ? stable_samples + 1
+              : 0;
+      previous_launch_count = launch_count;
+      if (std::chrono::steady_clock::now() >= backpressure_deadline) {
+        stop_backpressure_launches.store(true, std::memory_order_release);
+        const unsigned long long open_gate_after_failure = 1;
+        lrrt::Event gate_opened_after_failure(device);
+        lrrt::copy_to_device_async(gate, &open_gate_after_failure,
+                                   sizeof(open_gate_after_failure),
+                                   gate_opened_after_failure);
+        backpressure_launcher.join();
+        gate_opened_after_failure.synchronize();
+        throw std::runtime_error("queue backpressure was not reached");
+      }
     }
+
+    stop_backpressure_launches.store(true, std::memory_order_release);
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (backpressure_launch_completed.load(std::memory_order_acquire)) {
+      const unsigned long long open_gate_after_failure = 1;
+      lrrt::Event gate_opened_after_failure(device);
+      lrrt::copy_to_device_async(gate, &open_gate_after_failure,
+                                 sizeof(open_gate_after_failure),
+                                 gate_opened_after_failure);
+      backpressure_launcher.join();
+      gate_opened_after_failure.synchronize();
+      throw std::runtime_error(
+          "queue producer did not block under backpressure");
+    }
+    lrrt::launch(independent_queue, kernel, config, concurrent_args);
     const unsigned long long open_gate = 1;
     lrrt::Event gate_opened(device);
     lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
