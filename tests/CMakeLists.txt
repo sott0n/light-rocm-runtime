@@ -95,6 +95,7 @@ if(
       lrrt_direct_kfd_pipeline_device_tests direct_kfd_pipeline.cpp
       lrrt_multiple_queues_tests multiple_queues.cpp
       lrrt_event_timing_tests event_timing.cpp
+      lrrt_queue_event_lifetime_tests queue_event_lifetime.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )
@@ -147,6 +148,12 @@ if(
       direct_kfd_event_timing_kernel_hsaco
       LRRT_SCALE_HSACO
       "${DIRECT_KFD_EVENT_TIMING_HSACO}"
+    )
+    lrrt_bind_hsaco(
+      lrrt_queue_event_lifetime_tests
+      direct_kfd_multiple_queues_kernel_hsaco
+      LRRT_ASYNC_COPY_LAUNCH_HSACO
+      "${DIRECT_KFD_MULTIPLE_QUEUES_HSACO}"
     )
   endif()
   return()
