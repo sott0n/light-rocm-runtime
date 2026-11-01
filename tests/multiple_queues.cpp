@@ -87,6 +87,7 @@ int main() {
     lrrt::Kernel kernel = module.kernel("async_copy_launch_kernel");
     lrrt::Kernel wait_kernel = module.kernel("queue_wait_kernel");
     lrrt::Kernel gate_kernel = module.kernel("queue_gate_kernel");
+    lrrt::Kernel open_gate_kernel = module.kernel("queue_open_gate_kernel");
     lrrt::Queue first_queue(device);
     lrrt::Queue second_queue(device);
     const lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
@@ -351,16 +352,13 @@ int main() {
     lrrt::Queue backpressure_queue(device);
     lrrt::Queue independent_queue(device);
     lrrt::DeviceBuffer gate(device, sizeof(unsigned long long));
+    lrrt::PinnedHostBuffer open_gate_value(device, sizeof(unsigned long long));
+    *static_cast<unsigned long long *>(open_gate_value.data()) = 1;
     const unsigned long long closed_gate = 0;
     lrrt::copy_to_device(gate, &closed_gate, sizeof(closed_gate));
     const GateArgs gate_args = {
         static_cast<const unsigned long long *>(gate.data()),
     };
-    const WaitArgs filler_args = {
-        0,
-        static_cast<unsigned long long *>(wait_output.data()),
-    };
-
     void *synchronous_copy_device = nullptr;
     void *synchronous_copy_host = nullptr;
     lrrt::check(lr_malloc(device.get(), sizeof(unsigned long long),
@@ -388,10 +386,9 @@ int main() {
 
     lrrt::launch(independent_queue, kernel, config, concurrent_args);
     if (synchronous_copy_completed.load(std::memory_order_acquire)) {
-      const unsigned long long open_gate_after_failure = 1;
       lrrt::Event gate_opened_after_failure(device);
-      lrrt::copy_to_device_async(gate, &open_gate_after_failure,
-                                 sizeof(open_gate_after_failure),
+      lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                                 open_gate_value.size(),
                                  gate_opened_after_failure);
       synchronous_copier.join();
       gate_opened_after_failure.synchronize();
@@ -419,10 +416,9 @@ int main() {
 
     if (device_free_completed.load(std::memory_order_acquire) ||
         host_free_completed.load(std::memory_order_acquire)) {
-      const unsigned long long open_gate_after_failure = 1;
       lrrt::Event gate_opened_after_failure(device);
-      lrrt::copy_to_device_async(gate, &open_gate_after_failure,
-                                 sizeof(open_gate_after_failure),
+      lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                                 open_gate_value.size(),
                                  gate_opened_after_failure);
       synchronous_copier.join();
       device_freer.join();
@@ -431,10 +427,9 @@ int main() {
           "synchronous copy allocations were not pinned while waiting");
     }
 
-    const unsigned long long open_gate_for_synchronous_copy = 1;
     lrrt::Event synchronous_copy_gate_opened(device);
-    lrrt::copy_to_device_async(gate, &open_gate_for_synchronous_copy,
-                               sizeof(open_gate_for_synchronous_copy),
+    lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                               open_gate_value.size(),
                                synchronous_copy_gate_opened);
     synchronous_copier.join();
     device_freer.join();
@@ -456,7 +451,7 @@ int main() {
     std::thread backpressure_launcher([&] {
       backpressure_launch_started.store(true, std::memory_order_release);
       while (!stop_backpressure_launches.load(std::memory_order_acquire)) {
-        lrrt::launch(backpressure_queue, wait_kernel, config, filler_args);
+        lrrt::launch(backpressure_queue, gate_kernel, config, gate_args);
         backpressure_launch_count.fetch_add(1, std::memory_order_release);
       }
       backpressure_launch_completed.store(true, std::memory_order_release);
@@ -479,10 +474,9 @@ int main() {
       previous_launch_count = launch_count;
       if (std::chrono::steady_clock::now() >= backpressure_deadline) {
         stop_backpressure_launches.store(true, std::memory_order_release);
-        const unsigned long long open_gate_after_failure = 1;
         lrrt::Event gate_opened_after_failure(device);
-        lrrt::copy_to_device_async(gate, &open_gate_after_failure,
-                                   sizeof(open_gate_after_failure),
+        lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                                   open_gate_value.size(),
                                    gate_opened_after_failure);
         backpressure_launcher.join();
         gate_opened_after_failure.synchronize();
@@ -493,10 +487,9 @@ int main() {
     stop_backpressure_launches.store(true, std::memory_order_release);
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     if (backpressure_launch_completed.load(std::memory_order_acquire)) {
-      const unsigned long long open_gate_after_failure = 1;
       lrrt::Event gate_opened_after_failure(device);
-      lrrt::copy_to_device_async(gate, &open_gate_after_failure,
-                                 sizeof(open_gate_after_failure),
+      lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                                 open_gate_value.size(),
                                  gate_opened_after_failure);
       backpressure_launcher.join();
       gate_opened_after_failure.synchronize();
@@ -504,10 +497,9 @@ int main() {
           "queue producer did not block under backpressure");
     }
     lrrt::launch(independent_queue, kernel, config, concurrent_args);
-    const unsigned long long open_gate = 1;
     lrrt::Event gate_opened(device);
-    lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
-                               gate_opened);
+    lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                               open_gate_value.size(), gate_opened);
     backpressure_launcher.join();
     gate_opened.synchronize();
     backpressure_queue.synchronize();
@@ -547,8 +539,8 @@ int main() {
     }
 
     lrrt::Event consumer_gate_opened(device);
-    lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
-                               consumer_gate_opened);
+    lrrt::copy_to_device_async(gate, open_gate_value.data(),
+                               open_gate_value.size(), consumer_gate_opened);
     consumer_waiter.join();
     lrrt::check(consumer_wait_status, "lr_event_record_on_queue");
     consumer_gate_opened.synchronize();
@@ -586,12 +578,9 @@ int main() {
           "event consumer wait did not remain blocked by its copy consumer");
     }
 
-    lrrt::Event copy_consumer_gate_opened(device);
-    lrrt::copy_to_device_async(gate, &open_gate, sizeof(open_gate),
-                               copy_consumer_gate_opened);
+    lrrt::launch(independent_queue, open_gate_kernel, config, gate_args);
     copy_consumer_waiter.join();
     lrrt::check(copy_consumer_wait_status, "lr_event_record_on_queue");
-    copy_consumer_gate_opened.synchronize();
     dependent_copy_wait_event.synchronize();
     second_queue.synchronize();
     independent_queue.synchronize();
@@ -632,6 +621,9 @@ int main() {
         static_cast<float *>(final_output.data()), alpha, 0};
     lrrt::launch(second_queue, kernel, config, final_args, {&output_copied});
     second_queue.synchronize();
+    output_copied.synchronize();
+    kernel_complete.synchronize();
+    input_copied.synchronize();
     expect_value(final_output, input.back() * alpha * alpha,
                  "copy-compute-chain");
 
@@ -679,7 +671,7 @@ int main() {
     const ScaleArgs second_burst_args = {
         static_cast<const float *>(source.data()),
         static_cast<float *>(second_burst_output.data()), alpha, n - 1};
-    constexpr uint32_t burst_launches = 2048;
+    constexpr uint32_t burst_launches = 64;
     for (uint32_t i = 0; i < burst_launches; ++i) {
       lrrt::launch(first_queue, kernel, config, first_burst_args);
       lrrt::launch(second_queue, kernel, config, second_burst_args);

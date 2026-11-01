@@ -313,7 +313,10 @@ lr_status_t lr_shutdown(void) {
   }
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
   {
-    std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+    RuntimeLock lock(g_devices_mutex);
+    wait_for_all_direct_kfd_queue_operations_locked(&lock);
+    wait_for_all_direct_kfd_event_operations_locked(&lock);
+    wait_for_all_light_rocr_memory_operations_locked(&lock);
     lr_status_t release_status = LR_SUCCESS;
     for (DeviceState &device : g_devices) {
       const lr_status_t status = synchronize_direct_kfd_device_locked(&device);
@@ -530,12 +533,12 @@ lr_status_t lr_synchronize(lr_device_t device) {
   }
   return synchronize_light_rocr_device_locked(&g_devices[device.index]);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
-  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (device.index >= g_devices.size() || !g_devices[device.index].opened ||
       !g_devices[device.index].default_queue) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return synchronize_direct_kfd_device_locked(&g_devices[device.index]);
+  return synchronize_direct_kfd_device(&g_devices[device.index], &lock);
 #else
   if (!valid_device(device)) {
     return LR_ERROR_INVALID_ARGUMENT;

@@ -158,6 +158,7 @@ struct lr_event_t {
   bool completed = false;
   size_t dependency_count = 0;
   std::vector<std::pair<lr_queue_t *, size_t>> dependency_queues;
+  size_t active_synchronizers = 0;
   bool destroying = false;
   uint64_t start_tick = 0;
   uint64_t completion_tick = 0;
@@ -271,6 +272,9 @@ struct lr_queue_t {
   std::vector<std::unique_ptr<PendingDispatch>> available_dispatches;
   std::vector<std::unique_ptr<KernargArena>> kernarg_arenas;
   std::vector<lr_event_t *> pending_events;
+  size_t active_synchronizers = 0;
+  bool capacity_waiting = false;
+  bool destroying = false;
 #endif
 };
 
@@ -408,6 +412,12 @@ void release_modules_locked(lr_status_t *result);
 void release_memory_allocations_locked(lr_status_t *result);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
 extern std::unique_ptr<light_rocr::transport::kfd::KfdSession> g_kfd_session;
+extern std::condition_variable_any g_direct_kfd_queue_state_changed;
+extern std::condition_variable_any g_direct_kfd_event_state_changed;
+void wait_for_all_direct_kfd_queue_operations_locked(RuntimeLock *devices_lock);
+void wait_for_all_direct_kfd_event_operations_locked(RuntimeLock *devices_lock);
+void wait_for_all_light_rocr_memory_operations_locked(
+    RuntimeLock *devices_lock);
 lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
                                     DeviceState *device, bool is_default,
                                     lr_queue_t **queue);
@@ -424,14 +434,19 @@ void unregister_direct_kfd_event_dependency_locked(lr_event_t *event,
                                                    lr_queue_t *queue);
 lr_status_t
 ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue,
-                                        size_t required_packets = 1);
+                                        size_t required_packets = 1,
+                                        RuntimeLock *devices_lock = nullptr);
 lr_status_t wait_for_direct_kfd_signal_locked(
     lr_queue_t *queue, const light_rocr::transport::kfd::UserSignal &signal);
 lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue);
 lr_status_t synchronize_direct_kfd_device_locked(DeviceState *device);
+lr_status_t synchronize_direct_kfd_device(DeviceState *device,
+                                          RuntimeLock *devices_lock);
 lr_status_t reap_completed_direct_kfd_events_locked(lr_queue_t *queue);
 lr_status_t wait_for_direct_kfd_event_locked(lr_event_t *event);
 lr_status_t wait_for_direct_kfd_event_consumers_locked(lr_event_t *event);
+lr_status_t wait_for_direct_kfd_event_consumers(RuntimeLock *devices_lock,
+                                                lr_event_t *event);
 lr_status_t collect_direct_kfd_event_dependencies_locked(
     lr_device_t device, lr_event_t *const *dependencies,
     size_t dependency_count, const lr_event_t *completion_event,
@@ -443,7 +458,8 @@ lr_status_t submit_direct_kfd_kernel_locked(
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
     const void *args, size_t args_size, lr_event_t *completion_event = nullptr,
-    const std::vector<lr_event_t *> *event_dependencies = nullptr);
+    const std::vector<lr_event_t *> *event_dependencies = nullptr,
+    RuntimeLock *devices_lock = nullptr);
 lr_status_t ensure_direct_kfd_copy_state_locked(DeviceState *device);
 void release_direct_kfd_copy_states_locked(lr_status_t *result);
 void release_direct_kfd_queues_locked(lr_status_t *result);

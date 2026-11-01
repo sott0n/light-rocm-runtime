@@ -1,4 +1,7 @@
 #include "aql_producer.hpp"
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+#include "light_rocr_kfd_aql_queue.hpp"
+#endif
 #include "runtime_internal.hpp"
 
 #include <algorithm>
@@ -16,6 +19,10 @@ namespace lrrt_internal {
 
 #if LRRT_ENABLE_HSA || LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
 std::unordered_set<lr_queue_t *> g_queues;
+#endif
+
+#if LRRT_ENABLE_LIGHT_ROCR_KFD
+std::condition_variable_any g_direct_kfd_queue_state_changed;
 #endif
 
 #if LRRT_ENABLE_HSA
@@ -1294,7 +1301,18 @@ lr_status_t create_direct_kfd_queue(lr_device_t device_handle,
 }
 
 bool valid_direct_kfd_queue_locked(lr_queue_t *queue) {
-  return g_queues.find(queue) != g_queues.end();
+  return g_queues.find(queue) != g_queues.end() && !queue->capacity_waiting &&
+         !queue->destroying;
+}
+
+void wait_for_all_direct_kfd_queue_operations_locked(
+    RuntimeLock *devices_lock) {
+  g_direct_kfd_queue_state_changed.wait(*devices_lock, [] {
+    return std::all_of(g_queues.begin(), g_queues.end(), [](lr_queue_t *queue) {
+      return queue->active_synchronizers == 0 && !queue->capacity_waiting &&
+             !queue->destroying;
+    });
+  });
 }
 
 namespace {
@@ -1479,8 +1497,71 @@ lr_status_t synchronize_direct_kfd_queue_locked(lr_queue_t *queue) {
   return LR_SUCCESS;
 }
 
+struct DirectKfdQueueSynchronization {
+  std::unique_ptr<light_rocr::transport::kfd::UserSignal> signal;
+  lr_status_t wait_status = LR_SUCCESS;
+};
+
+lr_status_t prepare_direct_kfd_queue_synchronization_locked(
+    DeviceState *device, lr_queue_t *queue,
+    DirectKfdQueueSynchronization *synchronization,
+    RuntimeLock *devices_lock = nullptr) {
+  const lr_status_t capacity_status =
+      ensure_direct_kfd_queue_capacity_locked(queue, 1, devices_lock);
+  if (capacity_status != LR_SUCCESS) {
+    return capacity_status;
+  }
+  auto created = g_kfd_session->create_user_signal(device->node, 1);
+  if (!created) {
+    (void)created.signal.release();
+    return LR_ERROR_RUNTIME;
+  }
+  try {
+    synchronization->signal =
+        std::make_unique<light_rocr::transport::kfd::UserSignal>(
+            std::move(created.signal));
+  } catch (const std::bad_alloc &) {
+    (void)created.signal.release();
+    return LR_ERROR_RUNTIME;
+  }
+  AqlBarrierAndParameters parameters;
+  parameters.completion_signal = synchronization->signal->gpu_handle();
+  const AqlSubmitResult submitted = submit_aql_barrier_and(
+      light_rocr_kfd_producer_ops(&queue->queue), parameters);
+  if (!submitted) {
+    (void)synchronization->signal->release();
+    return LR_ERROR_RUNTIME;
+  }
+  ++queue->active_synchronizers;
+  return LR_SUCCESS;
+}
+
+void wait_for_direct_kfd_queue_synchronization(
+    lr_queue_t *queue, DirectKfdQueueSynchronization *synchronization) {
+  synchronization->wait_status =
+      wait_for_direct_kfd_signal_locked(queue, *synchronization->signal);
+}
+
+lr_status_t finish_direct_kfd_queue_synchronization_locked(
+    lr_queue_t *queue, DirectKfdQueueSynchronization *synchronization) {
+  lr_status_t result = synchronization->wait_status;
+  if (result == LR_SUCCESS) {
+    result = reap_direct_kfd_dispatches_locked(queue);
+  }
+  if (result == LR_SUCCESS) {
+    result = reap_completed_direct_kfd_events_locked(queue);
+  }
+  if (!synchronization->signal->release() && result == LR_SUCCESS) {
+    result = LR_ERROR_RUNTIME;
+  }
+  --queue->active_synchronizers;
+  g_direct_kfd_queue_state_changed.notify_all();
+  return result;
+}
+
 lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue,
-                                                    size_t required_packets) {
+                                                    size_t required_packets,
+                                                    RuntimeLock *devices_lock) {
   if (!queue->queue || required_packets == 0 ||
       required_packets > queue->queue.packet_count()) {
     return LR_ERROR_INVALID_ARGUMENT;
@@ -1532,6 +1613,11 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue,
         queue->pending_events.empty()) {
       return LR_ERROR_RUNTIME;
     }
+    if (devices_lock != nullptr) {
+      ++queue->active_synchronizers;
+      queue->capacity_waiting = true;
+      devices_lock->unlock();
+    }
     const lr_status_t wait_status =
         queue->pending_dispatch_head != queue->pending_dispatches.size()
             ? wait_for_direct_kfd_signal_locked(
@@ -1539,6 +1625,15 @@ lr_status_t ensure_direct_kfd_queue_capacity_locked(lr_queue_t *queue,
                              ->active_completion_signal())
             : wait_for_direct_kfd_signal_locked(
                   queue, queue->pending_events.front()->signal);
+    if (devices_lock != nullptr) {
+      devices_lock->lock();
+      queue->capacity_waiting = false;
+      --queue->active_synchronizers;
+      g_direct_kfd_queue_state_changed.notify_all();
+      if (queue->destroying) {
+        return LR_ERROR_INVALID_ARGUMENT;
+      }
+    }
     if (wait_status != LR_SUCCESS) {
       return wait_status;
     }
@@ -1553,6 +1648,56 @@ lr_status_t synchronize_direct_kfd_device_locked(DeviceState *device) {
     }
   }
   return LR_SUCCESS;
+}
+
+lr_status_t synchronize_direct_kfd_device(DeviceState *device,
+                                          RuntimeLock *devices_lock) {
+  struct QueueSynchronization {
+    lr_queue_t *queue;
+    DirectKfdQueueSynchronization synchronization;
+  };
+
+  g_direct_kfd_queue_state_changed.wait(*devices_lock, [device] {
+    return std::none_of(device->queues.begin(), device->queues.end(),
+                        [](lr_queue_t *queue) {
+                          return queue->capacity_waiting || queue->destroying;
+                        });
+  });
+
+  std::vector<QueueSynchronization> synchronizations;
+  try {
+    synchronizations.reserve(device->queues.size());
+  } catch (const std::bad_alloc &) {
+    return LR_ERROR_RUNTIME;
+  }
+
+  lr_status_t result = LR_SUCCESS;
+  for (lr_queue_t *queue : device->queues) {
+    synchronizations.push_back(QueueSynchronization{queue, {}});
+    const lr_status_t status = prepare_direct_kfd_queue_synchronization_locked(
+        device, queue, &synchronizations.back().synchronization, devices_lock);
+    if (status != LR_SUCCESS) {
+      synchronizations.pop_back();
+      result = status;
+      break;
+    }
+  }
+
+  devices_lock->unlock();
+  for (QueueSynchronization &entry : synchronizations) {
+    wait_for_direct_kfd_queue_synchronization(entry.queue,
+                                              &entry.synchronization);
+  }
+  devices_lock->lock();
+
+  for (QueueSynchronization &entry : synchronizations) {
+    const lr_status_t status = finish_direct_kfd_queue_synchronization_locked(
+        entry.queue, &entry.synchronization);
+    if (result == LR_SUCCESS && status != LR_SUCCESS) {
+      result = status;
+    }
+  }
+  return result;
 }
 
 lr_status_t ensure_direct_kfd_queue_scratch_locked(DeviceState *device,
@@ -1796,10 +1941,10 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
   delete queue;
   return LR_SUCCESS;
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
-  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   auto queue_entry = g_queues.find(queue);
   if (queue_entry == g_queues.end() || queue->is_default ||
-      queue->device.index >= g_devices.size()) {
+      queue->device.index >= g_devices.size() || queue->destroying) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
 
@@ -1809,27 +1954,53 @@ lr_status_t lr_queue_destroy(lr_queue_t *queue) {
   if (device_queue == device.queues.end()) {
     return LR_ERROR_RUNTIME;
   }
+  queue->destroying = true;
+  g_direct_kfd_queue_state_changed.wait(
+      lock, [queue] { return queue->active_synchronizers == 0; });
+  DirectKfdQueueSynchronization synchronization;
   const lr_status_t synchronization_status =
-      synchronize_direct_kfd_queue_locked(queue);
+      prepare_direct_kfd_queue_synchronization_locked(&device, queue,
+                                                      &synchronization, &lock);
   if (synchronization_status != LR_SUCCESS) {
+    queue->destroying = false;
+    g_direct_kfd_queue_state_changed.notify_all();
     return synchronization_status;
   }
+  lock.unlock();
+  wait_for_direct_kfd_queue_synchronization(queue, &synchronization);
+  lock.lock();
+  const lr_status_t finish_status =
+      finish_direct_kfd_queue_synchronization_locked(queue, &synchronization);
+  if (finish_status != LR_SUCCESS) {
+    queue->destroying = false;
+    g_direct_kfd_queue_state_changed.notify_all();
+    return finish_status;
+  }
+  g_direct_kfd_queue_state_changed.wait(
+      lock, [queue] { return queue->active_synchronizers == 0; });
   const lr_status_t pool_status =
       release_direct_kfd_dispatch_pool_locked(queue);
   if (pool_status != LR_SUCCESS) {
+    queue->destroying = false;
+    g_direct_kfd_queue_state_changed.notify_all();
     return pool_status;
   }
   const lr_status_t arena_status =
       release_direct_kfd_kernarg_arenas_locked(queue);
   if (arena_status != LR_SUCCESS) {
+    queue->destroying = false;
+    g_direct_kfd_queue_state_changed.notify_all();
     return arena_status;
   }
   if (!queue->queue.release()) {
+    queue->destroying = false;
+    g_direct_kfd_queue_state_changed.notify_all();
     return LR_ERROR_RUNTIME;
   }
   device.queues.erase(device_queue);
   g_queues.erase(queue_entry);
   delete queue;
+  g_direct_kfd_queue_state_changed.notify_all();
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
@@ -1874,12 +2045,22 @@ lr_status_t lr_queue_synchronize(lr_queue_t *queue) {
   }
   return synchronize_light_rocr_queue_locked(queue);
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
-  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   if (!valid_direct_kfd_queue_locked(queue) ||
       queue->device.index >= g_devices.size()) {
     return LR_ERROR_INVALID_ARGUMENT;
   }
-  return synchronize_direct_kfd_queue_locked(queue);
+  DirectKfdQueueSynchronization synchronization;
+  lr_status_t status = prepare_direct_kfd_queue_synchronization_locked(
+      &g_devices[queue->device.index], queue, &synchronization, &lock);
+  if (status != LR_SUCCESS) {
+    return status;
+  }
+  lock.unlock();
+  wait_for_direct_kfd_queue_synchronization(queue, &synchronization);
+  lock.lock();
+  return finish_direct_kfd_queue_synchronization_locked(queue,
+                                                        &synchronization);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif

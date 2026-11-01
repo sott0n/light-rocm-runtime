@@ -135,7 +135,8 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
     const void *args, size_t args_size, lr_event_t *completion_event,
-    const std::vector<lr_event_t *> *event_dependencies) {
+    const std::vector<lr_event_t *> *event_dependencies,
+    RuntimeLock *devices_lock) {
   LaunchProfile *profile = current_launch_profile();
   if (!device || !queue || !config || !args || !g_kfd_session ||
       !executable_image ||
@@ -171,8 +172,8 @@ lr_status_t submit_direct_kfd_kernel_impl_locked(
   {
     ScopedDirectKfdProfile phase(
         profile ? &profile->direct_kfd.queue_capacity_ns : nullptr);
-    const lr_status_t capacity_status =
-        ensure_direct_kfd_queue_capacity_locked(queue, barrier_count + 1);
+    const lr_status_t capacity_status = ensure_direct_kfd_queue_capacity_locked(
+        queue, barrier_count + 1, devices_lock);
     if (capacity_status != LR_SUCCESS) {
       return capacity_status;
     }
@@ -432,10 +433,11 @@ lr_status_t submit_direct_kfd_kernel_locked(
     const light_rocr::transport::kfd::ExecutableImage &executable_image,
     size_t image_kernel_index, const lr_launch_config_t *config,
     const void *args, size_t args_size, lr_event_t *completion_event,
-    const std::vector<lr_event_t *> *event_dependencies) {
+    const std::vector<lr_event_t *> *event_dependencies,
+    RuntimeLock *devices_lock) {
   return submit_direct_kfd_kernel_impl_locked(
       device, queue, executable_image, image_kernel_index, config, args,
-      args_size, completion_event, event_dependencies);
+      args_size, completion_event, event_dependencies, devices_lock);
 }
 
 } // namespace lrrt_internal
@@ -1294,7 +1296,7 @@ launch_impl(lr_kernel_t *kernel, const lr_launch_config_t *config,
   return submit_direct_kfd_kernel_locked(
       &state, execution_queue, *kernel->module->executable_image,
       kernel->image_kernel_index, config, args, args_size, nullptr,
-      &event_dependencies);
+      &event_dependencies, &lock);
 #else
   return LR_ERROR_NOT_SUPPORTED;
 #endif
