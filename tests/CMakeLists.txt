@@ -31,11 +31,19 @@ if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
     tests/async_copy_launch_kernel.cpp
     DIRECT_KFD_MULTIPLE_QUEUES_HSACO
   )
+  lrrt_add_hsaco_kernel(
+    direct_kfd_event_timing_kernel
+    tests/scale_kernel.cpp
+    DIRECT_KFD_EVENT_TIMING_HSACO
+  )
   if(NOT DIRECT_KFD_VECTOR_ADD_HSACO)
     message(FATAL_ERROR "direct KFD dispatch test requires the ROCm compiler")
   endif()
   if(NOT DIRECT_KFD_MULTIPLE_QUEUES_HSACO)
     message(FATAL_ERROR "direct KFD multiple-queue test requires the ROCm compiler")
+  endif()
+  if(NOT DIRECT_KFD_EVENT_TIMING_HSACO)
+    message(FATAL_ERROR "direct KFD event-timing test requires the ROCm compiler")
   endif()
   add_executable(
     lrrt_direct_kfd_dispatch_device_tests
@@ -86,6 +94,7 @@ if(
       lrrt_direct_kfd_async_copy_device_tests direct_kfd_async_copy.cpp
       lrrt_direct_kfd_pipeline_device_tests direct_kfd_pipeline.cpp
       lrrt_multiple_queues_tests multiple_queues.cpp
+      lrrt_event_timing_tests event_timing.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )
@@ -132,6 +141,12 @@ if(
       direct_kfd_multiple_queues_kernel_hsaco
       LRRT_ASYNC_COPY_LAUNCH_HSACO
       "${DIRECT_KFD_MULTIPLE_QUEUES_HSACO}"
+    )
+    lrrt_bind_hsaco(
+      lrrt_event_timing_tests
+      direct_kfd_event_timing_kernel_hsaco
+      LRRT_SCALE_HSACO
+      "${DIRECT_KFD_EVENT_TIMING_HSACO}"
     )
   endif()
   return()
