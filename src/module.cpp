@@ -490,7 +490,7 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
   destroy_module_handles(module);
   return LR_SUCCESS;
 #elif LRRT_ENABLE_LIGHT_ROCR_KFD
-  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  RuntimeLock lock(g_devices_mutex);
   auto module_entry = g_modules.find(module);
   if (module_entry == g_modules.end() || module->destroying ||
       module->device.index >= g_devices.size() ||
@@ -500,7 +500,7 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
 
   module->destroying = true;
   const lr_status_t synchronization_status =
-      synchronize_direct_kfd_device_locked(&g_devices[module->device.index]);
+      synchronize_direct_kfd_device(&g_devices[module->device.index], &lock);
   if (synchronization_status != LR_SUCCESS) {
     module->destroying = false;
     return synchronization_status;
@@ -510,7 +510,7 @@ lr_status_t lr_module_destroy(lr_module_t *module) {
     module->destroying = false;
     return status;
   }
-  g_modules.erase(module_entry);
+  g_modules.erase(module);
   return LR_SUCCESS;
 #else
   return LR_ERROR_NOT_SUPPORTED;
