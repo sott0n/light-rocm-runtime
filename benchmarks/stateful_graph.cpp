@@ -174,8 +174,31 @@ std::vector<sg::Task> make_qwen_decoder_tasks() {
   tasks.push_back(
       make_task(qd::Opcode::rope_kv_cache_f32, qkv_mask, 0, qd::kRotaryHeads));
   const uint64_t rope_mask = static_cast<uint64_t>(1) << rope_task_index;
-  tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, rope_mask, 0,
-                            qd::kHiddenSize, float_bits(1.0e-5f)));
+
+  uint64_t attention_mask = 0;
+  for (uint32_t partition = 0; partition < qd::kAttentionTaskPartitions;
+       ++partition) {
+    const uint32_t task_index = static_cast<uint32_t>(tasks.size());
+    tasks.push_back(make_task(
+        qd::Opcode::grouped_query_attention_f32, rope_mask,
+        qd::kAttentionHeads * partition / qd::kAttentionTaskPartitions,
+        qd::kAttentionHeads * (partition + 1u) / qd::kAttentionTaskPartitions));
+    attention_mask |= static_cast<uint64_t>(1) << task_index;
+  }
+
+  uint64_t attention_output_mask = 0;
+  for (uint32_t partition = 0; partition < qd::kAttentionOutputPartitions;
+       ++partition) {
+    const uint32_t task_index = static_cast<uint32_t>(tasks.size());
+    tasks.push_back(make_task(
+        qd::Opcode::attention_output_residual_f32, attention_mask,
+        qd::kHiddenSize * partition / qd::kAttentionOutputPartitions,
+        qd::kHiddenSize * (partition + 1u) / qd::kAttentionOutputPartitions));
+    attention_output_mask |= static_cast<uint64_t>(1) << task_index;
+  }
+
+  tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, attention_output_mask,
+                            0, qd::kHiddenSize, float_bits(1.0e-6f)));
 
   uint64_t activated_mask = 0;
   for (uint32_t partition = 0; partition < qd::kFfnProjectionPartitions;
@@ -227,7 +250,17 @@ struct HostStage {
 };
 
 constexpr HostStage kHostStages[] = {
-    {0, 1}, {1, 8}, {9, 1}, {10, 1}, {11, 20}, {31, 10}, {41, 1},
+    {0, 1},
+    {1, qd::kAttentionProjectionPartitions},
+    {1 + qd::kAttentionProjectionPartitions, 1},
+    {2 + qd::kAttentionProjectionPartitions, qd::kAttentionTaskPartitions},
+    {2 + qd::kAttentionProjectionPartitions + qd::kAttentionTaskPartitions,
+     qd::kAttentionOutputPartitions},
+    {qd::kAttentionTaskCount, 1},
+    {qd::kAttentionTaskCount + 1, qd::kFfnProjectionPartitions},
+    {qd::kAttentionTaskCount + 1 + qd::kFfnProjectionPartitions,
+     qd::kDownProjectionPartitions},
+    {qd::kTaskCount - 1, 1},
 };
 
 void fill_weight(std::vector<float> &weight, uint32_t salt) {
@@ -302,6 +335,7 @@ int main(int argc, char **argv) {
     std::vector<float> q_bias(qd::kQuerySize);
     std::vector<float> k_bias(qd::kKvSize);
     std::vector<float> v_bias(qd::kKvSize);
+    std::vector<float> out_weight(q_elements);
     std::vector<float> gate_weight(gate_elements);
     std::vector<float> up_weight(gate_elements);
     std::vector<float> down_weight(down_elements);
@@ -327,6 +361,7 @@ int main(int argc, char **argv) {
       q_bias = std::move(weights.q_bias);
       k_bias = std::move(weights.k_bias);
       v_bias = std::move(weights.v_bias);
+      out_weight = std::move(weights.out_weight);
       gate_weight = std::move(weights.gate_weight);
       up_weight = std::move(weights.up_weight);
       down_weight = std::move(weights.down_weight);
@@ -337,9 +372,10 @@ int main(int argc, char **argv) {
       fill_weight(q_bias, 4);
       fill_weight(k_bias, 5);
       fill_weight(v_bias, 6);
-      fill_weight(gate_weight, 7);
-      fill_weight(up_weight, 8);
-      fill_weight(down_weight, 9);
+      fill_weight(out_weight, 7);
+      fill_weight(gate_weight, 8);
+      fill_weight(up_weight, 9);
+      fill_weight(down_weight, 10);
     }
 
     const size_t rope_elements =
@@ -373,6 +409,8 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer q_bias_buffer(device, q_bias.size() * sizeof(float));
     lrrt::DeviceBuffer k_bias_buffer(device, k_bias.size() * sizeof(float));
     lrrt::DeviceBuffer v_bias_buffer(device, v_bias.size() * sizeof(float));
+    lrrt::DeviceBuffer out_weight_buffer(device,
+                                         out_weight.size() * sizeof(float));
     lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
     lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer gate_weight_buffer(device,
@@ -421,6 +459,7 @@ int main(int argc, char **argv) {
     lrrt::copy_to_device(q_bias_buffer, q_bias);
     lrrt::copy_to_device(k_bias_buffer, k_bias);
     lrrt::copy_to_device(v_bias_buffer, v_bias);
+    lrrt::copy_to_device(out_weight_buffer, out_weight);
     lrrt::copy_to_device(rope_cos_buffer, rope_cos);
     lrrt::copy_to_device(rope_sin_buffer, rope_sin);
     lrrt::copy_to_device(gate_weight_buffer, gate_weight);
@@ -436,6 +475,7 @@ int main(int argc, char **argv) {
         static_cast<const float *>(q_bias_buffer.data()),
         static_cast<const float *>(k_bias_buffer.data()),
         static_cast<const float *>(v_bias_buffer.data()),
+        static_cast<const float *>(out_weight_buffer.data()),
         static_cast<const float *>(mlp_norm_weight_buffer.data()),
         static_cast<const float *>(gate_weight_buffer.data()),
         static_cast<const float *>(up_weight_buffer.data()),
@@ -467,6 +507,7 @@ int main(int argc, char **argv) {
         static_cast<const float *>(q_bias_buffer.data()),
         static_cast<const float *>(k_bias_buffer.data()),
         static_cast<const float *>(v_bias_buffer.data()),
+        static_cast<const float *>(out_weight_buffer.data()),
         static_cast<const float *>(mlp_norm_weight_buffer.data()),
         static_cast<const float *>(gate_weight_buffer.data()),
         static_cast<const float *>(up_weight_buffer.data()),

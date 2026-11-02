@@ -50,6 +50,10 @@ __device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
     return task.begin < task.end && task.end <= qd::kPackedQkvSize;
   case qd::Opcode::rope_kv_cache_f32:
     return task.begin == 0 && task.end == qd::kRotaryHeads;
+  case qd::Opcode::grouped_query_attention_f32:
+    return task.begin < task.end && task.end <= qd::kAttentionHeads;
+  case qd::Opcode::attention_output_residual_f32:
+    return task.begin < task.end && task.end <= context->hidden_size;
   case qd::Opcode::residual_advance:
     return task.begin < task.end && task.end <= context->hidden_size &&
            task.argument0 != 0;
@@ -224,6 +228,72 @@ __device__ void rope_kv_cache(const sg::State *state,
   }
 }
 
+__device__ void grouped_query_attention(const sg::Task &task,
+                                        const sg::State *state,
+                                        qd::Context *context) {
+  constexpr uint32_t kQueriesPerKvHead = qd::kAttentionHeads / qd::kKvHeads;
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  for (uint32_t query_head = task.begin + wave; query_head < task.end;
+       query_head += kWavesPerWorker) {
+    const uint32_t kv_head = query_head / kQueriesPerKvHead;
+    const uint32_t query_offset = query_head * qd::kHeadSize;
+    const uint32_t kv_offset = kv_head * qd::kHeadSize;
+    const uint32_t first = query_offset + lane;
+    const uint32_t second = first + 32u;
+    float weighted_first = 0.0f;
+    float weighted_second = 0.0f;
+    float maximum = -INFINITY;
+    float denominator = 0.0f;
+
+    for (uint32_t position = 0; position <= state->step; ++position) {
+      const size_t cache_offset =
+          static_cast<size_t>(position) * context->kv_size + kv_offset;
+      float dot_product =
+          context->query[first] * context->key_cache[cache_offset + lane] +
+          context->query[second] *
+              context->key_cache[cache_offset + lane + 32u];
+      dot_product = wave_sum(dot_product);
+      const float score = __shfl(dot_product, 0, 32) *
+                          rsqrtf(static_cast<float>(qd::kHeadSize));
+      const float next_maximum = fmaxf(maximum, score);
+      const float previous_scale = expf(maximum - next_maximum);
+      const float score_scale = expf(score - next_maximum);
+      denominator = denominator * previous_scale + score_scale;
+      weighted_first = weighted_first * previous_scale +
+                       score_scale * context->value_cache[cache_offset + lane];
+      weighted_second =
+          weighted_second * previous_scale +
+          score_scale * context->value_cache[cache_offset + lane + 32u];
+      maximum = next_maximum;
+    }
+
+    context->query[first] = weighted_first / denominator;
+    context->query[second] = weighted_second / denominator;
+  }
+}
+
+__device__ void attention_output_residual_range_wave(const qd::Context *context,
+                                                     const sg::Task &task) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  for (uint32_t row = task.begin + wave; row < task.end;
+       row += kWavesPerWorker) {
+    float sum = 0.0f;
+    const float *row_weight =
+        context->out_weight + static_cast<size_t>(row) * context->query_size;
+    for (uint32_t column = lane; column < context->query_size; column += 32u) {
+      sum = fmaf(context->query[column], row_weight[column], sum);
+    }
+    sum = wave_sum(sum);
+    if (lane == 0) {
+      context->hidden[row] += sum;
+    }
+  }
+}
+
 __device__ void execute_task(const sg::Task &task, sg::State *state,
                              qd::Context *context, float *reduction) {
   const qd::Opcode opcode = static_cast<qd::Opcode>(task.opcode);
@@ -268,6 +338,16 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
 
   if (opcode == qd::Opcode::rope_kv_cache_f32) {
     rope_kv_cache(state, context);
+    return;
+  }
+
+  if (opcode == qd::Opcode::grouped_query_attention_f32) {
+    grouped_query_attention(task, state, context);
+    return;
+  }
+
+  if (opcode == qd::Opcode::attention_output_residual_f32) {
+    attention_output_residual_range_wave(context, task);
     return;
   }
 
