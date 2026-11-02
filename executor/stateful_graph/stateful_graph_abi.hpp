@@ -7,8 +7,10 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 1;
+constexpr uint32_t kAbiVersion = 2;
 constexpr uint32_t kWorkerThreads = 64;
+constexpr uint32_t kMaximumTasks = 32;
+constexpr uint32_t kNoTask = UINT32_MAX;
 
 enum class Status : uint32_t {
   ready = 0,
@@ -22,21 +24,22 @@ enum class Opcode : uint32_t {
   increment_u32 = 1,
 };
 
-// Mutable device-resident control state. The first prototype uses one reusable
-// epoch as a grid barrier: every resident worker arrives once per graph step,
-// and the final worker advances the epoch and evaluates the loop predicate.
+// Mutable device-resident control state. Workers atomically claim tasks whose
+// dependency masks are satisfied. The worker completing the final task resets
+// the masks, advances the epoch, and evaluates the loop predicate.
 struct alignas(64) State {
   uint32_t abi_version;
   uint32_t status;
   uint32_t epoch;
-  uint32_t arrivals;
+  uint32_t claimed_mask;
+  uint32_t completed_mask;
   uint32_t step;
   uint32_t max_steps;
   uint32_t stop_value;
   uint32_t task_count;
-  uint64_t executed_tasks;
   uint32_t error_code;
-  uint32_t reserved[5];
+  uint64_t executed_tasks;
+  uint32_t reserved[4];
 };
 
 // A deliberately small task descriptor. The ABI is intended to grow toward
@@ -45,7 +48,7 @@ struct alignas(64) State {
 // independently of a model kernel.
 struct alignas(32) Task {
   uint32_t opcode;
-  uint32_t flags;
+  uint32_t dependency_mask;
   uint32_t begin;
   uint32_t end;
   uint32_t argument0;
