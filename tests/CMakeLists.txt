@@ -98,6 +98,11 @@ if(
       lrrt_queue_event_lifetime_tests queue_event_lifetime.cpp
       lrrt_module_buffer_lifetime_tests module_buffer_lifetime.cpp
       lrrt_device_buffer_ownership_tests device_buffer_ownership.cpp
+      lrrt_async_copy_tests async_copy.cpp
+      lrrt_async_copy_launch_tests async_copy_launch.cpp
+      lrrt_launch_async_copy_tests launch_async_copy.cpp
+      lrrt_explicit_dependencies_tests explicit_dependencies.cpp
+      lrrt_double_buffer_pipeline_tests double_buffer_pipeline.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )
@@ -163,6 +168,22 @@ if(
       LRRT_ASYNC_COPY_LAUNCH_HSACO
       "${DIRECT_KFD_MULTIPLE_QUEUES_HSACO}"
     )
+    foreach(
+      target
+      IN
+      ITEMS
+        lrrt_async_copy_launch_tests
+        lrrt_launch_async_copy_tests
+        lrrt_explicit_dependencies_tests
+        lrrt_double_buffer_pipeline_tests
+    )
+      lrrt_bind_hsaco(
+        ${target}
+        direct_kfd_multiple_queues_kernel_hsaco
+        LRRT_ASYNC_COPY_LAUNCH_HSACO
+        "${DIRECT_KFD_MULTIPLE_QUEUES_HSACO}"
+      )
+    endforeach()
   endif()
   return()
 endif()
