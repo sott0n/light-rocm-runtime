@@ -9,6 +9,73 @@ function(lrrt_bind_hsaco target dependency define path)
   target_compile_definitions(${target} PRIVATE ${define}="${path}")
 endfunction()
 
+function(lrrt_add_backend_independent_tests)
+  lrrt_add_test_executable(lrrt_bundle_tests bundle.cpp lrrt::bundle)
+  lrrt_add_test_executable(
+    lrrt_triton_executor_tests
+    executor/triton/triton_executor.cpp
+    lrrt::bundle
+  )
+  target_include_directories(
+    lrrt_triton_executor_tests
+    PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
+  )
+  lrrt_add_test_executable(
+    lrrt_qwen_weight_bundle_tests
+    qwen_weight_bundle.cpp
+    lrrt::bundle
+  )
+  target_include_directories(
+    lrrt_qwen_weight_bundle_tests
+    PRIVATE "${PROJECT_SOURCE_DIR}"
+  )
+
+  if(PYTHON_EXECUTABLE)
+    add_test(
+      NAME lrrt_qwen_layer_converter_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/qwen_layer_converter_test.py"
+    )
+    add_test(
+      NAME lrrt_qwen_benchmark_runner_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/qwen_benchmark_runner_test.py"
+    )
+    add_test(
+      NAME lrrt_double_buffer_pipeline_sweep_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/double_buffer_pipeline_sweep_test.py"
+    )
+    add_test(
+      NAME lrrt_qwen_e2e_runner_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/qwen_e2e_runner_test.py"
+    )
+    add_test(
+      NAME lrrt_write_iree_qwen_decode_bundle_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/tools/iree/test_write_qwen_decode_bundle.py"
+    )
+    add_test(
+      NAME lrrt_iree_metadata_summary_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/tools/iree/test_metadata_summary.py"
+    )
+    add_test(
+      NAME lrrt_select_iree_qwen_linear_variant_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/tools/iree/test_select_qwen_linear_variant.py"
+    )
+  endif()
+endfunction()
+
 lrrt_add_test_executable(
   lrrt_aql_producer_tests
   aql_producer.cpp
@@ -232,6 +299,7 @@ if(
       )
     endforeach()
   endif()
+  lrrt_add_backend_independent_tests()
   return()
 endif()
 
@@ -352,6 +420,7 @@ if(
     ${LRRT_LIGHT_ROCR_GPU_TESTS}
     PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
   )
+  lrrt_add_backend_independent_tests()
   return()
 endif()
 
@@ -384,79 +453,7 @@ while(LRRT_CORE_TESTS)
   lrrt_add_test_executable(${target} ${source} lrrt::lrrt)
 endwhile()
 
-set(LRRT_BUNDLE_TESTS lrrt_bundle_tests bundle.cpp)
-
-while(LRRT_BUNDLE_TESTS)
-  list(POP_FRONT LRRT_BUNDLE_TESTS target source)
-  lrrt_add_test_executable(${target} ${source} lrrt::bundle)
-endwhile()
-
-set(
-  LRRT_TRITON_EXECUTOR_TESTS
-  lrrt_triton_executor_tests executor/triton/triton_executor.cpp
-)
-
-set(LRRT_QWEN_EXECUTOR_TESTS lrrt_qwen_weight_bundle_tests qwen_weight_bundle.cpp)
-
-if(PYTHON_EXECUTABLE)
-  add_test(
-    NAME lrrt_qwen_layer_converter_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/qwen_layer_converter_test.py"
-  )
-  add_test(
-    NAME lrrt_qwen_benchmark_runner_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/qwen_benchmark_runner_test.py"
-  )
-  add_test(
-    NAME lrrt_double_buffer_pipeline_sweep_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/double_buffer_pipeline_sweep_test.py"
-  )
-  add_test(
-    NAME lrrt_qwen_e2e_runner_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/qwen_e2e_runner_test.py"
-  )
-  add_test(
-    NAME lrrt_write_iree_qwen_decode_bundle_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/tools/iree/test_write_qwen_decode_bundle.py"
-  )
-  add_test(
-    NAME lrrt_iree_metadata_summary_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/tools/iree/test_metadata_summary.py"
-  )
-  add_test(
-    NAME lrrt_select_iree_qwen_linear_variant_tests
-    COMMAND
-      "${PYTHON_EXECUTABLE}"
-      "${PROJECT_SOURCE_DIR}/tests/tools/iree/test_select_qwen_linear_variant.py"
-  )
-endif()
-
-while(LRRT_TRITON_EXECUTOR_TESTS)
-  list(POP_FRONT LRRT_TRITON_EXECUTOR_TESTS target source)
-  lrrt_add_test_executable(${target} ${source} lrrt::bundle)
-  target_include_directories(
-    ${target}
-    PRIVATE "${PROJECT_SOURCE_DIR}/executor/triton"
-  )
-endwhile()
-
-while(LRRT_QWEN_EXECUTOR_TESTS)
-  list(POP_FRONT LRRT_QWEN_EXECUTOR_TESTS target source)
-  lrrt_add_test_executable(${target} ${source} lrrt::bundle)
-  target_include_directories(${target} PRIVATE "${PROJECT_SOURCE_DIR}")
-endwhile()
+lrrt_add_backend_independent_tests()
 
 lrrt_add_hsaco_kernel(scale_kernel tests/scale_kernel.cpp SCALE_HSACO)
 lrrt_add_hsaco_kernel(copy_kernel tests/copy_kernel_kernel.cpp COPY_HSACO)
