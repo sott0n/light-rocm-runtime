@@ -36,6 +36,12 @@ if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
     tests/scale_kernel.cpp
     DIRECT_KFD_EVENT_TIMING_HSACO
   )
+  lrrt_add_hsaco_kernel(
+    direct_kfd_copy_kernel
+    tests/copy_kernel_kernel.cpp
+    DIRECT_KFD_COPY_HSACO
+    -DLRRT_TEST_HIDDEN_KERNARGS=1
+  )
   if(NOT DIRECT_KFD_VECTOR_ADD_HSACO)
     message(FATAL_ERROR "direct KFD dispatch test requires the ROCm compiler")
   endif()
@@ -44,6 +50,9 @@ if(TARGET light_rocr::transport_kfd AND LIGHT_ROCR_BUILD_GPU_TESTS)
   endif()
   if(NOT DIRECT_KFD_EVENT_TIMING_HSACO)
     message(FATAL_ERROR "direct KFD event-timing test requires the ROCm compiler")
+  endif()
+  if(NOT DIRECT_KFD_COPY_HSACO)
+    message(FATAL_ERROR "direct KFD copy test requires the ROCm compiler")
   endif()
   add_executable(
     lrrt_direct_kfd_dispatch_device_tests
@@ -106,6 +115,11 @@ if(
       lrrt_runtime_api_tests runtime_api.cpp
       lrrt_memory_stats_tests memory_stats.cpp
       lrrt_pinned_host_memory_tests pinned_host_memory.cpp
+      lrrt_handle_registry_tests handle_registry.cpp
+      lrrt_scale_tests scale.cpp
+      lrrt_copy_kernel_tests copy_kernel.cpp
+      lrrt_kernel_event_dependencies_tests kernel_event_dependencies.cpp
+      lrrt_cpp_wrapper_tests cpp_wrapper.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )
@@ -185,6 +199,36 @@ if(
         direct_kfd_multiple_queues_kernel_hsaco
         LRRT_ASYNC_COPY_LAUNCH_HSACO
         "${DIRECT_KFD_MULTIPLE_QUEUES_HSACO}"
+      )
+    endforeach()
+    lrrt_bind_hsaco(
+      lrrt_handle_registry_tests
+      direct_kfd_scratch_kernel_hsaco
+      LRRT_VECTOR_ADD_HSACO
+      "${DIRECT_KFD_VECTOR_ADD_HSACO}"
+    )
+    foreach(target IN ITEMS lrrt_scale_tests lrrt_cpp_wrapper_tests)
+      lrrt_bind_hsaco(
+        ${target}
+        direct_kfd_event_timing_kernel_hsaco
+        LRRT_SCALE_HSACO
+        "${DIRECT_KFD_EVENT_TIMING_HSACO}"
+      )
+    endforeach()
+    foreach(
+      target
+      IN
+      ITEMS lrrt_copy_kernel_tests lrrt_kernel_event_dependencies_tests
+    )
+      lrrt_bind_hsaco(
+        ${target}
+        direct_kfd_copy_kernel_hsaco
+        LRRT_COPY_HSACO
+        "${DIRECT_KFD_COPY_HSACO}"
+      )
+      target_compile_definitions(
+        ${target}
+        PRIVATE LRRT_TEST_HIDDEN_KERNARGS=1
       )
     endforeach()
   endif()
