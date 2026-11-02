@@ -58,35 +58,44 @@ ABI. LRRT launches raw kernel argument buffers and deliberately does not
 synthesize HIP-specific hidden `blockDim` or `gridDim` arguments, so resident
 kernels must not depend on those fields.
 
-## Qwen FFN megakernel
+## Qwen decoder megakernel
 
 The scheduler ABI carries an opaque execution-context pointer, keeping model
 buffer semantics out of the generic graph state and task descriptors. The Qwen
-FFN specialization defines its context separately and uses the Qwen2.5-0.5B
-dimensions `hidden=896` and `intermediate=4864`.
+decoder specialization defines its context separately and uses the
+Qwen2.5-0.5B dimensions `hidden=896`, `heads=14`, `kv_heads=2`, `head_dim=64`,
+and `intermediate=4864`.
 
 The resident megakernel executes this FP32 dependency graph:
 
 ```text
-RMSNorm
+attention RMSNorm
+  -> 8 x fused Q/K/V projection over one packed output space
+  -> MLP RMSNorm
   -> 20 x fused gate projection + up projection + SiLU multiply
   -> 10 x down projection
   -> fused residual add + advance device state
 ```
 
-The FFN currently consumes 32 of the scheduler's 64 task slots, leaving room
-for attention stages in the same resident graph. Matvec tasks use wave-coalesced
-weight reads, and each persistent workgroup contains 256 threads to expose
-eight wave32 wavefronts. Gate, up, and activation are fused so the gate and up
-intermediates never enter device memory. The final task updates the predicate,
-which terminates the repeated FFN loop without host intervention.
+The attention input and FFN stages consume 41 of the scheduler's 64 task slots,
+leaving 23 slots for RoPE, KV-cache, attention, and output-projection work. The
+Q/K/V task maps a packed 1,152-row output range onto the three checkpoint
+matrices and fuses bias addition. This avoids three separately scheduled
+projection kinds while retaining parallel range tasks. Matvec tasks use
+wave-coalesced weight reads, and each persistent workgroup contains 256 threads
+to expose eight wave32 wavefronts. Gate, up, and activation are fused so the
+gate and up intermediates never enter device memory. The Q/K/V results are
+materialized for the next attention milestone; until attention output and its
+residual are connected, the FFN still consumes the pre-attention hidden state.
+The final task updates the predicate, which terminates the repeated graph loop
+without host intervention.
 
-The host-driven baseline invokes the same arithmetic in four stage launches per
+The host-driven baseline invokes the same arithmetic in six stage launches per
 step. By default the benchmark uses deterministic model-shaped weights,
 isolating execution and scheduling performance while preserving the real FFN
 dimensions and memory footprint. Pass `--weights` with an existing Qwen layer
-bundle manifest to run both paths with its checkpoint `mlp_norm`, gate, up, and
-down tensors:
+bundle manifest to run both paths with its checkpoint attention norm, Q/K/V
+weights and biases, `mlp_norm`, gate, up, and down tensors:
 
 ```sh
 ./build/lrrt_stateful_graph_benchmark 64 20 20 \
@@ -94,17 +103,17 @@ down tensors:
 ```
 
 The loader accepts the existing `lrrt.mini_decoder_weights` FP32 format and
-rejects bundles whose hidden or intermediate dimensions do not match the
-specialized megakernel.
+rejects bundles whose hidden, head, KV-head, head-dimension, or intermediate
+dimensions do not match the specialized megakernel.
 
-The resident kernel uses 1,032 bytes of group memory, 46 SGPRs, and 38 VGPRs on
+The resident kernel uses 1,032 bytes of group memory, 64 SGPRs, and 39 VGPRs on
 gfx1101, with no private segment, dynamic stack, or register spills.
 
 ## Qwen path
 
 The next milestones are:
 
-1. add attention, RoPE, and KV-cache stage specializations;
+1. add RoPE, KV-cache, attention, and output-projection stage specializations;
 2. keep token position, KV length, sampled token, and EOS in device state;
 3. add resource-aware worker admission from HSACO metadata; and
 4. compare a whole decode loop against HIP Graph and host-driven LRRT.
