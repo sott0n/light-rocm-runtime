@@ -165,6 +165,10 @@ struct lr_event_t {
   light_rocr::transport::kfd::ClockCounters record_clock;
   light_rocr::transport::kfd::ClockCounters completion_clock;
   lr_queue_t *recorded_queue = nullptr;
+  std::optional<light_rocr::transport::kfd::HostMemoryAllocation>
+      pageable_copy_staging;
+  void *pageable_copy_destination = nullptr;
+  size_t pageable_copy_size = 0;
 #endif
 };
 

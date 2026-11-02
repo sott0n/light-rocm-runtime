@@ -103,6 +103,9 @@ if(
       lrrt_launch_async_copy_tests launch_async_copy.cpp
       lrrt_explicit_dependencies_tests explicit_dependencies.cpp
       lrrt_double_buffer_pipeline_tests double_buffer_pipeline.cpp
+      lrrt_runtime_api_tests runtime_api.cpp
+      lrrt_memory_stats_tests memory_stats.cpp
+      lrrt_pinned_host_memory_tests pinned_host_memory.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )

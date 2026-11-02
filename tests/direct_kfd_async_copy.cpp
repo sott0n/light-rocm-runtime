@@ -72,11 +72,25 @@ int main() {
       throw std::runtime_error("asynchronous copy duration was not recorded");
     }
 
-    std::vector<float> pageable(element_count, 1.0F);
+    std::vector<float> pageable(element_count);
+    std::vector<float> pageable_output(element_count, 0.0F);
+    for (size_t index = 0; index < element_count; ++index) {
+      pageable[index] = static_cast<float>(index) + 1.25F;
+    }
     expect_status(lr_memcpy_async(device.get(), first.data(), pageable.data(),
                                   byte_count, LR_MEMCPY_HOST_TO_DEVICE,
                                   upload.get()),
-                  LR_ERROR_NOT_SUPPORTED, "pageable async H2D copy");
+                  LR_SUCCESS, "pageable async H2D copy");
+    expect_status(lr_memcpy_async(device.get(), pageable_output.data(),
+                                  first.data(), byte_count,
+                                  LR_MEMCPY_DEVICE_TO_HOST, download.get()),
+                  LR_SUCCESS, "pageable async D2H copy");
+    download.synchronize();
+    for (size_t index = 0; index < element_count; ++index) {
+      if (std::fabs(pageable_output[index] - pageable[index]) > 0.001F) {
+        throw std::runtime_error("pageable asynchronous copy mismatch");
+      }
+    }
     lr_event_t *dependency = nullptr;
     expect_status(lr_event_create(device.get(), &dependency), LR_SUCCESS,
                   "create explicit dependency event");
@@ -111,9 +125,9 @@ int main() {
     }
 
     const lrrt::MemoryStats stats = device.memory_stats();
-    if (stats.h2d_copy_bytes != 2 * byte_count ||
+    if (stats.h2d_copy_bytes != 3 * byte_count ||
         stats.d2d_copy_bytes != 2 * byte_count ||
-        stats.d2h_copy_bytes != 2 * byte_count || stats.memcpy_count != 6) {
+        stats.d2h_copy_bytes != 3 * byte_count || stats.memcpy_count != 8) {
       throw std::runtime_error("unexpected asynchronous copy statistics");
     }
 

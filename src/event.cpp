@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <mutex>
 #include <new>
 #include <unordered_set>
@@ -509,7 +510,21 @@ lr_status_t finish_direct_kfd_event_wait_locked(lr_event_t *event) {
   remove_direct_kfd_pending_event(&device.pending_events, event);
   event->recorded_queue = nullptr;
   event->pending = false;
-  event->completed = true;
+  lr_status_t result = LR_SUCCESS;
+  if (event->pageable_copy_staging.has_value()) {
+    if (event->pageable_copy_destination != nullptr) {
+      std::memcpy(event->pageable_copy_destination,
+                  event->pageable_copy_staging->host_address(),
+                  event->pageable_copy_size);
+    }
+    if (!event->pageable_copy_staging->release()) {
+      result = LR_ERROR_RUNTIME;
+    }
+    event->pageable_copy_staging.reset();
+    event->pageable_copy_destination = nullptr;
+    event->pageable_copy_size = 0;
+  }
+  event->completed = result == LR_SUCCESS;
   if (clock && start_tick != 0 && end_tick >= start_tick) {
     event->start_tick = start_tick;
     event->completion_tick = end_tick;
@@ -519,7 +534,7 @@ lr_status_t finish_direct_kfd_event_wait_locked(lr_event_t *event) {
     event->completion_tick = 0;
     event->completion_clock = {};
   }
-  return LR_SUCCESS;
+  return result;
 }
 
 lr_status_t direct_kfd_event_submit_status(AqlSubmitError error) {

@@ -1762,6 +1762,7 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
 
   uint64_t copy_destination = 0;
   uint64_t copy_source = 0;
+  bool pageable_copy = false;
   if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
     copy_destination = translate_direct_kfd_device_pointer(dst, device, size);
     const void *mapped_source = nullptr;
@@ -1772,10 +1773,11 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
       return LR_ERROR_INVALID_ARGUMENT;
     }
     if (lookup == LightRocrHostPointerLookup::Unregistered) {
-      return LR_ERROR_NOT_SUPPORTED;
+      pageable_copy = true;
+    } else {
+      copy_source =
+          static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mapped_source));
     }
-    copy_source =
-        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mapped_source));
   } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
     copy_source = translate_direct_kfd_device_pointer(src, device, size);
     const void *mapped_destination = nullptr;
@@ -1785,10 +1787,11 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
       return LR_ERROR_INVALID_ARGUMENT;
     }
     if (lookup == LightRocrHostPointerLookup::Unregistered) {
-      return LR_ERROR_NOT_SUPPORTED;
+      pageable_copy = true;
+    } else {
+      copy_destination = static_cast<uint64_t>(
+          reinterpret_cast<uintptr_t>(mapped_destination));
     }
-    copy_destination =
-        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(mapped_destination));
   } else {
     copy_destination = translate_direct_kfd_device_pointer(dst, device, size);
     copy_source = translate_direct_kfd_device_pointer(src, device, size);
@@ -1804,15 +1807,49 @@ static lr_status_t memcpy_async_impl(lr_device_t device, void *dst,
   }
 
   DeviceState &state = g_devices[device.index];
+  if (pageable_copy) {
+    auto staging = g_kfd_session->allocate_host(state.node, size);
+    if (!staging) {
+      return LR_ERROR_RUNTIME;
+    }
+    const uint64_t staging_gpu_address = staging.allocation.gpu_address();
+    if (staging_gpu_address == 0 ||
+        staging.allocation.host_address() == nullptr) {
+      (void)staging.allocation.release();
+      return LR_ERROR_RUNTIME;
+    }
+    if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+      std::memcpy(staging.allocation.host_address(), src, size);
+      copy_source = staging_gpu_address;
+    } else {
+      copy_destination = staging_gpu_address;
+    }
+    event->pageable_copy_staging.emplace(std::move(staging.allocation));
+    event->pageable_copy_destination =
+        kind == LR_MEMCPY_DEVICE_TO_HOST ? dst : nullptr;
+    event->pageable_copy_size = size;
+  }
   const lr_status_t copy_state_status =
       ensure_direct_kfd_copy_state_locked(&state);
   if (copy_state_status != LR_SUCCESS) {
+    if (event->pageable_copy_staging.has_value()) {
+      (void)event->pageable_copy_staging->release();
+      event->pageable_copy_staging.reset();
+      event->pageable_copy_destination = nullptr;
+      event->pageable_copy_size = 0;
+    }
     return copy_state_status;
   }
   const lr_status_t submit_status = submit_direct_kfd_copy_locked(
       &state, copy_destination, copy_source, size, event,
       use_implicit_dependencies ? nullptr : &event_dependencies);
   if (submit_status != LR_SUCCESS) {
+    if (event->pageable_copy_staging.has_value()) {
+      (void)event->pageable_copy_staging->release();
+      event->pageable_copy_staging.reset();
+      event->pageable_copy_destination = nullptr;
+      event->pageable_copy_size = 0;
+    }
     return submit_status;
   }
   record_memcpy(&state, kind, size);
