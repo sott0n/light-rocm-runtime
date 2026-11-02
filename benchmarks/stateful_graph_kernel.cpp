@@ -48,6 +48,8 @@ __device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
     return task.begin < task.end && task.end <= context->hidden_size;
   case qd::Opcode::qkv_projection_f32:
     return task.begin < task.end && task.end <= qd::kPackedQkvSize;
+  case qd::Opcode::rope_kv_cache_f32:
+    return task.begin == 0 && task.end == qd::kRotaryHeads;
   case qd::Opcode::residual_advance:
     return task.begin < task.end && task.end <= context->hidden_size &&
            task.argument0 != 0;
@@ -66,7 +68,8 @@ __device__ bool validate_program(const sg::State *state, const sg::Task *tasks,
       context->hidden_size != qd::kHiddenSize ||
       context->query_size != qd::kQuerySize ||
       context->kv_size != qd::kKvSize ||
-      context->intermediate_size != qd::kIntermediateSize) {
+      context->intermediate_size != qd::kIntermediateSize ||
+      context->cache_capacity < state->max_steps) {
     return false;
   }
 
@@ -185,6 +188,42 @@ __device__ void gate_up_silu_range_wave(const qd::Context *context,
   }
 }
 
+__device__ void rope_kv_cache(const sg::State *state,
+                              const qd::Context *context) {
+  const uint32_t position = state->step;
+  const size_t rope_offset = static_cast<size_t>(position) * qd::kRotarySize;
+  for (uint32_t pair = threadIdx.x; pair < qd::kRotaryHeads * qd::kRotarySize;
+       pair += sg::kWorkerThreads) {
+    const uint32_t head = pair / qd::kRotarySize;
+    const uint32_t frequency = pair % qd::kRotarySize;
+    const bool is_query = head < qd::kAttentionHeads;
+    const uint32_t local_head = is_query ? head : head - qd::kAttentionHeads;
+    float *vector = is_query ? context->query : context->key;
+    const uint32_t first = local_head * qd::kHeadSize + frequency;
+    const uint32_t second = first + qd::kRotarySize;
+    const float first_value = vector[first];
+    const float second_value = vector[second];
+    const float cosine = context->rope_cos[rope_offset + frequency];
+    const float sine = context->rope_sin[rope_offset + frequency];
+    const float rotated_first = first_value * cosine - second_value * sine;
+    const float rotated_second = second_value * cosine + first_value * sine;
+    vector[first] = rotated_first;
+    vector[second] = rotated_second;
+    if (!is_query) {
+      const size_t cache_offset =
+          static_cast<size_t>(position) * context->kv_size;
+      context->key_cache[cache_offset + first] = rotated_first;
+      context->key_cache[cache_offset + second] = rotated_second;
+    }
+  }
+
+  const size_t cache_offset = static_cast<size_t>(position) * context->kv_size;
+  for (uint32_t index = threadIdx.x; index < context->kv_size;
+       index += sg::kWorkerThreads) {
+    context->value_cache[cache_offset + index] = context->value[index];
+  }
+}
+
 __device__ void execute_task(const sg::Task &task, sg::State *state,
                              qd::Context *context, float *reduction) {
   const qd::Opcode opcode = static_cast<qd::Opcode>(task.opcode);
@@ -224,6 +263,11 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
 
   if (opcode == qd::Opcode::qkv_projection_f32) {
     qkv_projection_range_wave(context, task);
+    return;
+  }
+
+  if (opcode == qd::Opcode::rope_kv_cache_f32) {
+    rope_kv_cache(state, context);
     return;
   }
 
@@ -395,4 +439,9 @@ stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
   auto *context = static_cast<qd::Context *>(opaque_context);
   __shared__ float reduction[sg::kWorkerThreads];
   execute_task(tasks[blockIdx.x], state, context, reduction);
+  __syncthreads();
+  if (threadIdx.x == 0 && static_cast<qd::Opcode>(tasks[blockIdx.x].opcode) ==
+                              qd::Opcode::residual_advance) {
+    ++state->step;
+  }
 }

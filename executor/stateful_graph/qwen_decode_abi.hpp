@@ -12,6 +12,8 @@ constexpr uint32_t kHiddenSize = 896;
 constexpr uint32_t kAttentionHeads = 14;
 constexpr uint32_t kKvHeads = 2;
 constexpr uint32_t kHeadSize = 64;
+constexpr uint32_t kRotarySize = kHeadSize / 2u;
+constexpr uint32_t kRotaryHeads = kAttentionHeads + kKvHeads;
 constexpr uint32_t kQuerySize = kAttentionHeads * kHeadSize;
 constexpr uint32_t kKvSize = kKvHeads * kHeadSize;
 constexpr uint32_t kPackedQkvSize = kQuerySize + 2u * kKvSize;
@@ -19,17 +21,18 @@ constexpr uint32_t kIntermediateSize = 4864;
 constexpr uint32_t kAttentionProjectionPartitions = 8;
 constexpr uint32_t kFfnProjectionPartitions = 20;
 constexpr uint32_t kDownProjectionPartitions = 10;
-constexpr uint32_t kAttentionTaskCount = 9;
+constexpr uint32_t kAttentionTaskCount = 10;
 constexpr uint32_t kFfnTaskCount = 32;
 constexpr uint32_t kTaskCount = kAttentionTaskCount + kFfnTaskCount;
 
 enum class Opcode : uint32_t {
   attention_rmsnorm_f32 = 1,
   qkv_projection_f32 = 2,
-  mlp_rmsnorm_f32 = 3,
-  gate_up_silu_f32 = 4,
-  down_matvec_f32 = 5,
-  residual_advance = 6,
+  rope_kv_cache_f32 = 3,
+  mlp_rmsnorm_f32 = 4,
+  gate_up_silu_f32 = 5,
+  down_matvec_f32 = 6,
+  residual_advance = 7,
 };
 
 // Device pointers and dimensions consumed by the Qwen decoder-stage
@@ -52,6 +55,10 @@ struct alignas(16) Context {
   float *query;
   float *key;
   float *value;
+  const float *rope_cos;
+  const float *rope_sin;
+  float *key_cache;
+  float *value_cache;
   float *mlp_normalized;
   float *activated;
   float *projected;
@@ -59,11 +66,12 @@ struct alignas(16) Context {
   uint32_t query_size;
   uint32_t kv_size;
   uint32_t intermediate_size;
-  uint32_t reserved[2];
+  uint32_t cache_capacity;
+  uint32_t reserved;
 };
 
 static_assert(std::is_standard_layout_v<Context>);
-static_assert(sizeof(Context) == 176);
+static_assert(sizeof(Context) == 208);
 static_assert(kTaskCount <= kMaximumTasks);
 
 } // namespace lrrt::stateful_graph::qwen_decode

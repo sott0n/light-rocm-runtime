@@ -170,7 +170,11 @@ std::vector<sg::Task> make_qwen_decoder_tasks() {
     qkv_mask |= static_cast<uint64_t>(1) << task_index;
   }
 
-  tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, qkv_mask, 0,
+  const uint32_t rope_task_index = static_cast<uint32_t>(tasks.size());
+  tasks.push_back(
+      make_task(qd::Opcode::rope_kv_cache_f32, qkv_mask, 0, qd::kRotaryHeads));
+  const uint64_t rope_mask = static_cast<uint64_t>(1) << rope_task_index;
+  tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, rope_mask, 0,
                             qd::kHiddenSize, float_bits(1.0e-5f)));
 
   uint64_t activated_mask = 0;
@@ -223,7 +227,7 @@ struct HostStage {
 };
 
 constexpr HostStage kHostStages[] = {
-    {0, 1}, {1, 8}, {9, 1}, {10, 20}, {30, 10}, {40, 1},
+    {0, 1}, {1, 8}, {9, 1}, {10, 1}, {11, 20}, {31, 10}, {41, 1},
 };
 
 void fill_weight(std::vector<float> &weight, uint32_t salt) {
@@ -273,6 +277,7 @@ int main(int argc, char **argv) {
     lrrt::Kernel host_step = module.kernel("stateful_graph_host_step_kernel");
 
     const std::vector<sg::Task> tasks = make_qwen_decoder_tasks();
+    const uint32_t cache_capacity = steps * 2u;
     std::vector<float> initial_values(qd::kHiddenSize);
     std::vector<float> attention_norm_weight(qd::kHiddenSize);
     std::vector<float> mlp_norm_weight(qd::kHiddenSize);
@@ -300,6 +305,7 @@ int main(int argc, char **argv) {
     std::vector<float> gate_weight(gate_elements);
     std::vector<float> up_weight(gate_elements);
     std::vector<float> down_weight(down_elements);
+    float rope_theta = 1000000.0f;
     if (options.weights_path) {
       lrrt::executor::qwen::DecoderLayerWeights weights =
           lrrt::executor::qwen::load_decoder_layer_weights(
@@ -312,6 +318,7 @@ int main(int argc, char **argv) {
         throw std::runtime_error(
             "checkpoint decoder shape does not match the megakernel");
       }
+      rope_theta = weights.rope_theta;
       attention_norm_weight = std::move(weights.attention_norm_weight);
       mlp_norm_weight = std::move(weights.mlp_norm_weight);
       q_weight = std::move(weights.q_weight);
@@ -335,6 +342,25 @@ int main(int argc, char **argv) {
       fill_weight(down_weight, 9);
     }
 
+    const size_t rope_elements =
+        static_cast<size_t>(cache_capacity) * qd::kRotarySize;
+    const size_t cache_elements =
+        static_cast<size_t>(cache_capacity) * qd::kKvSize;
+    std::vector<float> rope_cos(rope_elements);
+    std::vector<float> rope_sin(rope_elements);
+    for (uint32_t position = 0; position < cache_capacity; ++position) {
+      for (uint32_t frequency = 0; frequency < qd::kRotarySize; ++frequency) {
+        const float exponent =
+            -2.0f * static_cast<float>(frequency) / qd::kHeadSize;
+        const float angle =
+            static_cast<float>(position) * std::pow(rope_theta, exponent);
+        const size_t index =
+            static_cast<size_t>(position) * qd::kRotarySize + frequency;
+        rope_cos[index] = std::cos(angle);
+        rope_sin[index] = std::sin(angle);
+      }
+    }
+
     lrrt::DeviceBuffer task_buffer(device,
                                    sg::kMaximumTasks * sizeof(sg::Task));
     lrrt::DeviceBuffer attention_norm_weight_buffer(
@@ -347,6 +373,8 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer q_bias_buffer(device, q_bias.size() * sizeof(float));
     lrrt::DeviceBuffer k_bias_buffer(device, k_bias.size() * sizeof(float));
     lrrt::DeviceBuffer v_bias_buffer(device, v_bias.size() * sizeof(float));
+    lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
+    lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer gate_weight_buffer(device,
                                           gate_weight.size() * sizeof(float));
     lrrt::DeviceBuffer up_weight_buffer(device,
@@ -359,6 +387,10 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer resident_query(device, qd::kQuerySize * sizeof(float));
     lrrt::DeviceBuffer resident_key(device, qd::kKvSize * sizeof(float));
     lrrt::DeviceBuffer resident_value(device, qd::kKvSize * sizeof(float));
+    lrrt::DeviceBuffer resident_key_cache(device,
+                                          cache_elements * sizeof(float));
+    lrrt::DeviceBuffer resident_value_cache(device,
+                                            cache_elements * sizeof(float));
     lrrt::DeviceBuffer resident_mlp_normalized(device,
                                                qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer resident_activated(device, qd::kIntermediateSize *
@@ -372,6 +404,8 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer host_query(device, qd::kQuerySize * sizeof(float));
     lrrt::DeviceBuffer host_key(device, qd::kKvSize * sizeof(float));
     lrrt::DeviceBuffer host_value(device, qd::kKvSize * sizeof(float));
+    lrrt::DeviceBuffer host_key_cache(device, cache_elements * sizeof(float));
+    lrrt::DeviceBuffer host_value_cache(device, cache_elements * sizeof(float));
     lrrt::DeviceBuffer host_mlp_normalized(device,
                                            qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer host_activated(device,
@@ -387,6 +421,8 @@ int main(int argc, char **argv) {
     lrrt::copy_to_device(q_bias_buffer, q_bias);
     lrrt::copy_to_device(k_bias_buffer, k_bias);
     lrrt::copy_to_device(v_bias_buffer, v_bias);
+    lrrt::copy_to_device(rope_cos_buffer, rope_cos);
+    lrrt::copy_to_device(rope_sin_buffer, rope_sin);
     lrrt::copy_to_device(gate_weight_buffer, gate_weight);
     lrrt::copy_to_device(up_weight_buffer, up_weight);
     lrrt::copy_to_device(down_weight_buffer, down_weight);
@@ -408,6 +444,10 @@ int main(int argc, char **argv) {
         static_cast<float *>(resident_query.data()),
         static_cast<float *>(resident_key.data()),
         static_cast<float *>(resident_value.data()),
+        static_cast<const float *>(rope_cos_buffer.data()),
+        static_cast<const float *>(rope_sin_buffer.data()),
+        static_cast<float *>(resident_key_cache.data()),
+        static_cast<float *>(resident_value_cache.data()),
         static_cast<float *>(resident_mlp_normalized.data()),
         static_cast<float *>(resident_activated.data()),
         static_cast<float *>(resident_projected.data()),
@@ -415,7 +455,8 @@ int main(int argc, char **argv) {
         qd::kQuerySize,
         qd::kKvSize,
         qd::kIntermediateSize,
-        {0, 0},
+        cache_capacity,
+        0,
     };
     const qd::Context host_context = {
         static_cast<float *>(host_values.data()),
@@ -434,6 +475,10 @@ int main(int argc, char **argv) {
         static_cast<float *>(host_query.data()),
         static_cast<float *>(host_key.data()),
         static_cast<float *>(host_value.data()),
+        static_cast<const float *>(rope_cos_buffer.data()),
+        static_cast<const float *>(rope_sin_buffer.data()),
+        static_cast<float *>(host_key_cache.data()),
+        static_cast<float *>(host_value_cache.data()),
         static_cast<float *>(host_mlp_normalized.data()),
         static_cast<float *>(host_activated.data()),
         static_cast<float *>(host_projected.data()),
@@ -441,7 +486,8 @@ int main(int argc, char **argv) {
         qd::kQuerySize,
         qd::kKvSize,
         qd::kIntermediateSize,
-        {0, 0},
+        cache_capacity,
+        0,
     };
     lrrt::DeviceBuffer resident_context_buffer(device, sizeof(qd::Context));
     lrrt::DeviceBuffer host_context_buffer(device, sizeof(qd::Context));
@@ -584,7 +630,8 @@ int main(int argc, char **argv) {
     }
     sg::State final_host_state{};
     lrrt::copy_to_host(&final_host_state, host_state, sizeof(final_host_state));
-    if (final_host_state.predicate_value != steps) {
+    if (final_host_state.predicate_value != steps ||
+        final_host_state.step != steps) {
       throw std::runtime_error("host-driven graph did not advance its state");
     }
     std::vector<float> resident_result(qd::kHiddenSize);
@@ -607,6 +654,21 @@ int main(int argc, char **argv) {
     verify_values("query", resident_q_result, host_q_result);
     verify_values("key", resident_k_result, host_k_result);
     verify_values("value", resident_v_result, host_v_result);
+    std::vector<float> resident_key_cache_result(static_cast<size_t>(steps) *
+                                                 qd::kKvSize);
+    std::vector<float> host_key_cache_result(resident_key_cache_result.size());
+    std::vector<float> resident_value_cache_result(
+        resident_key_cache_result.size());
+    std::vector<float> host_value_cache_result(
+        resident_key_cache_result.size());
+    lrrt::copy_to_host(resident_key_cache_result, resident_key_cache);
+    lrrt::copy_to_host(host_key_cache_result, host_key_cache);
+    lrrt::copy_to_host(resident_value_cache_result, resident_value_cache);
+    lrrt::copy_to_host(host_value_cache_result, host_value_cache);
+    verify_values("key cache", resident_key_cache_result,
+                  host_key_cache_result);
+    verify_values("value cache", resident_value_cache_result,
+                  host_value_cache_result);
 
     std::printf("\nLRRT Stateful Graph Benchmark\n");
     std::printf("=============================\n");
