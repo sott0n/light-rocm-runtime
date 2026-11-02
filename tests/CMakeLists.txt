@@ -298,6 +298,13 @@ if(
         PRIVATE LRRT_TEST_HIDDEN_KERNARGS=1
       )
     endforeach()
+    add_test(
+      NAME lrrt_direct_kfd_no_rocr_dependencies
+      COMMAND
+        "${CMAKE_COMMAND}"
+        -DEXECUTABLE=$<TARGET_FILE:lrrt_runtime_api_tests>
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/check_no_rocr_dependencies.cmake"
+    )
   endif()
   lrrt_add_backend_independent_tests()
   return()
