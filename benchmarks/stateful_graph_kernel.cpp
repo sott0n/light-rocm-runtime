@@ -64,17 +64,31 @@ __device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
 }
 
 __device__ bool validate_program(const sg::State *state, const sg::Task *tasks,
-                                 const qd::Context *context) {
+                                 const qd::Context *contexts) {
+  const qd::Context *context = contexts;
   if (state->abi_version != sg::kAbiVersion || state->task_count == 0 ||
       state->task_count > sg::kMaximumTasks || state->max_steps == 0 ||
       (state->transition_barrier >> 16u) == 0 ||
-      (state->transition_barrier & UINT16_MAX) != 0 || context == nullptr ||
-      context->hidden_size != qd::kHiddenSize ||
+      (state->transition_barrier & UINT16_MAX) != 0 || contexts == nullptr ||
+      context->layer_count == 0 || context->hidden_size != qd::kHiddenSize ||
       context->query_size != qd::kQuerySize ||
       context->kv_size != qd::kKvSize ||
       context->intermediate_size != qd::kIntermediateSize ||
-      context->cache_capacity < state->max_steps) {
+      context->cache_capacity < (state->max_steps + context->layer_count - 1u) /
+                                    context->layer_count) {
     return false;
+  }
+
+  for (uint32_t layer = 1; layer < context->layer_count; ++layer) {
+    const qd::Context &candidate = contexts[layer];
+    if (candidate.hidden_size != context->hidden_size ||
+        candidate.query_size != context->query_size ||
+        candidate.kv_size != context->kv_size ||
+        candidate.intermediate_size != context->intermediate_size ||
+        candidate.cache_capacity != context->cache_capacity ||
+        candidate.layer_count != context->layer_count) {
+      return false;
+    }
   }
 
   const uint64_t valid_mask = all_tasks_mask(state->task_count);
@@ -194,7 +208,7 @@ __device__ void gate_up_silu_range_wave(const qd::Context *context,
 
 __device__ void rope_kv_cache(const sg::State *state,
                               const qd::Context *context) {
-  const uint32_t position = state->step;
+  const uint32_t position = state->step / context->layer_count;
   const size_t rope_offset = static_cast<size_t>(position) * qd::kRotarySize;
   for (uint32_t pair = threadIdx.x; pair < qd::kRotaryHeads * qd::kRotarySize;
        pair += sg::kWorkerThreads) {
@@ -247,7 +261,8 @@ __device__ void grouped_query_attention(const sg::Task &task,
     float maximum = -INFINITY;
     float denominator = 0.0f;
 
-    for (uint32_t position = 0; position <= state->step; ++position) {
+    const uint32_t token_position = state->step / context->layer_count;
+    for (uint32_t position = 0; position <= token_position; ++position) {
       const size_t cache_offset =
           static_cast<size_t>(position) * context->kv_size + kv_offset;
       float dot_product =
@@ -367,7 +382,11 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
     context->hidden[index] += context->projected[index];
   }
   if (threadIdx.x == 0) {
-    state->predicate_value += task.argument0;
+    const bool token_boundary =
+        task.argument1 == 0 || (state->step + 1u) % context->layer_count == 0;
+    if (token_boundary) {
+      state->predicate_value += task.argument0;
+    }
   }
 }
 
@@ -376,11 +395,11 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
 extern "C" __global__ void
 stateful_graph_resident_kernel(sg::State *state, const sg::Task *tasks,
                                void *opaque_context) {
-  auto *context = static_cast<qd::Context *>(opaque_context);
+  auto *contexts = static_cast<qd::Context *>(opaque_context);
   const uint32_t worker = blockIdx.x;
 
   if (worker == 0 && threadIdx.x == 0) {
-    if (!validate_program(state, tasks, context)) {
+    if (!validate_program(state, tasks, contexts)) {
       state->error_code = 1;
       __threadfence();
       atomicExch(&state->status,
@@ -454,6 +473,7 @@ stateful_graph_resident_kernel(sg::State *state, const sg::Task *tasks,
     } else {
       const uint32_t mask_word = selected_task >> 5u;
       const uint32_t task_mask = 1u << (selected_task & 31u);
+      qd::Context *context = &contexts[state->step % contexts[0].layer_count];
       execute_task(tasks[selected_task], state, context, reduction);
       __syncthreads();
 
@@ -516,7 +536,8 @@ stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
   if (blockIdx.x >= task_count) {
     return;
   }
-  auto *context = static_cast<qd::Context *>(opaque_context);
+  auto *contexts = static_cast<qd::Context *>(opaque_context);
+  qd::Context *context = &contexts[state->step % contexts[0].layer_count];
   __shared__ float reduction[sg::kWorkerThreads];
   execute_task(tasks[blockIdx.x], state, context, reduction);
   __syncthreads();

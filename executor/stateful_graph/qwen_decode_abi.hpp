@@ -74,7 +74,10 @@ struct alignas(16) Context {
   uint32_t kv_size;
   uint32_t intermediate_size;
   uint32_t cache_capacity;
-  uint32_t reserved;
+  // The opaque resident context is an array of this many layer contexts.
+  // Scratch buffers may be shared, but weights and KV-cache slices are
+  // layer-local.
+  uint32_t layer_count;
 };
 
 static_assert(std::is_standard_layout_v<Context>);
