@@ -7,7 +7,7 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 2;
+constexpr uint32_t kAbiVersion = 3;
 constexpr uint32_t kWorkerThreads = 64;
 constexpr uint32_t kMaximumTasks = 32;
 constexpr uint32_t kNoTask = UINT32_MAX;
@@ -21,7 +21,10 @@ enum class Status : uint32_t {
 };
 
 enum class Opcode : uint32_t {
-  increment_u32 = 1,
+  rmsnorm_f32 = 1,
+  silu_f32 = 2,
+  residual_add_f32 = 3,
+  advance_state = 4,
 };
 
 // Mutable device-resident control state. Workers atomically claim tasks whose
@@ -39,13 +42,13 @@ struct alignas(64) State {
   uint32_t task_count;
   uint32_t error_code;
   uint64_t executed_tasks;
-  uint32_t reserved[4];
+  uint32_t predicate_value;
+  uint32_t reserved[3];
 };
 
-// A deliberately small task descriptor. The ABI is intended to grow toward
-// stage-level Qwen tasks; the initial opcode operates on a disjoint range so
-// that the resident scheduling and conditional-control costs are measurable
-// independently of a model kernel.
+// A deliberately small task descriptor. Opcodes interpret the range and two
+// arguments as stage-specific parameters; dependency_mask remains common to
+// every stage so scheduling is independent of model semantics.
 struct alignas(32) Task {
   uint32_t opcode;
   uint32_t dependency_mask;
@@ -59,14 +62,17 @@ struct alignas(32) Task {
 struct ResidentArgs {
   State *state;
   const Task *tasks;
-  uint32_t *values;
+  float *values;
+  float *workspace;
 };
 
 struct HostStepArgs {
+  State *state;
   const Task *tasks;
   uint32_t task_count;
   uint32_t reserved;
-  uint32_t *values;
+  float *values;
+  float *workspace;
 };
 
 static_assert(std::is_standard_layout_v<State>);
@@ -75,8 +81,8 @@ static_assert(std::is_standard_layout_v<ResidentArgs>);
 static_assert(std::is_standard_layout_v<HostStepArgs>);
 static_assert(sizeof(State) == 64);
 static_assert(sizeof(Task) == 32);
-static_assert(sizeof(ResidentArgs) == 24);
-static_assert(sizeof(HostStepArgs) == 24);
+static_assert(sizeof(ResidentArgs) == 32);
+static_assert(sizeof(HostStepArgs) == 40);
 
 } // namespace lrrt::stateful_graph
 

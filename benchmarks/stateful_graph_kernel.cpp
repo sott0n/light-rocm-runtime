@@ -20,6 +20,18 @@ __device__ __forceinline__ uint32_t all_tasks_mask(uint32_t task_count) {
   return task_count == sg::kMaximumTasks ? UINT32_MAX : (1u << task_count) - 1u;
 }
 
+__device__ bool valid_task(const sg::Task &task) {
+  switch (static_cast<sg::Opcode>(task.opcode)) {
+  case sg::Opcode::rmsnorm_f32:
+  case sg::Opcode::silu_f32:
+  case sg::Opcode::residual_add_f32:
+    return task.begin < task.end;
+  case sg::Opcode::advance_state:
+    return task.argument0 != 0;
+  }
+  return false;
+}
+
 __device__ bool validate_program(const sg::State *state,
                                  const sg::Task *tasks) {
   if (state->abi_version != sg::kAbiVersion || state->task_count == 0 ||
@@ -32,8 +44,7 @@ __device__ bool validate_program(const sg::State *state,
   for (uint32_t task_index = 0; task_index < state->task_count; ++task_index) {
     const sg::Task &task = tasks[task_index];
     const uint32_t task_mask = 1u << task_index;
-    if (task.opcode != static_cast<uint32_t>(sg::Opcode::increment_u32) ||
-        task.begin >= task.end || (task.dependency_mask & ~valid_mask) != 0 ||
+    if (!valid_task(task) || (task.dependency_mask & ~valid_mask) != 0 ||
         (task.dependency_mask & task_mask) != 0) {
       return false;
     }
@@ -55,13 +66,56 @@ __device__ bool validate_program(const sg::State *state,
   return reachable_mask == valid_mask;
 }
 
-__device__ void execute_task(const sg::Task &task, uint32_t *values) {
-  if (task.opcode != static_cast<uint32_t>(sg::Opcode::increment_u32)) {
+__device__ void execute_task(const sg::Task &task, sg::State *state,
+                             float *values, float *workspace,
+                             float *reduction) {
+  const sg::Opcode opcode = static_cast<sg::Opcode>(task.opcode);
+  if (opcode == sg::Opcode::advance_state) {
+    if (threadIdx.x == 0) {
+      state->predicate_value += task.argument0;
+    }
     return;
   }
+
+  if (opcode == sg::Opcode::rmsnorm_f32) {
+    float sum_squares = 0.0f;
+    for (uint32_t index = task.begin + threadIdx.x; index < task.end;
+         index += sg::kWorkerThreads) {
+      const float value = values[index];
+      sum_squares += value * value;
+    }
+    reduction[threadIdx.x] = sum_squares;
+    __syncthreads();
+    for (uint32_t stride = sg::kWorkerThreads / 2u; stride != 0;
+         stride >>= 1u) {
+      if (threadIdx.x < stride) {
+        reduction[threadIdx.x] += reduction[threadIdx.x + stride];
+      }
+      __syncthreads();
+    }
+    const float epsilon = __uint_as_float(task.argument0);
+    const float inverse_rms = rsqrtf(
+        reduction[0] / static_cast<float>(task.end - task.begin) + epsilon);
+    for (uint32_t index = task.begin + threadIdx.x; index < task.end;
+         index += sg::kWorkerThreads) {
+      workspace[index] = values[index] * inverse_rms;
+    }
+    return;
+  }
+
+  if (opcode == sg::Opcode::silu_f32) {
+    for (uint32_t index = task.begin + threadIdx.x; index < task.end;
+         index += sg::kWorkerThreads) {
+      const float value = workspace[index];
+      workspace[index] = value / (1.0f + expf(-value));
+    }
+    return;
+  }
+
+  const float scale = __uint_as_float(task.argument0);
   for (uint32_t index = task.begin + threadIdx.x; index < task.end;
        index += sg::kWorkerThreads) {
-    values[index] += task.argument0;
+    values[index] += workspace[index] * scale;
   }
 }
 
@@ -69,7 +123,8 @@ __device__ void execute_task(const sg::Task &task, uint32_t *values) {
 
 extern "C" __global__ void stateful_graph_resident_kernel(sg::State *state,
                                                           const sg::Task *tasks,
-                                                          uint32_t *values) {
+                                                          float *values,
+                                                          float *workspace) {
   const uint32_t worker = blockIdx.x;
 
   if (worker == 0 && threadIdx.x == 0) {
@@ -91,6 +146,7 @@ extern "C" __global__ void stateful_graph_resident_kernel(sg::State *state,
   }
 
   __shared__ uint32_t selected_task;
+  __shared__ float reduction[sg::kWorkerThreads];
   const uint32_t valid_mask = all_tasks_mask(state->task_count);
   while (true) {
     if (threadIdx.x == 0) {
@@ -120,7 +176,7 @@ extern "C" __global__ void stateful_graph_resident_kernel(sg::State *state,
       }
     } else {
       const uint32_t task_mask = 1u << selected_task;
-      execute_task(tasks[selected_task], values);
+      execute_task(tasks[selected_task], state, values, workspace, reduction);
       __syncthreads();
 
       if (threadIdx.x == 0) {
@@ -131,7 +187,7 @@ extern "C" __global__ void stateful_graph_resident_kernel(sg::State *state,
           state->step = next_step;
           state->executed_tasks += state->task_count;
 
-          const bool predicate = values[0] >= state->stop_value;
+          const bool predicate = state->predicate_value >= state->stop_value;
           if (predicate) {
             state->status = static_cast<uint32_t>(sg::Status::complete);
           } else if (next_step >= state->max_steps) {
@@ -157,11 +213,13 @@ extern "C" __global__ void stateful_graph_resident_kernel(sg::State *state,
 }
 
 extern "C" __global__ void
-stateful_graph_host_step_kernel(const sg::Task *tasks, uint32_t task_count,
-                                uint32_t reserved, uint32_t *values) {
+stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
+                                uint32_t task_count, uint32_t reserved,
+                                float *values, float *workspace) {
   (void)reserved;
   if (blockIdx.x >= task_count) {
     return;
   }
-  execute_task(tasks[blockIdx.x], values);
+  __shared__ float reduction[sg::kWorkerThreads];
+  execute_task(tasks[blockIdx.x], state, values, workspace, reduction);
 }

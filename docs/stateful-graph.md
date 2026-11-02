@@ -51,24 +51,28 @@ LRRT launches raw kernel argument buffers and deliberately does not synthesize
 HIP-specific hidden `blockDim` or `gridDim` arguments, so resident kernels must
 not depend on those fields.
 
-## Qwen path
+## Heterogeneous stage prototype
 
-The synthetic range task is only a way to isolate scheduling cost. The planned
-task vocabulary is stage-sized rather than elementwise:
+The resident kernel contains a small stage megakernel selected by task opcode.
+Its benchmark graph executes the following dependency chain on FP32 buffers:
 
 ```text
-attention stage
-output projection + residual + norm stage
-MLP stage
-sampling stage
-advance-token stage
+RMSNorm -> SiLU -> residual add -> advance device state
 ```
 
-Stage implementations may be individually fused megakernels, but their
-selection, dependencies, loop state, and early exit remain runtime concerns.
+The first three opcodes model compute stages and share a reusable workspace.
+The final opcode mutates the device-resident predicate value, which terminates
+the graph without host intervention. The same stages are also invoked one at a
+time by the host-driven baseline, so both paths use identical GPU arithmetic.
+
+The resident megakernel uses 260 bytes of group memory, 32 SGPRs, and 21 VGPRs
+on gfx1101, with no private segment, dynamic stack, or register spills.
+
+## Qwen path
+
 The next milestones are:
 
-1. replace the synthetic opcode with two heterogeneous stage opcodes;
-2. lower one Qwen layer into the task ABI;
-3. keep token position, KV length, sampled token, and EOS in device state; and
+1. replace the prototype stages with one real Qwen decode layer;
+2. keep token position, KV length, sampled token, and EOS in device state;
+3. add resource-aware worker admission from HSACO metadata; and
 4. compare a whole decode loop against HIP Graph and host-driven LRRT.
