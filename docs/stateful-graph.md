@@ -26,7 +26,7 @@ consumed on the GPU without a host round trip.
 ## Prototype v1
 
 The prototype defines a 64-byte device `State` and a 32-byte `Task`
-descriptor. Up to 32 tasks express their dependencies as bitmasks. A fixed
+descriptor. Up to 64 tasks express their dependencies as 64-bit masks. A fixed
 set of persistent workgroups repeatedly:
 
 1. scan for a task whose dependencies are complete;
@@ -34,6 +34,13 @@ set of persistent workgroups repeatedly:
 3. publish completion so dependent tasks become ready;
 4. let the final completing worker evaluate a device-side predicate; and
 5. reset the task masks for the next epoch or return.
+
+The masks are stored as two 32-bit atomic words so the original 32-task fast
+path remains intact. Epoch transitions use a device-side barrier across every
+admitted persistent worker before either word is reset. This prevents a worker
+from combining a claimed mask from one epoch with a completed mask from the
+next. The benchmark exercises a 64-task dependency chain through bit 63 before
+running the timed FFN graph.
 
 The accompanying benchmark compares one resident launch with an equivalent
 sequence of dependency-ordered host launches using kernels from the same
@@ -67,11 +74,12 @@ RMSNorm
   -> fused residual add + advance device state
 ```
 
-The 32 tasks consume the complete dependency bitmask. Matvec tasks use
-wave-coalesced weight reads, and each persistent workgroup contains 256 threads
-to expose eight wave32 wavefronts. Gate, up, and activation are fused so the
-gate and up intermediates never enter device memory. The final task updates the
-predicate, which terminates the repeated FFN loop without host intervention.
+The FFN currently consumes 32 of the scheduler's 64 task slots, leaving room
+for attention stages in the same resident graph. Matvec tasks use wave-coalesced
+weight reads, and each persistent workgroup contains 256 threads to expose
+eight wave32 wavefronts. Gate, up, and activation are fused so the gate and up
+intermediates never enter device memory. The final task updates the predicate,
+which terminates the repeated FFN loop without host intervention.
 
 The host-driven baseline invokes the same arithmetic in four stage launches per
 step. By default the benchmark uses deterministic model-shaped weights,
@@ -89,7 +97,7 @@ The loader accepts the existing `lrrt.mini_decoder_weights` FP32 format and
 rejects bundles whose hidden or intermediate dimensions do not match the
 specialized megakernel.
 
-The resident kernel uses 1,028 bytes of group memory, 34 SGPRs, and 39 VGPRs on
+The resident kernel uses 1,032 bytes of group memory, 46 SGPRs, and 38 VGPRs on
 gfx1101, with no private segment, dynamic stack, or register spills.
 
 ## Qwen path

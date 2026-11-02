@@ -7,9 +7,9 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 4;
+constexpr uint32_t kAbiVersion = 5;
 constexpr uint32_t kWorkerThreads = 256;
-constexpr uint32_t kMaximumTasks = 32;
+constexpr uint32_t kMaximumTasks = 64;
 constexpr uint32_t kNoTask = UINT32_MAX;
 
 enum class Status : uint32_t {
@@ -36,7 +36,11 @@ struct alignas(64) State {
   uint32_t error_code;
   uint64_t executed_tasks;
   uint32_t predicate_value;
-  uint32_t reserved[3];
+  uint32_t claimed_mask_high;
+  uint32_t completed_mask_high;
+  // High 16 bits hold the admitted worker count. Low 16 bits are the
+  // device-side epoch-transition barrier count.
+  uint32_t transition_barrier;
 };
 
 // A deliberately small task descriptor. Opcodes interpret the range and two
@@ -49,7 +53,8 @@ struct alignas(32) Task {
   uint32_t end;
   uint32_t argument0;
   uint32_t argument1;
-  uint32_t reserved[2];
+  uint32_t dependency_mask_high;
+  uint32_t reserved;
 };
 
 struct ResidentArgs {

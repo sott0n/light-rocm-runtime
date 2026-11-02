@@ -138,16 +138,17 @@ uint32_t float_bits(float value) {
   return bits;
 }
 
-sg::Task make_task(qf::Opcode opcode, uint32_t dependency_mask, uint32_t begin,
+sg::Task make_task(qf::Opcode opcode, uint64_t dependency_mask, uint32_t begin,
                    uint32_t end, uint32_t argument0 = 0) {
   return {
       static_cast<uint32_t>(opcode),
-      dependency_mask,
+      static_cast<uint32_t>(dependency_mask),
       begin,
       end,
       argument0,
       0,
-      {0, 0},
+      static_cast<uint32_t>(dependency_mask >> 32u),
+      0,
   };
 }
 
@@ -157,7 +158,7 @@ std::vector<sg::Task> make_qwen_ffn_tasks() {
   tasks.push_back(make_task(qf::Opcode::rmsnorm_f32, 0, 0, qf::kHiddenSize,
                             float_bits(1.0e-5f)));
 
-  uint32_t activated_mask = 0;
+  uint64_t activated_mask = 0;
   for (uint32_t partition = 0; partition < qf::kProjectionPartitions;
        ++partition) {
     const uint32_t task_index = static_cast<uint32_t>(tasks.size());
@@ -165,10 +166,10 @@ std::vector<sg::Task> make_qwen_ffn_tasks() {
         qf::Opcode::gate_up_silu_f32, 1u,
         qf::kIntermediateSize * partition / qf::kProjectionPartitions,
         qf::kIntermediateSize * (partition + 1u) / qf::kProjectionPartitions));
-    activated_mask |= 1u << task_index;
+    activated_mask |= static_cast<uint64_t>(1) << task_index;
   }
 
-  uint32_t down_mask = 0;
+  uint64_t down_mask = 0;
   for (uint32_t partition = 0; partition < qf::kDownProjectionPartitions;
        ++partition) {
     const uint32_t task_index = static_cast<uint32_t>(tasks.size());
@@ -176,13 +177,25 @@ std::vector<sg::Task> make_qwen_ffn_tasks() {
         qf::Opcode::down_matvec_f32, activated_mask,
         qf::kHiddenSize * partition / qf::kDownProjectionPartitions,
         qf::kHiddenSize * (partition + 1u) / qf::kDownProjectionPartitions));
-    down_mask |= 1u << task_index;
+    down_mask |= static_cast<uint64_t>(1) << task_index;
   }
 
   tasks.push_back(make_task(qf::Opcode::residual_advance, down_mask, 0,
                             qf::kHiddenSize, 1));
   if (tasks.size() != qf::kTaskCount) {
     throw std::runtime_error("Qwen FFN task layout mismatch");
+  }
+  return tasks;
+}
+
+std::vector<sg::Task> make_scheduler_capacity_tasks() {
+  std::vector<sg::Task> tasks;
+  tasks.reserve(sg::kMaximumTasks);
+  for (uint32_t index = 0; index < sg::kMaximumTasks; ++index) {
+    const uint64_t dependency =
+        index == 0 ? 0 : static_cast<uint64_t>(1) << (index - 1u);
+    tasks.push_back(
+        make_task(qf::Opcode::residual_advance, dependency, 0, 1, 1));
   }
   return tasks;
 }
@@ -279,7 +292,8 @@ int main(int argc, char **argv) {
       fill_weight(down_weight, 3);
     }
 
-    lrrt::DeviceBuffer task_buffer(device, tasks.size() * sizeof(sg::Task));
+    lrrt::DeviceBuffer task_buffer(device,
+                                   sg::kMaximumTasks * sizeof(sg::Task));
     lrrt::DeviceBuffer norm_weight_buffer(device,
                                           norm_weight.size() * sizeof(float));
     lrrt::DeviceBuffer gate_weight_buffer(device,
@@ -368,7 +382,9 @@ int main(int argc, char **argv) {
       });
     }
 
-    const auto initialize_state = [&](lrrt::DeviceBuffer &state_buffer) {
+    const auto initialize_state = [&](lrrt::DeviceBuffer &state_buffer,
+                                      uint32_t task_count, uint32_t max_steps,
+                                      uint32_t stop_value) {
       const sg::State state = {
           sg::kAbiVersion,
           static_cast<uint32_t>(sg::Status::ready),
@@ -376,23 +392,44 @@ int main(int argc, char **argv) {
           0,
           0,
           0,
-          steps * 2u,
-          steps,
-          qf::kTaskCount,
+          max_steps,
+          stop_value,
+          task_count,
           0,
           0,
           0,
-          {0, 0, 0},
+          0,
+          0,
+          workers << 16u,
       };
       lrrt::copy_to_device(state_buffer, &state, sizeof(state));
     };
 
+    // Exercise both 64-bit mask words, including task bit 63, before timing.
+    const std::vector<sg::Task> capacity_tasks =
+        make_scheduler_capacity_tasks();
+    const std::vector<float> zero_projected(qf::kHiddenSize, 0.0f);
+    lrrt::copy_to_device(task_buffer, capacity_tasks);
+    lrrt::copy_to_device(resident_projected, zero_projected);
+    initialize_state(resident_state, sg::kMaximumTasks, 1, sg::kMaximumTasks);
+    lrrt::launch(resident, resident_config, resident_args);
+    device.synchronize();
+    sg::State capacity_state{};
+    lrrt::copy_to_host(&capacity_state, resident_state, sizeof(capacity_state));
+    if (capacity_state.status != static_cast<uint32_t>(sg::Status::complete) ||
+        capacity_state.step != 1 ||
+        capacity_state.predicate_value != sg::kMaximumTasks ||
+        capacity_state.executed_tasks != sg::kMaximumTasks) {
+      throw std::runtime_error("resident graph did not execute 64-task DAG");
+    }
+
     // Exercise device-side program validation before timing. Making the root
     // depend on the final task closes the linear chain into a cycle.
     std::vector<sg::Task> cyclic_tasks = tasks;
-    cyclic_tasks[0].dependency_mask = 1u << (qf::kTaskCount - 1u);
+    cyclic_tasks[0].dependency_mask = static_cast<uint64_t>(1)
+                                      << (qf::kTaskCount - 1u);
     lrrt::copy_to_device(task_buffer, cyclic_tasks);
-    initialize_state(resident_state);
+    initialize_state(resident_state, qf::kTaskCount, steps * 2u, steps);
     lrrt::launch(resident, resident_config, resident_args);
     device.synchronize();
     sg::State invalid_state{};
@@ -405,11 +442,11 @@ int main(int argc, char **argv) {
     lrrt::copy_to_device(task_buffer, tasks);
 
     for (uint32_t trial = 0; trial < kWarmupTrials; ++trial) {
-      initialize_state(resident_state);
+      initialize_state(resident_state, qf::kTaskCount, steps * 2u, steps);
       lrrt::copy_to_device(resident_values, initial_values);
       lrrt::launch(resident, resident_config, resident_args);
       device.synchronize();
-      initialize_state(host_state);
+      initialize_state(host_state, qf::kTaskCount, steps * 2u, steps);
       lrrt::copy_to_device(host_values, initial_values);
       for (uint32_t step = 0; step < steps; ++step) {
         for (const HostLaunch &launch : host_launches) {
@@ -421,11 +458,15 @@ int main(int argc, char **argv) {
 
     const Measurement resident_measurement = measure(
         device, trials, resident_values, initial_values,
-        [&] { initialize_state(resident_state); },
+        [&] {
+          initialize_state(resident_state, qf::kTaskCount, steps * 2u, steps);
+        },
         [&] { lrrt::launch(resident, resident_config, resident_args); });
     const Measurement host_measurement = measure(
         device, trials, host_values, initial_values,
-        [&] { initialize_state(host_state); },
+        [&] {
+          initialize_state(host_state, qf::kTaskCount, steps * 2u, steps);
+        },
         [&] {
           for (uint32_t step = 0; step < steps; ++step) {
             for (const HostLaunch &launch : host_launches) {

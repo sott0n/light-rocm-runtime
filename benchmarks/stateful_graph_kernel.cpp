@@ -9,16 +9,35 @@ __device__ __forceinline__ uint32_t load_status(const sg::State *state) {
   return *reinterpret_cast<const volatile uint32_t *>(&state->status);
 }
 
-__device__ __forceinline__ uint32_t load_claimed_mask(sg::State *state) {
-  return atomicAdd(&state->claimed_mask, 0u);
+__device__ __forceinline__ uint32_t load_epoch(sg::State *state) {
+  return atomicAdd(&state->epoch, 0u);
 }
 
-__device__ __forceinline__ uint32_t load_completed_mask(sg::State *state) {
-  return atomicAdd(&state->completed_mask, 0u);
+__device__ __forceinline__ uint32_t load_transition_barrier(sg::State *state) {
+  return atomicAdd(&state->transition_barrier, 0u);
 }
 
-__device__ __forceinline__ uint32_t all_tasks_mask(uint32_t task_count) {
-  return task_count == sg::kMaximumTasks ? UINT32_MAX : (1u << task_count) - 1u;
+__device__ __forceinline__ uint32_t load_mask(uint32_t *mask) {
+  return atomicAdd(mask, 0u);
+}
+
+__device__ __forceinline__ uint64_t load_completed_mask(sg::State *state,
+                                                        uint32_t task_count) {
+  const uint64_t low = load_mask(&state->completed_mask);
+  const uint64_t high =
+      task_count > 32 ? load_mask(&state->completed_mask_high) : 0;
+  return low | (high << 32u);
+}
+
+__device__ __forceinline__ uint64_t task_dependencies(const sg::Task &task) {
+  return static_cast<uint64_t>(task.dependency_mask) |
+         (static_cast<uint64_t>(task.dependency_mask_high) << 32u);
+}
+
+__device__ __forceinline__ uint64_t all_tasks_mask(uint32_t task_count) {
+  return task_count == sg::kMaximumTasks
+             ? UINT64_MAX
+             : (static_cast<uint64_t>(1) << task_count) - 1u;
 }
 
 __device__ bool valid_task(const sg::Task &task, const qf::Context *context) {
@@ -39,19 +58,21 @@ __device__ bool validate_program(const sg::State *state, const sg::Task *tasks,
                                  const qf::Context *context) {
   if (state->abi_version != sg::kAbiVersion || state->task_count == 0 ||
       state->task_count > sg::kMaximumTasks || state->max_steps == 0 ||
-      context == nullptr || context->hidden_size != qf::kHiddenSize ||
+      (state->transition_barrier >> 16u) == 0 ||
+      (state->transition_barrier & UINT16_MAX) != 0 || context == nullptr ||
+      context->hidden_size != qf::kHiddenSize ||
       context->intermediate_size != qf::kIntermediateSize) {
     return false;
   }
 
-  const uint32_t valid_mask = all_tasks_mask(state->task_count);
-  uint32_t reachable_mask = 0;
+  const uint64_t valid_mask = all_tasks_mask(state->task_count);
+  uint64_t reachable_mask = 0;
   for (uint32_t task_index = 0; task_index < state->task_count; ++task_index) {
     const sg::Task &task = tasks[task_index];
-    const uint32_t task_mask = 1u << task_index;
-    if (!valid_task(task, context) ||
-        (task.dependency_mask & ~valid_mask) != 0 ||
-        (task.dependency_mask & task_mask) != 0) {
+    const uint64_t task_mask = static_cast<uint64_t>(1) << task_index;
+    const uint64_t dependencies = task_dependencies(task);
+    if (!valid_task(task, context) || (dependencies & ~valid_mask) != 0 ||
+        (dependencies & task_mask) != 0) {
       return false;
     }
   }
@@ -61,10 +82,10 @@ __device__ bool validate_program(const sg::State *state, const sg::Task *tasks,
   for (uint32_t pass = 0; pass < state->task_count; ++pass) {
     for (uint32_t task_index = 0; task_index < state->task_count;
          ++task_index) {
-      const uint32_t task_mask = 1u << task_index;
+      const uint64_t task_mask = static_cast<uint64_t>(1) << task_index;
+      const uint64_t dependencies = task_dependencies(tasks[task_index]);
       if ((reachable_mask & task_mask) == 0 &&
-          (tasks[task_index].dependency_mask & reachable_mask) ==
-              tasks[task_index].dependency_mask) {
+          (dependencies & reachable_mask) == dependencies) {
         reachable_mask |= task_mask;
       }
     }
@@ -199,24 +220,49 @@ stateful_graph_resident_kernel(sg::State *state, const sg::Task *tasks,
   }
 
   __shared__ uint32_t selected_task;
+  __shared__ uint32_t acknowledged_epoch;
   __shared__ float reduction[sg::kWorkerThreads];
-  const uint32_t valid_mask = all_tasks_mask(state->task_count);
+  if (threadIdx.x == 0) {
+    acknowledged_epoch = UINT32_MAX;
+  }
+  __syncthreads();
+  const uint64_t valid_mask = all_tasks_mask(state->task_count);
   while (true) {
     if (threadIdx.x == 0) {
       selected_task = sg::kNoTask;
-      // claimed_mask publishes a new epoch only after completed_mask resets.
-      const uint32_t claimed_mask = load_claimed_mask(state);
-      const uint32_t completed_mask = load_completed_mask(state);
-      for (uint32_t offset = 0; offset < state->task_count; ++offset) {
-        const uint32_t task_index = (worker + offset) % state->task_count;
-        const uint32_t task_mask = 1u << task_index;
-        const sg::Task &task = tasks[task_index];
-        if ((claimed_mask & task_mask) == 0 &&
-            (task.dependency_mask & completed_mask) == task.dependency_mask) {
-          const uint32_t previous = atomicOr(&state->claimed_mask, task_mask);
-          if ((previous & task_mask) == 0) {
-            selected_task = task_index;
-            break;
+      const uint32_t epoch_before = load_epoch(state);
+      if ((epoch_before & 1u) != 0) {
+        if (acknowledged_epoch != epoch_before) {
+          acknowledged_epoch = epoch_before;
+          atomicAdd(&state->transition_barrier, 1u);
+        }
+      } else {
+        const uint32_t claimed_mask = load_mask(&state->claimed_mask);
+        const uint32_t claimed_mask_high =
+            state->task_count > 32 ? load_mask(&state->claimed_mask_high) : 0;
+        const uint64_t completed_mask =
+            load_completed_mask(state, state->task_count);
+        const uint32_t epoch_after = load_epoch(state);
+        if (epoch_before == epoch_after) {
+          for (uint32_t offset = 0; offset < state->task_count; ++offset) {
+            const uint32_t task_index = (worker + offset) % state->task_count;
+            const uint32_t mask_word = task_index >> 5u;
+            const uint32_t task_mask = 1u << (task_index & 31u);
+            const sg::Task &task = tasks[task_index];
+            const uint32_t claimed =
+                mask_word == 0 ? claimed_mask : claimed_mask_high;
+            const uint64_t dependencies = task_dependencies(task);
+            if ((claimed & task_mask) == 0 &&
+                (dependencies & completed_mask) == dependencies) {
+              uint32_t *claimed_word = mask_word == 0
+                                           ? &state->claimed_mask
+                                           : &state->claimed_mask_high;
+              const uint32_t previous = atomicOr(claimed_word, task_mask);
+              if ((previous & task_mask) == 0) {
+                selected_task = task_index;
+                break;
+              }
+            }
           }
         }
       }
@@ -228,14 +274,24 @@ stateful_graph_resident_kernel(sg::State *state, const sg::Task *tasks,
         __builtin_amdgcn_s_sleep(1);
       }
     } else {
-      const uint32_t task_mask = 1u << selected_task;
+      const uint32_t mask_word = selected_task >> 5u;
+      const uint32_t task_mask = 1u << (selected_task & 31u);
       execute_task(tasks[selected_task], state, context, reduction);
       __syncthreads();
 
       if (threadIdx.x == 0) {
         __threadfence();
-        const uint32_t previous = atomicOr(&state->completed_mask, task_mask);
-        if ((previous | task_mask) == valid_mask) {
+        uint32_t *completed_word = mask_word == 0 ? &state->completed_mask
+                                                  : &state->completed_mask_high;
+        const uint32_t previous = atomicOr(completed_word, task_mask);
+        const bool all_complete =
+            state->task_count <= 32
+                ? (previous | task_mask) == static_cast<uint32_t>(valid_mask)
+                : load_completed_mask(state, state->task_count) == valid_mask;
+        if (all_complete) {
+          // Odd epochs close claiming while masks transition. Workers only
+          // claim tasks from a stable even epoch snapshot.
+          const uint32_t transition_epoch = atomicAdd(&state->epoch, 1u) + 1u;
           const uint32_t next_step = state->step + 1u;
           state->step = next_step;
           state->executed_tasks += state->task_count;
@@ -246,12 +302,21 @@ stateful_graph_resident_kernel(sg::State *state, const sg::Task *tasks,
           } else if (next_step >= state->max_steps) {
             state->status = static_cast<uint32_t>(sg::Status::max_steps);
           } else {
-            // Keep claimed_mask closed while completed_mask is reset.
-            // Publishing an empty claimed mask makes the next epoch's roots
-            // claimable.
+            acknowledged_epoch = transition_epoch;
+            atomicAdd(&state->transition_barrier, 1u);
+            const uint32_t worker_count = state->transition_barrier >> 16u;
+            while ((load_transition_barrier(state) & UINT16_MAX) !=
+                   worker_count) {
+              __builtin_amdgcn_s_sleep(1);
+            }
+
+            // Every admitted worker is now outside task selection. Reset both
+            // words before publishing the next even epoch.
             state->completed_mask = 0;
-            __threadfence();
-            atomicExch(&state->claimed_mask, 0u);
+            state->completed_mask_high = 0;
+            state->claimed_mask = 0;
+            state->claimed_mask_high = 0;
+            atomicAnd(&state->transition_barrier, UINT32_C(0xffff0000));
           }
           __threadfence();
           atomicAdd(&state->epoch, 1u);
