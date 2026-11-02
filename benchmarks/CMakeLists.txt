@@ -10,6 +10,12 @@ target_include_directories(
 add_executable(lrrt_mutex_contention_benchmark mutex_contention.cpp)
 target_link_libraries(lrrt_mutex_contention_benchmark PRIVATE lrrt::lrrt)
 
+add_executable(lrrt_stateful_graph_benchmark stateful_graph.cpp)
+target_link_libraries(lrrt_stateful_graph_benchmark PRIVATE lrrt::lrrt)
+target_include_directories(
+  lrrt_stateful_graph_benchmark PRIVATE "${PROJECT_SOURCE_DIR}"
+)
+
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
 
@@ -88,6 +94,12 @@ lrrt_add_hsaco_kernel(
 lrrt_add_hsaco_kernel(
   mutex_contention_kernel benchmarks/mutex_contention_kernel.cpp
   MUTEX_CONTENTION_HSACO
+)
+lrrt_add_hsaco_kernel(
+  stateful_graph_kernel benchmarks/stateful_graph_kernel.cpp
+  STATEFUL_GRAPH_HSACO
+  -O2
+  "-I${PROJECT_SOURCE_DIR}"
 )
 lrrt_add_hsaco_kernel(
   async_copy_launch_benchmark_kernel
@@ -182,6 +194,17 @@ if(MUTEX_CONTENTION_HSACO)
   target_compile_definitions(
     lrrt_mutex_contention_benchmark
     PRIVATE LRRT_MUTEX_CONTENTION_HSACO="${MUTEX_CONTENTION_HSACO}"
+  )
+endif()
+
+if(STATEFUL_GRAPH_HSACO)
+  add_dependencies(
+    lrrt_stateful_graph_benchmark
+    stateful_graph_kernel_hsaco
+  )
+  target_compile_definitions(
+    lrrt_stateful_graph_benchmark
+    PRIVATE LRRT_STATEFUL_GRAPH_HSACO="${STATEFUL_GRAPH_HSACO}"
   )
 endif()
 

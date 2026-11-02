@@ -16,11 +16,17 @@ The intended stack is:
 ```text
 compiler or model layer
   -> generated kernels and scheduling metadata
+  -> optional execution layer: Stateful Graph or another executor
   -> executor: tensors, arenas, workspaces, queues, dependencies
   -> light-rocm-runtime: devices, memory, code objects, dispatch, events
   -> ROCr/HSA
   -> AMDGPU kernel driver and GPU
 ```
+
+Device-resident graph semantics are provided by the optional
+[Stateful Graph](stateful-graph.md) execution layer, not by the core dispatch
+API. This preserves the small runtime boundary while allowing the project to
+experiment with GPU-resident control flow above it.
 
 The currently supported backend is ROCr/HSA. Project scope also includes an
 experimental native backend that will first replace `libhsa-runtime64` while
