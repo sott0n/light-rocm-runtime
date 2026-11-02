@@ -74,9 +74,20 @@ gate and up intermediates never enter device memory. The final task updates the
 predicate, which terminates the repeated FFN loop without host intervention.
 
 The host-driven baseline invokes the same arithmetic in four stage launches per
-step. The benchmark currently uses deterministic model-shaped weights rather
-than checkpoint tensors, isolating execution and scheduling performance while
-preserving the real FFN dimensions and memory footprint.
+step. By default the benchmark uses deterministic model-shaped weights,
+isolating execution and scheduling performance while preserving the real FFN
+dimensions and memory footprint. Pass `--weights` with an existing Qwen layer
+bundle manifest to run both paths with its checkpoint `mlp_norm`, gate, up, and
+down tensors:
+
+```sh
+./build/lrrt_stateful_graph_benchmark 64 20 20 \
+  --weights /path/to/qwen-bundle/layer_0/weights.json
+```
+
+The loader accepts the existing `lrrt.mini_decoder_weights` FP32 format and
+rejects bundles whose hidden or intermediate dimensions do not match the
+specialized megakernel.
 
 The resident kernel uses 1,028 bytes of group memory, 34 SGPRs, and 39 VGPRs on
 gfx1101, with no private segment, dynamic stack, or register spills.
@@ -85,8 +96,7 @@ gfx1101, with no private segment, dynamic stack, or register spills.
 
 The next milestones are:
 
-1. load checkpoint FFN weights through the existing Qwen weight bundle;
-2. add attention, RoPE, and KV-cache stage specializations;
-3. keep token position, KV length, sampled token, and EOS in device state;
-4. add resource-aware worker admission from HSACO metadata; and
-5. compare a whole decode loop against HIP Graph and host-driven LRRT.
+1. add attention, RoPE, and KV-cache stage specializations;
+2. keep token position, KV length, sampled token, and EOS in device state;
+3. add resource-aware worker admission from HSACO metadata; and
+4. compare a whole decode loop against HIP Graph and host-driven LRRT.

@@ -1,3 +1,4 @@
+#include "executor/qwen/weight_bundle.hpp"
 #include "executor/stateful_graph/qwen_ffn_abi.hpp"
 #include "lrrt/lrrt.hpp"
 
@@ -11,6 +12,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #ifndef LRRT_STATEFUL_GRAPH_HSACO
@@ -31,6 +33,13 @@ constexpr uint32_t kMaximumWorkers = 20;
 struct Measurement {
   double device_ns = 0.0;
   double wall_ns = 0.0;
+};
+
+struct Options {
+  uint32_t steps = 64;
+  uint32_t trials = 20;
+  uint32_t workers = kDefaultWorkers;
+  const char *weights_path = nullptr;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -59,6 +68,40 @@ uint32_t parse_u32(const char *text, const char *label) {
                                 " must be a positive uint32");
   }
   return static_cast<uint32_t>(value);
+}
+
+Options parse_options(int argc, char **argv) {
+  Options options;
+  uint32_t positional = 0;
+  for (int index = 1; index < argc; ++index) {
+    if (std::strcmp(argv[index], "--weights") == 0) {
+      if (++index >= argc) {
+        throw std::invalid_argument("--weights requires a manifest path");
+      }
+      options.weights_path = argv[index];
+      continue;
+    }
+    if (argv[index][0] == '-') {
+      throw std::invalid_argument(std::string("unknown option: ") +
+                                  argv[index]);
+    }
+    switch (positional++) {
+    case 0:
+      options.steps = parse_u32(argv[index], "steps");
+      break;
+    case 1:
+      options.trials = parse_u32(argv[index], "trials");
+      break;
+    case 2:
+      options.workers = parse_u32(argv[index], "workers");
+      break;
+    default:
+      throw std::invalid_argument(
+          "usage: lrrt_stateful_graph_benchmark [steps] [trials] [workers] "
+          "[--weights weights.json]");
+    }
+  }
+  return options;
 }
 
 template <typename Setup, typename Submit>
@@ -181,14 +224,10 @@ void verify_values(const std::vector<float> &resident,
 
 int main(int argc, char **argv) {
   try {
-    if (argc > 4) {
-      throw std::invalid_argument(
-          "usage: lrrt_stateful_graph_benchmark [steps] [trials] [workers]");
-    }
-    const uint32_t steps = argc >= 2 ? parse_u32(argv[1], "steps") : 64;
-    const uint32_t trials = argc >= 3 ? parse_u32(argv[2], "trials") : 20;
-    const uint32_t workers =
-        argc >= 4 ? parse_u32(argv[3], "workers") : kDefaultWorkers;
+    const Options options = parse_options(argc, argv);
+    const uint32_t steps = options.steps;
+    const uint32_t trials = options.trials;
+    const uint32_t workers = options.workers;
     if (steps > std::numeric_limits<uint32_t>::max() / 2u) {
       throw std::invalid_argument("steps is too large");
     }
@@ -221,9 +260,24 @@ int main(int argc, char **argv) {
     std::vector<float> gate_weight(gate_elements);
     std::vector<float> up_weight(gate_elements);
     std::vector<float> down_weight(down_elements);
-    fill_weight(gate_weight, 1);
-    fill_weight(up_weight, 2);
-    fill_weight(down_weight, 3);
+    if (options.weights_path) {
+      lrrt::executor::qwen::DecoderLayerWeights weights =
+          lrrt::executor::qwen::load_decoder_layer_weights(
+              options.weights_path);
+      if (weights.shape.hidden != qf::kHiddenSize ||
+          weights.shape.intermediate != qf::kIntermediateSize) {
+        throw std::runtime_error(
+            "checkpoint FFN shape does not match the megakernel");
+      }
+      norm_weight = std::move(weights.mlp_norm_weight);
+      gate_weight = std::move(weights.gate_weight);
+      up_weight = std::move(weights.up_weight);
+      down_weight = std::move(weights.down_weight);
+    } else {
+      fill_weight(gate_weight, 1);
+      fill_weight(up_weight, 2);
+      fill_weight(down_weight, 3);
+    }
 
     lrrt::DeviceBuffer task_buffer(device, tasks.size() * sizeof(sg::Task));
     lrrt::DeviceBuffer norm_weight_buffer(device,
@@ -406,6 +460,9 @@ int main(int argc, char **argv) {
                 workers);
     std::printf("Qwen FFN shape:           hidden=%u intermediate=%u\n",
                 qf::kHiddenSize, qf::kIntermediateSize);
+    std::printf("Weights:                  %s\n",
+                options.weights_path ? options.weights_path
+                                     : "deterministic synthetic f32");
     std::printf("Tasks per step:           %u dependency-scheduled tasks\n",
                 qf::kTaskCount);
     std::printf("Conditional steps:        %u (max=%u)\n", steps, steps * 2u);
