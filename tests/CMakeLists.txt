@@ -97,6 +97,7 @@ if(
       lrrt_event_timing_tests event_timing.cpp
       lrrt_queue_event_lifetime_tests queue_event_lifetime.cpp
       lrrt_module_buffer_lifetime_tests module_buffer_lifetime.cpp
+      lrrt_device_buffer_ownership_tests device_buffer_ownership.cpp
       lrrt_memory_bounds_tests memory_bounds.cpp
       lrrt_allocation_registry_tests allocation_registry.cpp
     )
