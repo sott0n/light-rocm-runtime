@@ -52,8 +52,8 @@ the ownership boundary to preserve during backend extraction.
 | Code-object reader | `hsa_code_object_reader_create_from_memory`, `hsa_code_object_reader_destroy` | `src/module.cpp` | bounded AMDHSA ELF parser | same loader; transport-independent |
 | Executable lifecycle | `hsa_executable_create_alt`, `hsa_executable_load_agent_code_object`, `hsa_executable_freeze`, `hsa_executable_destroy` | `src/module.cpp` | build a load plan, allocate executable segments, copy and relocate | same loader; allocation supplied by KFD transport |
 | Kernel discovery | `hsa_executable_iterate_agent_symbols`, `hsa_executable_symbol_get_info` | `src/module.cpp` | metadata/symbol/descriptor lookup | same loader; transport-independent |
-| Profiling setup | `hsa_amd_profiling_set_profiler_enabled`, `hsa_amd_profiling_async_copy_enable` | `src/queue.cpp`, `src/memory.cpp` | initially unsupported; add native timestamp capture later | initially unsupported; add native timestamp capture later |
-| Profiling queries | `hsa_amd_profiling_get_dispatch_time`, `hsa_amd_profiling_get_async_copy_time` | `src/event.cpp` | initially host timing; GPU timestamps are a later feature | initially host timing; GPU timestamps are a later feature |
+| Profiling setup | `hsa_amd_profiling_set_profiler_enabled`, `hsa_amd_profiling_async_copy_enable` | `src/queue.cpp`, `src/memory.cpp` | transport-dependent | queue profiling plus KFD clock counters |
+| Profiling queries | `hsa_amd_profiling_get_dispatch_time`, `hsa_amd_profiling_get_async_copy_time` | `src/event.cpp` | transport-dependent | GPU packet timestamps converted with KFD clock counters |
 
 ### Functions by exact name
 
@@ -356,14 +356,12 @@ parser were run across all 208 HSACOs then present under `build`,
 `build-triton`, and `build-iree-probe`. None contained `REL`, `RELA`, PLT, or
 RELR relocation records or corresponding dynamic relocation tags.
 
-This observed empty set is now explicit in `LoadPlan`: the current corpus
-produces zero relocation operations, while synthetic tests cover bounded
-ELF64 `REL` and `RELA` parsing, AMDGPU type decoding, `DT_HASH` symbol bounds,
-target bounds, malformed tables, and rejection of unknown or unobserved
-formats. Relocation records are planned but not yet applied. The initial GPU
-loader may therefore require an empty relocation list; adding relocation
-application is triggered by a real supported artifact that needs it rather
-than by speculative ABI coverage.
+This observed empty set remains covered, while synthetic tests exercise bounded
+ELF64 `REL` and `RELA` parsing, `DT_HASH`/`DT_SYMTAB` symbol validation, target
+bounds, malformed tables, and relocation application. The executable-image
+loader applies the AMDHSA dynamic relocations used by ET_DYN code objects:
+`R_AMDGPU_ABS64` and `R_AMDGPU_RELATIVE64`. Static-linker relocation types,
+PLT relocations, and RELR remain outside the runtime loader contract.
 
 ### Native metadata comparison
 
@@ -441,8 +439,8 @@ properties for the supported feature subset.
 | Multiple queues | Required | Required after basic dispatch | Required |
 | Async copy | Required | Copy-kernel implementation accepted initially | Required for full parity |
 | SDMA queue | ROCr implementation detail | Deferred | Stretch after Qwen correctness |
-| Dispatch timing | Required | Host timing accepted initially | GPU timing deferred |
-| Async-copy timing | Required | Deferred | Deferred |
+| Dispatch timing | Required | Host timing accepted initially | GPU timing implemented |
+| Async-copy timing | Required | Deferred | Copy-kernel GPU timing implemented |
 | Triton/IREE HSACO | Required | Required | Required |
 | Qwen E2E | Required | Required before removing KMT | Final acceptance gate |
 

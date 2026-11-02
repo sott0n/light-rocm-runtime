@@ -2,64 +2,26 @@
 
 ## Goal
 
-Build a small ROCm-oriented runtime that can run AMD GPU kernels without pulling
-in the full HIP runtime surface.
+Provide a small AMDGPU execution runtime for compiler-generated HSACO without
+requiring HIP. Keep ROCr as the reference backend and provide a self-authored
+`gfx1101` path whose userspace boundary is Linux KFD.
 
-The runtime should first prove a single end-to-end path:
+## Current acceptance gate
 
-1. initialize the runtime
-2. find an AMD GPU agent
-3. allocate GPU-accessible memory
-4. load a `.hsaco` code object
-5. resolve a kernel symbol
-6. dispatch the kernel
-7. synchronize
-8. copy the result back
+The direct KFD backend must implement the same LRRT C API and observable
+lifetime, ordering, timing, and error behavior used by the ROCr backend. It must
+run the repository's Clang, Triton, and IREE workloads without dynamically
+linking ROCr, `libhsakmt`, or HIP. Full 24-layer Qwen prompt/decode correctness
+and the shared backend test suite are the end-to-end gates.
 
-## Non-goals for the first version
+## Scope
 
-- Full HIP API compatibility
-- Graphs
-- Stream priority
-- Peer access
-- Full multi-GPU scheduling
-- Math/library replacement
-- Direct `/dev/kfd` ioctl backend
+- Linux KFD and one `gfx1101` GPU
+- AMDHSA ET_DYN code objects produced by the repository's compiler paths
+- device and pinned/pageable host memory
+- multiple AQL queues, events, dependencies, scratch, and GPU timing
+- LRRT's C ABI rather than HSA or HIP API compatibility
 
-## Milestones
-
-### M0: Repository scaffold
-
-- Public C API in `include/lrrt/lrrt.h`
-- CMake build
-- Stub runtime library
-- `vector_add` example source layout
-
-### M1: HSA-backed vector add
-
-- Initialize/shutdown HSA
-- Select the first GPU agent
-- Create one HSA queue
-- Allocate/copy memory through HSA-compatible mechanisms
-- Load a `.hsaco`
-- Dispatch `vector_add`
-- Validate output on CPU
-
-### M2: Runtime structure
-
-- Split device, memory, module, and queue internals
-- Add stable error reporting
-- Add basic device properties
-- Add GPU-free unit tests for argument validation and lifecycle behavior
-
-### M3: Practical minimum
-
-- Async launch handle or stream-like queue object
-- Multiple kernels per module
-- Kernel argument packing helper
-- Better diagnostics for missing ROCm/HSA pieces
-
-### M4: Optional compatibility layer
-
-- Consider a small HIP-like wrapper only after the native runtime API is stable
-- Keep it as a separate header/library so it does not define the core design
+Peer access, managed memory, graph capture, stream priorities, full multi-GPU
+scheduling, math libraries, and a general HSA-compatible shared library remain
+outside this project scope.

@@ -4,10 +4,9 @@
 for `light-rocm-runtime`. Its goal is to replace ROCr and its loader while
 keeping Linux KFD as the kernel boundary.
 
-It does not use `libhsa-runtime64.so`. The LRRT backend currently executes
-through `libhsakmt`, while the direct KFD transport can discover the GPU,
-manage GPUVM memory, create an AQL queue, and complete a scratch-backed kernel
-dispatch from a parsed Clang HSACO without `libhsakmt`.
+It does not use `libhsa-runtime64.so`. The default transport uses `libhsakmt`;
+the direct KFD transport also removes that dependency and talks to Linux KFD
+directly.
 
 ## Boundary
 
@@ -17,23 +16,15 @@ object lifetimes; it does not decide what a kernel-dispatch packet contains.
 
 ## Status
 
-The current target is `gfx1101`. `light-rocr` has run the full 24-layer
-Qwen2.5-0.5B IREE path, including prompt prefill, per-layer device-resident KV
-caches, the model tail, and autoregressive generation. Its generated tokens and
-top logits matched the ROCr backend. Clang and Triton generated HSACOs are also
-covered by the GPU tests. The direct KFD path can materialize a Clang HSACO in
-executable GTT, invalidate the instruction cache, resolve its kernel descriptor,
-and execute a scratch-backed kernel. LRRT's public direct KFD backend supports
-device and queue lifecycle, device and pinned host memory, synchronous copies,
-asynchronous copies using pinned host memory, device-side event dependencies
-between copies and kernel launches, events, module and kernel lookup, launch,
-and synchronization. These dependencies can connect H2D copies, an explicit
-kernel queue, and D2H copies without an intermediate CPU wait.
-Scratch-backed queues receive separate ranges from a process-wide GPU scratch
-pool, so multiple queues can remain active together.
-The direct KFD backend has run the full 24-layer Qwen2.5-0.5B FP32 Triton path
-with autoregressive token feedback; its generated token IDs and logits match
-the ROCr backend.
+The current target is `gfx1101`. The direct KFD backend implements every LRRT C
+API entry point for the supported code-object subset, including pageable and
+pinned host copies, event timing, multiple queues, scratch-backed dispatch, and
+device-side dependencies. Its loader
+validates AMDHSA ELF and metadata, resolves symbols, applies the supported
+AMDHSA dynamic relocations, and materializes executable GPU memory. It has run
+the full 24-layer Qwen2.5-0.5B IREE and FP32 Triton paths with autoregressive
+token feedback; generated token IDs and logits match ROCr. The tested direct
+KFD executables do not dynamically link ROCr, `libhsakmt`, or HIP.
 Current ROCr comparison results and their GPU clock caveats are recorded in the
 [performance comparison](../docs/light-rocr-performance.md).
 

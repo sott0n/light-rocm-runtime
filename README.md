@@ -10,9 +10,9 @@ kernel generation, scheduling, and tensor graph semantics; this runtime owns the
 execution path for loading code objects, managing resources, dispatching
 kernels, and synchronizing work.
 
-The first target is intentionally narrow:
+The runtime surface is intentionally narrow:
 
-- Linux with AMDGPU and an installed ROCm stack
+- Linux with AMDGPU
 - load a pre-built `.hsaco`
 - allocate device memory
 - copy host/device buffers
@@ -59,9 +59,10 @@ The current implementation has deliberate limitations. It requires
 Linux/AMDGPU, loads pre-built HSACO only, is not HIP API compatible, and does
 not provide peer-to-peer multi-GPU scheduling, managed memory APIs,
 stream-ordered allocation, graph capture, dynamic launch inference, or a
-general tensor/kernel ABI. The default backend requires ROCr/HSA; the
-experimental `light-rocr` backend currently targets `gfx1101` and uses
-`libhsakmt` for execution. Its direct KFD path combines LRRT-owned AQL packet
+general tensor/kernel ABI. The default backend requires ROCr/HSA. The
+experimental `light-rocr` backend currently targets `gfx1101`; its direct KFD
+transport does not link ROCr, `libhsakmt`, or HIP. That path combines
+LRRT-owned AQL packet
 publication with transport-owned discovery, VM and memory management, queue
 indices, doorbell signaling, completion signals, and resource cleanup to execute
 Clang HSACO kernels, including kernels that use scratch memory.
@@ -120,22 +121,16 @@ It can also be included in the main build with
 `-DLRRT_ENABLE_LIGHT_ROCR=ON`. The existing ROCr path remains the default and
 the correctness oracle while the loader and runtime are developed.
 
-Select the LRRT integration with `-DLRRT_BACKEND=light-rocr`. On `gfx1101`, it
-has run the full 24-layer Qwen2.5-0.5B IREE path, including prompt prefill,
-device-resident KV caches, the model tail, and autoregressive generation. The
-generated tokens and top logits matched the ROCr backend. GPU access still uses
-the `libhsakmt` execution transport by default. Add
+Select the LRRT integration with `-DLRRT_BACKEND=light-rocr`. GPU access uses
+the `libhsakmt` transport by default. Add
 `-DLRRT_LIGHT_ROCR_TRANSPORT=kfd` to select the direct KFD integration, which
-currently supports LRRT runtime and device lifecycle, device allocation,
-pinned host allocation, synchronous copies, event timing, queue lifecycle,
-HSACO module and kernel lookup, kernel launch on default and explicit queues,
-asynchronous copies with copy-event dependencies, and queue or device
-synchronization. These operations execute scratch-backed Clang HSACO on
-simultaneous queues without `libhsakmt`. Public kernel launches support
-device-side event dependencies across queues, including CPU-wait-free
-H2D-to-kernel-to-D2H pipelines. The direct KFD backend has also run the full
-24-layer Qwen2.5-0.5B Triton path with autoregressive token feedback, producing
-the same generated token IDs and logits as ROCr.
+implements every LRRT C API entry point for the supported `gfx1101` code-object
+subset, including pageable and pinned host copies, event timing, multiple
+queues, scratch-backed dispatch, and device-side dependencies. It loads AMDHSA
+code objects with its own ELF,
+metadata, symbol, and dynamic-relocation handling. The direct KFD backend has
+run the full 24-layer Qwen2.5-0.5B IREE and Triton paths with autoregressive
+token feedback; both produced the same generated token IDs and logits as ROCr.
 
 Triton executor examples are opt-in and are not part of the default build. They
 use `uv` to resolve `examples/triton/requirements.txt` and compile Triton

@@ -33,10 +33,11 @@ exact base pointer and drains the allocation's device before unlocking and
 freeing it.
 
 Asynchronous copies also accept pageable host pointers for compatibility. The
-runtime temporarily locks and maps the requested host range, keeps that mapping
-owned by the completion event, and unlocks it when the event is synchronized or
-otherwise drained. This per-copy mapping is the overhead that persistent pinned
-host allocations avoid.
+ROCr backend temporarily locks and maps the requested host range. The direct
+KFD backend uses an event-owned GPU-visible staging allocation, snapshots an H2D
+source before returning, and copies a completed D2H result into the caller's
+buffer when the event is drained. Persistent pinned host allocations avoid this
+per-copy mapping or staging overhead.
 
 The runtime intentionally does not infer tensor ownership, tensor shape, dtype,
 strides, model weights, KV cache layout, or graph lifetime. It only validates
