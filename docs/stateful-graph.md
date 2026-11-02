@@ -43,36 +43,50 @@ The resident kernel validates task bounds and rejects cyclic dependency graphs
 before entering the scheduling loop.
 
 The worker pool must still satisfy resource-aware admission: every persistent
-worker must be concurrently resident. The benchmark limits the pool to 16
+worker must be concurrently resident. The benchmark limits the pool to 20
 small workgroups, while tasks are scheduled onto that pool dynamically.
 
-The prototype also uses a fixed worker width from the Stateful Graph ABI.
-LRRT launches raw kernel argument buffers and deliberately does not synthesize
-HIP-specific hidden `blockDim` or `gridDim` arguments, so resident kernels must
-not depend on those fields.
+The prototype also uses a fixed 256-thread worker width from the Stateful Graph
+ABI. LRRT launches raw kernel argument buffers and deliberately does not
+synthesize HIP-specific hidden `blockDim` or `gridDim` arguments, so resident
+kernels must not depend on those fields.
 
-## Heterogeneous stage prototype
+## Qwen FFN megakernel
 
-The resident kernel contains a small stage megakernel selected by task opcode.
-Its benchmark graph executes the following dependency chain on FP32 buffers:
+The scheduler ABI carries an opaque execution-context pointer, keeping model
+buffer semantics out of the generic graph state and task descriptors. The Qwen
+FFN specialization defines its context separately and uses the Qwen2.5-0.5B
+dimensions `hidden=896` and `intermediate=4864`.
+
+The resident megakernel executes this FP32 dependency graph:
 
 ```text
-RMSNorm -> SiLU -> residual add -> advance device state
+RMSNorm
+  -> 20 x fused gate projection + up projection + SiLU multiply
+  -> 10 x down projection
+  -> fused residual add + advance device state
 ```
 
-The first three opcodes model compute stages and share a reusable workspace.
-The final opcode mutates the device-resident predicate value, which terminates
-the graph without host intervention. The same stages are also invoked one at a
-time by the host-driven baseline, so both paths use identical GPU arithmetic.
+The 32 tasks consume the complete dependency bitmask. Matvec tasks use
+wave-coalesced weight reads, and each persistent workgroup contains 256 threads
+to expose eight wave32 wavefronts. Gate, up, and activation are fused so the
+gate and up intermediates never enter device memory. The final task updates the
+predicate, which terminates the repeated FFN loop without host intervention.
 
-The resident megakernel uses 260 bytes of group memory, 32 SGPRs, and 21 VGPRs
-on gfx1101, with no private segment, dynamic stack, or register spills.
+The host-driven baseline invokes the same arithmetic in four stage launches per
+step. The benchmark currently uses deterministic model-shaped weights rather
+than checkpoint tensors, isolating execution and scheduling performance while
+preserving the real FFN dimensions and memory footprint.
+
+The resident kernel uses 1,028 bytes of group memory, 34 SGPRs, and 39 VGPRs on
+gfx1101, with no private segment, dynamic stack, or register spills.
 
 ## Qwen path
 
 The next milestones are:
 
-1. replace the prototype stages with one real Qwen decode layer;
-2. keep token position, KV length, sampled token, and EOS in device state;
-3. add resource-aware worker admission from HSACO metadata; and
-4. compare a whole decode loop against HIP Graph and host-driven LRRT.
+1. load checkpoint FFN weights through the existing Qwen weight bundle;
+2. add attention, RoPE, and KV-cache stage specializations;
+3. keep token position, KV length, sampled token, and EOS in device state;
+4. add resource-aware worker admission from HSACO metadata; and
+5. compare a whole decode loop against HIP Graph and host-driven LRRT.

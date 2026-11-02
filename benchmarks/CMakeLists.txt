@@ -100,6 +100,9 @@ lrrt_add_hsaco_kernel(
   STATEFUL_GRAPH_HSACO
   -O2
   "-I${PROJECT_SOURCE_DIR}"
+  DEPENDS
+  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
+  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/qwen_ffn_abi.hpp"
 )
 lrrt_add_hsaco_kernel(
   async_copy_launch_benchmark_kernel

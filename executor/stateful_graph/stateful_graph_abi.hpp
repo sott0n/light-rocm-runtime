@@ -7,8 +7,8 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 3;
-constexpr uint32_t kWorkerThreads = 64;
+constexpr uint32_t kAbiVersion = 4;
+constexpr uint32_t kWorkerThreads = 256;
 constexpr uint32_t kMaximumTasks = 32;
 constexpr uint32_t kNoTask = UINT32_MAX;
 
@@ -18,13 +18,6 @@ enum class Status : uint32_t {
   complete = 2,
   max_steps = 3,
   invalid_program = 4,
-};
-
-enum class Opcode : uint32_t {
-  rmsnorm_f32 = 1,
-  silu_f32 = 2,
-  residual_add_f32 = 3,
-  advance_state = 4,
 };
 
 // Mutable device-resident control state. Workers atomically claim tasks whose
@@ -62,8 +55,7 @@ struct alignas(32) Task {
 struct ResidentArgs {
   State *state;
   const Task *tasks;
-  float *values;
-  float *workspace;
+  void *context;
 };
 
 struct HostStepArgs {
@@ -71,8 +63,7 @@ struct HostStepArgs {
   const Task *tasks;
   uint32_t task_count;
   uint32_t reserved;
-  float *values;
-  float *workspace;
+  void *context;
 };
 
 static_assert(std::is_standard_layout_v<State>);
@@ -81,8 +72,8 @@ static_assert(std::is_standard_layout_v<ResidentArgs>);
 static_assert(std::is_standard_layout_v<HostStepArgs>);
 static_assert(sizeof(State) == 64);
 static_assert(sizeof(Task) == 32);
-static_assert(sizeof(ResidentArgs) == 32);
-static_assert(sizeof(HostStepArgs) == 40);
+static_assert(sizeof(ResidentArgs) == 24);
+static_assert(sizeof(HostStepArgs) == 32);
 
 } // namespace lrrt::stateful_graph
 
