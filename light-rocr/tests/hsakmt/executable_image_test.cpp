@@ -189,12 +189,13 @@ void materializes_copies_zero_fill_and_addresses(TestContext *context) {
                          "unmap", "free:4096", "release", "close"});
 }
 
-void relocations_are_rejected_before_allocation(TestContext *context) {
+void unsupported_relocations_are_rejected_before_allocation(
+    TestContext *context) {
   reset_fake();
   const std::vector<uint8_t> bytes = make_hsaco_bytes();
   auto object = make_code_object();
   object.load_plan.relocations.push_back(
-      {light_rocr::loader::RelocationEncoding::Rela, 0x1800, 3, 0, 0});
+      {light_rocr::loader::RelocationEncoding::Rela, 0x1800, 4, 1, 0});
   {
     auto opened = light_rocr::transport::hsakmt::KfdSession::open();
     const auto loaded =
@@ -203,7 +204,7 @@ void relocations_are_rejected_before_allocation(TestContext *context) {
     context->expect(loaded.status.error ==
                         light_rocr::transport::hsakmt::ExecutableImageError::
                             UnsupportedRelocations,
-                    "non-empty relocation plan was accepted");
+                    "unsupported static relocation was accepted");
   }
   expect_calls(context, {"open", "acquire", "release", "close"});
 }
@@ -571,8 +572,8 @@ int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"materializes_copies_zero_fill_and_addresses",
        materializes_copies_zero_fill_and_addresses},
-      {"relocations_are_rejected_before_allocation",
-       relocations_are_rejected_before_allocation},
+      {"unsupported_relocations_are_rejected_before_allocation",
+       unsupported_relocations_are_rejected_before_allocation},
       {"invalid_operations_are_rejected_before_allocation",
        invalid_operations_are_rejected_before_allocation},
       {"invalid_alignment_and_kernel_are_rejected",

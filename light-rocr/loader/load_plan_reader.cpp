@@ -22,13 +22,20 @@ constexpr uint32_t kProgramHeaderTypeDynamic = 2;
 constexpr size_t kElf64DynamicEntrySize = 16;
 constexpr size_t kElf64RelSize = 16;
 constexpr size_t kElf64RelaSize = 24;
+constexpr size_t kElf64SymbolSize = 24;
+constexpr size_t kSymbolSectionIndexOffset = 6;
+constexpr size_t kSymbolValueOffset = 8;
+constexpr uint16_t kUndefinedSection = 0;
+constexpr uint16_t kAbsoluteSection = 0xfff1;
 
 constexpr int64_t kDynamicNull = 0;
 constexpr int64_t kDynamicPltRelocationSize = 2;
 constexpr int64_t kDynamicHash = 4;
+constexpr int64_t kDynamicSymbolTable = 6;
 constexpr int64_t kDynamicRela = 7;
 constexpr int64_t kDynamicRelaSize = 8;
 constexpr int64_t kDynamicRelaEntrySize = 9;
+constexpr int64_t kDynamicSymbolEntrySize = 11;
 constexpr int64_t kDynamicRel = 17;
 constexpr int64_t kDynamicRelSize = 18;
 constexpr int64_t kDynamicRelEntrySize = 19;
@@ -132,6 +139,8 @@ struct RelocationTableInfo {
 
 struct DynamicRelocationInfo {
   DynamicValue hash;
+  DynamicValue symbol_table;
+  DynamicValue symbol_entry_size;
   RelocationTableInfo rel;
   RelocationTableInfo rela;
 };
@@ -200,6 +209,14 @@ ParseError read_dynamic_relocation_info(const uint8_t *data, size_t size,
     switch (tag) {
     case kDynamicHash:
       error = set_dynamic_value(&info->hash, value, file_offset + 8, "DT_HASH");
+      break;
+    case kDynamicSymbolTable:
+      error = set_dynamic_value(&info->symbol_table, value, file_offset + 8,
+                                "DT_SYMTAB");
+      break;
+    case kDynamicSymbolEntrySize:
+      error = set_dynamic_value(&info->symbol_entry_size, value,
+                                file_offset + 8, "DT_SYMENT");
       break;
     case kDynamicRel:
       error = set_dynamic_value(&info->rel.address, value, file_offset + 8,
@@ -377,6 +394,14 @@ uint64_t relocation_width(uint32_t type) {
   }
 }
 
+bool relocation_uses_symbol(uint32_t type) { return type != 0 && type != 13; }
+
+struct DynamicSymbol {
+  uint64_t value = 0;
+  bool defined = false;
+  bool absolute = false;
+};
+
 ParseError read_symbol_count(const uint8_t *data, const CodeObject &code_object,
                              const DynamicValue &hash, uint32_t *count) {
   if (!hash.present) {
@@ -413,11 +438,48 @@ ParseError read_symbol_count(const uint8_t *data, const CodeObject &code_object,
   return {};
 }
 
+ParseError read_dynamic_symbols(const uint8_t *data,
+                                const CodeObject &code_object,
+                                const DynamicRelocationInfo &dynamic,
+                                uint32_t symbol_count,
+                                std::vector<DynamicSymbol> *symbols) {
+  if (!dynamic.symbol_table.present || !dynamic.symbol_entry_size.present ||
+      dynamic.symbol_entry_size.value != kElf64SymbolSize) {
+    return failure(ParseErrorCode::InvalidRelocationTable,
+                   dynamic.symbol_table.present
+                       ? dynamic.symbol_entry_size.file_offset
+                       : dynamic.hash.file_offset,
+                   "relocations require DT_SYMTAB and ELF64 DT_SYMENT");
+  }
+  const uint64_t table_size =
+      static_cast<uint64_t>(symbol_count) * kElf64SymbolSize;
+  uint64_t table_offset = 0;
+  if (!virtual_address_to_file(code_object, dynamic.symbol_table.value,
+                               table_size, &table_offset)) {
+    return failure(ParseErrorCode::InvalidRelocationTable,
+                   dynamic.symbol_table.file_offset,
+                   "DT_SYMTAB extends outside PT_LOAD file ranges");
+  }
+  symbols->clear();
+  symbols->reserve(symbol_count);
+  for (uint32_t index = 0; index < symbol_count; ++index) {
+    const uint8_t *entry = data + static_cast<size_t>(table_offset) +
+                           static_cast<size_t>(index) * kElf64SymbolSize;
+    const uint16_t section_index = read_u16(entry + kSymbolSectionIndexOffset);
+    symbols->push_back(DynamicSymbol{
+        read_u64(entry + kSymbolValueOffset),
+        section_index != kUndefinedSection,
+        section_index == kAbsoluteSection,
+    });
+  }
+  return {};
+}
+
 ParseError read_relocation_table(const uint8_t *data,
                                  const CodeObject &code_object,
                                  const RelocationTableInfo &table,
                                  RelocationEncoding encoding,
-                                 uint32_t symbol_count,
+                                 const std::vector<DynamicSymbol> &symbols,
                                  std::vector<Relocation> *relocations) {
   if (!table_is_present(table) || table.size.value == 0) {
     return {};
@@ -452,7 +514,7 @@ ParseError read_relocation_table(const uint8_t *data,
                      "relocation uses an unknown AMDGPU type " +
                          std::to_string(relocation.type));
     }
-    if (relocation.symbol_index >= symbol_count) {
+    if (relocation.symbol_index >= symbols.size()) {
       return failure(ParseErrorCode::RelocationSymbolOutOfBounds,
                      entry_offset + 8,
                      "relocation symbol index is outside DT_HASH bounds");
@@ -462,6 +524,20 @@ ParseError read_relocation_table(const uint8_t *data,
       return failure(ParseErrorCode::InvalidRelocationTable, entry_offset + 8,
                      "relative relocation prefix contains a non-relative "
                      "entry");
+    }
+    if (relocation_uses_symbol(relocation.type)) {
+      const DynamicSymbol &symbol = symbols[relocation.symbol_index];
+      if (!symbol.defined) {
+        return failure(ParseErrorCode::InvalidRelocationTable, entry_offset + 8,
+                       "relocation references an undefined dynamic symbol");
+      }
+      if (!symbol.absolute &&
+          !virtual_address_in_memory(code_object, symbol.value, 1)) {
+        return failure(ParseErrorCode::InvalidRelocationTable, entry_offset + 8,
+                       "relocation symbol is outside PT_LOAD memory ranges");
+      }
+      relocation.symbol_value = symbol.value;
+      relocation.symbol_is_absolute = symbol.absolute;
     }
     const uint64_t width = relocation_width(relocation.type);
     if (width != 0 &&
@@ -508,14 +584,20 @@ ParseError append_relocations(const uint8_t *data, size_t size,
   if (error.code != ParseErrorCode::None) {
     return error;
   }
+  std::vector<DynamicSymbol> symbols;
+  error =
+      read_dynamic_symbols(data, code_object, dynamic, symbol_count, &symbols);
+  if (error.code != ParseErrorCode::None) {
+    return error;
+  }
   error = read_relocation_table(data, code_object, dynamic.rel,
-                                RelocationEncoding::Rel, symbol_count,
+                                RelocationEncoding::Rel, symbols,
                                 &load_plan->relocations);
   if (error.code != ParseErrorCode::None) {
     return error;
   }
   error = read_relocation_table(data, code_object, dynamic.rela,
-                                RelocationEncoding::Rela, symbol_count,
+                                RelocationEncoding::Rela, symbols,
                                 &load_plan->relocations);
   if (error.code != ParseErrorCode::None) {
     return error;

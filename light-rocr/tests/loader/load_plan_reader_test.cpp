@@ -17,13 +17,16 @@ constexpr size_t kDynamicOffset = 0x100;
 constexpr size_t kRelaOffset = 0x220;
 constexpr size_t kRelOffset = 0x240;
 constexpr size_t kHashOffset = 0x280;
+constexpr size_t kSymbolTableOffset = 0x2a0;
 constexpr uint64_t kRelocationTarget = 0x2d0;
 
 constexpr int64_t kDynamicPltRelocationSize = 2;
 constexpr int64_t kDynamicHash = 4;
+constexpr int64_t kDynamicSymbolTable = 6;
 constexpr int64_t kDynamicRela = 7;
 constexpr int64_t kDynamicRelaSize = 8;
 constexpr int64_t kDynamicRelaEntrySize = 9;
+constexpr int64_t kDynamicSymbolEntrySize = 11;
 constexpr int64_t kDynamicRel = 17;
 constexpr int64_t kDynamicRelSize = 18;
 constexpr int64_t kDynamicRelEntrySize = 19;
@@ -136,6 +139,8 @@ make_elf(const std::vector<DynamicEntry> &dynamic_entries = {},
 
   write_u32(&bytes, kHashOffset, 1);
   write_u32(&bytes, kHashOffset + 4, 2);
+  write_u16(&bytes, kSymbolTableOffset + 24 + 6, 1);
+  write_u64(&bytes, kSymbolTableOffset + 24 + 8, 0x600);
   return bytes;
 }
 
@@ -161,6 +166,8 @@ std::vector<DynamicEntry> rela_entries(uint64_t size = 24,
   if (include_hash) {
     entries.emplace_back(kDynamicHash, kHashOffset);
   }
+  entries.emplace_back(kDynamicSymbolTable, kSymbolTableOffset);
+  entries.emplace_back(kDynamicSymbolEntrySize, 24);
   return entries;
 }
 
@@ -171,6 +178,8 @@ std::vector<DynamicEntry> rel_entries(uint64_t size = 16,
       {kDynamicRelSize, size},
       {kDynamicRelEntrySize, entry_size},
       {kDynamicHash, kHashOffset},
+      {kDynamicSymbolTable, kSymbolTableOffset},
+      {kDynamicSymbolEntrySize, 24},
   };
 }
 
@@ -324,6 +333,9 @@ void rela_plan(TestContext *context) {
     context->expect(relocation.type == 3, "unexpected relocation type");
     context->expect(relocation.symbol_index == 1,
                     "unexpected relocation symbol index");
+    context->expect(relocation.symbol_value == 0x600 &&
+                        !relocation.symbol_is_absolute,
+                    "unexpected relocation symbol value");
     context->expect(relocation.addend == -7, "unexpected relocation addend");
   }
 }
@@ -347,7 +359,7 @@ void rel_plan(TestContext *context) {
 
 void rel_and_rela_plan(TestContext *context) {
   auto entries = rel_entries();
-  entries.pop_back();
+  entries.resize(3);
   const auto rela = rela_entries();
   entries.insert(entries.end(), rela.begin(), rela.end());
   auto bytes = make_elf(entries);
@@ -446,7 +458,7 @@ void relocation_table_out_of_bounds(TestContext *context) {
 void overlapping_relocation_tables(TestContext *context) {
   auto entries = rel_entries();
   entries[0].second = kRelaOffset;
-  entries.pop_back();
+  entries.resize(3);
   const auto rela = rela_entries();
   entries.insert(entries.end(), rela.begin(), rela.end());
   const auto bytes = make_elf(entries);
@@ -483,9 +495,50 @@ void relocation_symbol_out_of_bounds(TestContext *context) {
                light_rocr::loader::ParseErrorCode::RelocationSymbolOutOfBounds);
 }
 
+void missing_symbol_table_for_relocations(TestContext *context) {
+  auto entries = rela_entries();
+  entries.resize(entries.size() - 2);
+  auto bytes = make_elf(entries);
+  write_relocation(&bytes, kRelaOffset, kRelocationTarget, 3, 1, true);
+  expect_error(context, bytes,
+               light_rocr::loader::ParseErrorCode::InvalidRelocationTable);
+}
+
+void undefined_relocation_symbol(TestContext *context) {
+  auto bytes = make_elf(rela_entries());
+  write_u16(&bytes, kSymbolTableOffset + 24 + 6, 0);
+  write_relocation(&bytes, kRelaOffset, kRelocationTarget, 3, 1, true);
+  expect_error(context, bytes,
+               light_rocr::loader::ParseErrorCode::InvalidRelocationTable);
+}
+
+void relocation_symbol_outside_image(TestContext *context) {
+  auto bytes = make_elf(rela_entries());
+  write_u64(&bytes, kSymbolTableOffset + 24 + 8, 0x400);
+  write_relocation(&bytes, kRelaOffset, kRelocationTarget, 3, 1, true);
+  expect_error(context, bytes,
+               light_rocr::loader::ParseErrorCode::InvalidRelocationTable);
+}
+
+void absolute_relocation_symbol(TestContext *context) {
+  auto bytes = make_elf(rela_entries());
+  write_u16(&bytes, kSymbolTableOffset + 24 + 6, 0xfff1);
+  write_u64(&bytes, kSymbolTableOffset + 24 + 8, 0x12345678);
+  write_relocation(&bytes, kRelaOffset, kRelocationTarget, 3, 1, true);
+  const auto result =
+      light_rocr::loader::parse_code_object(bytes.data(), bytes.size());
+  context->expect(static_cast<bool>(result), result.error.message);
+  context->expect(
+      result.code_object.load_plan.relocations.size() == 1 &&
+          result.code_object.load_plan.relocations[0].symbol_is_absolute &&
+          result.code_object.load_plan.relocations[0].symbol_value ==
+              0x12345678,
+      "absolute relocation symbol was not preserved");
+}
+
 void relocation_target_out_of_bounds(TestContext *context) {
   auto bytes = make_elf(rela_entries());
-  write_relocation(&bytes, kRelaOffset, 0x400, 3, 0, true);
+  write_relocation(&bytes, kRelaOffset, 0x400, 3, 1, true);
   expect_error(context, bytes,
                light_rocr::loader::ParseErrorCode::RelocationTargetOutOfBounds);
 }
@@ -519,7 +572,9 @@ void known_relocation_types(TestContext *context) {
                                       7, 8, 9, 10, 11, 13, 14};
   for (const uint32_t type : known_types) {
     auto bytes = make_elf(rela_entries());
-    write_relocation(&bytes, kRelaOffset, kRelocationTarget, type, 0, true);
+    const uint32_t symbol_index = type == 0 || type == 13 ? 0 : 1;
+    write_relocation(&bytes, kRelaOffset, kRelocationTarget, type, symbol_index,
+                     true);
     const auto result =
         light_rocr::loader::parse_code_object(bytes.data(), bytes.size());
     context->expect(static_cast<bool>(result),
@@ -580,6 +635,11 @@ int main() {
       {"unknown_relocation_type", unknown_relocation_type},
       {"failed_plan_is_transactional", failed_plan_is_transactional},
       {"relocation_symbol_out_of_bounds", relocation_symbol_out_of_bounds},
+      {"missing_symbol_table_for_relocations",
+       missing_symbol_table_for_relocations},
+      {"undefined_relocation_symbol", undefined_relocation_symbol},
+      {"relocation_symbol_outside_image", relocation_symbol_outside_image},
+      {"absolute_relocation_symbol", absolute_relocation_symbol},
       {"relocation_target_out_of_bounds", relocation_target_out_of_bounds},
       {"missing_hash_for_relocations", missing_hash_for_relocations},
       {"relative_count_exceeds_table", relative_count_exceeds_table},

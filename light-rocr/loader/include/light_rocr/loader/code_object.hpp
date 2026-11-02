@@ -183,6 +183,8 @@ struct Relocation {
   uint32_t type = 0;
   uint32_t symbol_index = 0;
   int64_t addend = 0;
+  uint64_t symbol_value = 0;
+  bool symbol_is_absolute = false;
 };
 
 struct LoadPlan {

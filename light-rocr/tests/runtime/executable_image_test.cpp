@@ -110,17 +110,72 @@ void materializes_without_a_transport(TestContext *context) {
                   "general virtual-address translation failed");
 }
 
+void applies_dynamic_relocations(TestContext *context) {
+  std::vector<uint8_t> bytes = make_hsaco_bytes();
+  auto object = make_code_object();
+
+  light_rocr::loader::Relocation absolute;
+  absolute.encoding = light_rocr::loader::RelocationEncoding::Rela;
+  absolute.target_virtual_address = 0x1800;
+  absolute.type = 3;
+  absolute.symbol_index = 1;
+  absolute.addend = 4;
+  absolute.symbol_value = 0x1820;
+  object.load_plan.relocations.push_back(absolute);
+
+  light_rocr::loader::Relocation relative;
+  relative.encoding = light_rocr::loader::RelocationEncoding::Rel;
+  relative.target_virtual_address = 0x1808;
+  relative.type = 13;
+  relative.symbol_index = 0;
+  uint64_t relative_addend = 0x1040;
+  std::memcpy(bytes.data() + 0x68, &relative_addend, sizeof(relative_addend));
+  object.load_plan.relocations.push_back(relative);
+
+  light_rocr::loader::Relocation absolute_symbol;
+  absolute_symbol.encoding = light_rocr::loader::RelocationEncoding::Rela;
+  absolute_symbol.target_virtual_address = 0x1810;
+  absolute_symbol.type = 3;
+  absolute_symbol.symbol_index = 2;
+  absolute_symbol.addend = 8;
+  absolute_symbol.symbol_value = 0x12345000;
+  absolute_symbol.symbol_is_absolute = true;
+  object.load_plan.relocations.push_back(absolute_symbol);
+
+  std::vector<uint8_t> destination(4096, 0xa5);
+  const auto materialized = light_rocr::runtime::materialize_executable_image(
+      bytes.data(), bytes.size(), object, destination.data(),
+      destination.size(), kGpuAddress);
+  context->expect(static_cast<bool>(materialized), materialized.status.message);
+
+  uint64_t absolute_value = 0;
+  uint64_t relative_value = 0;
+  uint64_t absolute_symbol_value = 0;
+  std::memcpy(&absolute_value, destination.data() + 0x800,
+              sizeof(absolute_value));
+  std::memcpy(&relative_value, destination.data() + 0x808,
+              sizeof(relative_value));
+  std::memcpy(&absolute_symbol_value, destination.data() + 0x810,
+              sizeof(absolute_symbol_value));
+  context->expect(absolute_value == 0x200824,
+                  "ABS64 relocation produced the wrong GPU address");
+  context->expect(relative_value == 0x200040,
+                  "RELATIVE64 REL relocation produced the wrong GPU address");
+  context->expect(absolute_symbol_value == 0x12345008,
+                  "absolute-symbol relocation used the image load bias");
+}
+
 void rejects_invalid_plan_before_writing(TestContext *context) {
   const std::vector<uint8_t> bytes = make_hsaco_bytes();
   auto object = make_code_object();
   object.load_plan.relocations.push_back(
-      {light_rocr::loader::RelocationEncoding::Rela, 0x1800, 3, 0, 0});
+      {light_rocr::loader::RelocationEncoding::Rela, 0x1800, 4, 1, 0});
   auto requirements = light_rocr::runtime::executable_image_requirements(
       bytes.data(), bytes.size(), object);
   context->expect(
       requirements.status.error ==
           light_rocr::runtime::ExecutableImageError::UnsupportedRelocations,
-      "non-empty relocation plan was accepted");
+      "unsupported static relocation was accepted");
 
   object = make_code_object();
   object.load_plan.copies[0].file_offset = bytes.size();
@@ -226,6 +281,7 @@ static_assert(std::is_nothrow_move_assignable_v<
 int main() {
   const std::vector<std::pair<std::string, TestFunction>> tests = {
       {"materializes_without_a_transport", materializes_without_a_transport},
+      {"applies_dynamic_relocations", applies_dynamic_relocations},
       {"rejects_invalid_plan_before_writing",
        rejects_invalid_plan_before_writing},
       {"rejects_invalid_destination_and_mapping",

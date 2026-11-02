@@ -141,6 +141,18 @@ bool add_signed_offset(uint64_t base, int64_t offset, uint64_t *result) {
   return true;
 }
 
+uint64_t relocation_width(uint32_t type) {
+  switch (type) {
+  case 0:
+    return 0;
+  case 3:
+  case 13:
+    return 8;
+  default:
+    return 0;
+  }
+}
+
 ExecutableImageStatus validate_plan(const uint8_t *hsaco, size_t hsaco_size,
                                     const loader::CodeObject &code_object,
                                     uint64_t *allocation_size) {
@@ -179,12 +191,6 @@ ExecutableImageStatus validate_plan(const uint8_t *hsaco, size_t hsaco_size,
     return failure(ExecutableImageError::ImageSizeOverflow,
                    "executable image does not fit in the host address space");
   }
-  if (!plan.relocations.empty()) {
-    return failure(
-        ExecutableImageError::UnsupportedRelocations,
-        "executable image materialization does not yet apply relocations");
-  }
-
   if (!operations_are_ordered(
           plan.copies,
           [](const loader::LoadCopy &copy) { return copy.virtual_address; },
@@ -224,6 +230,39 @@ ExecutableImageStatus validate_plan(const uint8_t *hsaco, size_t hsaco_size,
                      "load-plan zero-fill range is outside the image");
     }
     (void)destination_offset;
+  }
+
+  uint64_t previous_relocation_end = 0;
+  bool has_previous_relocation = false;
+  for (const loader::Relocation &relocation : plan.relocations) {
+    const uint64_t width = relocation_width(relocation.type);
+    if (relocation.type != 0 && width == 0) {
+      return failure(ExecutableImageError::UnsupportedRelocations,
+                     "AMDHSA executable images support only NONE, ABS64, "
+                     "and RELATIVE64 dynamic relocations");
+    }
+    if (relocation.type == 13 && relocation.symbol_index != 0) {
+      return failure(ExecutableImageError::UnsupportedRelocations,
+                     "RELATIVE64 relocation must use STN_UNDEF");
+    }
+    if (width == 0) {
+      continue;
+    }
+    uint64_t relocation_offset = 0;
+    uint64_t relocation_end = 0;
+    if (!image_offset(plan, relocation.target_virtual_address, width,
+                      &relocation_offset) ||
+        !checked_add(relocation.target_virtual_address, width,
+                     &relocation_end) ||
+        (has_previous_relocation &&
+         relocation.target_virtual_address < previous_relocation_end)) {
+      return failure(ExecutableImageError::UnsupportedRelocations,
+                     "relocation targets are invalid, overlapping, or "
+                     "out of order");
+    }
+    (void)relocation_offset;
+    previous_relocation_end = relocation_end;
+    has_previous_relocation = true;
   }
   if (copy_and_zero_fill_ranges_overlap(plan)) {
     return failure(ExecutableImageError::InvalidZeroFillOperation,
@@ -408,6 +447,23 @@ materialize_executable_image(const uint8_t *hsaco, size_t hsaco_size,
             {}};
   }
   (void)allocation_end;
+  if (gpu_address < code_object.load_plan.image_virtual_address) {
+    return {failure(ExecutableImageError::GpuAddressOverflow,
+                    "executable GPU address is below its ELF image base"),
+            {}};
+  }
+  const uint64_t load_bias =
+      gpu_address - code_object.load_plan.image_virtual_address;
+  for (const loader::Relocation &relocation :
+       code_object.load_plan.relocations) {
+    uint64_t symbol_address = 0;
+    if (relocation.type == 3 && !relocation.symbol_is_absolute &&
+        !checked_add(load_bias, relocation.symbol_value, &symbol_address)) {
+      return {failure(ExecutableImageError::GpuAddressOverflow,
+                      "relocation symbol address overflows uint64"),
+              {}};
+    }
+  }
 
   std::vector<ResolvedKernel> kernels;
   kernels.reserve(code_object.kernels.size());
@@ -443,6 +499,31 @@ materialize_executable_image(const uint8_t *hsaco, size_t hsaco_size,
         zero_fill.virtual_address - code_object.load_plan.image_virtual_address;
     std::memset(image + static_cast<size_t>(destination_offset), 0,
                 static_cast<size_t>(zero_fill.size));
+  }
+
+  for (const loader::Relocation &relocation :
+       code_object.load_plan.relocations) {
+    if (relocation.type == 0) {
+      continue;
+    }
+    const size_t target_offset =
+        static_cast<size_t>(relocation.target_virtual_address -
+                            code_object.load_plan.image_virtual_address);
+    uint64_t addend = static_cast<uint64_t>(relocation.addend);
+    if (relocation.encoding == loader::RelocationEncoding::Rel) {
+      std::memcpy(&addend, image + target_offset, sizeof(addend));
+    }
+
+    uint64_t value = 0;
+    if (relocation.type == 13) {
+      value = load_bias + addend;
+    } else {
+      const uint64_t symbol_address = relocation.symbol_is_absolute
+                                          ? relocation.symbol_value
+                                          : load_bias + relocation.symbol_value;
+      value = symbol_address + addend;
+    }
+    std::memcpy(image + target_offset, &value, sizeof(value));
   }
 
   return {{},
