@@ -118,8 +118,8 @@ attention RMSNorm
   -> 10 x down projection
   -> fused residual add + advance device state
   -> [final layer only] final RMSNorm
-  -> 32 x fused LM head projection + partition-local Top-1
-  -> reduce 32 candidates to the sampled token and logit
+  -> worker-matched fused LM head projection + partition-local Top-1
+  -> reduce partition-local candidates to the sampled token and logit
   -> record token, test EOS/limit, and select the next token embedding
 ```
 
@@ -154,7 +154,9 @@ directly back to Attention;
 the final layer enters a third Program containing final RMSNorm, LM head, and
 Top-1 reduction. The LM head never materializes the full logits vector: each
 of at most 32 tasks emits one local token/logit candidate and the successor
-reduces only those candidates. Its final task records the sampled token, tests
+reduces only those candidates. The resident path matches its partition count
+to the admitted worker count, avoiding a second partition on only a subset of
+workers. Its final task records the sampled token, tests
 EOS and the maximum-token limit, and, when execution continues, copies the
 selected full-vocabulary embedding row into the shared hidden buffer. It also
 advances token position and KV length before returning to Attention. The tail
@@ -163,10 +165,12 @@ loop remains inside one kernel launch.
 
 The host-driven and HIP Graph baselines invoke the same arithmetic in nine
 kernels per decoder layer plus four kernels per token for final RMSNorm,
-partitioned LM head, Top-1 reduction, and embedding feedback. The HIP Graph
-path loads the same HSACO as LRRT and records that fixed kernel sequence as one
-graph submission. By default the benchmark uses deterministic model-shaped
-decoder weights and a 4,096-row synthetic LM head.
+partitioned LM head, Top-1 reduction, and embedding feedback. Their LM head
+retains the independently faster 32-way split instead of inheriting the
+resident worker count. The HIP Graph path loads the same HSACO as LRRT and
+records that fixed kernel sequence as one graph submission. By default the
+benchmark uses deterministic model-shaped decoder weights and a 4,096-row
+synthetic LM head.
 Pass `--weights` with an existing Qwen layer bundle manifest to run both paths
 with its checkpoint attention norm, Q/K/V weights and biases, output projection,
 `mlp_norm`, gate, up, and down tensors. Pass `--tail` to load an existing
@@ -262,30 +266,32 @@ python3 tools/convert_qwen_layer.py \
   --output /tmp/lrrt-qwen-full
 
 ./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
-  --weights-dir /tmp/lrrt-qwen-full --layers 24
+  --weights-dir /tmp/lrrt-qwen-full --layers 24 \
+  --csv /tmp/qwen-fair-lm-partitions.csv
 ```
 
-On the gfx1101 AMD Radeon RX 7800 XT reference system, one 20-trial
-interleaved run produced:
+With 20 resident workers, the resident LM head uses 20 partitions while the
+host-driven and HIP Graph baselines use 32. On the gfx1101 AMD Radeon RX 7800
+XT reference system, one 20-trial interleaved run produced:
 
 | Path | Device mean | Device p50 | Wall mean | Wall p50 |
 | --- | ---: | ---: | ---: | ---: |
-| Dynamic resident graph | 129.888 ms | 129.932 ms | 130.216 ms | 130.277 ms |
-| Compiled resident graph | 128.851 ms | 129.000 ms | 129.115 ms | 129.112 ms |
-| Host-driven LRRT | 115.713 ms | 115.722 ms | 117.281 ms | 117.280 ms |
-| HIP Graph | 113.262 ms | 113.256 ms | 113.282 ms | 113.275 ms |
+| Dynamic resident graph | 180.942 ms | 171.402 ms | 181.058 ms | 171.468 ms |
+| Compiled resident graph | 177.727 ms | 169.763 ms | 177.861 ms | 169.810 ms |
+| Host-driven LRRT | 167.601 ms | 161.237 ms | 169.464 ms | 163.057 ms |
+| HIP Graph | 164.748 ms | 157.581 ms | 164.772 ms | 157.604 ms |
 
 The compiled-resident, host-driven, and HIP Graph correctness checks produced
 matching graph state, hidden values, Q/K/V values, KV caches, final normalized
 values, decode state, and generated token sequence. The compiled resident path
-was `0.88x` the HIP Graph device and wall throughput in this run: its device
-time was 15.589 ms, or 13.8%, longer. The host-driven path was 2.2% longer in
-device time and 3.5% longer in wall time than HIP Graph. This result does not
-support a resident speedup claim yet; it identifies resident scheduling and
-megakernel execution overhead as the next measurement target. The first-token
-hidden input remains deterministic benchmark data rather than a tokenized
-prompt, while subsequent autoregressive steps use checkpoint embedding rows
-selected entirely on the device.
+was `0.93x` the HIP Graph device and wall throughput in this run: its mean
+device time was 12.979 ms, or 7.9%, longer. All 20 paired trials favored HIP
+Graph; the paired device-time gap ranged from 8.595 ms to 25.506 ms. This is
+the comparison baseline for further optimization: partition tuning for the
+resident path may not reduce the baseline's independently selected
+parallelism. The first-token hidden input remains deterministic benchmark data
+rather than a tokenized prompt, while subsequent autoregressive steps use
+checkpoint embedding rows selected entirely on the device.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` and
 `lrrt.mini_model_tail_weights` FP32 formats. Autoregressive feedback requires
@@ -302,6 +308,6 @@ Device-resident decode state, embedding feedback, EOS termination, and
 resource-aware worker admission are now implemented. The benchmark compares
 the whole loop against HIP Graph and host-driven LRRT using the same HSACO,
 weights, buffer layout, and arithmetic. The full-checkpoint comparison is now
-recorded above. The next milestone is to profile the 15.589 ms compiled
-resident gap against HIP Graph and separate scheduler overhead from megakernel
-execution effects.
+recorded above with independently selected LM-head partition counts. The next
+milestone is a persistent-specific optimization that closes the measured
+12.979 ms device-time gap without weakening the HIP Graph baseline.

@@ -652,14 +652,19 @@ int main(int argc, char **argv) {
       tail_source = "deterministic synthetic f32";
     }
     validate_tail_shape(tail_weights);
-    const uint32_t lm_head_partitions =
+    const uint32_t resident_lm_head_partitions =
+        std::min({tail_weights.vocab, qd::kMaximumLmHeadPartitions, workers});
+    const uint32_t baseline_lm_head_partitions =
         std::min(tail_weights.vocab, qd::kMaximumLmHeadPartitions);
     DeviceTailWeights device_tail_weights(device, tail_weights);
 
-    const ProgramTable qwen_program_table =
-        make_qwen_decoder_programs(tail_weights.vocab, lm_head_partitions);
-    const std::vector<sg::Task> &tasks = qwen_program_table.tasks;
-    const std::vector<sg::Program> &programs = qwen_program_table.programs;
+    const ProgramTable resident_program_table = make_qwen_decoder_programs(
+        tail_weights.vocab, resident_lm_head_partitions);
+    const ProgramTable baseline_program_table = make_qwen_decoder_programs(
+        tail_weights.vocab, baseline_lm_head_partitions);
+    const std::vector<sg::Task> &tasks = resident_program_table.tasks;
+    const std::vector<sg::Program> &programs = resident_program_table.programs;
+    const std::vector<sg::Task> &baseline_tasks = baseline_program_table.tasks;
     const uint32_t layers = options.layers;
     const uint32_t graph_steps = steps * layers;
     const uint32_t maximum_graph_steps = graph_steps * 2u;
@@ -817,18 +822,18 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer host_state(device, sizeof(sg::State));
     lrrt::DeviceBuffer resident_final_normalized(device, qd::kHiddenSize *
                                                              sizeof(float));
-    lrrt::DeviceBuffer resident_partial_max_values(device, lm_head_partitions *
-                                                               sizeof(float));
+    lrrt::DeviceBuffer resident_partial_max_values(
+        device, resident_lm_head_partitions * sizeof(float));
     lrrt::DeviceBuffer resident_partial_max_indices(
-        device, lm_head_partitions * sizeof(uint32_t));
+        device, resident_lm_head_partitions * sizeof(uint32_t));
     lrrt::DeviceBuffer resident_decode_state(device, sizeof(qd::DecodeState));
     lrrt::DeviceBuffer resident_output_tokens(device, steps * sizeof(uint32_t));
     lrrt::DeviceBuffer host_final_normalized(device,
                                              qd::kHiddenSize * sizeof(float));
-    lrrt::DeviceBuffer host_partial_max_values(device, lm_head_partitions *
-                                                           sizeof(float));
-    lrrt::DeviceBuffer host_partial_max_indices(device, lm_head_partitions *
-                                                            sizeof(uint32_t));
+    lrrt::DeviceBuffer host_partial_max_values(
+        device, baseline_lm_head_partitions * sizeof(float));
+    lrrt::DeviceBuffer host_partial_max_indices(
+        device, baseline_lm_head_partitions * sizeof(uint32_t));
     lrrt::DeviceBuffer host_decode_state(device, sizeof(qd::DecodeState));
     lrrt::DeviceBuffer host_output_tokens(device, steps * sizeof(uint32_t));
     lrrt::DeviceBuffer resident_tail_context_buffer(device,
@@ -845,7 +850,7 @@ int main(int argc, char **argv) {
         static_cast<qd::DecodeState *>(resident_decode_state.data()),
         static_cast<uint32_t *>(resident_output_tokens.data()),
         tail_weights.vocab,
-        lm_head_partitions,
+        resident_lm_head_partitions,
         static_cast<uint32_t>(tail_weights.token_ids.size()),
         0,
     };
@@ -859,7 +864,7 @@ int main(int argc, char **argv) {
         static_cast<qd::DecodeState *>(host_decode_state.data()),
         static_cast<uint32_t *>(host_output_tokens.data()),
         tail_weights.vocab,
-        lm_head_partitions,
+        baseline_lm_head_partitions,
         static_cast<uint32_t>(tail_weights.token_ids.size()),
         0,
     };
@@ -945,7 +950,11 @@ int main(int argc, char **argv) {
     dynamic_executor.bind_context(resident_context_buffer.data());
     resident_executor.bind_context(resident_context_buffer.data());
     profile_executor.bind_context(resident_context_buffer.data());
-    const auto *device_tasks = resident_executor.device_tasks();
+    lrrt::DeviceBuffer baseline_task_buffer(device, baseline_tasks.size() *
+                                                        sizeof(sg::Task));
+    lrrt::copy_to_device(baseline_task_buffer, baseline_tasks);
+    const auto *baseline_device_tasks =
+        static_cast<const sg::Task *>(baseline_task_buffer.data());
     struct HostLaunch {
       sg::HostStepArgs args;
       lr_launch_config_t config;
@@ -957,7 +966,7 @@ int main(int argc, char **argv) {
       launches.push_back({
           {
               static_cast<sg::State *>(host_state.data()),
-              device_tasks + stage.task_begin,
+              baseline_device_tasks + stage.task_begin,
               stage.task_count,
               0,
               host_context_buffer.data(),
@@ -969,12 +978,14 @@ int main(int argc, char **argv) {
       append_host_launch(decoder_host_launches, stage);
     }
     append_host_launch(tail_host_launches, {qd::kDecoderTaskCount, 1});
-    append_host_launch(tail_host_launches,
-                       {qd::kDecoderTaskCount + 1u, lm_head_partitions});
-    append_host_launch(tail_host_launches,
-                       {qd::kDecoderTaskCount + 1u + lm_head_partitions, 1});
-    append_host_launch(tail_host_launches,
-                       {qd::kDecoderTaskCount + 2u + lm_head_partitions, 1});
+    append_host_launch(tail_host_launches, {qd::kDecoderTaskCount + 1u,
+                                            baseline_lm_head_partitions});
+    append_host_launch(
+        tail_host_launches,
+        {qd::kDecoderTaskCount + 1u + baseline_lm_head_partitions, 1});
+    append_host_launch(
+        tail_host_launches,
+        {qd::kDecoderTaskCount + 2u + baseline_lm_head_partitions, 1});
     const auto launch_host_decode = [&] {
       for (uint32_t step = 0; step < steps; ++step) {
         for (uint32_t layer = 0; layer < layers; ++layer) {
@@ -1211,7 +1222,8 @@ int main(int argc, char **argv) {
             static_cast<uint32_t>(programs.size()) - 1u ||
         final_state.executed_tasks !=
             static_cast<uint64_t>(graph_steps) * qd::kDecoderTaskCount +
-                static_cast<uint64_t>(steps) * (lm_head_partitions + 3u)) {
+                static_cast<uint64_t>(steps) *
+                    (resident_lm_head_partitions + 3u)) {
       throw std::runtime_error(
           "resident graph did not stop at the device predicate");
     }
@@ -1387,8 +1399,10 @@ int main(int argc, char **argv) {
     std::printf("Model tail:               %s\n", tail_source.c_str());
     std::printf("Tasks per layer:          %u dependency-scheduled tasks\n",
                 qd::kDecoderTaskCount);
-    std::printf("Tail tasks:               %u (%u LM head partitions)\n",
-                lm_head_partitions + 3u, lm_head_partitions);
+    std::printf("Resident tail tasks:      %u (%u LM head partitions)\n",
+                resident_lm_head_partitions + 3u, resident_lm_head_partitions);
+    std::printf("Baseline tail tasks:      %u (%u LM head partitions)\n",
+                baseline_lm_head_partitions + 3u, baseline_lm_head_partitions);
     std::printf("Programs:                 %zu (attention -> FFN -> "
                 "conditional LM head)\n",
                 programs.size());
