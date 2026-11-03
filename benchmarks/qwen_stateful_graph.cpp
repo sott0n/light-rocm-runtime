@@ -3,8 +3,15 @@
 #include "executor/stateful_graph/resident_executor.hpp"
 #include "lrrt/lrrt.hpp"
 
+#ifndef LRRT_ENABLE_HIP_GRAPH
+#define LRRT_ENABLE_HIP_GRAPH 0
+#endif
+
+#if LRRT_ENABLE_HIP_GRAPH
+#include "benchmarks/qwen_hip_graph.hpp"
+#endif
+
 #include <algorithm>
-#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -45,17 +52,12 @@ struct BenchmarkPath {
   lrrt::DeviceBuffer *values;
   std::function<void()> setup;
   std::function<void()> submit;
+  std::function<void()> synchronize;
+  std::function<void()> record_start;
+  std::function<void()> record_end;
+  std::function<double()> elapsed_time_ns;
   Measurement measurement;
 };
-
-constexpr std::array<std::array<size_t, 3>, 6> kExecutionOrders = {{
-    {0, 1, 2},
-    {1, 2, 0},
-    {2, 0, 1},
-    {2, 1, 0},
-    {1, 0, 2},
-    {0, 2, 1},
-}};
 
 struct Options {
   uint32_t steps = 64;
@@ -172,52 +174,63 @@ double median(std::vector<double> samples) {
   return (samples[middle - 1] + samples[middle]) * 0.5;
 }
 
-template <size_t PathCount>
-void warm_up_interleaved(lrrt::Device device, uint32_t trials,
+std::vector<std::vector<size_t>> execution_orders(size_t path_count) {
+  std::vector<std::vector<size_t>> orders;
+  orders.reserve(path_count * 2);
+  for (size_t reverse = 0; reverse < 2; ++reverse) {
+    for (size_t offset = 0; offset < path_count; ++offset) {
+      std::vector<size_t> order(path_count);
+      for (size_t position = 0; position < path_count; ++position) {
+        order[position] = reverse
+                              ? (offset + path_count - position) % path_count
+                              : (offset + position) % path_count;
+      }
+      orders.push_back(std::move(order));
+    }
+  }
+  return orders;
+}
+
+void warm_up_interleaved(uint32_t trials,
                          const std::vector<float> &initial_values,
-                         std::array<BenchmarkPath, PathCount> &paths) {
-  static_assert(PathCount == 3);
+                         std::vector<BenchmarkPath> &paths) {
+  const std::vector<std::vector<size_t>> orders =
+      execution_orders(paths.size());
   for (uint32_t trial = 0; trial < trials; ++trial) {
-    for (const size_t path_index :
-         kExecutionOrders[trial % kExecutionOrders.size()]) {
+    for (const size_t path_index : orders[trial % orders.size()]) {
       BenchmarkPath &path = paths[path_index];
       lrrt::copy_to_device(*path.values, initial_values);
       path.setup();
       path.submit();
-      device.synchronize();
+      path.synchronize();
     }
   }
 }
 
-template <size_t PathCount>
-void measure_interleaved(lrrt::Device device, uint32_t trials,
+void measure_interleaved(uint32_t trials,
                          const std::vector<float> &initial_values,
-                         std::array<BenchmarkPath, PathCount> &paths) {
-  static_assert(PathCount == 3);
-  lrrt::Event start(device);
-  lrrt::Event end(device);
+                         std::vector<BenchmarkPath> &paths) {
+  const std::vector<std::vector<size_t>> orders =
+      execution_orders(paths.size());
   for (BenchmarkPath &path : paths) {
     path.measurement.device_samples_ns.reserve(trials);
     path.measurement.wall_samples_ns.reserve(trials);
   }
   for (uint32_t trial = 0; trial < trials; ++trial) {
-    for (const size_t path_index :
-         kExecutionOrders[trial % kExecutionOrders.size()]) {
+    for (const size_t path_index : orders[trial % orders.size()]) {
       BenchmarkPath &path = paths[path_index];
       lrrt::copy_to_device(*path.values, initial_values);
       path.setup();
-      start.record();
+      path.record_start();
       const auto begin = Clock::now();
       path.submit();
-      end.record();
-      end.synchronize();
-      start.synchronize();
+      path.record_end();
+      path.synchronize();
       path.measurement.wall_samples_ns.push_back(static_cast<double>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
                                                                begin)
               .count()));
-      path.measurement.device_samples_ns.push_back(
-          static_cast<double>(lrrt::elapsed_time_ns(start, end)));
+      path.measurement.device_samples_ns.push_back(path.elapsed_time_ns());
     }
   }
 }
@@ -540,7 +553,9 @@ int main(int argc, char **argv) {
       return 1;
     }
     lrrt::Device device = runtime.open_device(0);
-    lrrt::Module module(device, read_file(LRRT_QWEN_STATEFUL_GRAPH_HSACO));
+    const std::vector<unsigned char> code_object =
+        read_file(LRRT_QWEN_STATEFUL_GRAPH_HSACO);
+    lrrt::Module module(device, code_object);
     lrrt::Kernel resident =
         module.kernel("qwen_stateful_graph_resident_kernel");
     lrrt::Kernel compiled_resident =
@@ -917,6 +932,10 @@ int main(int argc, char **argv) {
         }
       }
     };
+#if LRRT_ENABLE_HIP_GRAPH
+    lrrt::benchmarks::QwenHipGraph hip_graph(code_object, decoder_host_launches,
+                                             tail_host_launches, steps, layers);
+#endif
 
     const auto initialize_host_state =
         [&](uint32_t program_index, uint32_t max_steps, uint32_t stop_value) {
@@ -1015,31 +1034,65 @@ int main(int argc, char **argv) {
       throw std::runtime_error("resident graph did not stop at EOS");
     }
 
-    std::array<BenchmarkPath, 3> benchmark_paths = {{
-        {&resident_values,
-         [&] {
-           initialize_decode_state(resident_decode_state, steps);
-           dynamic_executor.initialize(0, maximum_graph_steps, 1);
-         },
-         [&] { dynamic_executor.launch(); },
-         {}},
-        {&resident_values,
-         [&] {
-           initialize_decode_state(resident_decode_state, steps);
-           resident_executor.initialize(0, maximum_graph_steps, 1);
-         },
-         [&] { resident_executor.launch(); },
-         {}},
-        {&host_values,
-         [&] {
-           initialize_decode_state(host_decode_state, steps);
-           initialize_host_state(0, maximum_graph_steps, 1);
-         },
-         launch_host_decode,
-         {}},
-    }};
-    warm_up_interleaved(device, kWarmupTrials, initial_values, benchmark_paths);
-    measure_interleaved(device, trials, initial_values, benchmark_paths);
+    lrrt::Event benchmark_start(device);
+    lrrt::Event benchmark_end(device);
+    std::vector<BenchmarkPath> benchmark_paths;
+    benchmark_paths.reserve(4);
+    const auto append_lrrt_path = [&](lrrt::DeviceBuffer &values,
+                                      std::function<void()> setup,
+                                      std::function<void()> submit) {
+      benchmark_paths.push_back({
+          &values,
+          std::move(setup),
+          std::move(submit),
+          [&] { device.synchronize(); },
+          [&] { benchmark_start.record(); },
+          [&] { benchmark_end.record(); },
+          [&] {
+            return static_cast<double>(
+                lrrt::elapsed_time_ns(benchmark_start, benchmark_end));
+          },
+          {},
+      });
+    };
+    append_lrrt_path(
+        resident_values,
+        [&] {
+          initialize_decode_state(resident_decode_state, steps);
+          dynamic_executor.initialize(0, maximum_graph_steps, 1);
+        },
+        [&] { dynamic_executor.launch(); });
+    append_lrrt_path(
+        resident_values,
+        [&] {
+          initialize_decode_state(resident_decode_state, steps);
+          resident_executor.initialize(0, maximum_graph_steps, 1);
+        },
+        [&] { resident_executor.launch(); });
+    append_lrrt_path(
+        host_values,
+        [&] {
+          initialize_decode_state(host_decode_state, steps);
+          initialize_host_state(0, maximum_graph_steps, 1);
+        },
+        launch_host_decode);
+#if LRRT_ENABLE_HIP_GRAPH
+    benchmark_paths.push_back({
+        &host_values,
+        [&] {
+          initialize_decode_state(host_decode_state, steps);
+          initialize_host_state(0, maximum_graph_steps, 1);
+        },
+        [&] { hip_graph.launch(); },
+        [&] { hip_graph.synchronize(); },
+        [&] { hip_graph.record_start(); },
+        [&] { hip_graph.record_end(); },
+        [&] { return hip_graph.elapsed_time_ns(); },
+        {},
+    });
+#endif
+    warm_up_interleaved(kWarmupTrials, initial_values, benchmark_paths);
+    measure_interleaved(trials, initial_values, benchmark_paths);
     const Measurement &dynamic_measurement = benchmark_paths[0].measurement;
     const Measurement &resident_measurement = benchmark_paths[1].measurement;
     const Measurement &host_measurement = benchmark_paths[2].measurement;
@@ -1052,6 +1105,44 @@ int main(int argc, char **argv) {
     const double resident_wall_mean =
         mean(resident_measurement.wall_samples_ns);
     const double host_wall_mean = mean(host_measurement.wall_samples_ns);
+#if LRRT_ENABLE_HIP_GRAPH
+    const Measurement &hip_measurement = benchmark_paths[3].measurement;
+    const double hip_device_mean = mean(hip_measurement.device_samples_ns);
+    const double hip_wall_mean = mean(hip_measurement.wall_samples_ns);
+
+    initialize_decode_state(host_decode_state, steps);
+    initialize_host_state(0, maximum_graph_steps, 1);
+    lrrt::copy_to_device(host_values, initial_values);
+    hip_graph.launch();
+    hip_graph.synchronize();
+    sg::State hip_state{};
+    lrrt::copy_to_host(&hip_state, host_state, sizeof(hip_state));
+    std::vector<float> hip_result(qd::kHiddenSize);
+    std::vector<float> hip_q_result(qd::kQuerySize);
+    std::vector<float> hip_k_result(qd::kKvSize);
+    std::vector<float> hip_v_result(qd::kKvSize);
+    std::vector<float> hip_key_cache_result(layers * cache_elements);
+    std::vector<float> hip_value_cache_result(layers * cache_elements);
+    std::vector<float> hip_final_normalized_result(qd::kHiddenSize);
+    qd::DecodeState hip_decode{};
+    std::vector<uint32_t> hip_tokens(steps);
+    lrrt::copy_to_host(hip_result, host_values);
+    lrrt::copy_to_host(hip_q_result, host_query);
+    lrrt::copy_to_host(hip_k_result, host_key);
+    lrrt::copy_to_host(hip_v_result, host_value);
+    lrrt::copy_to_host(hip_key_cache_result, host_key_cache);
+    lrrt::copy_to_host(hip_value_cache_result, host_value_cache);
+    lrrt::copy_to_host(hip_final_normalized_result, host_final_normalized);
+    lrrt::copy_to_host(&hip_decode, host_decode_state, sizeof(hip_decode));
+    lrrt::copy_to_host(hip_tokens.data(), host_output_tokens,
+                       hip_tokens.size() * sizeof(uint32_t));
+#endif
+
+    initialize_decode_state(host_decode_state, steps);
+    initialize_host_state(0, maximum_graph_steps, 1);
+    lrrt::copy_to_device(host_values, initial_values);
+    launch_host_decode();
+    device.synchronize();
 
     const sg::State final_state = resident_executor.read_state();
     if (final_state.status != static_cast<uint32_t>(sg::Status::complete) ||
@@ -1072,11 +1163,19 @@ int main(int argc, char **argv) {
         final_host_state.step != graph_steps) {
       throw std::runtime_error("host-driven graph did not advance its state");
     }
+#if LRRT_ENABLE_HIP_GRAPH
+    if (std::memcmp(&hip_state, &final_host_state, sizeof(hip_state)) != 0) {
+      throw std::runtime_error("HIP Graph state mismatch");
+    }
+#endif
     std::vector<float> resident_result(qd::kHiddenSize);
     std::vector<float> host_result(qd::kHiddenSize);
     lrrt::copy_to_host(resident_result, resident_values);
     lrrt::copy_to_host(host_result, host_values);
     verify_values("hidden", resident_result, host_result);
+#if LRRT_ENABLE_HIP_GRAPH
+    verify_values("HIP Graph hidden", hip_result, host_result);
+#endif
     std::vector<float> resident_q_result(qd::kQuerySize);
     std::vector<float> host_q_result(qd::kQuerySize);
     std::vector<float> resident_k_result(qd::kKvSize);
@@ -1092,6 +1191,11 @@ int main(int argc, char **argv) {
     verify_values("query", resident_q_result, host_q_result);
     verify_values("key", resident_k_result, host_k_result);
     verify_values("value", resident_v_result, host_v_result);
+#if LRRT_ENABLE_HIP_GRAPH
+    verify_values("HIP Graph query", hip_q_result, host_q_result);
+    verify_values("HIP Graph key", hip_k_result, host_k_result);
+    verify_values("HIP Graph value", hip_v_result, host_v_result);
+#endif
     std::vector<float> resident_key_cache_result(layers * cache_elements);
     std::vector<float> host_key_cache_result(resident_key_cache_result.size());
     std::vector<float> resident_value_cache_result(
@@ -1106,6 +1210,12 @@ int main(int argc, char **argv) {
                   host_key_cache_result);
     verify_values("value cache", resident_value_cache_result,
                   host_value_cache_result);
+#if LRRT_ENABLE_HIP_GRAPH
+    verify_values("HIP Graph key cache", hip_key_cache_result,
+                  host_key_cache_result);
+    verify_values("HIP Graph value cache", hip_value_cache_result,
+                  host_value_cache_result);
+#endif
     std::vector<float> resident_final_normalized_result(qd::kHiddenSize);
     std::vector<float> host_final_normalized_result(qd::kHiddenSize);
     lrrt::copy_to_host(resident_final_normalized_result,
@@ -1113,6 +1223,10 @@ int main(int argc, char **argv) {
     lrrt::copy_to_host(host_final_normalized_result, host_final_normalized);
     verify_values("final normalized", resident_final_normalized_result,
                   host_final_normalized_result);
+#if LRRT_ENABLE_HIP_GRAPH
+    verify_values("HIP Graph final normalized", hip_final_normalized_result,
+                  host_final_normalized_result);
+#endif
     qd::DecodeState resident_decode{};
     qd::DecodeState host_decode{};
     lrrt::copy_to_host(&resident_decode, resident_decode_state,
@@ -1127,6 +1241,11 @@ int main(int argc, char **argv) {
             0) {
       throw std::runtime_error("resident decode state mismatch");
     }
+#if LRRT_ENABLE_HIP_GRAPH
+    if (std::memcmp(&hip_decode, &host_decode, sizeof(hip_decode)) != 0) {
+      throw std::runtime_error("HIP Graph decode state mismatch");
+    }
+#endif
     std::vector<uint32_t> resident_tokens(steps);
     std::vector<uint32_t> host_tokens(steps);
     lrrt::copy_to_host(resident_tokens.data(), resident_output_tokens,
@@ -1136,6 +1255,11 @@ int main(int argc, char **argv) {
     if (resident_tokens != host_tokens) {
       throw std::runtime_error("resident generated token sequence mismatch");
     }
+#if LRRT_ENABLE_HIP_GRAPH
+    if (hip_tokens != host_tokens) {
+      throw std::runtime_error("HIP Graph generated token sequence mismatch");
+    }
+#endif
     const uint32_t resident_top_token = resident_decode.sampled_token;
     const uint32_t host_top_token = host_decode.sampled_token;
     const float resident_top_logit = resident_decode.sampled_logit;
@@ -1147,6 +1271,10 @@ int main(int argc, char **argv) {
         std::fabs(resident_top_logit - host_top_logit) > logit_tolerance) {
       throw std::runtime_error("resident top-1 result mismatch");
     }
+    const size_t host_kernel_count =
+        static_cast<size_t>(steps) *
+        (static_cast<size_t>(layers) * decoder_host_launches.size() +
+         tail_host_launches.size());
 
     std::printf("\nLRRT Qwen Stateful Graph Benchmark\n");
     std::printf("==================================\n");
@@ -1184,34 +1312,51 @@ int main(int argc, char **argv) {
                 resident_top_token, resident_top_logit, tail_weights.vocab);
     std::printf("Measured trials:          %u per path (interleaved)\n\n",
                 trials);
-    std::printf("%-24s %14s %14s %14s %14s %12s\n", "Path", "Device avg us",
-                "Device p50 us", "Wall avg us", "Wall p50 us", "Launches");
-    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %12u\n",
+    std::printf("%-24s %14s %14s %14s %14s %10s %10s\n", "Path",
+                "Device avg us", "Device p50 us", "Wall avg us", "Wall p50 us",
+                "Submits", "Kernels");
+    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %10u %10u\n",
                 "Dynamic resident graph", dynamic_device_mean / 1.0e3,
                 median(dynamic_measurement.device_samples_ns) / 1.0e3,
                 dynamic_wall_mean / 1.0e3,
-                median(dynamic_measurement.wall_samples_ns) / 1.0e3, 1u);
-    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %12u\n",
+                median(dynamic_measurement.wall_samples_ns) / 1.0e3, 1u, 1u);
+    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %10u %10u\n",
                 "Compiled resident graph", resident_device_mean / 1.0e3,
                 median(resident_measurement.device_samples_ns) / 1.0e3,
                 resident_wall_mean / 1.0e3,
-                median(resident_measurement.wall_samples_ns) / 1.0e3, 1u);
-    std::printf(
-        "%-24s %14.3f %14.3f %14.3f %14.3f %12u\n", "Host-driven steps",
-        host_device_mean / 1.0e3,
-        median(host_measurement.device_samples_ns) / 1.0e3,
-        host_wall_mean / 1.0e3,
-        median(host_measurement.wall_samples_ns) / 1.0e3,
-        steps * (layers * static_cast<uint32_t>(decoder_host_launches.size()) +
-                 static_cast<uint32_t>(tail_host_launches.size())));
+                median(resident_measurement.wall_samples_ns) / 1.0e3, 1u, 1u);
+    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %10zu %10zu\n",
+                "Host-driven steps", host_device_mean / 1.0e3,
+                median(host_measurement.device_samples_ns) / 1.0e3,
+                host_wall_mean / 1.0e3,
+                median(host_measurement.wall_samples_ns) / 1.0e3,
+                host_kernel_count, host_kernel_count);
+#if LRRT_ENABLE_HIP_GRAPH
+    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %10u %10zu\n", "HIP Graph",
+                hip_device_mean / 1.0e3,
+                median(hip_measurement.device_samples_ns) / 1.0e3,
+                hip_wall_mean / 1.0e3,
+                median(hip_measurement.wall_samples_ns) / 1.0e3, 1u,
+                hip_graph.node_count());
+#endif
     std::printf("\nDynamic device speedup:  %.2fx\n",
                 host_device_mean / dynamic_device_mean);
     std::printf("Compiled device speedup: %.2fx\n",
                 host_device_mean / resident_device_mean);
     std::printf("Compiled wall speedup:   %.2fx\n",
                 host_wall_mean / resident_wall_mean);
-    std::printf("Compiled over dynamic:   %.2fx\n\n",
+    std::printf("Compiled over dynamic:   %.2fx\n",
                 dynamic_device_mean / resident_device_mean);
+#if LRRT_ENABLE_HIP_GRAPH
+    std::printf("HIP Graph over host:     %.2fx device, %.2fx wall\n",
+                host_device_mean / hip_device_mean,
+                host_wall_mean / hip_wall_mean);
+    std::printf("Compiled over HIP Graph: %.2fx device, %.2fx wall\n\n",
+                hip_device_mean / resident_device_mean,
+                hip_wall_mean / resident_wall_mean);
+#else
+    std::printf("\n");
+#endif
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

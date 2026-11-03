@@ -161,10 +161,12 @@ advances token position and KV length before returning to Attention. The tail
 Program then evaluates the device predicate, so the complete autoregressive
 loop remains inside one kernel launch.
 
-The host-driven baseline invokes the same arithmetic in nine launches per
-decoder layer plus four launches per token for final RMSNorm, partitioned LM
-head, Top-1 reduction, and embedding feedback. By default the benchmark uses
-deterministic model-shaped decoder weights and a 4,096-row synthetic LM head.
+The host-driven and HIP Graph baselines invoke the same arithmetic in nine
+kernels per decoder layer plus four kernels per token for final RMSNorm,
+partitioned LM head, Top-1 reduction, and embedding feedback. The HIP Graph
+path loads the same HSACO as LRRT and records that fixed kernel sequence as one
+graph submission. By default the benchmark uses deterministic model-shaped
+decoder weights and a 4,096-row synthetic LM head.
 Pass `--weights` with an existing Qwen layer bundle manifest to run both paths
 with its checkpoint attention norm, Q/K/V weights and biases, output projection,
 `mlp_norm`, gate, up, and down tensors. Pass `--tail` to load an existing
@@ -188,16 +190,21 @@ When `--weights-dir` contains `model_tail/weights.json`, the benchmark loads it
 automatically.
 
 Four tokens through 24 layers plus the synthetic LM head use one compiled
-resident launch versus 880 host launches. Absolute timings remain sensitive to
-GPU clocks and concurrent load, and the full-vocabulary 24-layer checkpoint
-comparison must be rerun before making a whole-model speedup claim.
+resident kernel, one HIP Graph submission containing 880 kernel nodes, or 880
+host-driven LRRT submissions. The HIP Graph baseline is enabled for the ROCr
+backend when CMake finds the HIP headers and `libamdhip64`; other builds retain
+the three LRRT paths. Absolute timings remain sensitive to GPU clocks and
+concurrent load, and the full-vocabulary 24-layer checkpoint comparison must be
+rerun before making a whole-model speedup claim.
 
-The benchmark measures the dynamic resident, compiled resident, and host-driven
-paths once per trial in an interleaved six-permutation cycle. This balances each
-path across the first, middle, and last measurement position instead of timing
-all trials for one path before moving to the next. Both mean and median device
-event time and synchronized wall time are reported; initialization and input
-reset remain outside the timed region for every path.
+The benchmark measures each available path once per trial in an interleaved
+forward-and-reverse rotation cycle. This balances paths across measurement
+positions instead of timing all trials for one path before moving to the next.
+LRRT paths use LRRT events and HIP Graph uses HIP events on its graph stream.
+Both mean and median device event time and synchronized wall time are reported;
+initialization and input reset remain outside the timed region for every path.
+The result, decode state, generated tokens, and KV cache from HIP Graph are
+checked against the host-driven LRRT path after measurement.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` and
 `lrrt.mini_model_tail_weights` FP32 formats. Autoregressive feedback requires
@@ -211,6 +218,8 @@ gfx1101, with no private segment, dynamic stack, or register spills.
 ## Qwen path
 
 Device-resident decode state, embedding feedback, EOS termination, and
-resource-aware worker admission are now implemented. The next milestone is a
-whole-loop comparison against HIP Graph and host-driven LRRT using the same
-full-checkpoint weights and arithmetic.
+resource-aware worker admission are now implemented. The benchmark compares
+the whole loop against HIP Graph and host-driven LRRT using the same HSACO,
+weights, buffer layout, and arithmetic. The next milestone is to rerun that
+comparison with a full checkpoint bundle and analyze the remaining resident
+scheduling overhead.

@@ -15,6 +15,34 @@ target_link_libraries(lrrt_qwen_stateful_graph_benchmark PRIVATE lrrt::lrrt)
 target_include_directories(
   lrrt_qwen_stateful_graph_benchmark PRIVATE "${PROJECT_SOURCE_DIR}"
 )
+find_path(
+  LRRT_HIP_INCLUDE_DIR
+  NAMES hip/hip_runtime_api.h
+  HINTS /opt/rocm/include
+)
+find_library(
+  LRRT_HIP_RUNTIME_LIBRARY
+  NAMES amdhip64
+  HINTS /opt/rocm/lib /opt/rocm/lib64
+)
+if(
+  LRRT_SELECTED_BACKEND STREQUAL "rocr"
+  AND LRRT_HIP_INCLUDE_DIR
+  AND LRRT_HIP_RUNTIME_LIBRARY
+)
+  target_compile_definitions(
+    lrrt_qwen_stateful_graph_benchmark
+    PRIVATE LRRT_ENABLE_HIP_GRAPH=1 __HIP_PLATFORM_AMD__=1
+  )
+  target_include_directories(
+    lrrt_qwen_stateful_graph_benchmark PRIVATE "${LRRT_HIP_INCLUDE_DIR}"
+  )
+  target_link_libraries(
+    lrrt_qwen_stateful_graph_benchmark PRIVATE "${LRRT_HIP_RUNTIME_LIBRARY}"
+  )
+else()
+  message(STATUS "Qwen HIP Graph baseline disabled")
+endif()
 
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
