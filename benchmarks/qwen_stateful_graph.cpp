@@ -49,6 +49,7 @@ struct Measurement {
 };
 
 struct BenchmarkPath {
+  const char *name;
   lrrt::DeviceBuffer *values;
   std::function<void()> setup;
   std::function<void()> submit;
@@ -59,6 +60,14 @@ struct BenchmarkPath {
   Measurement measurement;
 };
 
+struct TrialSample {
+  uint32_t trial;
+  size_t position;
+  const char *path;
+  double device_ns;
+  double wall_ns;
+};
+
 struct Options {
   uint32_t steps = 64;
   uint32_t trials = 20;
@@ -67,6 +76,7 @@ struct Options {
   const char *weights_path = nullptr;
   const char *weights_dir = nullptr;
   const char *tail_path = nullptr;
+  const char *csv_path = nullptr;
   bool profile_resident = false;
 };
 
@@ -134,6 +144,13 @@ Options parse_options(int argc, char **argv) {
       options.profile_resident = true;
       continue;
     }
+    if (std::strcmp(argv[index], "--csv") == 0) {
+      if (++index >= argc) {
+        throw std::invalid_argument("--csv requires an output path");
+      }
+      options.csv_path = argv[index];
+      continue;
+    }
     if (argv[index][0] == '-') {
       throw std::invalid_argument(std::string("unknown option: ") +
                                   argv[index]);
@@ -153,7 +170,8 @@ Options parse_options(int argc, char **argv) {
           "usage: lrrt_qwen_stateful_graph_benchmark [steps] [trials] "
           "[workers] "
           "[--weights weights.json | --weights-dir directory --layers N] "
-          "[--tail model_tail/weights.json] [--profile-resident]");
+          "[--tail model_tail/weights.json] [--profile-resident] "
+          "[--csv output.csv]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -214,15 +232,19 @@ void warm_up_interleaved(uint32_t trials,
 
 void measure_interleaved(uint32_t trials,
                          const std::vector<float> &initial_values,
-                         std::vector<BenchmarkPath> &paths) {
+                         std::vector<BenchmarkPath> &paths,
+                         std::vector<TrialSample> &trial_samples) {
   const std::vector<std::vector<size_t>> orders =
       execution_orders(paths.size());
+  trial_samples.reserve(static_cast<size_t>(trials) * paths.size());
   for (BenchmarkPath &path : paths) {
     path.measurement.device_samples_ns.reserve(trials);
     path.measurement.wall_samples_ns.reserve(trials);
   }
   for (uint32_t trial = 0; trial < trials; ++trial) {
-    for (const size_t path_index : orders[trial % orders.size()]) {
+    const std::vector<size_t> &order = orders[trial % orders.size()];
+    for (size_t position = 0; position < order.size(); ++position) {
+      const size_t path_index = order[position];
       BenchmarkPath &path = paths[path_index];
       lrrt::copy_to_device(*path.values, initial_values);
       path.setup();
@@ -231,12 +253,34 @@ void measure_interleaved(uint32_t trials,
       path.submit();
       path.record_end();
       path.synchronize();
-      path.measurement.wall_samples_ns.push_back(static_cast<double>(
+      const double wall_ns = static_cast<double>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
                                                                begin)
-              .count()));
-      path.measurement.device_samples_ns.push_back(path.elapsed_time_ns());
+              .count());
+      const double device_ns = path.elapsed_time_ns();
+      path.measurement.wall_samples_ns.push_back(wall_ns);
+      path.measurement.device_samples_ns.push_back(device_ns);
+      trial_samples.push_back(
+          {trial + 1u, position + 1u, path.name, device_ns, wall_ns});
     }
+  }
+}
+
+void write_trial_csv(const char *path,
+                     const std::vector<TrialSample> &trial_samples) {
+  std::ofstream output(path);
+  if (!output) {
+    throw std::runtime_error(std::string("failed to open CSV output: ") + path);
+  }
+  output << "trial,position,path,device_ns,wall_ns\n";
+  output.precision(std::numeric_limits<double>::max_digits10);
+  for (const TrialSample &sample : trial_samples) {
+    output << sample.trial << ',' << sample.position << ',' << sample.path
+           << ',' << sample.device_ns << ',' << sample.wall_ns << '\n';
+  }
+  if (!output) {
+    throw std::runtime_error(std::string("failed to write CSV output: ") +
+                             path);
   }
 }
 
@@ -1049,39 +1093,40 @@ int main(int argc, char **argv) {
     lrrt::Event benchmark_end(device);
     std::vector<BenchmarkPath> benchmark_paths;
     benchmark_paths.reserve(4);
-    const auto append_lrrt_path = [&](lrrt::DeviceBuffer &values,
-                                      std::function<void()> setup,
-                                      std::function<void()> submit) {
-      benchmark_paths.push_back({
-          &values,
-          std::move(setup),
-          std::move(submit),
-          [&] { device.synchronize(); },
-          [&] { benchmark_start.record(); },
-          [&] { benchmark_end.record(); },
-          [&] {
-            return static_cast<double>(
-                lrrt::elapsed_time_ns(benchmark_start, benchmark_end));
-          },
-          {},
-      });
-    };
+    const auto append_lrrt_path =
+        [&](const char *name, lrrt::DeviceBuffer &values,
+            std::function<void()> setup, std::function<void()> submit) {
+          benchmark_paths.push_back({
+              name,
+              &values,
+              std::move(setup),
+              std::move(submit),
+              [&] { device.synchronize(); },
+              [&] { benchmark_start.record(); },
+              [&] { benchmark_end.record(); },
+              [&] {
+                return static_cast<double>(
+                    lrrt::elapsed_time_ns(benchmark_start, benchmark_end));
+              },
+              {},
+          });
+        };
     append_lrrt_path(
-        resident_values,
+        "dynamic_resident", resident_values,
         [&] {
           initialize_decode_state(resident_decode_state, steps);
           dynamic_executor.initialize(0, maximum_graph_steps, 1);
         },
         [&] { dynamic_executor.launch(); });
     append_lrrt_path(
-        resident_values,
+        "compiled_resident", resident_values,
         [&] {
           initialize_decode_state(resident_decode_state, steps);
           resident_executor.initialize(0, maximum_graph_steps, 1);
         },
         [&] { resident_executor.launch(); });
     append_lrrt_path(
-        host_values,
+        "host_lrrt", host_values,
         [&] {
           initialize_decode_state(host_decode_state, steps);
           initialize_host_state(0, maximum_graph_steps, 1);
@@ -1089,6 +1134,7 @@ int main(int argc, char **argv) {
         launch_host_decode);
 #if LRRT_ENABLE_HIP_GRAPH
     benchmark_paths.push_back({
+        "hip_graph",
         &host_values,
         [&] {
           initialize_decode_state(host_decode_state, steps);
@@ -1103,7 +1149,8 @@ int main(int argc, char **argv) {
     });
 #endif
     warm_up_interleaved(kWarmupTrials, initial_values, benchmark_paths);
-    measure_interleaved(trials, initial_values, benchmark_paths);
+    std::vector<TrialSample> trial_samples;
+    measure_interleaved(trials, initial_values, benchmark_paths, trial_samples);
     const Measurement &dynamic_measurement = benchmark_paths[0].measurement;
     const Measurement &resident_measurement = benchmark_paths[1].measurement;
     const Measurement &host_measurement = benchmark_paths[2].measurement;
@@ -1319,6 +1366,9 @@ int main(int argc, char **argv) {
         static_cast<size_t>(steps) *
         (static_cast<size_t>(layers) * decoder_host_launches.size() +
          tail_host_launches.size());
+    if (options.csv_path) {
+      write_trial_csv(options.csv_path, trial_samples);
+    }
 
     std::printf("\nLRRT Qwen Stateful Graph Benchmark\n");
     std::printf("==================================\n");
@@ -1356,6 +1406,9 @@ int main(int argc, char **argv) {
                 resident_top_token, resident_top_logit, tail_weights.vocab);
     std::printf("Measured trials:          %u per path (interleaved)\n\n",
                 trials);
+    if (options.csv_path) {
+      std::printf("Trial CSV:                %s\n\n", options.csv_path);
+    }
     std::printf("%-24s %14s %14s %14s %14s %10s %10s\n", "Path",
                 "Device avg us", "Device p50 us", "Wall avg us", "Wall p50 us",
                 "Submits", "Kernels");

@@ -205,6 +205,21 @@ initialization and input reset remain outside the timed region for every path.
 The result, decode state, generated tokens, and KV cache from HIP Graph are
 checked against the host-driven LRRT path after measurement.
 
+Pass `--csv` to preserve every measured invocation in execution order for
+offline analysis and reproducibility:
+
+```sh
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
+  --weights-dir /tmp/lrrt-qwen-full --layers 24 \
+  --csv /tmp/qwen-stateful-trials.csv
+```
+
+The CSV contains one row per path per measured trial with the one-based
+`trial` and `position`, a stable path identifier, and raw `device_ns` and
+`wall_ns` values. Warmup launches are excluded. Reading rows in file order
+reconstructs the forward-and-reverse rotation used by the interleaved
+measurement.
+
 Pass `--profile-resident` to run a separate compiled-resident scheduler probe
 after the normal interleaved measurement. The probe uses the same compiled
 plan, worker count, stage barriers, Program transitions, layer branches, and
