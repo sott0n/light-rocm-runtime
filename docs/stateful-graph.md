@@ -23,24 +23,31 @@ API. The target is a device-resident execution model that HIP Graph does not
 currently expose on AMD GPUs: a graph loop whose predicate is produced and
 consumed on the GPU without a host round trip.
 
-## Prototype v1
+## Prototype v2
 
-The prototype defines a 64-byte device `State` and a 32-byte `Task`
-descriptor. Up to 64 tasks express their dependencies as 64-bit masks. A fixed
-set of persistent workgroups repeatedly:
+The prototype defines a 64-byte device `State`, a 32-byte `Task`, and a 16-byte
+`Program` descriptor. Each Program selects a DAG of up to 64 tasks from a
+shared task table and names the next Program. A fixed set of persistent
+workgroups repeatedly:
 
 1. scan for a task whose dependencies are complete;
 2. atomically claim and execute that task;
 3. publish completion so dependent tasks become ready;
 4. let the final completing worker evaluate a device-side predicate; and
-5. reset the task masks for the next epoch or return.
+5. atomically publish the next Program phase or return.
 
-The masks are stored as two 32-bit atomic words so the original 32-task fast
-path remains intact. Epoch transitions use a device-side barrier across every
-admitted persistent worker before either word is reset. This prevents a worker
-from combining a claimed mask from one epoch with a completed mask from the
-next. The benchmark exercises a 64-task dependency chain through bit 63 before
-running the timed FFN graph.
+Claimed and completed masks remain pairs of 32-bit atomic words so the 32-task
+fast path stays intact. Each bounded execution phase owns a separate 20-byte
+`MaskState`, including a one-word atomic completion counter. The counter elects
+exactly one transition owner without requiring a coherent snapshot across both
+halves of a 64-task mask. Mask storage is therefore proportional to the maximum
+number of Program transitions, not model weights. Program index and phase
+generation are packed into one atomic 32-bit word. The completing worker
+publishes them together, preventing workers from combining a new Program with
+an old mask generation. Since phase mask storage is never reused during a
+launch, stale workers can only touch an obsolete phase and no grid-wide
+transition barrier is required. The benchmark exercises a 64-task dependency
+chain through bit 63 before running the timed Qwen graph.
 
 The accompanying benchmark compares one resident launch with an equivalent
 sequence of dependency-ordered host launches using kernels from the same
@@ -80,7 +87,9 @@ attention RMSNorm
   -> fused residual add + advance device state
 ```
 
-The full decoder layer consumes 57 of the scheduler's 64 task slots. The Q/K/V
+The decoder layer is represented as two device-linked Programs: a 25-task
+attention DAG followed by a 32-task FFN DAG. Together they contain the same 57
+tasks, while each phase remains below the scheduler's 64-task limit. The Q/K/V
 task maps a packed 1,152-row output range onto the three checkpoint matrices
 and fuses bias addition. This avoids three separately scheduled projection
 kinds while retaining parallel range tasks. A single successor applies Qwen's
@@ -99,13 +108,14 @@ are fused so the gate and up intermediates never enter device memory. The final
 task adds the MLP residual and updates the predicate, which terminates the
 repeated graph loop without host intervention.
 
-The opaque context can also be an array of layer contexts. At each graph epoch,
-the resident scheduler selects `contexts[state.step % layer_count]`; weights
-and KV-cache slices remain layer-local while activation scratch is shared. The
-token position is `state.step / layer_count`, and only the final layer's
-residual task advances the token predicate. Consequently, a 24-layer decoder
-stack and multiple token iterations remain inside one kernel launch rather
-than returning to the host between layers.
+The opaque context can also be an array of layer contexts. After each completed
+FFN phase, the resident scheduler selects
+`contexts[state.step % layer_count]`; weights and KV-cache slices remain
+layer-local while activation scratch is shared. The token position is
+`state.step / layer_count`, and only the final layer's residual task advances
+the token predicate. Consequently, a 24-layer decoder stack and multiple token
+iterations remain inside one kernel launch rather than returning to the host
+between layers.
 
 The host-driven baseline invokes the same arithmetic in nine stage launches
 per step. By default the benchmark uses deterministic model-shaped weights,
@@ -129,25 +139,28 @@ root and select the layer count:
 
 The host-driven comparison launches the same nine arithmetic stages for every
 layer and token. Four tokens through 24 layers therefore use one resident
-launch versus 864 host launches. On the local gfx1101 test system, that fixed
-real-checkpoint workload completed 1.07--1.18x faster in both device and wall
-time across repeated runs; absolute timings remain sensitive to GPU clock and
-concurrent load.
+launch versus 864 host launches. On the local gfx1101 system, the barrier-free
+multi-Program path completed that synthetic workload 1.20x faster in both
+device and wall time. A longer 64-token, two-layer run traversed 256 Program
+phases in one launch and measured 1.08x faster than 1,152 host launches.
+Absolute timings remain sensitive to GPU clocks and concurrent load, and the
+real 24-layer checkpoint comparison must be rerun before making a whole-model
+speedup claim.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` FP32 format and
 rejects bundles whose hidden, head, KV-head, head-dimension, or intermediate
 dimensions do not match the specialized megakernel.
 
-The resident kernel uses 1,032 bytes of group memory, 40 SGPRs, and 72 VGPRs on
+The resident kernel uses 1,040 bytes of group memory, 42 SGPRs, and 72 VGPRs on
 gfx1101, with no private segment, dynamic stack, or register spills.
 
 ## Qwen path
 
 The next milestones are:
 
-1. make KV length, sampled token, and EOS explicit device-resident decode
-   state;
-2. connect final RMSNorm, LM head, sampling, and embedding around the resident
-   24-layer decoder loop;
+1. add final RMSNorm, LM head, and sampling as additional device-linked
+   Programs;
+2. make KV length, sampled token, EOS, and embedding selection explicit
+   device-resident decode state;
 3. add resource-aware worker admission from HSACO metadata; and
 4. compare a whole decode loop against HIP Graph and host-driven LRRT.

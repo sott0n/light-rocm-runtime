@@ -7,10 +7,25 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 5;
+constexpr uint32_t kAbiVersion = 6;
 constexpr uint32_t kWorkerThreads = 256;
 constexpr uint32_t kMaximumTasks = 64;
+constexpr uint32_t kMaximumPrograms = 256;
 constexpr uint32_t kNoTask = UINT32_MAX;
+constexpr uint32_t kProgramIndexBits = 8;
+constexpr uint32_t kProgramIndexMask = (1u << kProgramIndexBits) - 1u;
+
+constexpr uint32_t make_phase(uint32_t generation, uint32_t program_index) {
+  return (generation << kProgramIndexBits) | program_index;
+}
+
+constexpr uint32_t phase_generation(uint32_t phase) {
+  return phase >> kProgramIndexBits;
+}
+
+constexpr uint32_t phase_program(uint32_t phase) {
+  return phase & kProgramIndexMask;
+}
 
 enum class Status : uint32_t {
   ready = 0,
@@ -21,26 +36,21 @@ enum class Status : uint32_t {
 };
 
 // Mutable device-resident control state. Workers atomically claim tasks whose
-// dependency masks are satisfied. The worker completing the final task resets
-// the masks, advances the epoch, and evaluates the loop predicate.
+// dependency masks are satisfied. The worker winning a completed phase
+// advances the Program and evaluates the loop predicate.
 struct alignas(64) State {
   uint32_t abi_version;
   uint32_t status;
-  uint32_t epoch;
-  uint32_t claimed_mask;
-  uint32_t completed_mask;
+  // Generation and active Program are published together with make_phase().
+  uint32_t phase;
   uint32_t step;
   uint32_t max_steps;
   uint32_t stop_value;
-  uint32_t task_count;
   uint32_t error_code;
+  uint32_t worker_count;
   uint64_t executed_tasks;
   uint32_t predicate_value;
-  uint32_t claimed_mask_high;
-  uint32_t completed_mask_high;
-  // High 16 bits hold the admitted worker count. Low 16 bits are the
-  // device-side epoch-transition barrier count.
-  uint32_t transition_barrier;
+  uint32_t reserved[5];
 };
 
 // A deliberately small task descriptor. Opcodes interpret the range and two
@@ -57,9 +67,37 @@ struct alignas(32) Task {
   uint32_t reserved;
 };
 
+enum ProgramFlags : uint32_t {
+  kProgramAdvancesStep = 1u << 0u,
+  kProgramEvaluatesPredicate = 1u << 1u,
+};
+
+// A program selects one task DAG from a contiguous task table. The completing
+// worker publishes next_program in the packed phase word, so no host dispatch
+// is needed between execution phases.
+struct alignas(16) Program {
+  uint32_t task_offset;
+  uint32_t task_count;
+  uint32_t next_program;
+  uint32_t flags;
+};
+
+struct MaskState {
+  uint32_t claimed_mask;
+  uint32_t completed_mask;
+  uint32_t claimed_mask_high;
+  uint32_t completed_mask_high;
+  uint32_t completed_count;
+};
+
 struct ResidentArgs {
   State *state;
   const Task *tasks;
+  const Program *programs;
+  MaskState *phase_states;
+  uint32_t program_count;
+  uint32_t task_count;
+  uint32_t phase_state_count;
   void *context;
 };
 
@@ -73,11 +111,15 @@ struct HostStepArgs {
 
 static_assert(std::is_standard_layout_v<State>);
 static_assert(std::is_standard_layout_v<Task>);
+static_assert(std::is_standard_layout_v<Program>);
+static_assert(std::is_standard_layout_v<MaskState>);
 static_assert(std::is_standard_layout_v<ResidentArgs>);
 static_assert(std::is_standard_layout_v<HostStepArgs>);
 static_assert(sizeof(State) == 64);
 static_assert(sizeof(Task) == 32);
-static_assert(sizeof(ResidentArgs) == 24);
+static_assert(sizeof(Program) == 16);
+static_assert(sizeof(MaskState) == 20);
+static_assert(sizeof(ResidentArgs) == 56);
 static_assert(sizeof(HostStepArgs) == 32);
 
 } // namespace lrrt::stateful_graph

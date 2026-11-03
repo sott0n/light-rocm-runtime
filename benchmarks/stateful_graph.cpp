@@ -176,8 +176,14 @@ sg::Task make_task(qd::Opcode opcode, uint64_t dependency_mask, uint32_t begin,
   };
 }
 
-std::vector<sg::Task> make_qwen_decoder_tasks() {
+struct ProgramTable {
   std::vector<sg::Task> tasks;
+  std::vector<sg::Program> programs;
+};
+
+ProgramTable make_qwen_decoder_programs() {
+  ProgramTable table;
+  std::vector<sg::Task> &tasks = table.tasks;
   tasks.reserve(qd::kTaskCount);
   tasks.push_back(make_task(qd::Opcode::attention_rmsnorm_f32, 0, 0,
                             qd::kHiddenSize, float_bits(1.0e-6f)));
@@ -210,42 +216,45 @@ std::vector<sg::Task> make_qwen_decoder_tasks() {
     attention_mask |= static_cast<uint64_t>(1) << task_index;
   }
 
-  uint64_t attention_output_mask = 0;
   for (uint32_t partition = 0; partition < qd::kAttentionOutputPartitions;
        ++partition) {
-    const uint32_t task_index = static_cast<uint32_t>(tasks.size());
     tasks.push_back(make_task(
         qd::Opcode::attention_output_residual_f32, attention_mask,
         qd::kHiddenSize * partition / qd::kAttentionOutputPartitions,
         qd::kHiddenSize * (partition + 1u) / qd::kAttentionOutputPartitions));
-    attention_output_mask |= static_cast<uint64_t>(1) << task_index;
   }
+  if (tasks.size() != qd::kAttentionTaskCount) {
+    throw std::runtime_error("Qwen attention program layout mismatch");
+  }
+  table.programs.push_back({0, qd::kAttentionTaskCount, 1, 0});
 
-  tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, attention_output_mask,
-                            0, qd::kHiddenSize, float_bits(1.0e-6f)));
+  const uint32_t ffn_offset = static_cast<uint32_t>(tasks.size());
+  tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, 0, 0, qd::kHiddenSize,
+                            float_bits(1.0e-6f)));
 
   uint64_t activated_mask = 0;
   for (uint32_t partition = 0; partition < qd::kFfnProjectionPartitions;
        ++partition) {
-    const uint32_t task_index = static_cast<uint32_t>(tasks.size());
-    tasks.push_back(make_task(
-        qd::Opcode::gate_up_silu_f32,
-        static_cast<uint64_t>(1) << (qd::kAttentionTaskCount),
-        qd::kIntermediateSize * partition / qd::kFfnProjectionPartitions,
-        qd::kIntermediateSize * (partition + 1u) /
-            qd::kFfnProjectionPartitions));
-    activated_mask |= static_cast<uint64_t>(1) << task_index;
+    const uint32_t local_task_index =
+        static_cast<uint32_t>(tasks.size()) - ffn_offset;
+    tasks.push_back(make_task(qd::Opcode::gate_up_silu_f32, 1u,
+                              qd::kIntermediateSize * partition /
+                                  qd::kFfnProjectionPartitions,
+                              qd::kIntermediateSize * (partition + 1u) /
+                                  qd::kFfnProjectionPartitions));
+    activated_mask |= static_cast<uint64_t>(1) << local_task_index;
   }
 
   uint64_t down_mask = 0;
   for (uint32_t partition = 0; partition < qd::kDownProjectionPartitions;
        ++partition) {
-    const uint32_t task_index = static_cast<uint32_t>(tasks.size());
+    const uint32_t local_task_index =
+        static_cast<uint32_t>(tasks.size()) - ffn_offset;
     tasks.push_back(make_task(
         qd::Opcode::down_matvec_f32, activated_mask,
         qd::kHiddenSize * partition / qd::kDownProjectionPartitions,
         qd::kHiddenSize * (partition + 1u) / qd::kDownProjectionPartitions));
-    down_mask |= static_cast<uint64_t>(1) << task_index;
+    down_mask |= static_cast<uint64_t>(1) << local_task_index;
   }
 
   tasks.push_back(make_task(qd::Opcode::residual_advance, down_mask, 0,
@@ -253,7 +262,10 @@ std::vector<sg::Task> make_qwen_decoder_tasks() {
   if (tasks.size() != qd::kTaskCount) {
     throw std::runtime_error("Qwen decoder task layout mismatch");
   }
-  return tasks;
+  table.programs.push_back(
+      {ffn_offset, qd::kFfnTaskCount, 0,
+       sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate});
+  return table;
 }
 
 std::vector<sg::Task> make_scheduler_capacity_tasks() {
@@ -389,10 +401,20 @@ int main(int argc, char **argv) {
     lrrt::Kernel resident = module.kernel("stateful_graph_resident_kernel");
     lrrt::Kernel host_step = module.kernel("stateful_graph_host_step_kernel");
 
-    const std::vector<sg::Task> tasks = make_qwen_decoder_tasks();
+    const ProgramTable qwen_program_table = make_qwen_decoder_programs();
+    const std::vector<sg::Task> &tasks = qwen_program_table.tasks;
+    const std::vector<sg::Program> &programs = qwen_program_table.programs;
     const uint32_t layers = options.layers;
     const uint32_t graph_steps = steps * layers;
     const uint32_t maximum_graph_steps = graph_steps * 2u;
+    const uint64_t phase_state_count_u64 =
+        static_cast<uint64_t>(maximum_graph_steps) * programs.size() + 1u;
+    if (phase_state_count_u64 >
+        static_cast<uint64_t>(sg::phase_generation(UINT32_MAX)) + 1u) {
+      throw std::invalid_argument("program phase count is too large");
+    }
+    const uint32_t phase_state_count =
+        static_cast<uint32_t>(phase_state_count_u64);
     const uint32_t cache_capacity = steps * 2u;
     std::vector<float> initial_values(qd::kHiddenSize);
     for (uint32_t index = 0; index < qd::kHiddenSize; ++index) {
@@ -483,8 +505,13 @@ int main(int argc, char **argv) {
       }
     }
 
-    lrrt::DeviceBuffer task_buffer(device,
-                                   sg::kMaximumTasks * sizeof(sg::Task));
+    lrrt::DeviceBuffer task_buffer(
+        device,
+        std::max<size_t>(sg::kMaximumTasks, tasks.size()) * sizeof(sg::Task));
+    lrrt::DeviceBuffer program_buffer(device,
+                                      programs.size() * sizeof(sg::Program));
+    lrrt::DeviceBuffer phase_state_buffer(
+        device, static_cast<size_t>(phase_state_count) * sizeof(sg::MaskState));
     lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
     lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer resident_values(device, qd::kHiddenSize * sizeof(float));
@@ -521,6 +548,7 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer host_projected(device, qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer host_state(device, sizeof(sg::State));
     lrrt::copy_to_device(task_buffer, tasks);
+    lrrt::copy_to_device(program_buffer, programs);
     lrrt::copy_to_device(rope_cos_buffer, rope_cos);
     lrrt::copy_to_device(rope_sin_buffer, rope_sin);
 
@@ -598,6 +626,11 @@ int main(int argc, char **argv) {
     const sg::ResidentArgs resident_args = {
         static_cast<sg::State *>(resident_state.data()),
         static_cast<const sg::Task *>(task_buffer.data()),
+        static_cast<const sg::Program *>(program_buffer.data()),
+        static_cast<sg::MaskState *>(phase_state_buffer.data()),
+        static_cast<uint32_t>(programs.size()),
+        static_cast<uint32_t>(tasks.size()),
+        phase_state_count,
         resident_context_buffer.data(),
     };
     const auto *device_tasks =
@@ -621,36 +654,45 @@ int main(int argc, char **argv) {
     }
 
     const auto initialize_state = [&](lrrt::DeviceBuffer &state_buffer,
-                                      uint32_t task_count, uint32_t max_steps,
-                                      uint32_t stop_value) {
-      const sg::State state = {
-          sg::kAbiVersion,
-          static_cast<uint32_t>(sg::Status::ready),
-          0,
-          0,
-          0,
-          0,
-          max_steps,
-          stop_value,
-          task_count,
-          0,
-          0,
-          0,
-          0,
-          0,
-          workers << 16u,
-      };
+                                      uint32_t program_index,
+                                      uint32_t max_steps, uint32_t stop_value) {
+      sg::State state{};
+      state.abi_version = sg::kAbiVersion;
+      state.status = static_cast<uint32_t>(sg::Status::ready);
+      state.phase = sg::make_phase(0, program_index);
+      state.max_steps = max_steps;
+      state.stop_value = stop_value;
+      state.worker_count = workers;
       lrrt::copy_to_device(state_buffer, &state, sizeof(state));
+      const std::vector<sg::MaskState> empty_phase_states(phase_state_count);
+      lrrt::copy_to_device(phase_state_buffer, empty_phase_states);
     };
 
     // Exercise both 64-bit mask words, including task bit 63, before timing.
     const std::vector<sg::Task> capacity_tasks =
         make_scheduler_capacity_tasks();
+    const std::vector<sg::Program> capacity_programs = {{
+        0,
+        sg::kMaximumTasks,
+        0,
+        sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate,
+    }};
+    const sg::ResidentArgs capacity_args = {
+        static_cast<sg::State *>(resident_state.data()),
+        static_cast<const sg::Task *>(task_buffer.data()),
+        static_cast<const sg::Program *>(program_buffer.data()),
+        static_cast<sg::MaskState *>(phase_state_buffer.data()),
+        static_cast<uint32_t>(capacity_programs.size()),
+        static_cast<uint32_t>(capacity_tasks.size()),
+        phase_state_count,
+        resident_context_buffer.data(),
+    };
     const std::vector<float> zero_projected(qd::kHiddenSize, 0.0f);
     lrrt::copy_to_device(task_buffer, capacity_tasks);
+    lrrt::copy_to_device(program_buffer, capacity_programs);
     lrrt::copy_to_device(resident_projected, zero_projected);
-    initialize_state(resident_state, sg::kMaximumTasks, 1, sg::kMaximumTasks);
-    lrrt::launch(resident, resident_config, resident_args);
+    initialize_state(resident_state, 0, 1, sg::kMaximumTasks);
+    lrrt::launch(resident, resident_config, capacity_args);
     device.synchronize();
     sg::State capacity_state{};
     lrrt::copy_to_host(&capacity_state, resident_state, sizeof(capacity_state));
@@ -662,16 +704,16 @@ int main(int argc, char **argv) {
     }
 
     // Exercise device-side program validation before timing. Making the root
-    // depend on the final task closes the linear chain into a cycle.
+    // depend on the final attention task closes that program into a cycle.
     std::vector<sg::Task> cyclic_tasks = tasks;
     const uint64_t final_task_mask = static_cast<uint64_t>(1)
-                                     << (qd::kTaskCount - 1u);
+                                     << (qd::kAttentionTaskCount - 1u);
     cyclic_tasks[0].dependency_mask = static_cast<uint32_t>(final_task_mask);
     cyclic_tasks[0].dependency_mask_high =
         static_cast<uint32_t>(final_task_mask >> 32u);
     lrrt::copy_to_device(task_buffer, cyclic_tasks);
-    initialize_state(resident_state, qd::kTaskCount, maximum_graph_steps,
-                     steps);
+    lrrt::copy_to_device(program_buffer, programs);
+    initialize_state(resident_state, 0, maximum_graph_steps, steps);
     lrrt::launch(resident, resident_config, resident_args);
     device.synchronize();
     sg::State invalid_state{};
@@ -684,12 +726,11 @@ int main(int argc, char **argv) {
     lrrt::copy_to_device(task_buffer, tasks);
 
     for (uint32_t trial = 0; trial < kWarmupTrials; ++trial) {
-      initialize_state(resident_state, qd::kTaskCount, maximum_graph_steps,
-                       steps);
+      initialize_state(resident_state, 0, maximum_graph_steps, steps);
       lrrt::copy_to_device(resident_values, initial_values);
       lrrt::launch(resident, resident_config, resident_args);
       device.synchronize();
-      initialize_state(host_state, qd::kTaskCount, maximum_graph_steps, steps);
+      initialize_state(host_state, 0, maximum_graph_steps, steps);
       lrrt::copy_to_device(host_values, initial_values);
       for (uint32_t step = 0; step < steps; ++step) {
         for (uint32_t layer = 0; layer < layers; ++layer) {
@@ -704,16 +745,12 @@ int main(int argc, char **argv) {
     const Measurement resident_measurement = measure(
         device, trials, resident_values, initial_values,
         [&] {
-          initialize_state(resident_state, qd::kTaskCount, maximum_graph_steps,
-                           steps);
+          initialize_state(resident_state, 0, maximum_graph_steps, steps);
         },
         [&] { lrrt::launch(resident, resident_config, resident_args); });
     const Measurement host_measurement = measure(
         device, trials, host_values, initial_values,
-        [&] {
-          initialize_state(host_state, qd::kTaskCount, maximum_graph_steps,
-                           steps);
-        },
+        [&] { initialize_state(host_state, 0, maximum_graph_steps, steps); },
         [&] {
           for (uint32_t step = 0; step < steps; ++step) {
             for (uint32_t layer = 0; layer < layers; ++layer) {
@@ -729,6 +766,10 @@ int main(int argc, char **argv) {
     if (final_state.status != static_cast<uint32_t>(sg::Status::complete) ||
         final_state.step != graph_steps ||
         final_state.predicate_value != steps ||
+        sg::phase_generation(final_state.phase) !=
+            graph_steps * static_cast<uint32_t>(programs.size()) - 1u ||
+        sg::phase_program(final_state.phase) !=
+            static_cast<uint32_t>(programs.size()) - 1u ||
         final_state.executed_tasks !=
             static_cast<uint64_t>(graph_steps) * qd::kTaskCount) {
       throw std::runtime_error(
@@ -791,6 +832,10 @@ int main(int argc, char **argv) {
                                             : "deterministic synthetic f32"));
     std::printf("Tasks per layer:          %u dependency-scheduled tasks\n",
                 qd::kTaskCount);
+    std::printf("Programs per layer:       %zu (attention -> FFN)\n",
+                programs.size());
+    std::printf("Phase-state slots:        %u x %zu bytes\n", phase_state_count,
+                sizeof(sg::MaskState));
     std::printf("Conditional tokens:       %u (max=%u)\n", steps, steps * 2u);
     std::printf("Tasks executed:           %llu\n",
                 static_cast<unsigned long long>(final_state.executed_tasks));
