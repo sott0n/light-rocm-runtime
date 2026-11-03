@@ -39,8 +39,8 @@ using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kBlockSize = sg::kWorkerThreads;
 constexpr uint32_t kWarmupTrials = 5;
-constexpr uint32_t kDefaultWorkers = 20;
-constexpr uint32_t kMaximumWorkers = 20;
+constexpr uint32_t kMaximumWorkers = sg::kMaximumResidentWorkers;
+constexpr uint32_t kDefaultWorkers = kMaximumWorkers;
 constexpr uint32_t kSyntheticVocabSize = 4096;
 
 struct Measurement {
@@ -588,12 +588,12 @@ int main(int argc, char **argv) {
     const Options options = parse_options(argc, argv);
     const uint32_t steps = options.steps;
     const uint32_t trials = options.trials;
-    const uint32_t workers = options.workers;
+    uint32_t workers = options.workers;
     if (options.layers > std::numeric_limits<uint32_t>::max() / 2u / steps) {
       throw std::invalid_argument("steps times layers is too large");
     }
     if (workers > kMaximumWorkers) {
-      throw std::invalid_argument("workers must not exceed 20");
+      throw std::invalid_argument("workers exceed resident scheduler limit");
     }
 
     lrrt::Runtime runtime;
@@ -613,6 +613,9 @@ int main(int argc, char **argv) {
         module.kernel("qwen_stateful_graph_scheduler_profile_kernel");
     lrrt::Kernel host_step =
         module.kernel("qwen_stateful_graph_host_step_kernel");
+    const sg::ResidentAdmission worker_admission =
+        sg::admit_resident_workers(device, compiled_resident, workers);
+    workers = worker_admission.worker_count;
 
     lrrt::executor::qwen::ModelTailWeights tail_weights{};
     std::string tail_source;
@@ -1384,8 +1387,10 @@ int main(int argc, char **argv) {
 
     std::printf("\nLRRT Qwen Stateful Graph Benchmark\n");
     std::printf("==================================\n");
-    std::printf("Workers:                  %u persistent workgroups\n",
-                workers);
+    std::printf("Workers:                  %u persistent workgroups "
+                "(%u requested, safe limit %u)\n",
+                workers, worker_admission.requested_worker_count,
+                worker_admission.safe_worker_limit);
     std::printf("Qwen decoder shape:       hidden=%u heads=%u kv_heads=%u "
                 "head_dim=%u intermediate=%u\n",
                 qd::kHiddenSize, qd::kAttentionHeads, qd::kKvHeads,

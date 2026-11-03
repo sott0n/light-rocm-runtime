@@ -127,6 +127,7 @@ lrrt_add_hsaco_kernel(
   qwen_stateful_graph_kernel benchmarks/qwen_stateful_graph_kernel.cpp
   QWEN_STATEFUL_GRAPH_HSACO
   -O2
+  -mcumode
   "-I${PROJECT_SOURCE_DIR}"
   DEPENDS
   "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
