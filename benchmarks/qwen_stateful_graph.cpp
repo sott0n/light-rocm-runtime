@@ -67,6 +67,7 @@ struct Options {
   const char *weights_path = nullptr;
   const char *weights_dir = nullptr;
   const char *tail_path = nullptr;
+  bool profile_resident = false;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -129,6 +130,10 @@ Options parse_options(int argc, char **argv) {
       options.tail_path = argv[index];
       continue;
     }
+    if (std::strcmp(argv[index], "--profile-resident") == 0) {
+      options.profile_resident = true;
+      continue;
+    }
     if (argv[index][0] == '-') {
       throw std::invalid_argument(std::string("unknown option: ") +
                                   argv[index]);
@@ -148,7 +153,7 @@ Options parse_options(int argc, char **argv) {
           "usage: lrrt_qwen_stateful_graph_benchmark [steps] [trials] "
           "[workers] "
           "[--weights weights.json | --weights-dir directory --layers N] "
-          "[--tail model_tail/weights.json]");
+          "[--tail model_tail/weights.json] [--profile-resident]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -560,6 +565,8 @@ int main(int argc, char **argv) {
         module.kernel("qwen_stateful_graph_resident_kernel");
     lrrt::Kernel compiled_resident =
         module.kernel("qwen_stateful_graph_compiled_kernel");
+    lrrt::Kernel scheduler_profile_kernel =
+        module.kernel("qwen_stateful_graph_scheduler_profile_kernel");
     lrrt::Kernel host_step =
         module.kernel("qwen_stateful_graph_host_step_kernel");
 
@@ -727,6 +734,9 @@ int main(int argc, char **argv) {
     sg::ResidentExecutor resident_executor(device, compiled_resident, tasks,
                                            programs, resident_config,
                                            compiled_plan);
+    sg::ResidentExecutor profile_executor(device, scheduler_profile_kernel,
+                                          tasks, programs, resident_config,
+                                          compiled_plan);
     lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
     lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer resident_values(device, qd::kHiddenSize * sizeof(float));
@@ -890,6 +900,7 @@ int main(int argc, char **argv) {
 
     dynamic_executor.bind_context(resident_context_buffer.data());
     resident_executor.bind_context(resident_context_buffer.data());
+    profile_executor.bind_context(resident_context_buffer.data());
     const auto *device_tasks = resident_executor.device_tasks();
     struct HostLaunch {
       sg::HostStepArgs args;
@@ -1271,6 +1282,39 @@ int main(int argc, char **argv) {
         std::fabs(resident_top_logit - host_top_logit) > logit_tolerance) {
       throw std::runtime_error("resident top-1 result mismatch");
     }
+
+    double scheduler_profile_device_ns = 0.0;
+    if (options.profile_resident) {
+      constexpr uint32_t kProfileTrials = 5;
+      const auto measure_scheduler = [&](sg::ResidentExecutor &executor) {
+        const auto run_once = [&] {
+          initialize_decode_state(resident_decode_state, steps);
+          executor.initialize(0, maximum_graph_steps, 1);
+          benchmark_start.record();
+          executor.launch();
+          benchmark_end.record();
+          device.synchronize();
+          const sg::State profile_state = executor.read_state();
+          if (profile_state.status !=
+                  static_cast<uint32_t>(sg::Status::complete) ||
+              profile_state.step != graph_steps ||
+              profile_state.predicate_value != 1) {
+            throw std::runtime_error(
+                "compiled resident scheduler profile did not complete");
+          }
+          return static_cast<double>(
+              lrrt::elapsed_time_ns(benchmark_start, benchmark_end));
+        };
+        (void)run_once();
+        std::vector<double> samples;
+        samples.reserve(kProfileTrials);
+        for (uint32_t trial = 0; trial < kProfileTrials; ++trial) {
+          samples.push_back(run_once());
+        }
+        return mean(samples);
+      };
+      scheduler_profile_device_ns = measure_scheduler(profile_executor);
+    }
     const size_t host_kernel_count =
         static_cast<size_t>(steps) *
         (static_cast<size_t>(layers) * decoder_host_launches.size() +
@@ -1357,6 +1401,41 @@ int main(int argc, char **argv) {
 #else
     std::printf("\n");
 #endif
+    if (options.profile_resident) {
+      const double task_execution_ns =
+          std::max(0.0, resident_device_mean - scheduler_profile_device_ns);
+      const uint64_t decoder_stage_count =
+          static_cast<uint64_t>(compiled_plan.programs[0].stage_count) +
+          compiled_plan.programs[1].stage_count;
+      const uint64_t stage_synchronizations =
+          static_cast<uint64_t>(steps) *
+          (static_cast<uint64_t>(layers) * decoder_stage_count +
+           compiled_plan.programs[2].stage_count);
+      std::printf("Compiled resident scheduler profile "
+                  "(control-only, 5-trial mean)\n");
+      std::printf("  %-27s %10.3f us  %6.2f%% of compiled\n",
+                  "Scheduler/barrier floor",
+                  scheduler_profile_device_ns / 1.0e3,
+                  100.0 * scheduler_profile_device_ns / resident_device_mean);
+      std::printf("  %-27s %10.3f us  %6.2f%% of compiled\n",
+                  "Estimated task execution", task_execution_ns / 1.0e3,
+                  100.0 * task_execution_ns / resident_device_mean);
+      std::printf("  Stage synchronizations:  %10llu\n",
+                  static_cast<unsigned long long>(stage_synchronizations));
+      std::printf("  Mean per synchronization: %9.3f us\n",
+                  scheduler_profile_device_ns /
+                      static_cast<double>(stage_synchronizations) / 1.0e3);
+      std::printf("  Program transitions:     %10llu\n",
+                  static_cast<unsigned long long>(expected_program_phases));
+#if LRRT_ENABLE_HIP_GRAPH
+      const double hip_gap_ns = resident_device_mean - hip_device_mean;
+      if (hip_gap_ns > 0.0) {
+        std::printf("  Scheduler floor / HIP gap: %9.2fx\n",
+                    scheduler_profile_device_ns / hip_gap_ns);
+      }
+#endif
+      std::printf("\n");
+    }
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

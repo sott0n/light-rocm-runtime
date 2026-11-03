@@ -205,6 +205,32 @@ initialization and input reset remain outside the timed region for every path.
 The result, decode state, generated tokens, and KV cache from HIP Graph are
 checked against the host-driven LRRT path after measurement.
 
+Pass `--profile-resident` to run a separate compiled-resident scheduler probe
+after the normal interleaved measurement. The probe uses the same compiled
+plan, worker count, stage barriers, Program transitions, layer branches, and
+autoregressive termination path. It retains the residual-advance and embedding
+feedback control tasks but skips the matrix, attention, normalization, and LM
+head arithmetic. One warmup plus five measured probe launches report a
+control-only scheduler/barrier floor. The benchmark subtracts that floor from
+the uninstrumented compiled-resident mean to estimate the task-execution share:
+
+```sh
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
+  --weights-dir /tmp/lrrt-qwen-full --layers 24 --profile-resident
+```
+
+On the RX 7800 XT full-checkpoint run, the probe measured a 1.191 ms floor,
+0.55% of the 214.837 ms compiled-resident mean, across 880 stage
+synchronizations and 196 Program transitions. That run had substantially lower
+and more variable GPU clocks than the result recorded below, so its absolute
+model times are not a replacement benchmark result. The useful conclusion is
+the within-run ratio: the control-only floor was far smaller than the resident
+gap to HIP Graph. The next optimization target is therefore task execution
+inside the persistent megakernel, including occupancy and memory/compute
+efficiency, rather than the software scheduler alone. This probe is a
+counterfactual lower bound, not a direct hardware stall counter; removing
+arithmetic also changes cache and occupancy interactions.
+
 ### Full-checkpoint measurement
 
 The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`

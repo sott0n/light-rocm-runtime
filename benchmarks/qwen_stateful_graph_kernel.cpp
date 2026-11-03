@@ -501,6 +501,37 @@ struct QwenWorkload {
   }
 };
 
+// Preserves the Qwen Program transitions and compiled stage barriers while
+// replacing arithmetic tasks with only the state writes needed to follow the
+// same control-flow path. Host-side event timing of this workload measures the
+// compiled scheduler floor without relying on architecture-specific counters.
+struct QwenSchedulerProfileWorkload {
+  __device__ static __forceinline__ bool valid_context(const sg::State *state,
+                                                       void *opaque_context) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    return valid_qwen_contexts(state, contexts);
+  }
+
+  __device__ static __forceinline__ bool valid_task(const sg::Task &task,
+                                                    void *opaque_context) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    return valid_qwen_task(task, contexts);
+  }
+
+  __device__ static __forceinline__ void
+  execute(const sg::Task &task, sg::State *state, void *opaque_context) {
+    __shared__ float reduction[sg::kWorkerThreads];
+    __shared__ uint32_t wave_indices[sg::kWorkerThreads / 32u];
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    qd::Context *context = &contexts[state->step % contexts[0].layer_count];
+    const qd::Opcode opcode = static_cast<qd::Opcode>(task.opcode);
+    if (opcode == qd::Opcode::residual_advance ||
+        opcode == qd::Opcode::embedding_feedback_f32) {
+      execute_task(task, state, context, reduction, wave_indices);
+    }
+  }
+};
+
 } // namespace
 
 extern "C" __global__ void qwen_stateful_graph_resident_kernel(
@@ -526,6 +557,19 @@ extern "C" __global__ void qwen_stateful_graph_compiled_kernel(
     uint32_t stage_count, uint32_t reserved) {
   (void)reserved;
   sg::device::run_compiled_resident<QwenWorkload>(
+      state, tasks, programs, phase_states, program_count, total_task_count,
+      phase_state_count, opaque_context, stages, compiled_programs,
+      stage_count);
+}
+
+extern "C" __global__ void qwen_stateful_graph_scheduler_profile_kernel(
+    sg::State *state, const sg::Task *tasks, const sg::Program *programs,
+    sg::MaskState *phase_states, uint32_t program_count,
+    uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
+    const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
+    uint32_t stage_count, uint32_t reserved) {
+  (void)reserved;
+  sg::device::run_compiled_resident<QwenSchedulerProfileWorkload>(
       state, tasks, programs, phase_states, program_count, total_task_count,
       phase_state_count, opaque_context, stages, compiled_programs,
       stage_count);
