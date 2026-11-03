@@ -1,42 +1,13 @@
 #include "executor/qwen/stateful_graph_context.hpp"
+#include "executor/stateful_graph/device_scheduler.hpp"
 
 namespace sg = lrrt::stateful_graph;
 namespace qd = lrrt::qwen::stateful_graph;
 
 namespace {
 
-__device__ __forceinline__ uint32_t load_status(const sg::State *state) {
-  return *reinterpret_cast<const volatile uint32_t *>(&state->status);
-}
-
-__device__ __forceinline__ uint32_t load_phase(sg::State *state) {
-  return atomicAdd(&state->phase, 0u);
-}
-
-__device__ __forceinline__ uint32_t load_mask(uint32_t *mask) {
-  return atomicAdd(mask, 0u);
-}
-
-__device__ __forceinline__ uint64_t
-load_completed_mask(sg::MaskState *mask_state, uint32_t task_count) {
-  const uint64_t low = load_mask(&mask_state->completed_mask);
-  const uint64_t high =
-      task_count > 32 ? load_mask(&mask_state->completed_mask_high) : 0;
-  return low | (high << 32u);
-}
-
-__device__ __forceinline__ uint64_t task_dependencies(const sg::Task &task) {
-  return static_cast<uint64_t>(task.dependency_mask) |
-         (static_cast<uint64_t>(task.dependency_mask_high) << 32u);
-}
-
-__device__ __forceinline__ uint64_t all_tasks_mask(uint32_t task_count) {
-  return task_count == sg::kMaximumTasks
-             ? UINT64_MAX
-             : (static_cast<uint64_t>(1) << task_count) - 1u;
-}
-
-__device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
+__device__ bool valid_qwen_task(const sg::Task &task,
+                                const qd::Context *context) {
   switch (static_cast<qd::Opcode>(task.opcode)) {
   case qd::Opcode::attention_rmsnorm_f32:
   case qd::Opcode::mlp_rmsnorm_f32:
@@ -65,20 +36,11 @@ __device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
   return false;
 }
 
-__device__ bool
-validate_programs(const sg::State *state, const sg::Task *tasks,
-                  const sg::Program *programs, sg::MaskState *phase_states,
-                  uint32_t program_count, uint32_t total_task_count,
-                  uint32_t phase_state_count, const qd::Context *contexts) {
+__device__ bool valid_qwen_contexts(const sg::State *state,
+                                    const qd::Context *contexts) {
   const qd::Context *context = contexts;
-  if (state->abi_version != sg::kAbiVersion || program_count == 0 ||
-      total_task_count == 0 || program_count > sg::kMaximumPrograms ||
-      sg::phase_program(state->phase) >= program_count ||
-      sg::phase_generation(state->phase) >= phase_state_count ||
-      state->max_steps == 0 || programs == nullptr || phase_states == nullptr ||
-      phase_state_count == 0 || state->worker_count == 0 ||
-      state->worker_count > 32 || contexts == nullptr ||
-      context->layer_count == 0 || context->hidden_size != qd::kHiddenSize ||
+  if (contexts == nullptr || context->layer_count == 0 ||
+      context->hidden_size != qd::kHiddenSize ||
       context->query_size != qd::kQuerySize ||
       context->kv_size != qd::kKvSize ||
       context->intermediate_size != qd::kIntermediateSize ||
@@ -105,54 +67,6 @@ validate_programs(const sg::State *state, const sg::Task *tasks,
         candidate.cache_capacity != context->cache_capacity ||
         candidate.layer_count != context->layer_count ||
         candidate.tail != context->tail) {
-      return false;
-    }
-  }
-
-  for (uint32_t program_index = 0; program_index < program_count;
-       ++program_index) {
-    const sg::Program &program = programs[program_index];
-    if (program.task_count == 0 || program.task_count > sg::kMaximumTasks ||
-        program.task_offset > total_task_count ||
-        program.task_count > total_task_count - program.task_offset ||
-        program.next_program >= program_count ||
-        (program.flags &
-         ~(sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate |
-           sg::kProgramBranchesOnState)) != 0 ||
-        ((program.flags & sg::kProgramBranchesOnState) != 0 &&
-         program.branch_program >= program_count)) {
-      return false;
-    }
-
-    const sg::Task *program_tasks = tasks + program.task_offset;
-    const uint64_t valid_mask = all_tasks_mask(program.task_count);
-    uint64_t reachable_mask = 0;
-    for (uint32_t task_index = 0; task_index < program.task_count;
-         ++task_index) {
-      const sg::Task &task = program_tasks[task_index];
-      const uint64_t task_mask = static_cast<uint64_t>(1) << task_index;
-      const uint64_t dependencies = task_dependencies(task);
-      if (!valid_task(task, context) || (dependencies & ~valid_mask) != 0 ||
-          (dependencies & task_mask) != 0) {
-        return false;
-      }
-    }
-
-    // A small bitmask topological walk rejects cycles before workers enter the
-    // persistent scheduling loop.
-    for (uint32_t pass = 0; pass < program.task_count; ++pass) {
-      for (uint32_t task_index = 0; task_index < program.task_count;
-           ++task_index) {
-        const uint64_t task_mask = static_cast<uint64_t>(1) << task_index;
-        const uint64_t dependencies =
-            task_dependencies(program_tasks[task_index]);
-        if ((reachable_mask & task_mask) == 0 &&
-            (dependencies & reachable_mask) == dependencies) {
-          reachable_mask |= task_mask;
-        }
-      }
-    }
-    if (reachable_mask != valid_mask) {
       return false;
     }
   }
@@ -514,6 +428,29 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
   }
 }
 
+struct QwenWorkload {
+  __device__ static __forceinline__ bool valid_context(const sg::State *state,
+                                                       void *opaque_context) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    return valid_qwen_contexts(state, contexts);
+  }
+
+  __device__ static __forceinline__ bool valid_task(const sg::Task &task,
+                                                    void *opaque_context) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    return valid_qwen_task(task, contexts);
+  }
+
+  __device__ static __forceinline__ void
+  execute(const sg::Task &task, sg::State *state, void *opaque_context) {
+    __shared__ float reduction[sg::kWorkerThreads];
+    __shared__ uint32_t wave_indices[sg::kWorkerThreads / 32u];
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    qd::Context *context = &contexts[state->step % contexts[0].layer_count];
+    execute_task(task, state, context, reduction, wave_indices);
+  }
+};
+
 } // namespace
 
 extern "C" __global__ void qwen_stateful_graph_resident_kernel(
@@ -521,157 +458,9 @@ extern "C" __global__ void qwen_stateful_graph_resident_kernel(
     sg::MaskState *phase_states, uint32_t program_count,
     uint32_t total_task_count, uint32_t phase_state_count,
     void *opaque_context) {
-  auto *contexts = static_cast<qd::Context *>(opaque_context);
-  const uint32_t worker = blockIdx.x;
-
-  __shared__ uint32_t validation_status;
-  if (worker == 0) {
-    if (threadIdx.x == 0) {
-      validation_status =
-          validate_programs(state, tasks, programs, phase_states, program_count,
-                            total_task_count, phase_state_count, contexts)
-              ? static_cast<uint32_t>(sg::Status::running)
-              : static_cast<uint32_t>(sg::Status::invalid_program);
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      if (validation_status ==
-          static_cast<uint32_t>(sg::Status::invalid_program)) {
-        state->error_code = 1;
-      }
-      __threadfence();
-      atomicExch(&state->status, validation_status);
-    }
-    __syncthreads();
-  } else {
-    while (load_status(state) == static_cast<uint32_t>(sg::Status::ready)) {
-      __builtin_amdgcn_s_sleep(1);
-    }
-  }
-
-  if (load_status(state) != static_cast<uint32_t>(sg::Status::running)) {
-    return;
-  }
-
-  __shared__ uint32_t selected_task;
-  __shared__ uint32_t selected_program;
-  __shared__ uint32_t selected_generation;
-  __shared__ float reduction[sg::kWorkerThreads];
-  __shared__ uint32_t wave_indices[sg::kWorkerThreads / 32u];
-  while (true) {
-    if (threadIdx.x == 0) {
-      selected_task = sg::kNoTask;
-      const uint32_t phase_before = load_phase(state);
-      const uint32_t generation = sg::phase_generation(phase_before);
-      const uint32_t program_index = sg::phase_program(phase_before);
-      const sg::Program program = programs[program_index];
-      const sg::Task *program_tasks = tasks + program.task_offset;
-      sg::MaskState *mask_state = &phase_states[generation];
-      const uint32_t claimed_mask = load_mask(&mask_state->claimed_mask);
-      const uint32_t claimed_mask_high =
-          program.task_count > 32 ? load_mask(&mask_state->claimed_mask_high)
-                                  : 0;
-      const uint64_t completed_mask =
-          load_completed_mask(mask_state, program.task_count);
-      const uint32_t phase_after = load_phase(state);
-      if (phase_before == phase_after) {
-        for (uint32_t offset = 0; offset < program.task_count; ++offset) {
-          const uint32_t task_index = (worker + offset) % program.task_count;
-          const uint32_t mask_word = task_index >> 5u;
-          const uint32_t task_mask = 1u << (task_index & 31u);
-          const sg::Task &task = program_tasks[task_index];
-          const uint32_t claimed =
-              mask_word == 0 ? claimed_mask : claimed_mask_high;
-          const uint64_t dependencies = task_dependencies(task);
-          if ((claimed & task_mask) == 0 &&
-              (dependencies & completed_mask) == dependencies) {
-            uint32_t *claimed_word = mask_word == 0
-                                         ? &mask_state->claimed_mask
-                                         : &mask_state->claimed_mask_high;
-            const uint32_t previous = atomicOr(claimed_word, task_mask);
-            if ((previous & task_mask) == 0) {
-              selected_task = task_index;
-              selected_program = program_index;
-              selected_generation = generation;
-              break;
-            }
-          }
-        }
-      }
-    }
-    __syncthreads();
-
-    if (selected_task == sg::kNoTask) {
-      if (threadIdx.x == 0) {
-        __builtin_amdgcn_s_sleep(1);
-      }
-    } else {
-      const sg::Program program = programs[selected_program];
-      const sg::Task *program_tasks = tasks + program.task_offset;
-      sg::MaskState *mask_state = &phase_states[selected_generation];
-      const uint32_t mask_word = selected_task >> 5u;
-      const uint32_t task_mask = 1u << (selected_task & 31u);
-      qd::Context *context = &contexts[state->step % contexts[0].layer_count];
-      execute_task(program_tasks[selected_task], state, context, reduction,
-                   wave_indices);
-      __syncthreads();
-
-      if (threadIdx.x == 0) {
-        __threadfence();
-        uint32_t *completed_word = mask_word == 0
-                                       ? &mask_state->completed_mask
-                                       : &mask_state->completed_mask_high;
-        atomicOr(completed_word, task_mask);
-        // The dependency masks may span two independently observed atomic
-        // words. A single completion counter elects exactly one transition
-        // owner without requiring a coherent 64-bit mask snapshot.
-        const uint32_t completed_count =
-            atomicAdd(&mask_state->completed_count, 1u) + 1u;
-        if (completed_count == program.task_count) {
-          const bool advances_step =
-              (program.flags & sg::kProgramAdvancesStep) != 0;
-          const uint32_t next_step =
-              state->step + static_cast<uint32_t>(advances_step);
-          state->step = next_step;
-          state->executed_tasks += program.task_count;
-
-          const bool predicate =
-              (program.flags & sg::kProgramEvaluatesPredicate) != 0 &&
-              state->predicate_value >= state->stop_value;
-          if (predicate) {
-            __threadfence();
-            atomicExch(&state->status,
-                       static_cast<uint32_t>(sg::Status::complete));
-          } else if (next_step >= state->max_steps) {
-            __threadfence();
-            atomicExch(&state->status,
-                       static_cast<uint32_t>(sg::Status::max_steps));
-          } else {
-            const uint32_t next_generation = selected_generation + 1u;
-            if (next_generation >= phase_state_count) {
-              state->error_code = 2;
-              __threadfence();
-              atomicExch(&state->status,
-                         static_cast<uint32_t>(sg::Status::invalid_program));
-            } else {
-              uint32_t next_program = program.next_program;
-              if ((program.flags & sg::kProgramBranchesOnState) != 0 &&
-                  state->branch_value != 0) {
-                next_program = program.branch_program;
-              }
-              __threadfence();
-              atomicExch(&state->phase,
-                         sg::make_phase(next_generation, next_program));
-            }
-          }
-        }
-      }
-    }
-    __syncthreads();
-
-    if (load_status(state) != static_cast<uint32_t>(sg::Status::running))
-      return;
-  }
+  sg::device::run_resident<QwenWorkload>(state, tasks, programs, phase_states,
+                                         program_count, total_task_count,
+                                         phase_state_count, opaque_context);
 }
 
 extern "C" __global__ void

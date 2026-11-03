@@ -102,6 +102,7 @@ lrrt_add_hsaco_kernel(
   "-I${PROJECT_SOURCE_DIR}"
   DEPENDS
   "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
+  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/device_scheduler.hpp"
   "${PROJECT_SOURCE_DIR}/executor/qwen/stateful_graph_context.hpp"
 )
 lrrt_add_hsaco_kernel(

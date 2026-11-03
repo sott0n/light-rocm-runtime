@@ -79,6 +79,13 @@ specialization uses the
 Qwen2.5-0.5B dimensions `hidden=896`, `heads=14`, `kv_heads=2`, `head_dim=64`,
 and `intermediate=4864`.
 
+The persistent dependency scheduler is implemented by the reusable device
+template in `executor/stateful_graph/device_scheduler.hpp`. A specialization
+supplies only context validation, task validation, and task execution
+callbacks. The Qwen kernel therefore owns its fused model operations and
+shared-memory scratch while the generic scheduler owns task claiming,
+dependency masks, Program transitions, conditional branches, and termination.
+
 The resident megakernel executes this FP32 dependency graph:
 
 ```text
