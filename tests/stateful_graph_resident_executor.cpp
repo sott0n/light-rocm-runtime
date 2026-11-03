@@ -36,6 +36,25 @@ bool expect_compile_invalid(const char *label,
 } // namespace
 
 int main() {
+  const lrrt::DeviceProperties device_properties = {60, 32, 32, 1024,
+                                                    64u * 1024u};
+  const lrrt::KernelProperties kernel_properties = {128, 1060, 0};
+  const sg::ResidentAdmission admission =
+      sg::admit_resident_workers(device_properties, kernel_properties, 128);
+  if (admission.requested_worker_count != 128 ||
+      admission.safe_worker_limit != sg::kMaximumResidentWorkers ||
+      admission.worker_count != sg::kMaximumResidentWorkers) {
+    std::fprintf(stderr, "unexpected resident admission result\n");
+    return 1;
+  }
+  try {
+    (void)sg::resident_worker_limit(device_properties,
+                                    {128, 64u * 1024u + 1u, 0});
+    std::fprintf(stderr, "oversized resident LDS was admitted\n");
+    return 1;
+  } catch (const std::invalid_argument &) {
+  }
+
   const std::vector<sg::Task> tasks = {
       {0, 0, 0, 1, 0, 0, 0, 0},
       {1, 1, 0, 1, 0, 0, 0, 0},

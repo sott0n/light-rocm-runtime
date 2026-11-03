@@ -15,6 +15,7 @@ static int expect_status(lr_status_t actual, lr_status_t expected,
 static int expect_not_initialized_statuses(void) {
   uint32_t count = 123;
   lr_device_t device = {0};
+  lr_device_properties_t device_properties = {};
   lr_memory_stats_t stats = {};
   char name[64] = {};
   lr_queue_t *queue = (lr_queue_t *)1;
@@ -36,6 +37,11 @@ static int expect_not_initialized_statuses(void) {
   }
   if (!expect_status(lr_device_name(device, name, sizeof(name)),
                      LR_ERROR_NOT_INITIALIZED, "lr_device_name before init")) {
+    return 0;
+  }
+  if (!expect_status(lr_device_get_properties(device, &device_properties),
+                     LR_ERROR_NOT_INITIALIZED,
+                     "lr_device_get_properties before init")) {
     return 0;
   }
   if (!expect_status(lr_get_memory_stats(device, &stats),
@@ -276,6 +282,31 @@ int main(void) {
   status = lr_device_name(device, name, sizeof(name));
   if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
                      "lr_device_name too small")) {
+    lr_shutdown();
+    return 1;
+  }
+
+  lr_device_properties_t device_properties = {};
+  status = lr_device_get_properties(device, &device_properties);
+  if (!expect_status(status, LR_SUCCESS, "lr_device_get_properties") ||
+      device_properties.compute_unit_count == 0 ||
+      device_properties.wavefront_size == 0 ||
+      device_properties.maximum_waves_per_compute_unit == 0 ||
+      device_properties.maximum_workgroup_size == 0 ||
+      device_properties.group_segment_size == 0) {
+    fprintf(stderr, "lr_device_get_properties returned incomplete limits\n");
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_device_get_properties(device, NULL);
+  if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
+                     "lr_device_get_properties null")) {
+    lr_shutdown();
+    return 1;
+  }
+  status = lr_device_get_properties(invalid_device, &device_properties);
+  if (!expect_status(status, LR_ERROR_INVALID_ARGUMENT,
+                     "lr_device_get_properties invalid device")) {
     lr_shutdown();
     return 1;
   }

@@ -4,6 +4,7 @@
 #include "executor/stateful_graph/stateful_graph_abi.hpp"
 #include "lrrt/lrrt.hpp"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -18,6 +19,65 @@ struct ResidentConfig {
   uint32_t phase_state_count;
   uint32_t worker_count;
 };
+
+struct ResidentAdmission {
+  uint32_t requested_worker_count;
+  uint32_t safe_worker_limit;
+  uint32_t worker_count;
+};
+
+inline uint32_t resident_worker_limit(const DeviceProperties &device,
+                                      const KernelProperties &kernel,
+                                      uint32_t block_threads = kWorkerThreads,
+                                      uint32_t dynamic_group_segment_size = 0) {
+  if (device.compute_unit_count == 0 || device.wavefront_size == 0 ||
+      device.maximum_waves_per_compute_unit == 0 ||
+      device.maximum_workgroup_size == 0 || block_threads == 0) {
+    throw std::invalid_argument("incomplete resident resource properties");
+  }
+  if (block_threads > device.maximum_workgroup_size) {
+    throw std::invalid_argument("resident workgroup exceeds device limit");
+  }
+  const uint32_t waves =
+      (block_threads + device.wavefront_size - 1u) / device.wavefront_size;
+  if (waves > device.maximum_waves_per_compute_unit) {
+    throw std::invalid_argument("resident workgroup exceeds wave limit");
+  }
+  const uint64_t group_segment_size =
+      static_cast<uint64_t>(kernel.group_segment_size) +
+      dynamic_group_segment_size;
+  if (group_segment_size > device.group_segment_size) {
+    throw std::invalid_argument("resident workgroup exceeds LDS limit");
+  }
+
+  // Stateful graph kernels use grid-wide software barriers. Limiting the grid
+  // to one workgroup per CU is conservative, but does not depend on fragile
+  // architecture-specific SGPR/VGPR occupancy formulas.
+  return std::min(device.compute_unit_count, kMaximumResidentWorkers);
+}
+
+inline ResidentAdmission admit_resident_workers(
+    const DeviceProperties &device, const KernelProperties &kernel,
+    uint32_t requested_worker_count, uint32_t block_threads = kWorkerThreads,
+    uint32_t dynamic_group_segment_size = 0) {
+  if (requested_worker_count == 0) {
+    throw std::invalid_argument("resident worker request must be nonzero");
+  }
+  const uint32_t safe_limit = resident_worker_limit(
+      device, kernel, block_threads, dynamic_group_segment_size);
+  return {requested_worker_count, safe_limit,
+          std::min(requested_worker_count, safe_limit)};
+}
+
+inline ResidentAdmission
+admit_resident_workers(Device device, const Kernel &kernel,
+                       uint32_t requested_worker_count,
+                       uint32_t block_threads = kWorkerThreads,
+                       uint32_t dynamic_group_segment_size = 0) {
+  return admit_resident_workers(device.properties(), kernel.properties(),
+                                requested_worker_count, block_threads,
+                                dynamic_group_segment_size);
+}
 
 struct CompiledPlan {
   std::vector<Stage> stages;

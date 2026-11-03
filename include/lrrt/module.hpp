@@ -7,11 +7,19 @@
 
 namespace lrrt {
 
+using KernelProperties = lr_kernel_properties_t;
+
 class Kernel {
 public:
   explicit Kernel(lr_kernel_t *kernel) : kernel_(kernel) {}
 
   lr_kernel_t *get() const { return kernel_; }
+  KernelProperties properties() const {
+    KernelProperties properties{};
+    check(lr_kernel_get_properties(kernel_, &properties),
+          "lr_kernel_get_properties");
+    return properties;
+  }
 
 private:
   lr_kernel_t *kernel_;

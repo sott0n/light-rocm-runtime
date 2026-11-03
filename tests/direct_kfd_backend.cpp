@@ -31,6 +31,7 @@ int main() {
 
   lr_device_t device{};
   char name[128] = {};
+  lr_device_properties_t properties{};
   if (!expect_status(lr_device_open(count, &device), LR_ERROR_INVALID_ARGUMENT,
                      "lr_device_open out of range") ||
       !expect_status(lr_synchronize(device), LR_ERROR_INVALID_ARGUMENT,
@@ -42,6 +43,12 @@ int main() {
       !expect_status(lr_device_name(device, name, sizeof(name)), LR_SUCCESS,
                      "lr_device_name") ||
       name[0] == '\0' ||
+      !expect_status(lr_device_get_properties(device, &properties), LR_SUCCESS,
+                     "lr_device_get_properties") ||
+      properties.compute_unit_count == 0 || properties.wavefront_size == 0 ||
+      properties.maximum_waves_per_compute_unit == 0 ||
+      properties.maximum_workgroup_size == 0 ||
+      properties.group_segment_size == 0 ||
       !expect_status(lr_synchronize(device), LR_SUCCESS,
                      "lr_synchronize idle device") ||
       !expect_status(lr_shutdown(), LR_SUCCESS, "lr_shutdown") ||

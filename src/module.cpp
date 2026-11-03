@@ -656,4 +656,51 @@ lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
 #endif
 }
 
+lr_status_t lr_kernel_get_properties(lr_kernel_t *kernel,
+                                     lr_kernel_properties_t *properties) {
+  if (!properties) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+
+  *properties = {};
+#if LRRT_ENABLE_HSA
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_kernel_locked(kernel)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  properties->kernarg_size = kernel->kernarg_size;
+  properties->group_segment_size = kernel->group_segment_size;
+  properties->private_segment_size = kernel->private_segment_size;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_kernel_locked(kernel)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const auto &info = kernel->module->executable_image.code_object()
+                         .kernels[kernel->image_kernel_index];
+  properties->kernarg_size = info.kernarg_size;
+  properties->group_segment_size = info.group_segment_size;
+  properties->private_segment_size = info.private_segment_size;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (!valid_kernel_locked(kernel)) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const auto &info = kernel->module->executable_image->code_object()
+                         .kernels[kernel->image_kernel_index];
+  properties->kernarg_size = info.kernarg_size;
+  properties->group_segment_size = info.group_segment_size;
+  properties->private_segment_size = info.private_segment_size;
+  return LR_SUCCESS;
+#else
+  (void)kernel;
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
 } // extern "C"

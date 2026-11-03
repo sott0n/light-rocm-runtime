@@ -259,6 +259,7 @@ bool run_queue_checks(lr_device_t device, lr_queue_t **shutdown_owned_queue) {
 
 bool open_only_device(lr_device_t *device, char *name, size_t name_size) {
   uint32_t count = 0;
+  lr_device_properties_t properties{};
   if (!expect_status(lr_device_count(&count), LR_SUCCESS, "lr_device_count") ||
       count != 1) {
     std::fprintf(stderr, "light-rocr backend exposed %u devices, expected 1\n",
@@ -270,8 +271,15 @@ bool open_only_device(lr_device_t *device, char *name, size_t name_size) {
       !expect_status(lr_device_open(0, device), LR_SUCCESS, "lr_device_open") ||
       !expect_status(lr_device_name(*device, name, name_size), LR_SUCCESS,
                      "lr_device_name") ||
-      name[0] == '\0') {
-    std::fprintf(stderr, "light-rocr backend returned an empty device name\n");
+      name[0] == '\0' ||
+      !expect_status(lr_device_get_properties(*device, &properties), LR_SUCCESS,
+                     "lr_device_get_properties") ||
+      properties.compute_unit_count == 0 || properties.wavefront_size == 0 ||
+      properties.maximum_waves_per_compute_unit == 0 ||
+      properties.maximum_workgroup_size == 0 ||
+      properties.group_segment_size == 0) {
+    std::fprintf(stderr,
+                 "light-rocr backend returned incomplete device properties\n");
     return false;
   }
   return true;

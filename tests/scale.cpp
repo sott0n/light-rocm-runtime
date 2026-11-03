@@ -144,6 +144,18 @@ int main(void) {
     return 1;
   }
 
+  lr_kernel_properties_t kernel_properties = {};
+  status = lr_kernel_get_properties(kernel, &kernel_properties);
+  if (!expect_status(status, LR_SUCCESS, "lr_kernel_get_properties") ||
+      kernel_properties.kernarg_size < sizeof(scale_args_t)) {
+    fprintf(stderr, "lr_kernel_get_properties returned incomplete metadata\n");
+    lr_module_destroy(module);
+    lr_free(device, device_out);
+    lr_free(device, device_in);
+    lr_shutdown();
+    return 1;
+  }
+
   lr_launch_config_t config = {{64, 1, 1}, {64, 1, 1}, 0};
   for (size_t iteration = 0; iteration < sizeof(alphas) / sizeof(alphas[0]);
        ++iteration) {

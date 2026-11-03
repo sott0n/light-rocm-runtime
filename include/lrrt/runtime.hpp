@@ -10,6 +10,7 @@
 namespace lrrt {
 
 using MemoryStats = lr_memory_stats_t;
+using DeviceProperties = lr_device_properties_t;
 
 class Device {
 public:
@@ -21,6 +22,12 @@ public:
     char name[64] = {};
     check(lr_device_name(device_, name, sizeof(name)), "lr_device_name");
     return std::string(name);
+  }
+  DeviceProperties properties() const {
+    DeviceProperties properties{};
+    check(lr_device_get_properties(device_, &properties),
+          "lr_device_get_properties");
+    return properties;
   }
   void synchronize() const { check(lr_synchronize(device_), "lr_synchronize"); }
   MemoryStats memory_stats() const {

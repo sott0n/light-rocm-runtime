@@ -70,6 +70,20 @@ typedef struct lr_memory_stats_t {
   uint64_t pinned_host_free_count;
 } lr_memory_stats_t;
 
+typedef struct lr_device_properties_t {
+  uint32_t compute_unit_count;
+  uint32_t wavefront_size;
+  uint32_t maximum_waves_per_compute_unit;
+  uint32_t maximum_workgroup_size;
+  uint64_t group_segment_size;
+} lr_device_properties_t;
+
+typedef struct lr_kernel_properties_t {
+  uint32_t kernarg_size;
+  uint32_t group_segment_size;
+  uint32_t private_segment_size;
+} lr_kernel_properties_t;
+
 LRRT_API const char *lr_status_string(lr_status_t status);
 
 LRRT_API lr_status_t lr_init(void);
@@ -81,6 +95,8 @@ LRRT_API lr_status_t lr_device_count(uint32_t *count);
 LRRT_API lr_status_t lr_device_open(uint32_t index, lr_device_t *device);
 LRRT_API lr_status_t lr_device_name(lr_device_t device, char *name,
                                     size_t name_size);
+LRRT_API lr_status_t lr_device_get_properties(
+    lr_device_t device, lr_device_properties_t *properties);
 LRRT_API lr_status_t lr_get_memory_stats(lr_device_t device,
                                          lr_memory_stats_t *stats);
 LRRT_API lr_status_t lr_reset_memory_stats(lr_device_t device);
@@ -179,6 +195,8 @@ LRRT_API lr_status_t lr_module_destroy(lr_module_t *module);
 
 LRRT_API lr_status_t lr_kernel_get(lr_module_t *module, const char *name,
                                    lr_kernel_t **kernel);
+LRRT_API lr_status_t lr_kernel_get_properties(
+    lr_kernel_t *kernel, lr_kernel_properties_t *properties);
 
 /*
  * Enqueues a kernel dispatch and returns after the packet is submitted to the

@@ -98,6 +98,21 @@ hsa_status_t select_device_regions(hsa_region_t region, void *data) {
   return HSA_STATUS_SUCCESS;
 }
 
+struct GroupSegmentSize {
+  uint64_t size = 0;
+};
+
+hsa_status_t find_group_segment_size(hsa_region_t region, void *data) {
+  hsa_region_segment_t segment = HSA_REGION_SEGMENT_READONLY;
+  hsa_status_t status =
+      hsa_region_get_info(region, HSA_REGION_INFO_SEGMENT, &segment);
+  if (status != HSA_STATUS_SUCCESS || segment != HSA_REGION_SEGMENT_GROUP) {
+    return status;
+  }
+  return hsa_region_get_info(region, HSA_REGION_INFO_SIZE,
+                             &static_cast<GroupSegmentSize *>(data)->size);
+}
+
 hsa_status_t populate_device_regions() {
   for (DeviceState &device : g_devices) {
     hsa_status_t status =
@@ -510,6 +525,77 @@ lr_status_t lr_device_name(lr_device_t device, char *name, size_t name_size) {
 #else
   (void)device;
   name[0] = '\0';
+  return LR_ERROR_NOT_SUPPORTED;
+#endif
+}
+
+lr_status_t lr_device_get_properties(lr_device_t device,
+                                     lr_device_properties_t *properties) {
+  if (!properties) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  if (!g_initialized.load()) {
+    return LR_ERROR_NOT_INITIALIZED;
+  }
+
+  *properties = {};
+#if LRRT_ENABLE_HSA
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const hsa_agent_t agent = g_devices[device.index].agent;
+  hsa_status_t status = hsa_agent_get_info(
+      agent,
+      static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_COMPUTE_UNIT_COUNT),
+      &properties->compute_unit_count);
+  if (status == HSA_STATUS_SUCCESS) {
+    status = hsa_agent_get_info(agent, HSA_AGENT_INFO_WAVEFRONT_SIZE,
+                                &properties->wavefront_size);
+  }
+  if (status == HSA_STATUS_SUCCESS) {
+    status = hsa_agent_get_info(
+        agent,
+        static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_MAX_WAVES_PER_CU),
+        &properties->maximum_waves_per_compute_unit);
+  }
+  if (status == HSA_STATUS_SUCCESS) {
+    status = hsa_agent_get_info(agent, HSA_AGENT_INFO_WORKGROUP_MAX_SIZE,
+                                &properties->maximum_workgroup_size);
+  }
+  GroupSegmentSize group_segment;
+  if (status == HSA_STATUS_SUCCESS) {
+    status = hsa_agent_iterate_regions(agent, find_group_segment_size,
+                                       &group_segment);
+  }
+  if (status != HSA_STATUS_SUCCESS) {
+    *properties = {};
+    return to_lr_status(status);
+  }
+  properties->group_segment_size = group_segment.size;
+  return LR_SUCCESS;
+#elif LRRT_ENABLE_LIGHT_ROCR || LRRT_ENABLE_LIGHT_ROCR_KFD
+  std::lock_guard<RuntimeMutex> lock(g_devices_mutex);
+  if (device.index >= g_devices.size()) {
+    return LR_ERROR_INVALID_ARGUMENT;
+  }
+  const light_rocr::runtime::Node &node = g_devices[device.index].node;
+  const uint64_t maximum_waves =
+      static_cast<uint64_t>(node.maximum_waves_per_simd) *
+      node.simd_per_compute_unit;
+  if (maximum_waves > UINT32_MAX) {
+    return LR_ERROR_RUNTIME;
+  }
+  properties->compute_unit_count = node.compute_unit_count();
+  properties->wavefront_size = node.wavefront_size;
+  properties->maximum_waves_per_compute_unit =
+      static_cast<uint32_t>(maximum_waves);
+  properties->maximum_workgroup_size = 1024;
+  properties->group_segment_size =
+      static_cast<uint64_t>(node.lds_size_kb) * 1024u;
+  return LR_SUCCESS;
+#else
+  (void)device;
   return LR_ERROR_NOT_SUPPORTED;
 #endif
 }
