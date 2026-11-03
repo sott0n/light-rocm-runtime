@@ -9,6 +9,7 @@ namespace lrrt::stateful_graph {
 
 constexpr uint32_t kAbiVersion = 7;
 constexpr uint32_t kWorkerThreads = 256;
+constexpr uint32_t kMaximumResidentWorkers = 32;
 constexpr uint32_t kMaximumTasks = 64;
 constexpr uint32_t kMaximumPrograms = 256;
 constexpr uint32_t kNoTask = UINT32_MAX;

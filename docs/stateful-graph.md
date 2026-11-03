@@ -86,6 +86,14 @@ callbacks. The Qwen kernel therefore owns its fused model operations and
 shared-memory scratch while the generic scheduler owns task claiming,
 dependency masks, Program transitions, conditional branches, and termination.
 
+The corresponding host runtime API is
+`executor/stateful_graph/resident_executor.hpp`. `ResidentExecutor` validates
+and uploads the generic task and Program tables, owns the device State and
+per-phase masks, binds an opaque workload context, initializes each bounded
+run, and dispatches the workload-specialized resident kernel. The Qwen
+benchmark uses this API rather than managing scheduler buffers and constructing
+`ResidentArgs` itself.
+
 The resident megakernel executes this FP32 dependency graph:
 
 ```text

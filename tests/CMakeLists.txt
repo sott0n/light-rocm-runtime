@@ -29,6 +29,15 @@ function(lrrt_add_backend_independent_tests)
     lrrt_qwen_weight_bundle_tests
     PRIVATE "${PROJECT_SOURCE_DIR}"
   )
+  lrrt_add_test_executable(
+    lrrt_stateful_graph_resident_executor_tests
+    stateful_graph_resident_executor.cpp
+    lrrt::lrrt
+  )
+  target_include_directories(
+    lrrt_stateful_graph_resident_executor_tests
+    PRIVATE "${PROJECT_SOURCE_DIR}"
+  )
 
   if(PYTHON_EXECUTABLE)
     add_test(

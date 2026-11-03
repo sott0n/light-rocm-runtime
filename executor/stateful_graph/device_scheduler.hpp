@@ -59,7 +59,8 @@ validate_programs(const State *state, const Task *tasks,
       phase_generation(state->phase) >= phase_state_count ||
       state->max_steps == 0 || tasks == nullptr || programs == nullptr ||
       phase_states == nullptr || phase_state_count == 0 ||
-      state->worker_count == 0 || state->worker_count > 32 ||
+      state->worker_count == 0 ||
+      state->worker_count > kMaximumResidentWorkers ||
       !Workload::valid_context(state, opaque_context)) {
     return false;
   }

@@ -1,5 +1,6 @@
 #include "executor/qwen/stateful_graph_context.hpp"
 #include "executor/qwen/weight_bundle.hpp"
+#include "executor/stateful_graph/resident_executor.hpp"
 #include "lrrt/lrrt.hpp"
 
 #include <algorithm>
@@ -621,13 +622,8 @@ int main(int argc, char **argv) {
       }
     }
 
-    lrrt::DeviceBuffer task_buffer(
-        device,
-        std::max<size_t>(sg::kMaximumTasks, tasks.size()) * sizeof(sg::Task));
-    lrrt::DeviceBuffer program_buffer(device,
-                                      programs.size() * sizeof(sg::Program));
-    lrrt::DeviceBuffer phase_state_buffer(
-        device, static_cast<size_t>(phase_state_count) * sizeof(sg::MaskState));
+    sg::ResidentExecutor resident_executor(device, resident, tasks, programs,
+                                           {phase_state_count, workers});
     lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
     lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer resident_values(device, qd::kHiddenSize * sizeof(float));
@@ -646,7 +642,6 @@ int main(int argc, char **argv) {
                                                       sizeof(float));
     lrrt::DeviceBuffer resident_projected(device,
                                           qd::kHiddenSize * sizeof(float));
-    lrrt::DeviceBuffer resident_state(device, sizeof(sg::State));
     lrrt::DeviceBuffer host_values(device, qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer host_attention_normalized(device, qd::kHiddenSize *
                                                              sizeof(float));
@@ -709,8 +704,6 @@ int main(int argc, char **argv) {
                          sizeof(resident_tail_context));
     lrrt::copy_to_device(host_tail_context_buffer, &host_tail_context,
                          sizeof(host_tail_context));
-    lrrt::copy_to_device(task_buffer, tasks);
-    lrrt::copy_to_device(program_buffer, programs);
     lrrt::copy_to_device(rope_cos_buffer, rope_cos);
     lrrt::copy_to_device(rope_sin_buffer, rope_sin);
 
@@ -786,20 +779,8 @@ int main(int argc, char **argv) {
     lrrt::copy_to_device(host_key_cache, zero_caches);
     lrrt::copy_to_device(host_value_cache, zero_caches);
 
-    const lr_launch_config_t resident_config = {
-        {workers * kBlockSize, 1, 1}, {kBlockSize, 1, 1}, 0};
-    const sg::ResidentArgs resident_args = {
-        static_cast<sg::State *>(resident_state.data()),
-        static_cast<const sg::Task *>(task_buffer.data()),
-        static_cast<const sg::Program *>(program_buffer.data()),
-        static_cast<sg::MaskState *>(phase_state_buffer.data()),
-        static_cast<uint32_t>(programs.size()),
-        static_cast<uint32_t>(tasks.size()),
-        phase_state_count,
-        resident_context_buffer.data(),
-    };
-    const auto *device_tasks =
-        static_cast<const sg::Task *>(task_buffer.data());
+    resident_executor.bind_context(resident_context_buffer.data());
+    const auto *device_tasks = resident_executor.device_tasks();
     struct HostLaunch {
       sg::HostStepArgs args;
       lr_launch_config_t config;
@@ -840,20 +821,17 @@ int main(int argc, char **argv) {
       }
     };
 
-    const auto initialize_state = [&](lrrt::DeviceBuffer &state_buffer,
-                                      uint32_t program_index,
-                                      uint32_t max_steps, uint32_t stop_value) {
-      sg::State state{};
-      state.abi_version = sg::kAbiVersion;
-      state.status = static_cast<uint32_t>(sg::Status::ready);
-      state.phase = sg::make_phase(0, program_index);
-      state.max_steps = max_steps;
-      state.stop_value = stop_value;
-      state.worker_count = workers;
-      lrrt::copy_to_device(state_buffer, &state, sizeof(state));
-      const std::vector<sg::MaskState> empty_phase_states(phase_state_count);
-      lrrt::copy_to_device(phase_state_buffer, empty_phase_states);
-    };
+    const auto initialize_host_state =
+        [&](uint32_t program_index, uint32_t max_steps, uint32_t stop_value) {
+          sg::State state{};
+          state.abi_version = sg::kAbiVersion;
+          state.status = static_cast<uint32_t>(sg::Status::ready);
+          state.phase = sg::make_phase(0, program_index);
+          state.max_steps = max_steps;
+          state.stop_value = stop_value;
+          state.worker_count = workers;
+          lrrt::copy_to_device(host_state, &state, sizeof(state));
+        };
 
     // Exercise both 64-bit mask words, including task bit 63, before timing.
     const std::vector<sg::Task> capacity_tasks =
@@ -861,25 +839,13 @@ int main(int argc, char **argv) {
     const std::vector<sg::Program> capacity_programs = {make_program(
         0, sg::kMaximumTasks, 0,
         sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate)};
-    const sg::ResidentArgs capacity_args = {
-        static_cast<sg::State *>(resident_state.data()),
-        static_cast<const sg::Task *>(task_buffer.data()),
-        static_cast<const sg::Program *>(program_buffer.data()),
-        static_cast<sg::MaskState *>(phase_state_buffer.data()),
-        static_cast<uint32_t>(capacity_programs.size()),
-        static_cast<uint32_t>(capacity_tasks.size()),
-        phase_state_count,
-        resident_context_buffer.data(),
-    };
     const std::vector<float> zero_projected(qd::kHiddenSize, 0.0f);
-    lrrt::copy_to_device(task_buffer, capacity_tasks);
-    lrrt::copy_to_device(program_buffer, capacity_programs);
+    resident_executor.upload_graph(capacity_tasks, capacity_programs);
     lrrt::copy_to_device(resident_projected, zero_projected);
-    initialize_state(resident_state, 0, 1, sg::kMaximumTasks);
-    lrrt::launch(resident, resident_config, capacity_args);
+    resident_executor.initialize(0, 1, sg::kMaximumTasks);
+    resident_executor.launch();
     device.synchronize();
-    sg::State capacity_state{};
-    lrrt::copy_to_host(&capacity_state, resident_state, sizeof(capacity_state));
+    const sg::State capacity_state = resident_executor.read_state();
     if (capacity_state.status != static_cast<uint32_t>(sg::Status::complete) ||
         capacity_state.step != 1 ||
         capacity_state.predicate_value != sg::kMaximumTasks ||
@@ -895,26 +861,24 @@ int main(int argc, char **argv) {
     cyclic_tasks[0].dependency_mask = static_cast<uint32_t>(final_task_mask);
     cyclic_tasks[0].dependency_mask_high =
         static_cast<uint32_t>(final_task_mask >> 32u);
-    lrrt::copy_to_device(task_buffer, cyclic_tasks);
-    lrrt::copy_to_device(program_buffer, programs);
-    initialize_state(resident_state, 0, maximum_graph_steps, steps);
-    lrrt::launch(resident, resident_config, resident_args);
+    resident_executor.upload_graph(cyclic_tasks, programs);
+    resident_executor.initialize(0, maximum_graph_steps, steps);
+    resident_executor.launch();
     device.synchronize();
-    sg::State invalid_state{};
-    lrrt::copy_to_host(&invalid_state, resident_state, sizeof(invalid_state));
+    const sg::State invalid_state = resident_executor.read_state();
     if (invalid_state.status !=
             static_cast<uint32_t>(sg::Status::invalid_program) ||
         invalid_state.error_code != 1) {
       throw std::runtime_error("resident graph did not reject a cyclic DAG");
     }
-    lrrt::copy_to_device(task_buffer, tasks);
+    resident_executor.upload_graph(tasks, programs);
 
     for (uint32_t trial = 0; trial < kWarmupTrials; ++trial) {
-      initialize_state(resident_state, 0, maximum_graph_steps, steps);
+      resident_executor.initialize(0, maximum_graph_steps, steps);
       lrrt::copy_to_device(resident_values, initial_values);
-      lrrt::launch(resident, resident_config, resident_args);
+      resident_executor.launch();
       device.synchronize();
-      initialize_state(host_state, 0, maximum_graph_steps, steps);
+      initialize_host_state(0, maximum_graph_steps, steps);
       lrrt::copy_to_device(host_values, initial_values);
       launch_host_decode();
       device.synchronize();
@@ -922,17 +886,14 @@ int main(int argc, char **argv) {
 
     const Measurement resident_measurement = measure(
         device, trials, resident_values, initial_values,
-        [&] {
-          initialize_state(resident_state, 0, maximum_graph_steps, steps);
-        },
-        [&] { lrrt::launch(resident, resident_config, resident_args); });
+        [&] { resident_executor.initialize(0, maximum_graph_steps, steps); },
+        [&] { resident_executor.launch(); });
     const Measurement host_measurement = measure(
         device, trials, host_values, initial_values,
-        [&] { initialize_state(host_state, 0, maximum_graph_steps, steps); },
+        [&] { initialize_host_state(0, maximum_graph_steps, steps); },
         launch_host_decode);
 
-    sg::State final_state{};
-    lrrt::copy_to_host(&final_state, resident_state, sizeof(final_state));
+    const sg::State final_state = resident_executor.read_state();
     if (final_state.status != static_cast<uint32_t>(sg::Status::complete) ||
         final_state.step != graph_steps ||
         final_state.predicate_value != steps ||
