@@ -10,10 +10,10 @@ target_include_directories(
 add_executable(lrrt_mutex_contention_benchmark mutex_contention.cpp)
 target_link_libraries(lrrt_mutex_contention_benchmark PRIVATE lrrt::lrrt)
 
-add_executable(lrrt_stateful_graph_benchmark stateful_graph.cpp)
-target_link_libraries(lrrt_stateful_graph_benchmark PRIVATE lrrt::lrrt)
+add_executable(lrrt_qwen_stateful_graph_benchmark qwen_stateful_graph.cpp)
+target_link_libraries(lrrt_qwen_stateful_graph_benchmark PRIVATE lrrt::lrrt)
 target_include_directories(
-  lrrt_stateful_graph_benchmark PRIVATE "${PROJECT_SOURCE_DIR}"
+  lrrt_qwen_stateful_graph_benchmark PRIVATE "${PROJECT_SOURCE_DIR}"
 )
 
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
@@ -96,13 +96,13 @@ lrrt_add_hsaco_kernel(
   MUTEX_CONTENTION_HSACO
 )
 lrrt_add_hsaco_kernel(
-  stateful_graph_kernel benchmarks/stateful_graph_kernel.cpp
-  STATEFUL_GRAPH_HSACO
+  qwen_stateful_graph_kernel benchmarks/qwen_stateful_graph_kernel.cpp
+  QWEN_STATEFUL_GRAPH_HSACO
   -O2
   "-I${PROJECT_SOURCE_DIR}"
   DEPENDS
   "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/qwen_decode_abi.hpp"
+  "${PROJECT_SOURCE_DIR}/executor/qwen/stateful_graph_context.hpp"
 )
 lrrt_add_hsaco_kernel(
   async_copy_launch_benchmark_kernel
@@ -200,14 +200,15 @@ if(MUTEX_CONTENTION_HSACO)
   )
 endif()
 
-if(STATEFUL_GRAPH_HSACO)
+if(QWEN_STATEFUL_GRAPH_HSACO)
   add_dependencies(
-    lrrt_stateful_graph_benchmark
-    stateful_graph_kernel_hsaco
+    lrrt_qwen_stateful_graph_benchmark
+    qwen_stateful_graph_kernel_hsaco
   )
   target_compile_definitions(
-    lrrt_stateful_graph_benchmark
-    PRIVATE LRRT_STATEFUL_GRAPH_HSACO="${STATEFUL_GRAPH_HSACO}"
+    lrrt_qwen_stateful_graph_benchmark
+    PRIVATE
+      LRRT_QWEN_STATEFUL_GRAPH_HSACO="${QWEN_STATEFUL_GRAPH_HSACO}"
   )
 endif()
 

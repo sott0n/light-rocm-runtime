@@ -68,11 +68,14 @@ ABI. LRRT launches raw kernel argument buffers and deliberately does not
 synthesize HIP-specific hidden `blockDim` or `gridDim` arguments, so resident
 kernels must not depend on those fields.
 
-## Qwen decoder megakernel
+## Qwen executor specialization
 
 The scheduler ABI carries an opaque execution-context pointer, keeping model
-buffer semantics out of the generic graph state and task descriptors. The Qwen
-decoder specialization defines its context separately and uses the
+buffer semantics out of the generic graph state and task descriptors. All
+Qwen-specific shapes, opcodes, contexts, kernels, and benchmark wiring live
+under `executor/qwen` or Qwen-named benchmark sources; the generic
+`executor/stateful_graph` layer has no Qwen dependency. The decoder
+specialization uses the
 Qwen2.5-0.5B dimensions `hidden=896`, `heads=14`, `kv_heads=2`, `head_dim=64`,
 and `intermediate=4864`.
 
@@ -136,7 +139,7 @@ checkpoint attention norm, Q/K/V weights and biases, output projection,
 `lrrt.mini_model_tail_weights` manifest:
 
 ```sh
-./build/lrrt_stateful_graph_benchmark 64 20 20 \
+./build/lrrt_qwen_stateful_graph_benchmark 64 20 20 \
   --weights /path/to/qwen-bundle/layer_0/weights.json \
   --tail /path/to/qwen-bundle/model_tail/weights.json
 ```
@@ -145,7 +148,7 @@ To exercise a full checkpoint decoder stack, point the benchmark at the bundle
 root and select the layer count:
 
 ```sh
-./build/lrrt_stateful_graph_benchmark 4 20 20 \
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
   --weights-dir /path/to/qwen-bundle --layers 24
 ```
 

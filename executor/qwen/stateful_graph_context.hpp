@@ -1,12 +1,12 @@
-#ifndef LRRT_STATEFUL_GRAPH_QWEN_DECODE_ABI_HPP_
-#define LRRT_STATEFUL_GRAPH_QWEN_DECODE_ABI_HPP_
+#ifndef LRRT_QWEN_STATEFUL_GRAPH_CONTEXT_HPP_
+#define LRRT_QWEN_STATEFUL_GRAPH_CONTEXT_HPP_
 
 #include "executor/stateful_graph/stateful_graph_abi.hpp"
 
 #include <cstdint>
 #include <type_traits>
 
-namespace lrrt::stateful_graph::qwen_decode {
+namespace lrrt::qwen::stateful_graph {
 
 constexpr uint32_t kHiddenSize = 896;
 constexpr uint32_t kAttentionHeads = 14;
@@ -105,10 +105,10 @@ static_assert(std::is_standard_layout_v<Context>);
 static_assert(std::is_standard_layout_v<TailContext>);
 static_assert(sizeof(Context) == 224);
 static_assert(sizeof(TailContext) == 64);
-static_assert(kAttentionTaskCount <= kMaximumTasks);
-static_assert(kFfnTaskCount <= kMaximumTasks);
-static_assert(kMaximumTailTaskCount <= kMaximumTasks);
+static_assert(kAttentionTaskCount <= lrrt::stateful_graph::kMaximumTasks);
+static_assert(kFfnTaskCount <= lrrt::stateful_graph::kMaximumTasks);
+static_assert(kMaximumTailTaskCount <= lrrt::stateful_graph::kMaximumTasks);
 
-} // namespace lrrt::stateful_graph::qwen_decode
+} // namespace lrrt::qwen::stateful_graph
 
-#endif // LRRT_STATEFUL_GRAPH_QWEN_DECODE_ABI_HPP_
+#endif // LRRT_QWEN_STATEFUL_GRAPH_CONTEXT_HPP_

@@ -1,7 +1,7 @@
-#include "executor/stateful_graph/qwen_decode_abi.hpp"
+#include "executor/qwen/stateful_graph_context.hpp"
 
 namespace sg = lrrt::stateful_graph;
-namespace qd = lrrt::stateful_graph::qwen_decode;
+namespace qd = lrrt::qwen::stateful_graph;
 
 namespace {
 
@@ -516,7 +516,7 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
 
 } // namespace
 
-extern "C" __global__ void stateful_graph_resident_kernel(
+extern "C" __global__ void qwen_stateful_graph_resident_kernel(
     sg::State *state, const sg::Task *tasks, const sg::Program *programs,
     sg::MaskState *phase_states, uint32_t program_count,
     uint32_t total_task_count, uint32_t phase_state_count,
@@ -675,9 +675,9 @@ extern "C" __global__ void stateful_graph_resident_kernel(
 }
 
 extern "C" __global__ void
-stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
-                                uint32_t task_count, uint32_t reserved,
-                                void *opaque_context) {
+qwen_stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
+                                     uint32_t task_count, uint32_t reserved,
+                                     void *opaque_context) {
   (void)reserved;
   if (blockIdx.x >= task_count) {
     return;

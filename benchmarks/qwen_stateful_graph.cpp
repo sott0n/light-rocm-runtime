@@ -1,5 +1,5 @@
+#include "executor/qwen/stateful_graph_context.hpp"
 #include "executor/qwen/weight_bundle.hpp"
-#include "executor/stateful_graph/qwen_decode_abi.hpp"
 #include "lrrt/lrrt.hpp"
 
 #include <algorithm>
@@ -16,14 +16,14 @@
 #include <utility>
 #include <vector>
 
-#ifndef LRRT_STATEFUL_GRAPH_HSACO
-#define LRRT_STATEFUL_GRAPH_HSACO "stateful_graph_kernel.hsaco"
+#ifndef LRRT_QWEN_STATEFUL_GRAPH_HSACO
+#define LRRT_QWEN_STATEFUL_GRAPH_HSACO "qwen_stateful_graph_kernel.hsaco"
 #endif
 
 namespace {
 
 namespace sg = lrrt::stateful_graph;
-namespace qd = lrrt::stateful_graph::qwen_decode;
+namespace qd = lrrt::qwen::stateful_graph;
 using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kBlockSize = sg::kWorkerThreads;
@@ -123,7 +123,8 @@ Options parse_options(int argc, char **argv) {
       break;
     default:
       throw std::invalid_argument(
-          "usage: lrrt_stateful_graph_benchmark [steps] [trials] [workers] "
+          "usage: lrrt_qwen_stateful_graph_benchmark [steps] [trials] "
+          "[workers] "
           "[--weights weights.json | --weights-dir directory --layers N] "
           "[--tail model_tail/weights.json]");
     }
@@ -461,13 +462,15 @@ int main(int argc, char **argv) {
 
     lrrt::Runtime runtime;
     if (runtime.device_count() == 0) {
-      std::fprintf(stderr, "stateful_graph_benchmark: no GPU devices\n");
+      std::fprintf(stderr, "qwen_stateful_graph_benchmark: no GPU devices\n");
       return 1;
     }
     lrrt::Device device = runtime.open_device(0);
-    lrrt::Module module(device, read_file(LRRT_STATEFUL_GRAPH_HSACO));
-    lrrt::Kernel resident = module.kernel("stateful_graph_resident_kernel");
-    lrrt::Kernel host_step = module.kernel("stateful_graph_host_step_kernel");
+    lrrt::Module module(device, read_file(LRRT_QWEN_STATEFUL_GRAPH_HSACO));
+    lrrt::Kernel resident =
+        module.kernel("qwen_stateful_graph_resident_kernel");
+    lrrt::Kernel host_step =
+        module.kernel("qwen_stateful_graph_host_step_kernel");
 
     lrrt::executor::qwen::ModelTailWeights tail_weights{};
     std::string tail_source;
@@ -1010,8 +1013,8 @@ int main(int argc, char **argv) {
       throw std::runtime_error("resident top-1 result mismatch");
     }
 
-    std::printf("\nLRRT Stateful Graph Benchmark\n");
-    std::printf("=============================\n");
+    std::printf("\nLRRT Qwen Stateful Graph Benchmark\n");
+    std::printf("==================================\n");
     std::printf("Workers:                  %u persistent workgroups\n",
                 workers);
     std::printf("Qwen decoder shape:       hidden=%u heads=%u kv_heads=%u "
