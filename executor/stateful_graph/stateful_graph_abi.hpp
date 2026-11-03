@@ -7,7 +7,7 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 6;
+constexpr uint32_t kAbiVersion = 7;
 constexpr uint32_t kWorkerThreads = 256;
 constexpr uint32_t kMaximumTasks = 64;
 constexpr uint32_t kMaximumPrograms = 256;
@@ -50,7 +50,10 @@ struct alignas(64) State {
   uint32_t worker_count;
   uint64_t executed_tasks;
   uint32_t predicate_value;
-  uint32_t reserved[5];
+  // Tasks may set this value before a Program with kProgramBranchesOnState
+  // completes. A nonzero value selects branch_program.
+  uint32_t branch_value;
+  uint32_t reserved[4];
 };
 
 // A deliberately small task descriptor. Opcodes interpret the range and two
@@ -70,16 +73,19 @@ struct alignas(32) Task {
 enum ProgramFlags : uint32_t {
   kProgramAdvancesStep = 1u << 0u,
   kProgramEvaluatesPredicate = 1u << 1u,
+  kProgramBranchesOnState = 1u << 2u,
 };
 
 // A program selects one task DAG from a contiguous task table. The completing
-// worker publishes next_program in the packed phase word, so no host dispatch
-// is needed between execution phases.
+// worker publishes next_program or branch_program in the packed phase word, so
+// no host dispatch is needed between execution phases.
 struct alignas(16) Program {
   uint32_t task_offset;
   uint32_t task_count;
   uint32_t next_program;
   uint32_t flags;
+  uint32_t branch_program;
+  uint32_t reserved[3];
 };
 
 struct MaskState {
@@ -117,7 +123,7 @@ static_assert(std::is_standard_layout_v<ResidentArgs>);
 static_assert(std::is_standard_layout_v<HostStepArgs>);
 static_assert(sizeof(State) == 64);
 static_assert(sizeof(Task) == 32);
-static_assert(sizeof(Program) == 16);
+static_assert(sizeof(Program) == 32);
 static_assert(sizeof(MaskState) == 20);
 static_assert(sizeof(ResidentArgs) == 56);
 static_assert(sizeof(HostStepArgs) == 32);

@@ -40,6 +40,7 @@ __device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
   switch (static_cast<qd::Opcode>(task.opcode)) {
   case qd::Opcode::attention_rmsnorm_f32:
   case qd::Opcode::mlp_rmsnorm_f32:
+  case qd::Opcode::final_rmsnorm_f32:
   case qd::Opcode::down_matvec_f32:
     return task.begin < task.end && task.end <= context->hidden_size;
   case qd::Opcode::qkv_projection_f32:
@@ -55,6 +56,11 @@ __device__ bool valid_task(const sg::Task &task, const qd::Context *context) {
            task.argument0 != 0;
   case qd::Opcode::gate_up_silu_f32:
     return task.begin < task.end && task.end <= context->intermediate_size;
+  case qd::Opcode::lm_head_top1_partition_f32:
+    return task.begin < task.end && task.end <= context->tail->vocab_size &&
+           task.argument0 < context->tail->partition_count;
+  case qd::Opcode::top1_reduce:
+    return task.begin == 0 && task.end == context->tail->partition_count;
   }
   return false;
 }
@@ -76,6 +82,15 @@ validate_programs(const sg::State *state, const sg::Task *tasks,
       context->query_size != qd::kQuerySize ||
       context->kv_size != qd::kKvSize ||
       context->intermediate_size != qd::kIntermediateSize ||
+      context->tail == nullptr || context->tail->final_norm_weight == nullptr ||
+      context->tail->lm_head_weight == nullptr ||
+      context->tail->final_normalized == nullptr ||
+      context->tail->partial_max_values == nullptr ||
+      context->tail->partial_max_indices == nullptr ||
+      context->tail->sampled_token == nullptr ||
+      context->tail->sampled_logit == nullptr ||
+      context->tail->vocab_size == 0 || context->tail->partition_count == 0 ||
+      context->tail->partition_count > qd::kMaximumLmHeadPartitions ||
       context->cache_capacity < (state->max_steps + context->layer_count - 1u) /
                                     context->layer_count) {
     return false;
@@ -88,7 +103,8 @@ validate_programs(const sg::State *state, const sg::Task *tasks,
         candidate.kv_size != context->kv_size ||
         candidate.intermediate_size != context->intermediate_size ||
         candidate.cache_capacity != context->cache_capacity ||
-        candidate.layer_count != context->layer_count) {
+        candidate.layer_count != context->layer_count ||
+        candidate.tail != context->tail) {
       return false;
     }
   }
@@ -101,7 +117,10 @@ validate_programs(const sg::State *state, const sg::Task *tasks,
         program.task_count > total_task_count - program.task_offset ||
         program.next_program >= program_count ||
         (program.flags &
-         ~(sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate)) != 0) {
+         ~(sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate |
+           sg::kProgramBranchesOnState)) != 0 ||
+        ((program.flags & sg::kProgramBranchesOnState) != 0 &&
+         program.branch_program >= program_count)) {
       return false;
     }
 
@@ -165,6 +184,74 @@ __device__ void matvec_range_wave(const float *input, const float *weight,
       output[row] = sum;
     }
   }
+}
+
+__device__ __forceinline__ bool better_top1(float value, uint32_t index,
+                                            float best_value,
+                                            uint32_t best_index) {
+  return value > best_value || (value == best_value && index < best_index);
+}
+
+__device__ void lm_head_top1_partition(const qd::Context *context,
+                                       const sg::Task &task, float *reduction,
+                                       uint32_t *wave_indices) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  float best_value = -INFINITY;
+  uint32_t best_index = UINT32_MAX;
+  for (uint32_t row = task.begin + wave; row < task.end;
+       row += kWavesPerWorker) {
+    float sum = 0.0f;
+    const float *row_weight = context->tail->lm_head_weight +
+                              static_cast<size_t>(row) * context->hidden_size;
+    for (uint32_t column = lane; column < context->hidden_size; column += 32u) {
+      sum = fmaf(context->tail->final_normalized[column], row_weight[column],
+                 sum);
+    }
+    sum = wave_sum(sum);
+    if (lane == 0 && better_top1(sum, row, best_value, best_index)) {
+      best_value = sum;
+      best_index = row;
+    }
+  }
+  if (lane == 0) {
+    reduction[wave] = best_value;
+    wave_indices[wave] = best_index;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    best_value = reduction[0];
+    best_index = wave_indices[0];
+    for (uint32_t candidate = 1; candidate < kWavesPerWorker; ++candidate) {
+      if (better_top1(reduction[candidate], wave_indices[candidate], best_value,
+                      best_index)) {
+        best_value = reduction[candidate];
+        best_index = wave_indices[candidate];
+      }
+    }
+    context->tail->partial_max_values[task.argument0] = best_value;
+    context->tail->partial_max_indices[task.argument0] = best_index;
+  }
+}
+
+__device__ void reduce_top1(const qd::Context *context) {
+  if (threadIdx.x != 0) {
+    return;
+  }
+  float best_value = context->tail->partial_max_values[0];
+  uint32_t best_index = context->tail->partial_max_indices[0];
+  for (uint32_t candidate = 1; candidate < context->tail->partition_count;
+       ++candidate) {
+    const float value = context->tail->partial_max_values[candidate];
+    const uint32_t index = context->tail->partial_max_indices[candidate];
+    if (better_top1(value, index, best_value, best_index)) {
+      best_value = value;
+      best_index = index;
+    }
+  }
+  *context->tail->sampled_logit = best_value;
+  *context->tail->sampled_token = best_index;
 }
 
 __device__ void qkv_projection_range_wave(const qd::Context *context,
@@ -331,10 +418,12 @@ __device__ void attention_output_residual_range_wave(const qd::Context *context,
 }
 
 __device__ void execute_task(const sg::Task &task, sg::State *state,
-                             qd::Context *context, float *reduction) {
+                             qd::Context *context, float *reduction,
+                             uint32_t *wave_indices) {
   const qd::Opcode opcode = static_cast<qd::Opcode>(task.opcode);
   if (opcode == qd::Opcode::attention_rmsnorm_f32 ||
-      opcode == qd::Opcode::mlp_rmsnorm_f32) {
+      opcode == qd::Opcode::mlp_rmsnorm_f32 ||
+      opcode == qd::Opcode::final_rmsnorm_f32) {
     float sum_squares = 0.0f;
     for (uint32_t index = task.begin + threadIdx.x; index < task.end;
          index += sg::kWorkerThreads) {
@@ -353,12 +442,15 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
     const float epsilon = __uint_as_float(task.argument0);
     const float inverse_rms = rsqrtf(
         reduction[0] / static_cast<float>(task.end - task.begin) + epsilon);
-    const float *norm_weight = opcode == qd::Opcode::attention_rmsnorm_f32
-                                   ? context->attention_norm_weight
-                                   : context->mlp_norm_weight;
-    float *normalized = opcode == qd::Opcode::attention_rmsnorm_f32
-                            ? context->attention_normalized
-                            : context->mlp_normalized;
+    const float *norm_weight = context->tail->final_norm_weight;
+    float *normalized = context->tail->final_normalized;
+    if (opcode == qd::Opcode::attention_rmsnorm_f32) {
+      norm_weight = context->attention_norm_weight;
+      normalized = context->attention_normalized;
+    } else if (opcode == qd::Opcode::mlp_rmsnorm_f32) {
+      norm_weight = context->mlp_norm_weight;
+      normalized = context->mlp_normalized;
+    }
     for (uint32_t index = task.begin + threadIdx.x; index < task.end;
          index += sg::kWorkerThreads) {
       normalized[index] =
@@ -398,6 +490,16 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
     return;
   }
 
+  if (opcode == qd::Opcode::lm_head_top1_partition_f32) {
+    lm_head_top1_partition(context, task, reduction, wave_indices);
+    return;
+  }
+
+  if (opcode == qd::Opcode::top1_reduce) {
+    reduce_top1(context);
+    return;
+  }
+
   for (uint32_t index = task.begin + threadIdx.x; index < task.end;
        index += sg::kWorkerThreads) {
     context->hidden[index] += context->projected[index];
@@ -408,6 +510,7 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
     if (token_boundary) {
       state->predicate_value += task.argument0;
     }
+    state->branch_value = static_cast<uint32_t>(token_boundary);
   }
 }
 
@@ -454,6 +557,7 @@ extern "C" __global__ void stateful_graph_resident_kernel(
   __shared__ uint32_t selected_program;
   __shared__ uint32_t selected_generation;
   __shared__ float reduction[sg::kWorkerThreads];
+  __shared__ uint32_t wave_indices[sg::kWorkerThreads / 32u];
   while (true) {
     if (threadIdx.x == 0) {
       selected_task = sg::kNoTask;
@@ -508,7 +612,8 @@ extern "C" __global__ void stateful_graph_resident_kernel(
       const uint32_t mask_word = selected_task >> 5u;
       const uint32_t task_mask = 1u << (selected_task & 31u);
       qd::Context *context = &contexts[state->step % contexts[0].layer_count];
-      execute_task(program_tasks[selected_task], state, context, reduction);
+      execute_task(program_tasks[selected_task], state, context, reduction,
+                   wave_indices);
       __syncthreads();
 
       if (threadIdx.x == 0) {
@@ -549,9 +654,14 @@ extern "C" __global__ void stateful_graph_resident_kernel(
               atomicExch(&state->status,
                          static_cast<uint32_t>(sg::Status::invalid_program));
             } else {
+              uint32_t next_program = program.next_program;
+              if ((program.flags & sg::kProgramBranchesOnState) != 0 &&
+                  state->branch_value != 0) {
+                next_program = program.branch_program;
+              }
               __threadfence();
               atomicExch(&state->phase,
-                         sg::make_phase(next_generation, program.next_program));
+                         sg::make_phase(next_generation, next_program));
             }
           }
         }
@@ -575,7 +685,8 @@ stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
   auto *contexts = static_cast<qd::Context *>(opaque_context);
   qd::Context *context = &contexts[state->step % contexts[0].layer_count];
   __shared__ float reduction[sg::kWorkerThreads];
-  execute_task(tasks[blockIdx.x], state, context, reduction);
+  __shared__ uint32_t wave_indices[sg::kWorkerThreads / 32u];
+  execute_task(tasks[blockIdx.x], state, context, reduction, wave_indices);
   __syncthreads();
   if (threadIdx.x == 0 && static_cast<qd::Opcode>(tasks[blockIdx.x].opcode) ==
                               qd::Opcode::residual_advance) {

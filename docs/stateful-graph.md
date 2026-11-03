@@ -23,18 +23,21 @@ API. The target is a device-resident execution model that HIP Graph does not
 currently expose on AMD GPUs: a graph loop whose predicate is produced and
 consumed on the GPU without a host round trip.
 
-## Prototype v2
+## Prototype v3
 
-The prototype defines a 64-byte device `State`, a 32-byte `Task`, and a 16-byte
+The prototype defines a 64-byte device `State`, a 32-byte `Task`, and a 32-byte
 `Program` descriptor. Each Program selects a DAG of up to 64 tasks from a
-shared task table and names the next Program. A fixed set of persistent
+shared task table and names its normal and conditional successors. Tasks can
+publish a branch value in device state, allowing a Program transition to skip
+or enter a subgraph without host intervention. A fixed set of persistent
 workgroups repeatedly:
 
 1. scan for a task whose dependencies are complete;
 2. atomically claim and execute that task;
 3. publish completion so dependent tasks become ready;
-4. let the final completing worker evaluate a device-side predicate; and
-5. atomically publish the next Program phase or return.
+4. let the final completing worker evaluate device-side branch and loop
+   predicates; and
+5. atomically publish the selected Program phase or return.
 
 Claimed and completed masks remain pairs of 32-bit atomic words so the 32-task
 fast path stays intact. Each bounded execution phase owns a separate 20-byte
@@ -85,6 +88,9 @@ attention RMSNorm
   -> 20 x fused gate projection + up projection + SiLU multiply
   -> 10 x down projection
   -> fused residual add + advance device state
+  -> [final layer only] final RMSNorm
+  -> 32 x fused LM head projection + partition-local Top-1
+  -> reduce 32 candidates to the sampled token and logit
 ```
 
 The decoder layer is represented as two device-linked Programs: a 25-task
@@ -105,28 +111,34 @@ hidden state.
 Matvec tasks use wave-coalesced weight reads, and each persistent workgroup
 contains 256 threads to expose eight wave32 wavefronts. Gate, up, and activation
 are fused so the gate and up intermediates never enter device memory. The final
-task adds the MLP residual and updates the predicate, which terminates the
-repeated graph loop without host intervention.
+FFN task adds the MLP residual, advances layer state, and publishes whether the
+token reached its final layer.
 
 The opaque context can also be an array of layer contexts. After each completed
 FFN phase, the resident scheduler selects
 `contexts[state.step % layer_count]`; weights and KV-cache slices remain
 layer-local while activation scratch is shared. The token position is
-`state.step / layer_count`, and only the final layer's residual task advances
-the token predicate. Consequently, a 24-layer decoder stack and multiple token
-iterations remain inside one kernel launch rather than returning to the host
-between layers.
+`state.step / layer_count`. Non-final layers branch directly back to Attention;
+the final layer enters a third Program containing final RMSNorm, LM head, and
+Top-1 reduction. The LM head never materializes the full logits vector: each
+of at most 32 tasks emits one local token/logit candidate and the successor
+reduces only those candidates. The tail Program evaluates the token predicate
+after sampling, so a 24-layer decoder stack, LM head, and multiple token
+iterations remain inside one kernel launch.
 
-The host-driven baseline invokes the same arithmetic in nine stage launches
-per step. By default the benchmark uses deterministic model-shaped weights,
-isolating execution and scheduling performance while preserving the real FFN
-dimensions and memory footprint. Pass `--weights` with an existing Qwen layer
-bundle manifest to run both paths with its checkpoint attention norm, Q/K/V
-weights and biases, output projection, `mlp_norm`, gate, up, and down tensors:
+The host-driven baseline invokes the same arithmetic in nine launches per
+decoder layer plus three launches per token for final RMSNorm, partitioned LM
+head, and Top-1 reduction. By default the benchmark uses deterministic
+model-shaped decoder weights and a 4,096-row synthetic LM head. Pass `--weights`
+with an existing Qwen layer bundle manifest to run both paths with its
+checkpoint attention norm, Q/K/V weights and biases, output projection,
+`mlp_norm`, gate, up, and down tensors. Pass `--tail` to load an existing
+`lrrt.mini_model_tail_weights` manifest:
 
 ```sh
 ./build/lrrt_stateful_graph_benchmark 64 20 20 \
-  --weights /path/to/qwen-bundle/layer_0/weights.json
+  --weights /path/to/qwen-bundle/layer_0/weights.json \
+  --tail /path/to/qwen-bundle/model_tail/weights.json
 ```
 
 To exercise a full checkpoint decoder stack, point the benchmark at the bundle
@@ -137,30 +149,30 @@ root and select the layer count:
   --weights-dir /path/to/qwen-bundle --layers 24
 ```
 
-The host-driven comparison launches the same nine arithmetic stages for every
-layer and token. Four tokens through 24 layers therefore use one resident
-launch versus 864 host launches. On the local gfx1101 system, the barrier-free
-multi-Program path completed that synthetic workload 1.20x faster in both
-device and wall time. A longer 64-token, two-layer run traversed 256 Program
-phases in one launch and measured 1.08x faster than 1,152 host launches.
+When `--weights-dir` contains `model_tail/weights.json`, the benchmark loads it
+automatically.
+
+Four tokens through 24 layers plus the synthetic LM head use one resident
+launch versus 876 host launches. On the local gfx1101 system, that
+196-Program-phase workload measured 1.12x faster in both device and wall time.
 Absolute timings remain sensitive to GPU clocks and concurrent load, and the
-real 24-layer checkpoint comparison must be rerun before making a whole-model
-speedup claim.
+full-vocabulary 24-layer checkpoint comparison must be rerun before making a
+whole-model speedup claim.
 
-The loader accepts the existing `lrrt.mini_decoder_weights` FP32 format and
-rejects bundles whose hidden, head, KV-head, head-dimension, or intermediate
-dimensions do not match the specialized megakernel.
+The loader accepts the existing `lrrt.mini_decoder_weights` and
+`lrrt.mini_model_tail_weights` FP32 formats and rejects bundles whose hidden,
+head, KV-head, head-dimension, or intermediate dimensions do not match the
+specialized megakernel.
 
-The resident kernel uses 1,040 bytes of group memory, 42 SGPRs, and 72 VGPRs on
+The resident kernel uses 1,072 bytes of group memory, 44 SGPRs, and 73 VGPRs on
 gfx1101, with no private segment, dynamic stack, or register spills.
 
 ## Qwen path
 
 The next milestones are:
 
-1. add final RMSNorm, LM head, and sampling as additional device-linked
-   Programs;
-2. make KV length, sampled token, EOS, and embedding selection explicit
+1. make KV length, sampled token, EOS, and embedding selection explicit
    device-resident decode state;
+2. feed the sampled token's embedding back into the next resident iteration;
 3. add resource-aware worker admission from HSACO metadata; and
 4. compare a whole decode loop against HIP Graph and host-driven LRRT.

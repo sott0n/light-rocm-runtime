@@ -23,11 +23,13 @@ constexpr uint32_t kAttentionTaskPartitions = 7;
 constexpr uint32_t kAttentionOutputPartitions = 8;
 constexpr uint32_t kFfnProjectionPartitions = 20;
 constexpr uint32_t kDownProjectionPartitions = 10;
+constexpr uint32_t kMaximumLmHeadPartitions = 32;
 constexpr uint32_t kAttentionTaskCount = 2u + kAttentionProjectionPartitions +
                                          kAttentionTaskPartitions +
                                          kAttentionOutputPartitions;
 constexpr uint32_t kFfnTaskCount = 32;
-constexpr uint32_t kTaskCount = kAttentionTaskCount + kFfnTaskCount;
+constexpr uint32_t kDecoderTaskCount = kAttentionTaskCount + kFfnTaskCount;
+constexpr uint32_t kMaximumTailTaskCount = 2u + kMaximumLmHeadPartitions;
 
 enum class Opcode : uint32_t {
   attention_rmsnorm_f32 = 1,
@@ -39,6 +41,24 @@ enum class Opcode : uint32_t {
   gate_up_silu_f32 = 7,
   down_matvec_f32 = 8,
   residual_advance = 9,
+  final_rmsnorm_f32 = 10,
+  lm_head_top1_partition_f32 = 11,
+  top1_reduce = 12,
+};
+
+// Shared model-tail state. Every decoder-layer Context points to the same
+// instance so a conditional tail Program can run after the final layer without
+// changing the scheduler's opaque-context ABI.
+struct alignas(16) TailContext {
+  const float *final_norm_weight;
+  const float *lm_head_weight;
+  float *final_normalized;
+  float *partial_max_values;
+  uint32_t *partial_max_indices;
+  uint32_t *sampled_token;
+  float *sampled_logit;
+  uint32_t vocab_size;
+  uint32_t partition_count;
 };
 
 // Device pointers and dimensions consumed by the Qwen decoder-stage
@@ -69,6 +89,7 @@ struct alignas(16) Context {
   float *mlp_normalized;
   float *activated;
   float *projected;
+  TailContext *tail;
   uint32_t hidden_size;
   uint32_t query_size;
   uint32_t kv_size;
@@ -81,8 +102,12 @@ struct alignas(16) Context {
 };
 
 static_assert(std::is_standard_layout_v<Context>);
+static_assert(std::is_standard_layout_v<TailContext>);
 static_assert(sizeof(Context) == 224);
-static_assert(kTaskCount <= kMaximumTasks);
+static_assert(sizeof(TailContext) == 64);
+static_assert(kAttentionTaskCount <= kMaximumTasks);
+static_assert(kFfnTaskCount <= kMaximumTasks);
+static_assert(kMaximumTailTaskCount <= kMaximumTasks);
 
 } // namespace lrrt::stateful_graph::qwen_decode
 

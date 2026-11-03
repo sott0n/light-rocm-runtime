@@ -30,6 +30,7 @@ constexpr uint32_t kBlockSize = sg::kWorkerThreads;
 constexpr uint32_t kWarmupTrials = 5;
 constexpr uint32_t kDefaultWorkers = 20;
 constexpr uint32_t kMaximumWorkers = 20;
+constexpr uint32_t kSyntheticVocabSize = 4096;
 
 struct Measurement {
   double device_ns = 0.0;
@@ -43,6 +44,7 @@ struct Options {
   uint32_t layers = 1;
   const char *weights_path = nullptr;
   const char *weights_dir = nullptr;
+  const char *tail_path = nullptr;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -98,6 +100,13 @@ Options parse_options(int argc, char **argv) {
       options.layers = parse_u32(argv[index], "layers");
       continue;
     }
+    if (std::strcmp(argv[index], "--tail") == 0) {
+      if (++index >= argc) {
+        throw std::invalid_argument("--tail requires a manifest path");
+      }
+      options.tail_path = argv[index];
+      continue;
+    }
     if (argv[index][0] == '-') {
       throw std::invalid_argument(std::string("unknown option: ") +
                                   argv[index]);
@@ -115,7 +124,8 @@ Options parse_options(int argc, char **argv) {
     default:
       throw std::invalid_argument(
           "usage: lrrt_stateful_graph_benchmark [steps] [trials] [workers] "
-          "[--weights weights.json | --weights-dir directory --layers N]");
+          "[--weights weights.json | --weights-dir directory --layers N] "
+          "[--tail model_tail/weights.json]");
     }
   }
   if (options.weights_path && options.weights_dir) {
@@ -176,15 +186,28 @@ sg::Task make_task(qd::Opcode opcode, uint64_t dependency_mask, uint32_t begin,
   };
 }
 
+sg::Program make_program(uint32_t task_offset, uint32_t task_count,
+                         uint32_t next_program, uint32_t flags = 0,
+                         uint32_t branch_program = 0) {
+  return {task_offset, task_count,     next_program,
+          flags,       branch_program, {0, 0, 0}};
+}
+
 struct ProgramTable {
   std::vector<sg::Task> tasks;
   std::vector<sg::Program> programs;
 };
 
-ProgramTable make_qwen_decoder_programs() {
+ProgramTable make_qwen_decoder_programs(uint32_t vocab_size,
+                                        uint32_t lm_head_partitions) {
+  if (vocab_size == 0 || lm_head_partitions == 0 ||
+      lm_head_partitions > qd::kMaximumLmHeadPartitions ||
+      lm_head_partitions > vocab_size) {
+    throw std::invalid_argument("invalid LM head partitioning");
+  }
   ProgramTable table;
   std::vector<sg::Task> &tasks = table.tasks;
-  tasks.reserve(qd::kTaskCount);
+  tasks.reserve(qd::kDecoderTaskCount + lm_head_partitions + 2u);
   tasks.push_back(make_task(qd::Opcode::attention_rmsnorm_f32, 0, 0,
                             qd::kHiddenSize, float_bits(1.0e-6f)));
 
@@ -226,7 +249,7 @@ ProgramTable make_qwen_decoder_programs() {
   if (tasks.size() != qd::kAttentionTaskCount) {
     throw std::runtime_error("Qwen attention program layout mismatch");
   }
-  table.programs.push_back({0, qd::kAttentionTaskCount, 1, 0});
+  table.programs.push_back(make_program(0, qd::kAttentionTaskCount, 1));
 
   const uint32_t ffn_offset = static_cast<uint32_t>(tasks.size());
   tasks.push_back(make_task(qd::Opcode::mlp_rmsnorm_f32, 0, 0, qd::kHiddenSize,
@@ -259,12 +282,33 @@ ProgramTable make_qwen_decoder_programs() {
 
   tasks.push_back(make_task(qd::Opcode::residual_advance, down_mask, 0,
                             qd::kHiddenSize, 1, 1));
-  if (tasks.size() != qd::kTaskCount) {
+  if (tasks.size() != qd::kDecoderTaskCount) {
     throw std::runtime_error("Qwen decoder task layout mismatch");
   }
   table.programs.push_back(
-      {ffn_offset, qd::kFfnTaskCount, 0,
-       sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate});
+      make_program(ffn_offset, qd::kFfnTaskCount, 0,
+                   sg::kProgramAdvancesStep | sg::kProgramBranchesOnState, 2));
+
+  const uint32_t tail_offset = static_cast<uint32_t>(tasks.size());
+  tasks.push_back(make_task(qd::Opcode::final_rmsnorm_f32, 0, 0,
+                            qd::kHiddenSize, float_bits(1.0e-6f)));
+  uint64_t partition_mask = 0;
+  for (uint32_t partition = 0; partition < lm_head_partitions; ++partition) {
+    const uint32_t local_task_index =
+        static_cast<uint32_t>(tasks.size()) - tail_offset;
+    tasks.push_back(
+        make_task(qd::Opcode::lm_head_top1_partition_f32, 1u,
+                  static_cast<uint32_t>(static_cast<uint64_t>(vocab_size) *
+                                        partition / lm_head_partitions),
+                  static_cast<uint32_t>(static_cast<uint64_t>(vocab_size) *
+                                        (partition + 1u) / lm_head_partitions),
+                  partition));
+    partition_mask |= static_cast<uint64_t>(1) << local_task_index;
+  }
+  tasks.push_back(make_task(qd::Opcode::top1_reduce, partition_mask, 0,
+                            lm_head_partitions));
+  table.programs.push_back(make_program(tail_offset, lm_head_partitions + 2u, 0,
+                                        sg::kProgramEvaluatesPredicate));
   return table;
 }
 
@@ -296,7 +340,7 @@ constexpr HostStage kHostStages[] = {
     {qd::kAttentionTaskCount + 1, qd::kFfnProjectionPartitions},
     {qd::kAttentionTaskCount + 1 + qd::kFfnProjectionPartitions,
      qd::kDownProjectionPartitions},
-    {qd::kTaskCount - 1, 1},
+    {qd::kDecoderTaskCount - 1, 1},
 };
 
 void fill_weight(std::vector<float> &weight, uint32_t salt) {
@@ -316,6 +360,17 @@ void validate_layer_shape(
       weights.shape.intermediate != qd::kIntermediateSize) {
     throw std::runtime_error(
         "checkpoint decoder shape does not match the megakernel");
+  }
+}
+
+void validate_tail_shape(
+    const lrrt::executor::qwen::ModelTailWeights &weights) {
+  if (weights.hidden != qd::kHiddenSize || weights.vocab == 0 ||
+      weights.final_norm_weight.size() != qd::kHiddenSize ||
+      weights.lm_head_weight.size() !=
+          static_cast<size_t>(weights.vocab) * qd::kHiddenSize) {
+    throw std::runtime_error(
+        "checkpoint model tail does not match the megakernel");
   }
 }
 
@@ -363,6 +418,19 @@ struct DeviceLayerWeights {
   }
 };
 
+struct DeviceTailWeights {
+  lrrt::DeviceBuffer final_norm;
+  lrrt::DeviceBuffer lm_head;
+
+  DeviceTailWeights(lrrt::Device device,
+                    const lrrt::executor::qwen::ModelTailWeights &weights)
+      : final_norm(device, weights.final_norm_weight.size() * sizeof(float)),
+        lm_head(device, weights.lm_head_weight.size() * sizeof(float)) {
+    lrrt::copy_to_device(final_norm, weights.final_norm_weight);
+    lrrt::copy_to_device(lm_head, weights.lm_head_weight);
+  }
+};
+
 void verify_values(const char *label, const std::vector<float> &resident,
                    const std::vector<float> &host) {
   for (size_t index = 0; index < resident.size(); ++index) {
@@ -401,18 +469,63 @@ int main(int argc, char **argv) {
     lrrt::Kernel resident = module.kernel("stateful_graph_resident_kernel");
     lrrt::Kernel host_step = module.kernel("stateful_graph_host_step_kernel");
 
-    const ProgramTable qwen_program_table = make_qwen_decoder_programs();
+    lrrt::executor::qwen::ModelTailWeights tail_weights{};
+    std::string tail_source;
+    std::filesystem::path inferred_tail;
+    if (options.tail_path) {
+      inferred_tail = options.tail_path;
+    } else if (options.weights_dir) {
+      const std::filesystem::path candidate =
+          std::filesystem::path(options.weights_dir) / "model_tail" /
+          "weights.json";
+      if (std::filesystem::exists(candidate)) {
+        inferred_tail = candidate;
+      }
+    }
+    if (!inferred_tail.empty()) {
+      tail_weights = lrrt::executor::qwen::load_model_tail_weights(
+          inferred_tail.string().c_str());
+      tail_source = inferred_tail.string();
+    } else {
+      tail_weights.hidden = qd::kHiddenSize;
+      tail_weights.vocab = kSyntheticVocabSize;
+      tail_weights.final_norm_weight.resize(qd::kHiddenSize);
+      tail_weights.lm_head_weight.resize(
+          static_cast<size_t>(tail_weights.vocab) * qd::kHiddenSize);
+      for (uint32_t index = 0; index < qd::kHiddenSize; ++index) {
+        tail_weights.final_norm_weight[index] =
+            1.0f + 0.001f * static_cast<float>(index % 19u);
+      }
+      fill_weight(tail_weights.lm_head_weight, 11);
+      tail_source = "deterministic synthetic f32";
+    }
+    validate_tail_shape(tail_weights);
+    const uint32_t lm_head_partitions =
+        std::min(tail_weights.vocab, qd::kMaximumLmHeadPartitions);
+    DeviceTailWeights device_tail_weights(device, tail_weights);
+
+    const ProgramTable qwen_program_table =
+        make_qwen_decoder_programs(tail_weights.vocab, lm_head_partitions);
     const std::vector<sg::Task> &tasks = qwen_program_table.tasks;
     const std::vector<sg::Program> &programs = qwen_program_table.programs;
     const uint32_t layers = options.layers;
     const uint32_t graph_steps = steps * layers;
     const uint32_t maximum_graph_steps = graph_steps * 2u;
+    const uint64_t expected_program_phases_u64 =
+        static_cast<uint64_t>(steps) *
+        (2u * static_cast<uint64_t>(layers) + 1u);
     const uint64_t phase_state_count_u64 =
-        static_cast<uint64_t>(maximum_graph_steps) * programs.size() + 1u;
+        static_cast<uint64_t>(steps) * 2u *
+            (2u * static_cast<uint64_t>(layers) + 1u) +
+        1u;
     if (phase_state_count_u64 >
-        static_cast<uint64_t>(sg::phase_generation(UINT32_MAX)) + 1u) {
+            static_cast<uint64_t>(sg::phase_generation(UINT32_MAX)) + 1u ||
+        expected_program_phases_u64 >
+            static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
       throw std::invalid_argument("program phase count is too large");
     }
+    const uint32_t expected_program_phases =
+        static_cast<uint32_t>(expected_program_phases_u64);
     const uint32_t phase_state_count =
         static_cast<uint32_t>(phase_state_count_u64);
     const uint32_t cache_capacity = steps * 2u;
@@ -547,6 +660,52 @@ int main(int argc, char **argv) {
                                       qd::kIntermediateSize * sizeof(float));
     lrrt::DeviceBuffer host_projected(device, qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer host_state(device, sizeof(sg::State));
+    lrrt::DeviceBuffer resident_final_normalized(device, qd::kHiddenSize *
+                                                             sizeof(float));
+    lrrt::DeviceBuffer resident_partial_max_values(device, lm_head_partitions *
+                                                               sizeof(float));
+    lrrt::DeviceBuffer resident_partial_max_indices(
+        device, lm_head_partitions * sizeof(uint32_t));
+    lrrt::DeviceBuffer resident_sampled_token(device, sizeof(uint32_t));
+    lrrt::DeviceBuffer resident_sampled_logit(device, sizeof(float));
+    lrrt::DeviceBuffer host_final_normalized(device,
+                                             qd::kHiddenSize * sizeof(float));
+    lrrt::DeviceBuffer host_partial_max_values(device, lm_head_partitions *
+                                                           sizeof(float));
+    lrrt::DeviceBuffer host_partial_max_indices(device, lm_head_partitions *
+                                                            sizeof(uint32_t));
+    lrrt::DeviceBuffer host_sampled_token(device, sizeof(uint32_t));
+    lrrt::DeviceBuffer host_sampled_logit(device, sizeof(float));
+    lrrt::DeviceBuffer resident_tail_context_buffer(device,
+                                                    sizeof(qd::TailContext));
+    lrrt::DeviceBuffer host_tail_context_buffer(device,
+                                                sizeof(qd::TailContext));
+    const qd::TailContext resident_tail_context = {
+        static_cast<const float *>(device_tail_weights.final_norm.data()),
+        static_cast<const float *>(device_tail_weights.lm_head.data()),
+        static_cast<float *>(resident_final_normalized.data()),
+        static_cast<float *>(resident_partial_max_values.data()),
+        static_cast<uint32_t *>(resident_partial_max_indices.data()),
+        static_cast<uint32_t *>(resident_sampled_token.data()),
+        static_cast<float *>(resident_sampled_logit.data()),
+        tail_weights.vocab,
+        lm_head_partitions,
+    };
+    const qd::TailContext host_tail_context = {
+        static_cast<const float *>(device_tail_weights.final_norm.data()),
+        static_cast<const float *>(device_tail_weights.lm_head.data()),
+        static_cast<float *>(host_final_normalized.data()),
+        static_cast<float *>(host_partial_max_values.data()),
+        static_cast<uint32_t *>(host_partial_max_indices.data()),
+        static_cast<uint32_t *>(host_sampled_token.data()),
+        static_cast<float *>(host_sampled_logit.data()),
+        tail_weights.vocab,
+        lm_head_partitions,
+    };
+    lrrt::copy_to_device(resident_tail_context_buffer, &resident_tail_context,
+                         sizeof(resident_tail_context));
+    lrrt::copy_to_device(host_tail_context_buffer, &host_tail_context,
+                         sizeof(host_tail_context));
     lrrt::copy_to_device(task_buffer, tasks);
     lrrt::copy_to_device(program_buffer, programs);
     lrrt::copy_to_device(rope_cos_buffer, rope_cos);
@@ -585,6 +744,7 @@ int main(int argc, char **argv) {
           static_cast<float *>(resident_mlp_normalized.data()),
           static_cast<float *>(resident_activated.data()),
           static_cast<float *>(resident_projected.data()),
+          static_cast<qd::TailContext *>(resident_tail_context_buffer.data()),
           qd::kHiddenSize,
           qd::kQuerySize,
           qd::kKvSize,
@@ -607,6 +767,8 @@ int main(int argc, char **argv) {
           static_cast<float *>(host_mlp_normalized.data());
       host_context.activated = static_cast<float *>(host_activated.data());
       host_context.projected = static_cast<float *>(host_projected.data());
+      host_context.tail =
+          static_cast<qd::TailContext *>(host_tail_context_buffer.data());
       host_contexts.push_back(host_context);
     }
     lrrt::DeviceBuffer resident_context_buffer(
@@ -639,9 +801,11 @@ int main(int argc, char **argv) {
       sg::HostStepArgs args;
       lr_launch_config_t config;
     };
-    std::vector<HostLaunch> host_launches;
-    for (const HostStage stage : kHostStages) {
-      host_launches.push_back({
+    std::vector<HostLaunch> decoder_host_launches;
+    std::vector<HostLaunch> tail_host_launches;
+    const auto append_host_launch = [&](std::vector<HostLaunch> &launches,
+                                        HostStage stage) {
+      launches.push_back({
           {
               static_cast<sg::State *>(host_state.data()),
               device_tasks + stage.task_begin,
@@ -651,7 +815,27 @@ int main(int argc, char **argv) {
           },
           {{stage.task_count * kBlockSize, 1, 1}, {kBlockSize, 1, 1}, 0},
       });
+    };
+    for (const HostStage stage : kHostStages) {
+      append_host_launch(decoder_host_launches, stage);
     }
+    append_host_launch(tail_host_launches, {qd::kDecoderTaskCount, 1});
+    append_host_launch(tail_host_launches,
+                       {qd::kDecoderTaskCount + 1u, lm_head_partitions});
+    append_host_launch(tail_host_launches,
+                       {qd::kDecoderTaskCount + 1u + lm_head_partitions, 1});
+    const auto launch_host_decode = [&] {
+      for (uint32_t step = 0; step < steps; ++step) {
+        for (uint32_t layer = 0; layer < layers; ++layer) {
+          for (const HostLaunch &launch : decoder_host_launches) {
+            lrrt::launch(host_step, launch.config, launch.args);
+          }
+        }
+        for (const HostLaunch &launch : tail_host_launches) {
+          lrrt::launch(host_step, launch.config, launch.args);
+        }
+      }
+    };
 
     const auto initialize_state = [&](lrrt::DeviceBuffer &state_buffer,
                                       uint32_t program_index,
@@ -671,12 +855,9 @@ int main(int argc, char **argv) {
     // Exercise both 64-bit mask words, including task bit 63, before timing.
     const std::vector<sg::Task> capacity_tasks =
         make_scheduler_capacity_tasks();
-    const std::vector<sg::Program> capacity_programs = {{
-        0,
-        sg::kMaximumTasks,
-        0,
-        sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate,
-    }};
+    const std::vector<sg::Program> capacity_programs = {make_program(
+        0, sg::kMaximumTasks, 0,
+        sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate)};
     const sg::ResidentArgs capacity_args = {
         static_cast<sg::State *>(resident_state.data()),
         static_cast<const sg::Task *>(task_buffer.data()),
@@ -732,13 +913,7 @@ int main(int argc, char **argv) {
       device.synchronize();
       initialize_state(host_state, 0, maximum_graph_steps, steps);
       lrrt::copy_to_device(host_values, initial_values);
-      for (uint32_t step = 0; step < steps; ++step) {
-        for (uint32_t layer = 0; layer < layers; ++layer) {
-          for (const HostLaunch &launch : host_launches) {
-            lrrt::launch(host_step, launch.config, launch.args);
-          }
-        }
-      }
+      launch_host_decode();
       device.synchronize();
     }
 
@@ -751,15 +926,7 @@ int main(int argc, char **argv) {
     const Measurement host_measurement = measure(
         device, trials, host_values, initial_values,
         [&] { initialize_state(host_state, 0, maximum_graph_steps, steps); },
-        [&] {
-          for (uint32_t step = 0; step < steps; ++step) {
-            for (uint32_t layer = 0; layer < layers; ++layer) {
-              for (const HostLaunch &launch : host_launches) {
-                lrrt::launch(host_step, launch.config, launch.args);
-              }
-            }
-          }
-        });
+        launch_host_decode);
 
     sg::State final_state{};
     lrrt::copy_to_host(&final_state, resident_state, sizeof(final_state));
@@ -767,11 +934,12 @@ int main(int argc, char **argv) {
         final_state.step != graph_steps ||
         final_state.predicate_value != steps ||
         sg::phase_generation(final_state.phase) !=
-            graph_steps * static_cast<uint32_t>(programs.size()) - 1u ||
+            expected_program_phases - 1u ||
         sg::phase_program(final_state.phase) !=
             static_cast<uint32_t>(programs.size()) - 1u ||
         final_state.executed_tasks !=
-            static_cast<uint64_t>(graph_steps) * qd::kTaskCount) {
+            static_cast<uint64_t>(graph_steps) * qd::kDecoderTaskCount +
+                static_cast<uint64_t>(steps) * (lm_head_partitions + 2u)) {
       throw std::runtime_error(
           "resident graph did not stop at the device predicate");
     }
@@ -815,6 +983,32 @@ int main(int argc, char **argv) {
                   host_key_cache_result);
     verify_values("value cache", resident_value_cache_result,
                   host_value_cache_result);
+    std::vector<float> resident_final_normalized_result(qd::kHiddenSize);
+    std::vector<float> host_final_normalized_result(qd::kHiddenSize);
+    lrrt::copy_to_host(resident_final_normalized_result,
+                       resident_final_normalized);
+    lrrt::copy_to_host(host_final_normalized_result, host_final_normalized);
+    verify_values("final normalized", resident_final_normalized_result,
+                  host_final_normalized_result);
+    uint32_t resident_top_token = 0;
+    uint32_t host_top_token = 0;
+    float resident_top_logit = 0.0f;
+    float host_top_logit = 0.0f;
+    lrrt::copy_to_host(&resident_top_token, resident_sampled_token,
+                       sizeof(resident_top_token));
+    lrrt::copy_to_host(&host_top_token, host_sampled_token,
+                       sizeof(host_top_token));
+    lrrt::copy_to_host(&resident_top_logit, resident_sampled_logit,
+                       sizeof(resident_top_logit));
+    lrrt::copy_to_host(&host_top_logit, host_sampled_logit,
+                       sizeof(host_top_logit));
+    const float logit_tolerance =
+        1.0e-5f * std::max(1.0f, std::fabs(host_top_logit));
+    if (resident_top_token != host_top_token ||
+        !std::isfinite(resident_top_logit) ||
+        std::fabs(resident_top_logit - host_top_logit) > logit_tolerance) {
+      throw std::runtime_error("resident top-1 result mismatch");
+    }
 
     std::printf("\nLRRT Stateful Graph Benchmark\n");
     std::printf("=============================\n");
@@ -830,25 +1024,32 @@ int main(int argc, char **argv) {
                     ? options.weights_dir
                     : (options.weights_path ? options.weights_path
                                             : "deterministic synthetic f32"));
+    std::printf("Model tail:               %s\n", tail_source.c_str());
     std::printf("Tasks per layer:          %u dependency-scheduled tasks\n",
-                qd::kTaskCount);
-    std::printf("Programs per layer:       %zu (attention -> FFN)\n",
+                qd::kDecoderTaskCount);
+    std::printf("Tail tasks:               %u (%u LM head partitions)\n",
+                lm_head_partitions + 2u, lm_head_partitions);
+    std::printf("Programs:                 %zu (attention -> FFN -> "
+                "conditional LM head)\n",
                 programs.size());
     std::printf("Phase-state slots:        %u x %zu bytes\n", phase_state_count,
                 sizeof(sg::MaskState));
     std::printf("Conditional tokens:       %u (max=%u)\n", steps, steps * 2u);
     std::printf("Tasks executed:           %llu\n",
                 static_cast<unsigned long long>(final_state.executed_tasks));
+    std::printf("Top-1 token:              %u (logit=%f, vocab=%u)\n",
+                resident_top_token, resident_top_logit, tail_weights.vocab);
     std::printf("Measured trials:          %u\n\n", trials);
     std::printf("%-24s %12s %12s %12s\n", "Path", "Device us", "Wall us",
                 "Launches");
     std::printf("%-24s %12.3f %12.3f %12u\n", "Device-resident graph",
                 resident_measurement.device_ns / 1.0e3,
                 resident_measurement.wall_ns / 1.0e3, 1u);
-    std::printf("%-24s %12.3f %12.3f %12u\n", "Host-driven steps",
-                host_measurement.device_ns / 1.0e3,
-                host_measurement.wall_ns / 1.0e3,
-                graph_steps * static_cast<uint32_t>(host_launches.size()));
+    std::printf(
+        "%-24s %12.3f %12.3f %12u\n", "Host-driven steps",
+        host_measurement.device_ns / 1.0e3, host_measurement.wall_ns / 1.0e3,
+        steps * (layers * static_cast<uint32_t>(decoder_host_launches.size()) +
+                 static_cast<uint32_t>(tail_host_launches.size())));
     std::printf("\nDevice speedup: %.2fx\n",
                 host_measurement.device_ns / resident_measurement.device_ns);
     std::printf("Wall speedup:   %.2fx\n\n",
