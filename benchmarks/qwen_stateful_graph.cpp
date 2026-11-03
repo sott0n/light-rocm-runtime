@@ -209,7 +209,7 @@ ProgramTable make_qwen_decoder_programs(uint32_t vocab_size,
   }
   ProgramTable table;
   std::vector<sg::Task> &tasks = table.tasks;
-  tasks.reserve(qd::kDecoderTaskCount + lm_head_partitions + 2u);
+  tasks.reserve(qd::kDecoderTaskCount + lm_head_partitions + 3u);
   tasks.push_back(make_task(qd::Opcode::attention_rmsnorm_f32, 0, 0,
                             qd::kHiddenSize, float_bits(1.0e-6f)));
 
@@ -307,9 +307,14 @@ ProgramTable make_qwen_decoder_programs(uint32_t vocab_size,
                   partition));
     partition_mask |= static_cast<uint64_t>(1) << local_task_index;
   }
+  const uint32_t reduce_task_index =
+      static_cast<uint32_t>(tasks.size()) - tail_offset;
   tasks.push_back(make_task(qd::Opcode::top1_reduce, partition_mask, 0,
                             lm_head_partitions));
-  table.programs.push_back(make_program(tail_offset, lm_head_partitions + 2u, 0,
+  const uint64_t reduce_mask = static_cast<uint64_t>(1) << reduce_task_index;
+  tasks.push_back(make_task(qd::Opcode::embedding_feedback_f32, reduce_mask, 0,
+                            qd::kHiddenSize));
+  table.programs.push_back(make_program(tail_offset, lm_head_partitions + 3u, 0,
                                         sg::kProgramEvaluatesPredicate));
   return table;
 }
@@ -368,11 +373,20 @@ void validate_layer_shape(
 void validate_tail_shape(
     const lrrt::executor::qwen::ModelTailWeights &weights) {
   if (weights.hidden != qd::kHiddenSize || weights.vocab == 0 ||
+      weights.token_ids.size() != weights.vocab ||
+      weights.token_embeddings.size() !=
+          static_cast<size_t>(weights.vocab) * qd::kHiddenSize ||
       weights.final_norm_weight.size() != qd::kHiddenSize ||
       weights.lm_head_weight.size() !=
           static_cast<size_t>(weights.vocab) * qd::kHiddenSize) {
     throw std::runtime_error(
-        "checkpoint model tail does not match the megakernel");
+        "checkpoint model tail requires full-vocabulary embeddings");
+  }
+  for (uint32_t token = 0; token < weights.vocab; ++token) {
+    if (weights.token_ids[token] != token) {
+      throw std::runtime_error(
+          "checkpoint model tail embeddings must use vocabulary order");
+    }
   }
 }
 
@@ -421,13 +435,16 @@ struct DeviceLayerWeights {
 };
 
 struct DeviceTailWeights {
+  lrrt::DeviceBuffer embeddings;
   lrrt::DeviceBuffer final_norm;
   lrrt::DeviceBuffer lm_head;
 
   DeviceTailWeights(lrrt::Device device,
                     const lrrt::executor::qwen::ModelTailWeights &weights)
-      : final_norm(device, weights.final_norm_weight.size() * sizeof(float)),
+      : embeddings(device, weights.token_embeddings.size() * sizeof(float)),
+        final_norm(device, weights.final_norm_weight.size() * sizeof(float)),
         lm_head(device, weights.lm_head_weight.size() * sizeof(float)) {
+    lrrt::copy_to_device(embeddings, weights.token_embeddings);
     lrrt::copy_to_device(final_norm, weights.final_norm_weight);
     lrrt::copy_to_device(lm_head, weights.lm_head_weight);
   }
@@ -495,13 +512,20 @@ int main(int argc, char **argv) {
     } else {
       tail_weights.hidden = qd::kHiddenSize;
       tail_weights.vocab = kSyntheticVocabSize;
+      tail_weights.token_ids.resize(tail_weights.vocab);
+      tail_weights.token_embeddings.resize(
+          static_cast<size_t>(tail_weights.vocab) * qd::kHiddenSize);
       tail_weights.final_norm_weight.resize(qd::kHiddenSize);
       tail_weights.lm_head_weight.resize(
           static_cast<size_t>(tail_weights.vocab) * qd::kHiddenSize);
+      for (uint32_t token = 0; token < tail_weights.vocab; ++token) {
+        tail_weights.token_ids[token] = token;
+      }
       for (uint32_t index = 0; index < qd::kHiddenSize; ++index) {
         tail_weights.final_norm_weight[index] =
             1.0f + 0.001f * static_cast<float>(index % 19u);
       }
+      fill_weight(tail_weights.token_embeddings, 12);
       fill_weight(tail_weights.lm_head_weight, 11);
       tail_source = "deterministic synthetic f32";
     }
@@ -672,16 +696,16 @@ int main(int argc, char **argv) {
                                                                sizeof(float));
     lrrt::DeviceBuffer resident_partial_max_indices(
         device, lm_head_partitions * sizeof(uint32_t));
-    lrrt::DeviceBuffer resident_sampled_token(device, sizeof(uint32_t));
-    lrrt::DeviceBuffer resident_sampled_logit(device, sizeof(float));
+    lrrt::DeviceBuffer resident_decode_state(device, sizeof(qd::DecodeState));
+    lrrt::DeviceBuffer resident_output_tokens(device, steps * sizeof(uint32_t));
     lrrt::DeviceBuffer host_final_normalized(device,
                                              qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer host_partial_max_values(device, lm_head_partitions *
                                                            sizeof(float));
     lrrt::DeviceBuffer host_partial_max_indices(device, lm_head_partitions *
                                                             sizeof(uint32_t));
-    lrrt::DeviceBuffer host_sampled_token(device, sizeof(uint32_t));
-    lrrt::DeviceBuffer host_sampled_logit(device, sizeof(float));
+    lrrt::DeviceBuffer host_decode_state(device, sizeof(qd::DecodeState));
+    lrrt::DeviceBuffer host_output_tokens(device, steps * sizeof(uint32_t));
     lrrt::DeviceBuffer resident_tail_context_buffer(device,
                                                     sizeof(qd::TailContext));
     lrrt::DeviceBuffer host_tail_context_buffer(device,
@@ -689,24 +713,30 @@ int main(int argc, char **argv) {
     const qd::TailContext resident_tail_context = {
         static_cast<const float *>(device_tail_weights.final_norm.data()),
         static_cast<const float *>(device_tail_weights.lm_head.data()),
+        static_cast<const float *>(device_tail_weights.embeddings.data()),
         static_cast<float *>(resident_final_normalized.data()),
         static_cast<float *>(resident_partial_max_values.data()),
         static_cast<uint32_t *>(resident_partial_max_indices.data()),
-        static_cast<uint32_t *>(resident_sampled_token.data()),
-        static_cast<float *>(resident_sampled_logit.data()),
+        static_cast<qd::DecodeState *>(resident_decode_state.data()),
+        static_cast<uint32_t *>(resident_output_tokens.data()),
         tail_weights.vocab,
         lm_head_partitions,
+        static_cast<uint32_t>(tail_weights.token_ids.size()),
+        0,
     };
     const qd::TailContext host_tail_context = {
         static_cast<const float *>(device_tail_weights.final_norm.data()),
         static_cast<const float *>(device_tail_weights.lm_head.data()),
+        static_cast<const float *>(device_tail_weights.embeddings.data()),
         static_cast<float *>(host_final_normalized.data()),
         static_cast<float *>(host_partial_max_values.data()),
         static_cast<uint32_t *>(host_partial_max_indices.data()),
-        static_cast<uint32_t *>(host_sampled_token.data()),
-        static_cast<float *>(host_sampled_logit.data()),
+        static_cast<qd::DecodeState *>(host_decode_state.data()),
+        static_cast<uint32_t *>(host_output_tokens.data()),
         tail_weights.vocab,
         lm_head_partitions,
+        static_cast<uint32_t>(tail_weights.token_ids.size()),
+        0,
     };
     lrrt::copy_to_device(resident_tail_context_buffer, &resident_tail_context,
                          sizeof(resident_tail_context));
@@ -817,6 +847,8 @@ int main(int argc, char **argv) {
                        {qd::kDecoderTaskCount + 1u, lm_head_partitions});
     append_host_launch(tail_host_launches,
                        {qd::kDecoderTaskCount + 1u + lm_head_partitions, 1});
+    append_host_launch(tail_host_launches,
+                       {qd::kDecoderTaskCount + 2u + lm_head_partitions, 1});
     const auto launch_host_decode = [&] {
       for (uint32_t step = 0; step < steps; ++step) {
         for (uint32_t layer = 0; layer < layers; ++layer) {
@@ -841,6 +873,21 @@ int main(int argc, char **argv) {
           state.worker_count = workers;
           lrrt::copy_to_device(host_state, &state, sizeof(state));
         };
+    const auto initialize_decode_state = [&](lrrt::DeviceBuffer &buffer,
+                                             uint32_t maximum_tokens,
+                                             uint32_t eos_token = UINT32_MAX) {
+      const qd::DecodeState state = {
+          0,
+          0,
+          0,
+          eos_token,
+          0,
+          maximum_tokens,
+          static_cast<uint32_t>(qd::StopReason::none),
+          0.0f,
+      };
+      lrrt::copy_to_device(buffer, &state, sizeof(state));
+    };
 
     // Exercise both 64-bit mask words, including task bit 63, before timing.
     const std::vector<sg::Task> capacity_tasks =
@@ -851,6 +898,7 @@ int main(int argc, char **argv) {
     const std::vector<float> zero_projected(qd::kHiddenSize, 0.0f);
     dynamic_executor.upload_graph(capacity_tasks, capacity_programs);
     lrrt::copy_to_device(resident_projected, zero_projected);
+    initialize_decode_state(resident_decode_state, 1);
     dynamic_executor.initialize(0, 1, sg::kMaximumTasks);
     dynamic_executor.launch();
     device.synchronize();
@@ -871,7 +919,8 @@ int main(int argc, char **argv) {
     cyclic_tasks[0].dependency_mask_high =
         static_cast<uint32_t>(final_task_mask >> 32u);
     dynamic_executor.upload_graph(cyclic_tasks, programs);
-    dynamic_executor.initialize(0, maximum_graph_steps, steps);
+    initialize_decode_state(resident_decode_state, steps);
+    dynamic_executor.initialize(0, maximum_graph_steps, 1);
     dynamic_executor.launch();
     device.synchronize();
     const sg::State invalid_state = dynamic_executor.read_state();
@@ -881,16 +930,48 @@ int main(int argc, char **argv) {
       throw std::runtime_error("resident graph did not reject a cyclic DAG");
     }
     dynamic_executor.upload_graph(tasks, programs);
+
+    // Determine the first greedy token, then prove that the same graph stops
+    // after one token when that value is configured as EOS. This exercises the
+    // device-side conditional exit independently of the maximum-token limit.
+    initialize_decode_state(resident_decode_state, 1);
+    resident_executor.initialize(0, maximum_graph_steps, 1);
+    lrrt::copy_to_device(resident_values, initial_values);
+    resident_executor.launch();
+    device.synchronize();
+    qd::DecodeState first_token_decode{};
+    lrrt::copy_to_host(&first_token_decode, resident_decode_state,
+                       sizeof(first_token_decode));
+    initialize_decode_state(resident_decode_state, std::max(steps, 2u),
+                            first_token_decode.sampled_token);
+    resident_executor.initialize(0, maximum_graph_steps, 1);
+    lrrt::copy_to_device(resident_values, initial_values);
+    resident_executor.launch();
+    device.synchronize();
+    const sg::State eos_state = resident_executor.read_state();
+    qd::DecodeState eos_decode{};
+    lrrt::copy_to_host(&eos_decode, resident_decode_state, sizeof(eos_decode));
+    if (eos_state.status != static_cast<uint32_t>(sg::Status::complete) ||
+        eos_state.step != layers || eos_decode.generated_tokens != 1 ||
+        eos_decode.stop_reason !=
+            static_cast<uint32_t>(qd::StopReason::eos_token) ||
+        eos_decode.sampled_token != first_token_decode.sampled_token) {
+      throw std::runtime_error("resident graph did not stop at EOS");
+    }
+
     for (uint32_t trial = 0; trial < kWarmupTrials; ++trial) {
-      dynamic_executor.initialize(0, maximum_graph_steps, steps);
+      initialize_decode_state(resident_decode_state, steps);
+      dynamic_executor.initialize(0, maximum_graph_steps, 1);
       lrrt::copy_to_device(resident_values, initial_values);
       dynamic_executor.launch();
       device.synchronize();
-      resident_executor.initialize(0, maximum_graph_steps, steps);
+      initialize_decode_state(resident_decode_state, steps);
+      resident_executor.initialize(0, maximum_graph_steps, 1);
       lrrt::copy_to_device(resident_values, initial_values);
       resident_executor.launch();
       device.synchronize();
-      initialize_host_state(0, maximum_graph_steps, steps);
+      initialize_decode_state(host_decode_state, steps);
+      initialize_host_state(0, maximum_graph_steps, 1);
       lrrt::copy_to_device(host_values, initial_values);
       launch_host_decode();
       device.synchronize();
@@ -898,34 +979,42 @@ int main(int argc, char **argv) {
 
     const Measurement dynamic_measurement = measure(
         device, trials, resident_values, initial_values,
-        [&] { dynamic_executor.initialize(0, maximum_graph_steps, steps); },
+        [&] {
+          initialize_decode_state(resident_decode_state, steps);
+          dynamic_executor.initialize(0, maximum_graph_steps, 1);
+        },
         [&] { dynamic_executor.launch(); });
     const Measurement resident_measurement = measure(
         device, trials, resident_values, initial_values,
-        [&] { resident_executor.initialize(0, maximum_graph_steps, steps); },
+        [&] {
+          initialize_decode_state(resident_decode_state, steps);
+          resident_executor.initialize(0, maximum_graph_steps, 1);
+        },
         [&] { resident_executor.launch(); });
     const Measurement host_measurement = measure(
         device, trials, host_values, initial_values,
-        [&] { initialize_host_state(0, maximum_graph_steps, steps); },
+        [&] {
+          initialize_decode_state(host_decode_state, steps);
+          initialize_host_state(0, maximum_graph_steps, 1);
+        },
         launch_host_decode);
 
     const sg::State final_state = resident_executor.read_state();
     if (final_state.status != static_cast<uint32_t>(sg::Status::complete) ||
-        final_state.step != graph_steps ||
-        final_state.predicate_value != steps ||
+        final_state.step != graph_steps || final_state.predicate_value != 1 ||
         sg::phase_generation(final_state.phase) !=
             expected_program_phases - 1u ||
         sg::phase_program(final_state.phase) !=
             static_cast<uint32_t>(programs.size()) - 1u ||
         final_state.executed_tasks !=
             static_cast<uint64_t>(graph_steps) * qd::kDecoderTaskCount +
-                static_cast<uint64_t>(steps) * (lm_head_partitions + 2u)) {
+                static_cast<uint64_t>(steps) * (lm_head_partitions + 3u)) {
       throw std::runtime_error(
           "resident graph did not stop at the device predicate");
     }
     sg::State final_host_state{};
     lrrt::copy_to_host(&final_host_state, host_state, sizeof(final_host_state));
-    if (final_host_state.predicate_value != steps ||
+    if (final_host_state.predicate_value != 1 ||
         final_host_state.step != graph_steps) {
       throw std::runtime_error("host-driven graph did not advance its state");
     }
@@ -970,18 +1059,33 @@ int main(int argc, char **argv) {
     lrrt::copy_to_host(host_final_normalized_result, host_final_normalized);
     verify_values("final normalized", resident_final_normalized_result,
                   host_final_normalized_result);
-    uint32_t resident_top_token = 0;
-    uint32_t host_top_token = 0;
-    float resident_top_logit = 0.0f;
-    float host_top_logit = 0.0f;
-    lrrt::copy_to_host(&resident_top_token, resident_sampled_token,
-                       sizeof(resident_top_token));
-    lrrt::copy_to_host(&host_top_token, host_sampled_token,
-                       sizeof(host_top_token));
-    lrrt::copy_to_host(&resident_top_logit, resident_sampled_logit,
-                       sizeof(resident_top_logit));
-    lrrt::copy_to_host(&host_top_logit, host_sampled_logit,
-                       sizeof(host_top_logit));
+    qd::DecodeState resident_decode{};
+    qd::DecodeState host_decode{};
+    lrrt::copy_to_host(&resident_decode, resident_decode_state,
+                       sizeof(resident_decode));
+    lrrt::copy_to_host(&host_decode, host_decode_state, sizeof(host_decode));
+    if (resident_decode.generated_tokens != steps ||
+        resident_decode.token_position != steps - 1u ||
+        resident_decode.kv_length != steps - 1u ||
+        resident_decode.stop_reason !=
+            static_cast<uint32_t>(qd::StopReason::maximum_tokens) ||
+        std::memcmp(&resident_decode, &host_decode, sizeof(resident_decode)) !=
+            0) {
+      throw std::runtime_error("resident decode state mismatch");
+    }
+    std::vector<uint32_t> resident_tokens(steps);
+    std::vector<uint32_t> host_tokens(steps);
+    lrrt::copy_to_host(resident_tokens.data(), resident_output_tokens,
+                       resident_tokens.size() * sizeof(uint32_t));
+    lrrt::copy_to_host(host_tokens.data(), host_output_tokens,
+                       host_tokens.size() * sizeof(uint32_t));
+    if (resident_tokens != host_tokens) {
+      throw std::runtime_error("resident generated token sequence mismatch");
+    }
+    const uint32_t resident_top_token = resident_decode.sampled_token;
+    const uint32_t host_top_token = host_decode.sampled_token;
+    const float resident_top_logit = resident_decode.sampled_logit;
+    const float host_top_logit = host_decode.sampled_logit;
     const float logit_tolerance =
         1.0e-5f * std::max(1.0f, std::fabs(host_top_logit));
     if (resident_top_token != host_top_token ||
@@ -1008,7 +1112,7 @@ int main(int argc, char **argv) {
     std::printf("Tasks per layer:          %u dependency-scheduled tasks\n",
                 qd::kDecoderTaskCount);
     std::printf("Tail tasks:               %u (%u LM head partitions)\n",
-                lm_head_partitions + 2u, lm_head_partitions);
+                lm_head_partitions + 3u, lm_head_partitions);
     std::printf("Programs:                 %zu (attention -> FFN -> "
                 "conditional LM head)\n",
                 programs.size());
@@ -1016,7 +1120,10 @@ int main(int argc, char **argv) {
                 compiled_plan.stages.size());
     std::printf("Phase-state slots:        %u x %zu bytes\n", phase_state_count,
                 sizeof(sg::MaskState));
-    std::printf("Conditional tokens:       %u (max=%u)\n", steps, steps * 2u);
+    std::printf("Autoregressive tokens:    %u (device-resident feedback)\n",
+                resident_decode.generated_tokens);
+    std::printf("EOS termination:          verified with token %u\n",
+                first_token_decode.sampled_token);
     std::printf("Tasks executed:           %llu\n",
                 static_cast<unsigned long long>(final_state.executed_tasks));
     std::printf("Top-1 token:              %u (logit=%f, vocab=%u)\n",

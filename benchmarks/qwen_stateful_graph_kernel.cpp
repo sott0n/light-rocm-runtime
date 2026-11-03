@@ -33,12 +33,15 @@ __device__ bool valid_qwen_task(const sg::Task &task,
            task.argument0 < context->tail->partition_count;
   case qd::Opcode::top1_reduce:
     return task.begin == 0 && task.end == context->tail->partition_count;
+  case qd::Opcode::embedding_feedback_f32:
+    return task.begin == 0 && task.end == context->hidden_size;
   }
   return false;
 }
 
 __device__ bool valid_qwen_contexts(const sg::State *state,
                                     const qd::Context *contexts) {
+  (void)state;
   const qd::Context *context = contexts;
   if (contexts == nullptr || context->layer_count == 0 ||
       context->hidden_size != qd::kHiddenSize ||
@@ -47,15 +50,20 @@ __device__ bool valid_qwen_contexts(const sg::State *state,
       context->intermediate_size != qd::kIntermediateSize ||
       context->tail == nullptr || context->tail->final_norm_weight == nullptr ||
       context->tail->lm_head_weight == nullptr ||
+      context->tail->token_embeddings == nullptr ||
       context->tail->final_normalized == nullptr ||
       context->tail->partial_max_values == nullptr ||
       context->tail->partial_max_indices == nullptr ||
-      context->tail->sampled_token == nullptr ||
-      context->tail->sampled_logit == nullptr ||
+      context->tail->decode_state == nullptr ||
+      context->tail->output_tokens == nullptr ||
       context->tail->vocab_size == 0 || context->tail->partition_count == 0 ||
       context->tail->partition_count > qd::kMaximumLmHeadPartitions ||
-      context->cache_capacity < (state->max_steps + context->layer_count - 1u) /
-                                    context->layer_count) {
+      context->tail->embedding_count != context->tail->vocab_size ||
+      context->tail->decode_state->maximum_tokens == 0 ||
+      context->tail->decode_state->maximum_tokens > context->cache_capacity ||
+      context->tail->decode_state->token_position !=
+          context->tail->decode_state->kv_length ||
+      context->tail->decode_state->token_position >= context->cache_capacity) {
     return false;
   }
 
@@ -165,8 +173,42 @@ __device__ void reduce_top1(const qd::Context *context) {
       best_index = index;
     }
   }
-  *context->tail->sampled_logit = best_value;
-  *context->tail->sampled_token = best_index;
+  context->tail->decode_state->sampled_logit = best_value;
+  context->tail->decode_state->sampled_token = best_index;
+}
+
+__device__ void embedding_feedback(qd::Context *context, sg::State *state) {
+  qd::DecodeState *decode = context->tail->decode_state;
+  if (threadIdx.x == 0) {
+    const uint32_t output_index = decode->generated_tokens;
+    const uint32_t token = decode->sampled_token;
+    context->tail->output_tokens[output_index] = token;
+    decode->generated_tokens = output_index + 1u;
+
+    const bool reached_eos = token == decode->eos_token;
+    const bool reached_limit =
+        decode->generated_tokens >= decode->maximum_tokens;
+    if (reached_eos || reached_limit) {
+      decode->stop_reason =
+          static_cast<uint32_t>(reached_eos ? qd::StopReason::eos_token
+                                            : qd::StopReason::maximum_tokens);
+      state->predicate_value = 1;
+    } else {
+      ++decode->token_position;
+      ++decode->kv_length;
+    }
+  }
+  __syncthreads();
+
+  if (state->predicate_value == 0) {
+    const size_t embedding_offset =
+        static_cast<size_t>(decode->sampled_token) * context->hidden_size;
+    for (uint32_t index = threadIdx.x; index < context->hidden_size;
+         index += sg::kWorkerThreads) {
+      context->hidden[index] =
+          context->tail->token_embeddings[embedding_offset + index];
+    }
+  }
 }
 
 __device__ void qkv_projection_range_wave(const qd::Context *context,
@@ -231,7 +273,8 @@ __device__ void gate_up_silu_range_wave(const qd::Context *context,
 
 __device__ void rope_kv_cache(const sg::State *state,
                               const qd::Context *context) {
-  const uint32_t position = state->step / context->layer_count;
+  (void)state;
+  const uint32_t position = context->tail->decode_state->token_position;
   const size_t rope_offset = static_cast<size_t>(position) * qd::kRotarySize;
   for (uint32_t pair = threadIdx.x; pair < qd::kRotaryHeads * qd::kRotarySize;
        pair += sg::kWorkerThreads) {
@@ -268,6 +311,7 @@ __device__ void rope_kv_cache(const sg::State *state,
 __device__ void grouped_query_attention(const sg::Task &task,
                                         const sg::State *state,
                                         qd::Context *context) {
+  (void)state;
   constexpr uint32_t kQueriesPerKvHead = qd::kAttentionHeads / qd::kKvHeads;
   const uint32_t lane = threadIdx.x & 31u;
   const uint32_t wave = threadIdx.x >> 5u;
@@ -284,8 +328,8 @@ __device__ void grouped_query_attention(const sg::Task &task,
     float maximum = -INFINITY;
     float denominator = 0.0f;
 
-    const uint32_t token_position = state->step / context->layer_count;
-    for (uint32_t position = 0; position <= token_position; ++position) {
+    const uint32_t kv_length = context->tail->decode_state->kv_length;
+    for (uint32_t position = 0; position <= kv_length; ++position) {
       const size_t cache_offset =
           static_cast<size_t>(position) * context->kv_size + kv_offset;
       float dot_product =
@@ -415,6 +459,11 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
     return;
   }
 
+  if (opcode == qd::Opcode::embedding_feedback_f32) {
+    embedding_feedback(context, state);
+    return;
+  }
+
   for (uint32_t index = task.begin + threadIdx.x; index < task.end;
        index += sg::kWorkerThreads) {
     context->hidden[index] += context->projected[index];
@@ -422,7 +471,7 @@ __device__ void execute_task(const sg::Task &task, sg::State *state,
   if (threadIdx.x == 0) {
     const bool token_boundary =
         task.argument1 == 0 || (state->step + 1u) % context->layer_count == 0;
-    if (token_boundary) {
+    if (token_boundary && task.argument1 == 0) {
       state->predicate_value += task.argument0;
     }
     state->branch_value = static_cast<uint32_t>(token_boundary);

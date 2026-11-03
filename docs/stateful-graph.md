@@ -120,6 +120,7 @@ attention RMSNorm
   -> [final layer only] final RMSNorm
   -> 32 x fused LM head projection + partition-local Top-1
   -> reduce 32 candidates to the sampled token and logit
+  -> record token, test EOS/limit, and select the next token embedding
 ```
 
 The decoder layer is represented as two device-linked Programs: a 25-task
@@ -146,21 +147,26 @@ token reached its final layer.
 The opaque context can also be an array of layer contexts. After each completed
 FFN phase, the resident scheduler selects
 `contexts[state.step % layer_count]`; weights and KV-cache slices remain
-layer-local while activation scratch is shared. The token position is
-`state.step / layer_count`. Non-final layers branch directly back to Attention;
+layer-local while activation scratch is shared. A Qwen-specific device
+`DecodeState` explicitly owns token position, KV length, sampled token/logit,
+generated-token count, EOS token, and stop reason. Non-final layers branch
+directly back to Attention;
 the final layer enters a third Program containing final RMSNorm, LM head, and
 Top-1 reduction. The LM head never materializes the full logits vector: each
 of at most 32 tasks emits one local token/logit candidate and the successor
-reduces only those candidates. The tail Program evaluates the token predicate
-after sampling, so a 24-layer decoder stack, LM head, and multiple token
-iterations remain inside one kernel launch.
+reduces only those candidates. Its final task records the sampled token, tests
+EOS and the maximum-token limit, and, when execution continues, copies the
+selected full-vocabulary embedding row into the shared hidden buffer. It also
+advances token position and KV length before returning to Attention. The tail
+Program then evaluates the device predicate, so the complete autoregressive
+loop remains inside one kernel launch.
 
 The host-driven baseline invokes the same arithmetic in nine launches per
-decoder layer plus three launches per token for final RMSNorm, partitioned LM
-head, and Top-1 reduction. By default the benchmark uses deterministic
-model-shaped decoder weights and a 4,096-row synthetic LM head. Pass `--weights`
-with an existing Qwen layer bundle manifest to run both paths with its
-checkpoint attention norm, Q/K/V weights and biases, output projection,
+decoder layer plus four launches per token for final RMSNorm, partitioned LM
+head, Top-1 reduction, and embedding feedback. By default the benchmark uses
+deterministic model-shaped decoder weights and a 4,096-row synthetic LM head.
+Pass `--weights` with an existing Qwen layer bundle manifest to run both paths
+with its checkpoint attention norm, Q/K/V weights and biases, output projection,
 `mlp_norm`, gate, up, and down tensors. Pass `--tail` to load an existing
 `lrrt.mini_model_tail_weights` manifest:
 
@@ -182,24 +188,22 @@ When `--weights-dir` contains `model_tail/weights.json`, the benchmark loads it
 automatically.
 
 Four tokens through 24 layers plus the synthetic LM head use one compiled
-resident launch versus 876 host launches. Absolute timings remain sensitive to
+resident launch versus 880 host launches. Absolute timings remain sensitive to
 GPU clocks and concurrent load, and the full-vocabulary 24-layer checkpoint
 comparison must be rerun before making a whole-model speedup claim.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` and
-`lrrt.mini_model_tail_weights` FP32 formats and rejects bundles whose hidden,
-head, KV-head, head-dimension, or intermediate dimensions do not match the
-specialized megakernel.
+`lrrt.mini_model_tail_weights` FP32 formats. Autoregressive feedback requires
+the model-tail bundle to contain every token embedding in vocabulary order.
+Bundles whose hidden, head, KV-head, head-dimension, intermediate dimensions,
+or embedding table do not match the specialized megakernel are rejected.
 
 The resident kernel uses 1,072 bytes of group memory, 44 SGPRs, and 73 VGPRs on
 gfx1101, with no private segment, dynamic stack, or register spills.
 
 ## Qwen path
 
-The next milestones are:
-
-1. make KV length, sampled token, EOS, and embedding selection explicit
-   device-resident decode state;
-2. feed the sampled token's embedding back into the next resident iteration;
-3. add resource-aware worker admission from HSACO metadata; and
-4. compare a whole decode loop against HIP Graph and host-driven LRRT.
+Device-resident decode state, embedding feedback, EOS termination, and
+resource-aware worker admission are now implemented. The next milestone is a
+whole-loop comparison against HIP Graph and host-driven LRRT using the same
+full-checkpoint weights and arithmetic.

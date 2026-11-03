@@ -29,7 +29,7 @@ constexpr uint32_t kAttentionTaskCount = 2u + kAttentionProjectionPartitions +
                                          kAttentionOutputPartitions;
 constexpr uint32_t kFfnTaskCount = 32;
 constexpr uint32_t kDecoderTaskCount = kAttentionTaskCount + kFfnTaskCount;
-constexpr uint32_t kMaximumTailTaskCount = 2u + kMaximumLmHeadPartitions;
+constexpr uint32_t kMaximumTailTaskCount = 3u + kMaximumLmHeadPartitions;
 
 enum class Opcode : uint32_t {
   attention_rmsnorm_f32 = 1,
@@ -44,6 +44,27 @@ enum class Opcode : uint32_t {
   final_rmsnorm_f32 = 10,
   lm_head_top1_partition_f32 = 11,
   top1_reduce = 12,
+  embedding_feedback_f32 = 13,
+};
+
+enum class StopReason : uint32_t {
+  none = 0,
+  maximum_tokens = 1,
+  eos_token = 2,
+};
+
+// Qwen-specific mutable state kept on the device for the complete
+// autoregressive loop. The generic scheduler only observes predicate_value;
+// token, KV-cache, and model-tail semantics remain isolated in this ABI.
+struct alignas(16) DecodeState {
+  uint32_t token_position;
+  uint32_t kv_length;
+  uint32_t sampled_token;
+  uint32_t eos_token;
+  uint32_t generated_tokens;
+  uint32_t maximum_tokens;
+  uint32_t stop_reason;
+  float sampled_logit;
 };
 
 // Shared model-tail state. Every decoder-layer Context points to the same
@@ -52,13 +73,16 @@ enum class Opcode : uint32_t {
 struct alignas(16) TailContext {
   const float *final_norm_weight;
   const float *lm_head_weight;
+  const float *token_embeddings;
   float *final_normalized;
   float *partial_max_values;
   uint32_t *partial_max_indices;
-  uint32_t *sampled_token;
-  float *sampled_logit;
+  DecodeState *decode_state;
+  uint32_t *output_tokens;
   uint32_t vocab_size;
   uint32_t partition_count;
+  uint32_t embedding_count;
+  uint32_t reserved;
 };
 
 // Device pointers and dimensions consumed by the Qwen decoder-stage
@@ -103,8 +127,10 @@ struct alignas(16) Context {
 
 static_assert(std::is_standard_layout_v<Context>);
 static_assert(std::is_standard_layout_v<TailContext>);
+static_assert(std::is_standard_layout_v<DecodeState>);
 static_assert(sizeof(Context) == 224);
-static_assert(sizeof(TailContext) == 64);
+static_assert(sizeof(TailContext) == 80);
+static_assert(sizeof(DecodeState) == 32);
 static_assert(kAttentionTaskCount <= lrrt::stateful_graph::kMaximumTasks);
 static_assert(kFfnTaskCount <= lrrt::stateful_graph::kMaximumTasks);
 static_assert(kMaximumTailTaskCount <= lrrt::stateful_graph::kMaximumTasks);
