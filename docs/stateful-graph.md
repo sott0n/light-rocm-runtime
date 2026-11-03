@@ -189,13 +189,12 @@ root and select the layer count:
 When `--weights-dir` contains `model_tail/weights.json`, the benchmark loads it
 automatically.
 
-Four tokens through 24 layers plus the synthetic LM head use one compiled
-resident kernel, one HIP Graph submission containing 880 kernel nodes, or 880
-host-driven LRRT submissions. The HIP Graph baseline is enabled for the ROCr
-backend when CMake finds the HIP headers and `libamdhip64`; other builds retain
-the three LRRT paths. Absolute timings remain sensitive to GPU clocks and
-concurrent load, and the full-vocabulary 24-layer checkpoint comparison must be
-rerun before making a whole-model speedup claim.
+Four tokens through 24 layers use one compiled resident kernel, one HIP Graph
+submission containing 880 kernel nodes, or 880 host-driven LRRT submissions.
+The HIP Graph baseline is enabled for the ROCr backend when CMake finds the HIP
+headers and `libamdhip64`; other builds retain the three LRRT paths. Absolute
+timings remain sensitive to GPU clocks and concurrent load, so repeat the
+measurement on the target system before making a whole-model speedup claim.
 
 The benchmark measures each available path once per trial in an interleaved
 forward-and-reverse rotation cycle. This balances paths across measurement
@@ -205,6 +204,47 @@ Both mean and median device event time and synchronized wall time are reported;
 initialization and input reset remain outside the timed region for every path.
 The result, decode state, generated tokens, and KV cache from HIP Graph are
 checked against the host-driven LRRT path after measurement.
+
+### Full-checkpoint measurement
+
+The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`
+checkpoint: all 24 decoder layers, the 151,936-row embedding table, final
+RMSNorm, and tied LM head are converted to the existing FP32 bundle format.
+The measured model file had SHA-256
+`fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe`.
+The conversion and benchmark commands were:
+
+```sh
+python3 tools/convert_qwen_layer.py \
+  --checkpoint-dir /path/to/Qwen2.5-0.5B-Instruct \
+  --all-layers --keys 4 --token-ids 0 --full-token-embeddings \
+  --output /tmp/lrrt-qwen-full
+
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
+  --weights-dir /tmp/lrrt-qwen-full --layers 24
+```
+
+On the gfx1101 AMD Radeon RX 7800 XT reference system, one 20-trial
+interleaved run produced:
+
+| Path | Device mean | Device p50 | Wall mean | Wall p50 |
+| --- | ---: | ---: | ---: | ---: |
+| Dynamic resident graph | 129.888 ms | 129.932 ms | 130.216 ms | 130.277 ms |
+| Compiled resident graph | 128.851 ms | 129.000 ms | 129.115 ms | 129.112 ms |
+| Host-driven LRRT | 115.713 ms | 115.722 ms | 117.281 ms | 117.280 ms |
+| HIP Graph | 113.262 ms | 113.256 ms | 113.282 ms | 113.275 ms |
+
+The compiled-resident, host-driven, and HIP Graph correctness checks produced
+matching graph state, hidden values, Q/K/V values, KV caches, final normalized
+values, decode state, and generated token sequence. The compiled resident path
+was `0.88x` the HIP Graph device and wall throughput in this run: its device
+time was 15.589 ms, or 13.8%, longer. The host-driven path was 2.2% longer in
+device time and 3.5% longer in wall time than HIP Graph. This result does not
+support a resident speedup claim yet; it identifies resident scheduling and
+megakernel execution overhead as the next measurement target. The first-token
+hidden input remains deterministic benchmark data rather than a tokenized
+prompt, while subsequent autoregressive steps use checkpoint embedding rows
+selected entirely on the device.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` and
 `lrrt.mini_model_tail_weights` FP32 formats. Autoregressive feedback requires
@@ -220,6 +260,7 @@ gfx1101, with no private segment, dynamic stack, or register spills.
 Device-resident decode state, embedding feedback, EOS termination, and
 resource-aware worker admission are now implemented. The benchmark compares
 the whole loop against HIP Graph and host-driven LRRT using the same HSACO,
-weights, buffer layout, and arithmetic. The next milestone is to rerun that
-comparison with a full checkpoint bundle and analyze the remaining resident
-scheduling overhead.
+weights, buffer layout, and arithmetic. The full-checkpoint comparison is now
+recorded above. The next milestone is to profile the 15.589 ms compiled
+resident gap against HIP Graph and separate scheduler overhead from megakernel
+execution effects.
