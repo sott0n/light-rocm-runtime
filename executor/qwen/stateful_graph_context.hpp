@@ -22,12 +22,13 @@ constexpr uint32_t kAttentionProjectionPartitions = 8;
 constexpr uint32_t kAttentionTaskPartitions = 7;
 constexpr uint32_t kAttentionOutputPartitions = 8;
 constexpr uint32_t kFfnProjectionPartitions = 20;
-constexpr uint32_t kDownProjectionPartitions = 10;
+constexpr uint32_t kDownProjectionPartitions = 32;
 constexpr uint32_t kMaximumLmHeadPartitions = 32;
 constexpr uint32_t kAttentionTaskCount = 2u + kAttentionProjectionPartitions +
                                          kAttentionTaskPartitions +
                                          kAttentionOutputPartitions;
-constexpr uint32_t kFfnTaskCount = 32;
+constexpr uint32_t kFfnTaskCount =
+    2u + kFfnProjectionPartitions + kDownProjectionPartitions;
 constexpr uint32_t kDecoderTaskCount = kAttentionTaskCount + kFfnTaskCount;
 constexpr uint32_t kMaximumTailTaskCount = 3u + kMaximumLmHeadPartitions;
 

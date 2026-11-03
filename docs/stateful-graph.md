@@ -115,7 +115,7 @@ attention RMSNorm
   -> 8 x output projection + attention residual add
   -> MLP RMSNorm
   -> 20 x fused gate projection + up projection + SiLU multiply
-  -> 10 x down projection
+  -> 32 x down projection
   -> fused residual add + advance device state
   -> [final layer only] final RMSNorm
   -> worker-matched fused LM head projection + partition-local Top-1
@@ -304,14 +304,34 @@ and 1.662 ms of event-marker packets.
 
 This separates two optimization classes. Eliminating graph nodes and tiny
 stage launches is persistent-specific, but it cannot recover the dominant
-matrix time. The immediate throughput problem is under-filled memory-bound
-matvec work shared by both execution paths: the down projection schedules only
-10 workgroups and reaches about 36 GB/s while 32-way LM-head work reaches about
-120 GB/s. Increasing down-projection parallelism, followed by QKV and output
-projection parallelism, is therefore the next measured optimization target.
-After that shared arithmetic work approaches its bandwidth roof, rerun the
-same profile to measure whether the one-launch resident control path creates a
-stable advantage over HIP Graph.
+matrix time. The initial profile found under-filled memory-bound matvec work
+shared by both execution paths: the down projection scheduled only 10
+workgroups and reached about 36 GB/s while 32-way LM-head work reached about
+120 GB/s.
+
+Increasing the down projection from 10 to 32 partitions raised its available
+parallelism from 80 to 256 wave32 wavefronts. A repeat of the same 20-trial
+full-checkpoint profile produced:
+
+| Metric | 10 partitions | 32 partitions | Change |
+| --- | ---: | ---: | ---: |
+| Down-projection stage | 46.212 ms | 17.063 ms | 63.1% shorter |
+| Down effective minimum bandwidth | 36.3 GB/s | 98.2 GB/s | 2.71x |
+| Down roof efficiency | 5.81% | 15.74% | 2.71x |
+| All profiled stages | 119.618 ms | 94.272 ms | 21.2% shorter |
+| Compiled resident | 113.077 ms | 96.978 ms | 14.2% shorter |
+| HIP Graph | 114.990 ms | 99.013 ms | 13.9% shorter |
+
+Correctness remained identical across compiled resident, host-driven, and HIP
+Graph execution. The modeled 12.685 ms bandwidth floor did not change, so the
+overall compiled-resident distance to that floor improved from 8.91x to 7.65x.
+The resident scheduler/barrier probe rose from 0.971 ms to 1.151 ms because the
+compiled plan contains 22 more tasks per layer, but it remains only 1.19% of
+resident time. The result confirms that maintaining enough independent waves
+to hide streaming-weight latency is more important than reducing scheduler
+work at this point. Gate/up still uses 20 partitions and QKV/output projection
+use eight each; they are the next concurrency targets before adding
+register-buffered software prefetch to the matvec inner loop.
 
 ### Full-checkpoint measurement
 
