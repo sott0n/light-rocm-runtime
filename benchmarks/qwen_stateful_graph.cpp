@@ -470,6 +470,8 @@ int main(int argc, char **argv) {
     lrrt::Module module(device, read_file(LRRT_QWEN_STATEFUL_GRAPH_HSACO));
     lrrt::Kernel resident =
         module.kernel("qwen_stateful_graph_resident_kernel");
+    lrrt::Kernel compiled_resident =
+        module.kernel("qwen_stateful_graph_compiled_kernel");
     lrrt::Kernel host_step =
         module.kernel("qwen_stateful_graph_host_step_kernel");
 
@@ -622,8 +624,14 @@ int main(int argc, char **argv) {
       }
     }
 
-    sg::ResidentExecutor resident_executor(device, resident, tasks, programs,
-                                           {phase_state_count, workers});
+    const sg::ResidentConfig resident_config{phase_state_count, workers};
+    const sg::CompiledPlan compiled_plan =
+        sg::compile_resident_plan(tasks, programs, resident_config);
+    sg::ResidentExecutor dynamic_executor(device, resident, tasks, programs,
+                                          resident_config);
+    sg::ResidentExecutor resident_executor(device, compiled_resident, tasks,
+                                           programs, resident_config,
+                                           compiled_plan);
     lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
     lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer resident_values(device, qd::kHiddenSize * sizeof(float));
@@ -779,6 +787,7 @@ int main(int argc, char **argv) {
     lrrt::copy_to_device(host_key_cache, zero_caches);
     lrrt::copy_to_device(host_value_cache, zero_caches);
 
+    dynamic_executor.bind_context(resident_context_buffer.data());
     resident_executor.bind_context(resident_context_buffer.data());
     const auto *device_tasks = resident_executor.device_tasks();
     struct HostLaunch {
@@ -840,12 +849,12 @@ int main(int argc, char **argv) {
         0, sg::kMaximumTasks, 0,
         sg::kProgramAdvancesStep | sg::kProgramEvaluatesPredicate)};
     const std::vector<float> zero_projected(qd::kHiddenSize, 0.0f);
-    resident_executor.upload_graph(capacity_tasks, capacity_programs);
+    dynamic_executor.upload_graph(capacity_tasks, capacity_programs);
     lrrt::copy_to_device(resident_projected, zero_projected);
-    resident_executor.initialize(0, 1, sg::kMaximumTasks);
-    resident_executor.launch();
+    dynamic_executor.initialize(0, 1, sg::kMaximumTasks);
+    dynamic_executor.launch();
     device.synchronize();
-    const sg::State capacity_state = resident_executor.read_state();
+    const sg::State capacity_state = dynamic_executor.read_state();
     if (capacity_state.status != static_cast<uint32_t>(sg::Status::complete) ||
         capacity_state.step != 1 ||
         capacity_state.predicate_value != sg::kMaximumTasks ||
@@ -861,19 +870,22 @@ int main(int argc, char **argv) {
     cyclic_tasks[0].dependency_mask = static_cast<uint32_t>(final_task_mask);
     cyclic_tasks[0].dependency_mask_high =
         static_cast<uint32_t>(final_task_mask >> 32u);
-    resident_executor.upload_graph(cyclic_tasks, programs);
-    resident_executor.initialize(0, maximum_graph_steps, steps);
-    resident_executor.launch();
+    dynamic_executor.upload_graph(cyclic_tasks, programs);
+    dynamic_executor.initialize(0, maximum_graph_steps, steps);
+    dynamic_executor.launch();
     device.synchronize();
-    const sg::State invalid_state = resident_executor.read_state();
+    const sg::State invalid_state = dynamic_executor.read_state();
     if (invalid_state.status !=
             static_cast<uint32_t>(sg::Status::invalid_program) ||
         invalid_state.error_code != 1) {
       throw std::runtime_error("resident graph did not reject a cyclic DAG");
     }
-    resident_executor.upload_graph(tasks, programs);
-
+    dynamic_executor.upload_graph(tasks, programs);
     for (uint32_t trial = 0; trial < kWarmupTrials; ++trial) {
+      dynamic_executor.initialize(0, maximum_graph_steps, steps);
+      lrrt::copy_to_device(resident_values, initial_values);
+      dynamic_executor.launch();
+      device.synchronize();
       resident_executor.initialize(0, maximum_graph_steps, steps);
       lrrt::copy_to_device(resident_values, initial_values);
       resident_executor.launch();
@@ -884,6 +896,10 @@ int main(int argc, char **argv) {
       device.synchronize();
     }
 
+    const Measurement dynamic_measurement = measure(
+        device, trials, resident_values, initial_values,
+        [&] { dynamic_executor.initialize(0, maximum_graph_steps, steps); },
+        [&] { dynamic_executor.launch(); });
     const Measurement resident_measurement = measure(
         device, trials, resident_values, initial_values,
         [&] { resident_executor.initialize(0, maximum_graph_steps, steps); },
@@ -996,6 +1012,8 @@ int main(int argc, char **argv) {
     std::printf("Programs:                 %zu (attention -> FFN -> "
                 "conditional LM head)\n",
                 programs.size());
+    std::printf("Compiled stages:          %zu static dependency levels\n",
+                compiled_plan.stages.size());
     std::printf("Phase-state slots:        %u x %zu bytes\n", phase_state_count,
                 sizeof(sg::MaskState));
     std::printf("Conditional tokens:       %u (max=%u)\n", steps, steps * 2u);
@@ -1006,7 +1024,10 @@ int main(int argc, char **argv) {
     std::printf("Measured trials:          %u\n\n", trials);
     std::printf("%-24s %12s %12s %12s\n", "Path", "Device us", "Wall us",
                 "Launches");
-    std::printf("%-24s %12.3f %12.3f %12u\n", "Device-resident graph",
+    std::printf("%-24s %12.3f %12.3f %12u\n", "Dynamic resident graph",
+                dynamic_measurement.device_ns / 1.0e3,
+                dynamic_measurement.wall_ns / 1.0e3, 1u);
+    std::printf("%-24s %12.3f %12.3f %12u\n", "Compiled resident graph",
                 resident_measurement.device_ns / 1.0e3,
                 resident_measurement.wall_ns / 1.0e3, 1u);
     std::printf(
@@ -1014,10 +1035,14 @@ int main(int argc, char **argv) {
         host_measurement.device_ns / 1.0e3, host_measurement.wall_ns / 1.0e3,
         steps * (layers * static_cast<uint32_t>(decoder_host_launches.size()) +
                  static_cast<uint32_t>(tail_host_launches.size())));
-    std::printf("\nDevice speedup: %.2fx\n",
+    std::printf("\nDynamic device speedup:  %.2fx\n",
+                host_measurement.device_ns / dynamic_measurement.device_ns);
+    std::printf("Compiled device speedup: %.2fx\n",
                 host_measurement.device_ns / resident_measurement.device_ns);
-    std::printf("Wall speedup:   %.2fx\n\n",
+    std::printf("Compiled wall speedup:   %.2fx\n",
                 host_measurement.wall_ns / resident_measurement.wall_ns);
+    std::printf("Compiled over dynamic:   %.2fx\n\n",
+                dynamic_measurement.device_ns / resident_measurement.device_ns);
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());

@@ -7,7 +7,7 @@
 
 namespace lrrt::stateful_graph {
 
-constexpr uint32_t kAbiVersion = 7;
+constexpr uint32_t kAbiVersion = 8;
 constexpr uint32_t kWorkerThreads = 256;
 constexpr uint32_t kMaximumResidentWorkers = 32;
 constexpr uint32_t kMaximumTasks = 64;
@@ -97,6 +97,19 @@ struct MaskState {
   uint32_t completed_count;
 };
 
+// A compiled stage is a contiguous group of dependency-independent tasks.
+// Persistent workers execute the group directly instead of atomically scanning
+// and claiming individual tasks.
+struct alignas(8) Stage {
+  uint32_t task_offset;
+  uint32_t task_count;
+};
+
+struct alignas(8) CompiledProgram {
+  uint32_t stage_offset;
+  uint32_t stage_count;
+};
+
 struct ResidentArgs {
   State *state;
   const Task *tasks;
@@ -106,6 +119,10 @@ struct ResidentArgs {
   uint32_t task_count;
   uint32_t phase_state_count;
   void *context;
+  const Stage *stages;
+  const CompiledProgram *compiled_programs;
+  uint32_t stage_count;
+  uint32_t reserved;
 };
 
 struct HostStepArgs {
@@ -120,13 +137,17 @@ static_assert(std::is_standard_layout_v<State>);
 static_assert(std::is_standard_layout_v<Task>);
 static_assert(std::is_standard_layout_v<Program>);
 static_assert(std::is_standard_layout_v<MaskState>);
+static_assert(std::is_standard_layout_v<Stage>);
+static_assert(std::is_standard_layout_v<CompiledProgram>);
 static_assert(std::is_standard_layout_v<ResidentArgs>);
 static_assert(std::is_standard_layout_v<HostStepArgs>);
 static_assert(sizeof(State) == 64);
 static_assert(sizeof(Task) == 32);
 static_assert(sizeof(Program) == 32);
 static_assert(sizeof(MaskState) == 20);
-static_assert(sizeof(ResidentArgs) == 56);
+static_assert(sizeof(Stage) == 8);
+static_assert(sizeof(CompiledProgram) == 8);
+static_assert(sizeof(ResidentArgs) == 80);
 static_assert(sizeof(HostStepArgs) == 32);
 
 } // namespace lrrt::stateful_graph

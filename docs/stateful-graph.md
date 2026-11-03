@@ -94,6 +94,17 @@ run, and dispatches the workload-specialized resident kernel. The Qwen
 benchmark uses this API rather than managing scheduler buffers and constructing
 `ResidentArgs` itself.
 
+For fixed workloads, `compile_resident_plan()` converts a topologically ordered
+task DAG into contiguous dependency-independent stages. The reusable compiled
+scheduler in `executor/stateful_graph/compiled_scheduler.hpp` assigns those
+tasks directly to persistent workers, removing runtime task scans and atomic
+claims. All resident workers rendezvous at each stage boundary; the last arrival
+performs the same device-side Program transition, conditional branch, and
+termination logic as the dynamic scheduler. This fast path requires all
+launched workgroups to be concurrently resident. The dynamic scheduler remains
+available for irregular graphs and validates cyclic-graph rejection in the
+benchmark.
+
 The resident megakernel executes this FP32 dependency graph:
 
 ```text
@@ -170,12 +181,10 @@ root and select the layer count:
 When `--weights-dir` contains `model_tail/weights.json`, the benchmark loads it
 automatically.
 
-Four tokens through 24 layers plus the synthetic LM head use one resident
-launch versus 876 host launches. On the local gfx1101 system, that
-196-Program-phase workload measured 1.12x faster in both device and wall time.
-Absolute timings remain sensitive to GPU clocks and concurrent load, and the
-full-vocabulary 24-layer checkpoint comparison must be rerun before making a
-whole-model speedup claim.
+Four tokens through 24 layers plus the synthetic LM head use one compiled
+resident launch versus 876 host launches. Absolute timings remain sensitive to
+GPU clocks and concurrent load, and the full-vocabulary 24-layer checkpoint
+comparison must be rerun before making a whole-model speedup claim.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` and
 `lrrt.mini_model_tail_weights` FP32 formats and rejects bundles whose hidden,

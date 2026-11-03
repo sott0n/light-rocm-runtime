@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -16,6 +17,11 @@ namespace lrrt::stateful_graph {
 struct ResidentConfig {
   uint32_t phase_state_count;
   uint32_t worker_count;
+};
+
+struct CompiledPlan {
+  std::vector<Stage> stages;
+  std::vector<CompiledProgram> programs;
 };
 
 namespace detail {
@@ -96,12 +102,95 @@ validate_resident_graph(const std::vector<Task> &tasks,
   };
 }
 
+inline void validate_compiled_plan(const std::vector<Task> &tasks,
+                                   const std::vector<Program> &programs,
+                                   const CompiledPlan &plan) {
+  if (plan.stages.empty() || plan.programs.size() != programs.size()) {
+    throw std::invalid_argument("invalid stateful graph compiled plan size");
+  }
+  for (size_t program_index = 0; program_index < programs.size();
+       ++program_index) {
+    const Program &program = programs[program_index];
+    const CompiledProgram &compiled = plan.programs[program_index];
+    if (compiled.stage_count == 0 ||
+        compiled.stage_offset > plan.stages.size() ||
+        compiled.stage_count > plan.stages.size() - compiled.stage_offset) {
+      throw std::invalid_argument("invalid stateful graph compiled stages");
+    }
+
+    uint32_t expected_task_offset = program.task_offset;
+    uint64_t completed_mask = 0;
+    for (uint32_t stage_index = 0; stage_index < compiled.stage_count;
+         ++stage_index) {
+      const Stage &stage = plan.stages[compiled.stage_offset + stage_index];
+      const uint32_t completed_count =
+          expected_task_offset - program.task_offset;
+      if (stage.task_count == 0 || stage.task_offset != expected_task_offset ||
+          stage.task_count > program.task_count - completed_count) {
+        throw std::invalid_argument("invalid stateful graph compiled stage");
+      }
+      for (uint32_t task_index = 0; task_index < stage.task_count;
+           ++task_index) {
+        const uint64_t dependencies =
+            task_dependencies(tasks[stage.task_offset + task_index]);
+        if ((dependencies & completed_mask) != dependencies) {
+          throw std::invalid_argument(
+              "compiled stage contains dependent tasks");
+        }
+      }
+      completed_mask |= valid_task_mask(stage.task_count) << completed_count;
+      expected_task_offset += stage.task_count;
+    }
+    if (expected_task_offset != program.task_offset + program.task_count) {
+      throw std::invalid_argument("compiled plan does not cover program");
+    }
+  }
+}
+
 } // namespace detail
 
 inline void validate_resident_graph(const std::vector<Task> &tasks,
                                     const std::vector<Program> &programs,
                                     ResidentConfig config) {
   (void)detail::validate_resident_graph(tasks, programs, config);
+}
+
+inline CompiledPlan compile_resident_plan(const std::vector<Task> &tasks,
+                                          const std::vector<Program> &programs,
+                                          ResidentConfig config) {
+  validate_resident_graph(tasks, programs, config);
+  CompiledPlan plan;
+  plan.programs.reserve(programs.size());
+  for (const Program &program : programs) {
+    const uint32_t stage_offset = static_cast<uint32_t>(plan.stages.size());
+    uint32_t next_task = 0;
+    uint64_t completed_mask = 0;
+    while (next_task < program.task_count) {
+      const uint32_t stage_begin = next_task;
+      while (next_task < program.task_count) {
+        const Task &task = tasks[program.task_offset + next_task];
+        const uint64_t dependencies = detail::task_dependencies(task);
+        if ((dependencies & completed_mask) != dependencies) {
+          break;
+        }
+        ++next_task;
+      }
+      if (next_task == stage_begin) {
+        throw std::invalid_argument(
+            "stateful graph tasks are not in topological stage order");
+      }
+      const uint32_t stage_task_count = next_task - stage_begin;
+      plan.stages.push_back(
+          {program.task_offset + stage_begin, stage_task_count});
+      completed_mask |= detail::valid_task_mask(stage_task_count)
+                        << stage_begin;
+    }
+    plan.programs.push_back(
+        {stage_offset,
+         static_cast<uint32_t>(plan.stages.size()) - stage_offset});
+  }
+  detail::validate_compiled_plan(tasks, programs, plan);
+  return plan;
 }
 
 // Owns the model-independent control buffers for one resident graph. The
@@ -115,6 +204,14 @@ public:
       : ResidentExecutor(
             device, kernel, tasks, programs, config,
             detail::validate_resident_graph(tasks, programs, config)) {}
+
+  ResidentExecutor(Device device, const Kernel &kernel,
+                   const std::vector<Task> &tasks,
+                   const std::vector<Program> &programs, ResidentConfig config,
+                   const CompiledPlan &plan)
+      : ResidentExecutor(device, kernel, tasks, programs, config) {
+    upload_compiled_plan(tasks, programs, plan);
+  }
 
   ResidentExecutor(const ResidentExecutor &) = delete;
   ResidentExecutor &operator=(const ResidentExecutor &) = delete;
@@ -134,7 +231,15 @@ public:
     copy_to_device(program_buffer_, programs);
     task_count_ = static_cast<uint32_t>(tasks.size());
     program_count_ = static_cast<uint32_t>(programs.size());
+    stage_count_ = 0;
     initialized_ = false;
+  }
+
+  void upload_graph(const std::vector<Task> &tasks,
+                    const std::vector<Program> &programs,
+                    const CompiledPlan &plan) {
+    upload_graph(tasks, programs);
+    upload_compiled_plan(tasks, programs, plan);
   }
 
   void bind_context(void *device_context) { context_ = device_context; }
@@ -187,6 +292,7 @@ public:
   uint32_t program_count() const { return program_count_; }
   uint32_t phase_state_count() const { return config_.phase_state_count; }
   uint32_t worker_count() const { return config_.worker_count; }
+  bool has_compiled_plan() const { return stage_count_ != 0; }
 
 private:
   ResidentExecutor(Device device, const Kernel &kernel,
@@ -202,7 +308,8 @@ private:
         program_buffer_(device, graph.program_bytes),
         phase_state_buffer_(device, graph.phase_state_bytes),
         empty_phase_states_(config.phase_state_count), context_(nullptr),
-        task_count_(0), program_count_(0), initialized_(false) {
+        task_count_(0), program_count_(0), stage_count_(0),
+        initialized_(false) {
     upload_graph(tasks, programs);
   }
 
@@ -216,7 +323,36 @@ private:
         task_count_,
         config_.phase_state_count,
         context_,
+        stage_buffer_ ? static_cast<const Stage *>(stage_buffer_->data())
+                      : nullptr,
+        compiled_program_buffer_ ? static_cast<const CompiledProgram *>(
+                                       compiled_program_buffer_->data())
+                                 : nullptr,
+        stage_count_,
+        0,
     };
+  }
+
+  void upload_compiled_plan(const std::vector<Task> &tasks,
+                            const std::vector<Program> &programs,
+                            const CompiledPlan &plan) {
+    detail::validate_compiled_plan(tasks, programs, plan);
+    const size_t stage_bytes = plan.stages.size() * sizeof(Stage);
+    const size_t compiled_program_bytes =
+        plan.programs.size() * sizeof(CompiledProgram);
+    if (!stage_buffer_) {
+      stage_buffer_.emplace(state_buffer_.device(), stage_bytes);
+      compiled_program_buffer_.emplace(state_buffer_.device(),
+                                       compiled_program_bytes);
+    } else if (stage_bytes > stage_buffer_->size() ||
+               compiled_program_bytes > compiled_program_buffer_->size()) {
+      throw std::invalid_argument(
+          "compiled plan exceeds resident executor capacity");
+    }
+    copy_to_device(*stage_buffer_, plan.stages);
+    copy_to_device(*compiled_program_buffer_, plan.programs);
+    stage_count_ = static_cast<uint32_t>(plan.stages.size());
+    initialized_ = false;
   }
 
   void require_initialized() const {
@@ -232,10 +368,13 @@ private:
   DeviceBuffer task_buffer_;
   DeviceBuffer program_buffer_;
   DeviceBuffer phase_state_buffer_;
+  std::optional<DeviceBuffer> stage_buffer_;
+  std::optional<DeviceBuffer> compiled_program_buffer_;
   std::vector<MaskState> empty_phase_states_;
   void *context_;
   uint32_t task_count_;
   uint32_t program_count_;
+  uint32_t stage_count_;
   bool initialized_;
 };
 

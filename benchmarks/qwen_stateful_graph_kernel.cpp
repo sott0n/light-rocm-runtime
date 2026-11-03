@@ -1,4 +1,5 @@
 #include "executor/qwen/stateful_graph_context.hpp"
+#include "executor/stateful_graph/compiled_scheduler.hpp"
 #include "executor/stateful_graph/device_scheduler.hpp"
 
 namespace sg = lrrt::stateful_graph;
@@ -456,11 +457,29 @@ struct QwenWorkload {
 extern "C" __global__ void qwen_stateful_graph_resident_kernel(
     sg::State *state, const sg::Task *tasks, const sg::Program *programs,
     sg::MaskState *phase_states, uint32_t program_count,
-    uint32_t total_task_count, uint32_t phase_state_count,
-    void *opaque_context) {
+    uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
+    const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
+    uint32_t stage_count, uint32_t reserved) {
+  (void)stages;
+  (void)compiled_programs;
+  (void)stage_count;
+  (void)reserved;
   sg::device::run_resident<QwenWorkload>(state, tasks, programs, phase_states,
                                          program_count, total_task_count,
                                          phase_state_count, opaque_context);
+}
+
+extern "C" __global__ void qwen_stateful_graph_compiled_kernel(
+    sg::State *state, const sg::Task *tasks, const sg::Program *programs,
+    sg::MaskState *phase_states, uint32_t program_count,
+    uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
+    const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
+    uint32_t stage_count, uint32_t reserved) {
+  (void)reserved;
+  sg::device::run_compiled_resident<QwenWorkload>(
+      state, tasks, programs, phase_states, program_count, total_task_count,
+      phase_state_count, opaque_context, stages, compiled_programs,
+      stage_count);
 }
 
 extern "C" __global__ void
