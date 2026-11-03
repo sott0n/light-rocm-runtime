@@ -254,6 +254,65 @@ efficiency, rather than the software scheduler alone. This probe is a
 counterfactual lower bound, not a direct hardware stall counter; removing
 arithmetic also changes cache and occupancy interactions.
 
+For an operator breakdown and an explicit roofline latency floor, pass
+`--profile-roofline`. This mode also runs the scheduler probe, then runs five
+additional host-driven profiles with a GPU event after every stage. It reports
+the event-marker time separately and subtracts each marker packet from its
+preceding stage interval. The uninstrumented resident, host, and HIP Graph
+measurements still run first and are not included in this profile.
+
+The optional hardware limits are explicit inputs because LRRT device
+properties do not expose a reliable active-clock FP32 rate or DRAM bandwidth:
+
+```sh
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 32 \
+  --weights-dir /tmp/lrrt-qwen-full --layers 24 \
+  --profile-roofline \
+  --peak-fp32-tflops 37.32 --memory-bandwidth-gbps 624
+```
+
+The operation model counts FP32 add, multiply, and FMA work, but does not
+assign synthetic FLOP counts to `exp` or `rsqrt`. The byte model is an
+optimistic DRAM minimum: every weight is streamed once, while activation and
+KV-head reuse are assumed ideal. Consequently, the reported roof time is a
+latency floor, not a prediction. Supplying no hardware limits still reports
+stage time, modeled work, arithmetic intensity, and effective minimum
+bandwidth. The peak and bandwidth values must describe the target device and
+clock mode; they are not inferred from the device name.
+
+On the same RX 7800 XT and full-checkpoint shape, one profile using the limits
+above measured the following dominant stages. `Roof` is
+`max(FLOPs/peak, minimum-bytes/bandwidth)` and `gap` is measured stage time
+minus that floor:
+
+| Stage | Measured | Minimum traffic | Effective minimum bandwidth | Roof | Gap |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QKV projection | 14.400 ms | 0.398 GB | 27.6 GB/s | 0.637 ms | 13.763 ms |
+| attention output | 11.368 ms | 0.309 GB | 27.2 GB/s | 0.496 ms | 10.872 ms |
+| gate + up + SiLU | 24.421 ms | 3.349 GB | 137.1 GB/s | 5.367 ms | 19.053 ms |
+| down projection | 46.212 ms | 1.676 GB | 36.3 GB/s | 2.685 ms | 43.526 ms |
+| LM head + local Top-1 | 18.091 ms | 2.178 GB | 120.4 GB/s | 3.491 ms | 14.600 ms |
+| all stages | 119.618 ms | 7.915 GB | 66.2 GB/s | 12.685 ms | 106.933 ms |
+
+The modeled workload is 3.956 GFLOP at 0.500 FLOP/byte overall, far below the
+59.81 FLOP/byte ridge point from the supplied limits. Its theoretical floor is
+therefore bandwidth, not FP32 compute. The uninstrumented compiled resident
+time was 113.077 ms, 8.91 times the 12.685 ms stage roof, while the independent
+control-only scheduler/barrier floor was 0.971 ms, or 0.86% of resident time.
+The instrumented interval was 121.281 ms, comprising a 119.618 ms stage sum
+and 1.662 ms of event-marker packets.
+
+This separates two optimization classes. Eliminating graph nodes and tiny
+stage launches is persistent-specific, but it cannot recover the dominant
+matrix time. The immediate throughput problem is under-filled memory-bound
+matvec work shared by both execution paths: the down projection schedules only
+10 workgroups and reaches about 36 GB/s while 32-way LM-head work reaches about
+120 GB/s. Increasing down-projection parallelism, followed by QKV and output
+projection parallelism, is therefore the next measured optimization target.
+After that shared arithmetic work approaches its bandwidth roof, rerun the
+same profile to measure whether the one-launch resident control path creates a
+stable advantage over HIP Graph.
+
 ### Full-checkpoint measurement
 
 The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`

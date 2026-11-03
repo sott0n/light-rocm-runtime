@@ -12,6 +12,7 @@
 #endif
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -21,6 +22,7 @@
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -39,6 +41,7 @@ using Clock = std::chrono::steady_clock;
 
 constexpr uint32_t kBlockSize = sg::kWorkerThreads;
 constexpr uint32_t kWarmupTrials = 5;
+constexpr uint32_t kRooflineProfileTrials = 5;
 constexpr uint32_t kMaximumWorkers = sg::kMaximumResidentWorkers;
 constexpr uint32_t kDefaultWorkers = kMaximumWorkers;
 constexpr uint32_t kSyntheticVocabSize = 4096;
@@ -78,6 +81,9 @@ struct Options {
   const char *tail_path = nullptr;
   const char *csv_path = nullptr;
   bool profile_resident = false;
+  bool profile_roofline = false;
+  double peak_fp32_tflops = 0.0;
+  double memory_bandwidth_gbps = 0.0;
 };
 
 std::vector<unsigned char> read_file(const char *path) {
@@ -106,6 +112,16 @@ uint32_t parse_u32(const char *text, const char *label) {
                                 " must be a positive uint32");
   }
   return static_cast<uint32_t>(value);
+}
+
+double parse_positive_double(const char *text, const char *label) {
+  char *end = nullptr;
+  const double value = std::strtod(text, &end);
+  if (!end || *end != '\0' || !std::isfinite(value) || value <= 0.0) {
+    throw std::invalid_argument(std::string(label) +
+                                " must be a positive number");
+  }
+  return value;
 }
 
 Options parse_options(int argc, char **argv) {
@@ -144,6 +160,26 @@ Options parse_options(int argc, char **argv) {
       options.profile_resident = true;
       continue;
     }
+    if (std::strcmp(argv[index], "--profile-roofline") == 0) {
+      options.profile_roofline = true;
+      continue;
+    }
+    if (std::strcmp(argv[index], "--peak-fp32-tflops") == 0) {
+      if (++index >= argc) {
+        throw std::invalid_argument("--peak-fp32-tflops requires a value");
+      }
+      options.peak_fp32_tflops =
+          parse_positive_double(argv[index], "peak FP32 TFLOP/s");
+      continue;
+    }
+    if (std::strcmp(argv[index], "--memory-bandwidth-gbps") == 0) {
+      if (++index >= argc) {
+        throw std::invalid_argument("--memory-bandwidth-gbps requires a value");
+      }
+      options.memory_bandwidth_gbps =
+          parse_positive_double(argv[index], "memory bandwidth GB/s");
+      continue;
+    }
     if (std::strcmp(argv[index], "--csv") == 0) {
       if (++index >= argc) {
         throw std::invalid_argument("--csv requires an output path");
@@ -171,6 +207,8 @@ Options parse_options(int argc, char **argv) {
           "[workers] "
           "[--weights weights.json | --weights-dir directory --layers N] "
           "[--tail model_tail/weights.json] [--profile-resident] "
+          "[--profile-roofline] [--peak-fp32-tflops value] "
+          "[--memory-bandwidth-gbps value] "
           "[--csv output.csv]");
     }
   }
@@ -179,6 +217,16 @@ Options parse_options(int argc, char **argv) {
   }
   if (options.weights_path && options.layers != 1) {
     throw std::invalid_argument("--weights supports exactly one layer");
+  }
+  if ((options.peak_fp32_tflops != 0.0 ||
+       options.memory_bandwidth_gbps != 0.0) &&
+      !options.profile_roofline) {
+    throw std::invalid_argument("roofline limits require --profile-roofline");
+  }
+  if ((options.peak_fp32_tflops == 0.0) !=
+      (options.memory_bandwidth_gbps == 0.0)) {
+    throw std::invalid_argument(
+        "roofline requires both peak FP32 and memory bandwidth limits");
   }
   return options;
 }
@@ -467,6 +515,119 @@ constexpr HostStage kHostStages[] = {
      qd::kDownProjectionPartitions},
     {qd::kDecoderTaskCount - 1, 1},
 };
+
+enum class ProfileStage : size_t {
+  attention_norm,
+  qkv_projection,
+  rope_kv_cache,
+  attention,
+  attention_output,
+  mlp_norm,
+  gate_up_silu,
+  down_projection,
+  residual_advance,
+  final_norm,
+  lm_head_top1,
+  top1_reduce,
+  embedding_feedback,
+  count,
+};
+
+constexpr size_t kProfileStageCount = static_cast<size_t>(ProfileStage::count);
+
+constexpr std::array<const char *, kProfileStageCount> kProfileStageNames = {
+    "attention norm",     "QKV projection",       "RoPE + KV cache",
+    "attention",          "attention output",     "MLP norm",
+    "gate + up + SiLU",   "down projection",      "residual advance",
+    "final norm",         "LM head + local top1", "global top1",
+    "embedding feedback",
+};
+
+struct StageWork {
+  double flops = 0.0;
+  double minimum_bytes = 0.0;
+};
+
+struct RooflineProfile {
+  std::array<double, kProfileStageCount> device_ns{};
+  std::array<double, kProfileStageCount> flops{};
+  std::array<double, kProfileStageCount> minimum_bytes{};
+  std::array<uint64_t, kProfileStageCount> launches{};
+  double instrumented_ns = 0.0;
+  double marker_ns = 0.0;
+};
+
+constexpr size_t stage_index(ProfileStage stage) {
+  return static_cast<size_t>(stage);
+}
+
+StageWork stage_work(ProfileStage stage, uint32_t kv_positions,
+                     uint32_t vocab_size, uint32_t lm_head_partitions) {
+  const double hidden = qd::kHiddenSize;
+  const double query = qd::kQuerySize;
+  const double kv = qd::kKvSize;
+  const double packed_qkv = qd::kPackedQkvSize;
+  const double intermediate = qd::kIntermediateSize;
+  const double fp32_bytes = sizeof(float);
+
+  switch (stage) {
+  case ProfileStage::attention_norm:
+  case ProfileStage::mlp_norm:
+  case ProfileStage::final_norm:
+    // Square-and-sum plus two multiplies for the normalized output. The
+    // reciprocal square root is intentionally not assigned an artificial
+    // FLOP count.
+    return {4.0 * hidden, 3.0 * hidden * fp32_bytes};
+  case ProfileStage::qkv_projection:
+    return {2.0 * packed_qkv * hidden + packed_qkv,
+            (packed_qkv * hidden + hidden + 2.0 * packed_qkv) * fp32_bytes};
+  case ProfileStage::rope_kv_cache:
+    return {6.0 * qd::kRotaryHeads * qd::kRotarySize,
+            (2.0 * query + 5.0 * kv + 2.0 * qd::kRotarySize) * fp32_bytes};
+  case ProfileStage::attention:
+    // The online softmax exponentials are excluded from FLOPs. Minimum bytes
+    // assume ideal reuse of each KV head by its seven query heads.
+    return {qd::kAttentionHeads * static_cast<double>(kv_positions) *
+                    (5.0 * qd::kHeadSize + 9.0) +
+                query,
+            (2.0 * query + 2.0 * kv_positions * kv) * fp32_bytes};
+  case ProfileStage::attention_output:
+    return {2.0 * hidden * query + hidden,
+            (hidden * query + query + 2.0 * hidden) * fp32_bytes};
+  case ProfileStage::gate_up_silu:
+    // Four elementwise operations model x * sigmoid(x) * up; exp is excluded.
+    return {4.0 * intermediate * hidden + 4.0 * intermediate,
+            (2.0 * intermediate * hidden + hidden + intermediate) * fp32_bytes};
+  case ProfileStage::down_projection:
+    return {2.0 * hidden * intermediate,
+            (hidden * intermediate + intermediate + hidden) * fp32_bytes};
+  case ProfileStage::residual_advance:
+    return {hidden, 3.0 * hidden * fp32_bytes};
+  case ProfileStage::lm_head_top1:
+    return {2.0 * vocab_size * hidden,
+            (static_cast<double>(vocab_size) * hidden + hidden +
+             2.0 * lm_head_partitions) *
+                fp32_bytes};
+  case ProfileStage::top1_reduce:
+    return {0.0, 8.0 * lm_head_partitions + 8.0};
+  case ProfileStage::embedding_feedback:
+    return {0.0, 2.0 * hidden * fp32_bytes + sizeof(qd::DecodeState)};
+  case ProfileStage::count:
+    break;
+  }
+  throw std::invalid_argument("invalid roofline stage");
+}
+
+void add_stage_work(RooflineProfile &profile, ProfileStage stage,
+                    uint32_t kv_positions, uint32_t vocab_size,
+                    uint32_t lm_head_partitions) {
+  const StageWork work =
+      stage_work(stage, kv_positions, vocab_size, lm_head_partitions);
+  const size_t index = stage_index(stage);
+  profile.flops[index] += work.flops;
+  profile.minimum_bytes[index] += work.minimum_bytes;
+  ++profile.launches[index];
+}
 
 void fill_weight(std::vector<float> &weight, uint32_t salt) {
   for (size_t index = 0; index < weight.size(); ++index) {
@@ -1001,6 +1162,52 @@ int main(int argc, char **argv) {
         }
       }
     };
+    const size_t host_kernel_count =
+        static_cast<size_t>(steps) *
+        (static_cast<size_t>(layers) * decoder_host_launches.size() +
+         tail_host_launches.size());
+
+    constexpr std::array<ProfileStage, std::size(kHostStages)>
+        kDecoderProfileStages = {
+            ProfileStage::attention_norm,   ProfileStage::qkv_projection,
+            ProfileStage::rope_kv_cache,    ProfileStage::attention,
+            ProfileStage::attention_output, ProfileStage::mlp_norm,
+            ProfileStage::gate_up_silu,     ProfileStage::down_projection,
+            ProfileStage::residual_advance,
+        };
+    constexpr std::array<ProfileStage, 4> kTailProfileStages = {
+        ProfileStage::final_norm,
+        ProfileStage::lm_head_top1,
+        ProfileStage::top1_reduce,
+        ProfileStage::embedding_feedback,
+    };
+    struct ProfileLaunch {
+      const HostLaunch *launch;
+      ProfileStage stage;
+    };
+    std::vector<ProfileLaunch> profile_launches;
+    profile_launches.reserve(host_kernel_count);
+    RooflineProfile roofline_profile;
+    for (uint32_t step = 0; step < steps; ++step) {
+      for (uint32_t layer = 0; layer < layers; ++layer) {
+        for (size_t stage = 0; stage < decoder_host_launches.size(); ++stage) {
+          profile_launches.push_back(
+              {&decoder_host_launches[stage], kDecoderProfileStages[stage]});
+          add_stage_work(roofline_profile, kDecoderProfileStages[stage],
+                         step + 1u, tail_weights.vocab,
+                         baseline_lm_head_partitions);
+        }
+      }
+      for (size_t stage = 0; stage < tail_host_launches.size(); ++stage) {
+        profile_launches.push_back(
+            {&tail_host_launches[stage], kTailProfileStages[stage]});
+        add_stage_work(roofline_profile, kTailProfileStages[stage], step + 1u,
+                       tail_weights.vocab, baseline_lm_head_partitions);
+      }
+    }
+    if (profile_launches.size() != host_kernel_count) {
+      throw std::runtime_error("roofline profile launch layout mismatch");
+    }
 #if LRRT_ENABLE_HIP_GRAPH
     lrrt::benchmarks::QwenHipGraph hip_graph(code_object, decoder_host_launches,
                                              tail_host_launches, steps, layers);
@@ -1165,6 +1372,49 @@ int main(int argc, char **argv) {
     warm_up_interleaved(kWarmupTrials, initial_values, benchmark_paths);
     std::vector<TrialSample> trial_samples;
     measure_interleaved(trials, initial_values, benchmark_paths, trial_samples);
+
+    if (options.profile_roofline) {
+      std::vector<std::unique_ptr<lrrt::Event>> markers;
+      markers.reserve(profile_launches.size());
+      for (size_t index = 0; index < profile_launches.size(); ++index) {
+        markers.push_back(std::make_unique<lrrt::Event>(device));
+      }
+      lrrt::Event profile_start(device);
+      for (uint32_t trial = 0; trial < kRooflineProfileTrials; ++trial) {
+        initialize_decode_state(host_decode_state, steps);
+        initialize_host_state(0, maximum_graph_steps, 1);
+        lrrt::copy_to_device(host_values, initial_values);
+        profile_start.record();
+        for (size_t index = 0; index < profile_launches.size(); ++index) {
+          const HostLaunch &launch = *profile_launches[index].launch;
+          lrrt::launch(host_step, launch.config, launch.args);
+          markers[index]->record();
+        }
+        markers.back()->synchronize();
+        for (const auto &marker : markers) {
+          marker->synchronize();
+        }
+        roofline_profile.instrumented_ns += static_cast<double>(
+            lrrt::elapsed_time_ns(profile_start, *markers.back()));
+        const lrrt::Event *previous = &profile_start;
+        for (size_t index = 0; index < markers.size(); ++index) {
+          const double interval = static_cast<double>(
+              lrrt::elapsed_time_ns(*previous, *markers[index]));
+          const double marker =
+              static_cast<double>(lrrt::duration_ns(*markers[index]));
+          roofline_profile
+              .device_ns[stage_index(profile_launches[index].stage)] +=
+              std::max(0.0, interval - marker);
+          roofline_profile.marker_ns += marker;
+          previous = markers[index].get();
+        }
+      }
+      roofline_profile.instrumented_ns /= kRooflineProfileTrials;
+      roofline_profile.marker_ns /= kRooflineProfileTrials;
+      for (double &stage_ns : roofline_profile.device_ns) {
+        stage_ns /= kRooflineProfileTrials;
+      }
+    }
     const Measurement &dynamic_measurement = benchmark_paths[0].measurement;
     const Measurement &resident_measurement = benchmark_paths[1].measurement;
     const Measurement &host_measurement = benchmark_paths[2].measurement;
@@ -1346,7 +1596,7 @@ int main(int argc, char **argv) {
     }
 
     double scheduler_profile_device_ns = 0.0;
-    if (options.profile_resident) {
+    if (options.profile_resident || options.profile_roofline) {
       constexpr uint32_t kProfileTrials = 5;
       const auto measure_scheduler = [&](sg::ResidentExecutor &executor) {
         const auto run_once = [&] {
@@ -1377,10 +1627,6 @@ int main(int argc, char **argv) {
       };
       scheduler_profile_device_ns = measure_scheduler(profile_executor);
     }
-    const size_t host_kernel_count =
-        static_cast<size_t>(steps) *
-        (static_cast<size_t>(layers) * decoder_host_launches.size() +
-         tail_host_launches.size());
     if (options.csv_path) {
       write_trial_csv(options.csv_path, trial_samples);
     }
@@ -1473,7 +1719,7 @@ int main(int argc, char **argv) {
 #else
     std::printf("\n");
 #endif
-    if (options.profile_resident) {
+    if (options.profile_resident || options.profile_roofline) {
       const double task_execution_ns =
           std::max(0.0, resident_device_mean - scheduler_profile_device_ns);
       const uint64_t decoder_stage_count =
@@ -1507,6 +1753,138 @@ int main(int argc, char **argv) {
       }
 #endif
       std::printf("\n");
+    }
+    if (options.profile_roofline) {
+      const bool has_hardware_roof = options.peak_fp32_tflops != 0.0;
+      const double profiled_stage_ns =
+          std::accumulate(roofline_profile.device_ns.begin(),
+                          roofline_profile.device_ns.end(), 0.0);
+      const double total_flops = std::accumulate(
+          roofline_profile.flops.begin(), roofline_profile.flops.end(), 0.0);
+      const double total_minimum_bytes =
+          std::accumulate(roofline_profile.minimum_bytes.begin(),
+                          roofline_profile.minimum_bytes.end(), 0.0);
+      std::array<double, kProfileStageCount> stage_roof_ns{};
+      double modeled_roof_ns = 0.0;
+      if (has_hardware_roof) {
+        for (size_t index = 0; index < kProfileStageCount; ++index) {
+          const double compute_ns = roofline_profile.flops[index] /
+                                    (options.peak_fp32_tflops * 1.0e3);
+          const double memory_ns = roofline_profile.minimum_bytes[index] /
+                                   options.memory_bandwidth_gbps;
+          stage_roof_ns[index] = std::max(compute_ns, memory_ns);
+          modeled_roof_ns += stage_roof_ns[index];
+        }
+      }
+
+      std::printf("Host-stage roofline profile (%u-trial event mean)\n",
+                  kRooflineProfileTrials);
+      std::printf("  Modeled operations exclude exp/rsqrt and integer/control "
+                  "work.\n");
+      std::printf(
+          "  Minimum DRAM bytes assume ideal activation/KV cache reuse; "
+          "weights stream once.\n");
+      if (has_hardware_roof) {
+        const double ridge_point =
+            options.peak_fp32_tflops * 1.0e3 / options.memory_bandwidth_gbps;
+        std::printf("  Hardware roof: %.3f FP32 TFLOP/s, %.3f GB/s, "
+                    "ridge %.2f FLOP/byte\n",
+                    options.peak_fp32_tflops, options.memory_bandwidth_gbps,
+                    ridge_point);
+        std::printf("  %-23s %5s %9s %7s %9s %9s %8s %9s %9s %8s\n", "Stage",
+                    "Nodes", "Time ms", "Share", "GFLOP", "Min GB", "F/B",
+                    "Min GB/s", "Roof ms", "Roof %");
+      } else {
+        std::printf("  No hardware roof supplied; add --peak-fp32-tflops and "
+                    "--memory-bandwidth-gbps.\n");
+        std::printf("  %-23s %5s %9s %7s %9s %9s %8s %10s\n", "Stage", "Nodes",
+                    "Time ms", "Share", "GFLOP", "Min GB", "F/B", "Min GB/s");
+      }
+      for (size_t index = 0; index < kProfileStageCount; ++index) {
+        const double stage_ns = roofline_profile.device_ns[index];
+        const double intensity =
+            roofline_profile.minimum_bytes[index] == 0.0
+                ? 0.0
+                : roofline_profile.flops[index] /
+                      roofline_profile.minimum_bytes[index];
+        const double minimum_bandwidth =
+            stage_ns == 0.0 ? 0.0
+                            : roofline_profile.minimum_bytes[index] / stage_ns;
+        if (has_hardware_roof) {
+          const double efficiency =
+              stage_ns == 0.0 ? 0.0 : 100.0 * stage_roof_ns[index] / stage_ns;
+          std::printf(
+              "  %-23s %5llu %9.3f %6.1f%% %9.3f %9.3f %8.3f "
+              "%9.3f %9.3f %7.2f%%\n",
+              kProfileStageNames[index],
+              static_cast<unsigned long long>(roofline_profile.launches[index]),
+              stage_ns / 1.0e6, 100.0 * stage_ns / profiled_stage_ns,
+              roofline_profile.flops[index] / 1.0e9,
+              roofline_profile.minimum_bytes[index] / 1.0e9, intensity,
+              minimum_bandwidth, stage_roof_ns[index] / 1.0e6, efficiency);
+        } else {
+          std::printf(
+              "  %-23s %5llu %9.3f %6.1f%% %9.3f %9.3f %8.3f "
+              "%10.3f\n",
+              kProfileStageNames[index],
+              static_cast<unsigned long long>(roofline_profile.launches[index]),
+              stage_ns / 1.0e6, 100.0 * stage_ns / profiled_stage_ns,
+              roofline_profile.flops[index] / 1.0e9,
+              roofline_profile.minimum_bytes[index] / 1.0e9, intensity,
+              minimum_bandwidth);
+        }
+      }
+      if (has_hardware_roof) {
+        std::printf("  %-23s %5zu %9.3f %6.1f%% %9.3f %9.3f %8.3f %9.3f "
+                    "%9.3f %7.2f%%\n",
+                    "TOTAL", host_kernel_count, profiled_stage_ns / 1.0e6,
+                    100.0, total_flops / 1.0e9, total_minimum_bytes / 1.0e9,
+                    total_flops / total_minimum_bytes,
+                    total_minimum_bytes / profiled_stage_ns,
+                    modeled_roof_ns / 1.0e6,
+                    100.0 * modeled_roof_ns / profiled_stage_ns);
+        std::printf("  Compiled resident / modeled stage roof: %.2fx "
+                    "(%.3f ms / %.3f ms)\n",
+                    resident_device_mean / modeled_roof_ns,
+                    resident_device_mean / 1.0e6, modeled_roof_ns / 1.0e6);
+#if LRRT_ENABLE_HIP_GRAPH
+        std::printf("  HIP Graph / modeled stage roof:         %.2fx "
+                    "(%.3f ms / %.3f ms)\n",
+                    hip_device_mean / modeled_roof_ns, hip_device_mean / 1.0e6,
+                    modeled_roof_ns / 1.0e6);
+#endif
+        std::array<size_t, kProfileStageCount> priority{};
+        std::iota(priority.begin(), priority.end(), 0u);
+        std::sort(
+            priority.begin(), priority.end(), [&](size_t lhs, size_t rhs) {
+              return roofline_profile.device_ns[lhs] - stage_roof_ns[lhs] >
+                     roofline_profile.device_ns[rhs] - stage_roof_ns[rhs];
+            });
+        std::printf("  Largest measured-to-roof gaps:\n");
+        for (size_t rank = 0; rank < 3; ++rank) {
+          const size_t index = priority[rank];
+          std::printf("    %zu. %-21s %9.3f ms\n", rank + 1u,
+                      kProfileStageNames[index],
+                      std::max(0.0, roofline_profile.device_ns[index] -
+                                        stage_roof_ns[index]) /
+                          1.0e6);
+        }
+      } else {
+        std::printf("  %-23s %5zu %9.3f %6.1f%% %9.3f %9.3f %8.3f "
+                    "%10.3f\n",
+                    "TOTAL", host_kernel_count, profiled_stage_ns / 1.0e6,
+                    100.0, total_flops / 1.0e9, total_minimum_bytes / 1.0e9,
+                    total_flops / total_minimum_bytes,
+                    total_minimum_bytes / profiled_stage_ns);
+      }
+      std::printf("  Instrumented interval: %.3f ms; marker packets: %.3f ms; "
+                  "stage sum: %.3f ms\n",
+                  roofline_profile.instrumented_ns / 1.0e6,
+                  roofline_profile.marker_ns / 1.0e6,
+                  profiled_stage_ns / 1.0e6);
+      std::printf(
+          "  Roofline gap includes kernel inefficiency and launch/stage "
+          "cost; it is not all persistent-only headroom.\n\n");
     }
     return 0;
   } catch (const std::exception &error) {
