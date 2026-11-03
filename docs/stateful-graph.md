@@ -192,6 +192,13 @@ resident launch versus 880 host launches. Absolute timings remain sensitive to
 GPU clocks and concurrent load, and the full-vocabulary 24-layer checkpoint
 comparison must be rerun before making a whole-model speedup claim.
 
+The benchmark measures the dynamic resident, compiled resident, and host-driven
+paths once per trial in an interleaved six-permutation cycle. This balances each
+path across the first, middle, and last measurement position instead of timing
+all trials for one path before moving to the next. Both mean and median device
+event time and synchronized wall time are reported; initialization and input
+reset remain outside the timed region for every path.
+
 The loader accepts the existing `lrrt.mini_decoder_weights` and
 `lrrt.mini_model_tail_weights` FP32 formats. Autoregressive feedback requires
 the model-tail bundle to contain every token embedding in vocabulary order.

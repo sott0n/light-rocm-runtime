@@ -4,6 +4,7 @@
 #include "lrrt/lrrt.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -11,7 +12,9 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -34,9 +37,25 @@ constexpr uint32_t kMaximumWorkers = 20;
 constexpr uint32_t kSyntheticVocabSize = 4096;
 
 struct Measurement {
-  double device_ns = 0.0;
-  double wall_ns = 0.0;
+  std::vector<double> device_samples_ns;
+  std::vector<double> wall_samples_ns;
 };
+
+struct BenchmarkPath {
+  lrrt::DeviceBuffer *values;
+  std::function<void()> setup;
+  std::function<void()> submit;
+  Measurement measurement;
+};
+
+constexpr std::array<std::array<size_t, 3>, 6> kExecutionOrders = {{
+    {0, 1, 2},
+    {1, 2, 0},
+    {2, 0, 1},
+    {2, 1, 0},
+    {1, 0, 2},
+    {0, 2, 1},
+}};
 
 struct Options {
   uint32_t steps = 64;
@@ -139,31 +158,68 @@ Options parse_options(int argc, char **argv) {
   return options;
 }
 
-template <typename Setup, typename Submit>
-Measurement
-measure(lrrt::Device device, uint32_t trials, lrrt::DeviceBuffer &values,
-        const std::vector<float> &initial_values, Setup setup, Submit submit) {
+double mean(const std::vector<double> &samples) {
+  return std::accumulate(samples.begin(), samples.end(), 0.0) /
+         static_cast<double>(samples.size());
+}
+
+double median(std::vector<double> samples) {
+  std::sort(samples.begin(), samples.end());
+  const size_t middle = samples.size() / 2;
+  if ((samples.size() & 1u) != 0) {
+    return samples[middle];
+  }
+  return (samples[middle - 1] + samples[middle]) * 0.5;
+}
+
+template <size_t PathCount>
+void warm_up_interleaved(lrrt::Device device, uint32_t trials,
+                         const std::vector<float> &initial_values,
+                         std::array<BenchmarkPath, PathCount> &paths) {
+  static_assert(PathCount == 3);
+  for (uint32_t trial = 0; trial < trials; ++trial) {
+    for (const size_t path_index :
+         kExecutionOrders[trial % kExecutionOrders.size()]) {
+      BenchmarkPath &path = paths[path_index];
+      lrrt::copy_to_device(*path.values, initial_values);
+      path.setup();
+      path.submit();
+      device.synchronize();
+    }
+  }
+}
+
+template <size_t PathCount>
+void measure_interleaved(lrrt::Device device, uint32_t trials,
+                         const std::vector<float> &initial_values,
+                         std::array<BenchmarkPath, PathCount> &paths) {
+  static_assert(PathCount == 3);
   lrrt::Event start(device);
   lrrt::Event end(device);
-  Measurement result;
-  for (uint32_t trial = 0; trial < trials; ++trial) {
-    lrrt::copy_to_device(values, initial_values);
-    setup();
-    start.record();
-    const auto begin = Clock::now();
-    submit();
-    end.record();
-    end.synchronize();
-    start.synchronize();
-    result.wall_ns += static_cast<double>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
-                                                             begin)
-            .count());
-    result.device_ns += static_cast<double>(lrrt::elapsed_time_ns(start, end));
+  for (BenchmarkPath &path : paths) {
+    path.measurement.device_samples_ns.reserve(trials);
+    path.measurement.wall_samples_ns.reserve(trials);
   }
-  result.device_ns /= static_cast<double>(trials);
-  result.wall_ns /= static_cast<double>(trials);
-  return result;
+  for (uint32_t trial = 0; trial < trials; ++trial) {
+    for (const size_t path_index :
+         kExecutionOrders[trial % kExecutionOrders.size()]) {
+      BenchmarkPath &path = paths[path_index];
+      lrrt::copy_to_device(*path.values, initial_values);
+      path.setup();
+      start.record();
+      const auto begin = Clock::now();
+      path.submit();
+      end.record();
+      end.synchronize();
+      start.synchronize();
+      path.measurement.wall_samples_ns.push_back(static_cast<double>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                               begin)
+              .count()));
+      path.measurement.device_samples_ns.push_back(
+          static_cast<double>(lrrt::elapsed_time_ns(start, end)));
+    }
+  }
 }
 
 uint32_t float_bits(float value) {
@@ -959,45 +1015,43 @@ int main(int argc, char **argv) {
       throw std::runtime_error("resident graph did not stop at EOS");
     }
 
-    for (uint32_t trial = 0; trial < kWarmupTrials; ++trial) {
-      initialize_decode_state(resident_decode_state, steps);
-      dynamic_executor.initialize(0, maximum_graph_steps, 1);
-      lrrt::copy_to_device(resident_values, initial_values);
-      dynamic_executor.launch();
-      device.synchronize();
-      initialize_decode_state(resident_decode_state, steps);
-      resident_executor.initialize(0, maximum_graph_steps, 1);
-      lrrt::copy_to_device(resident_values, initial_values);
-      resident_executor.launch();
-      device.synchronize();
-      initialize_decode_state(host_decode_state, steps);
-      initialize_host_state(0, maximum_graph_steps, 1);
-      lrrt::copy_to_device(host_values, initial_values);
-      launch_host_decode();
-      device.synchronize();
-    }
-
-    const Measurement dynamic_measurement = measure(
-        device, trials, resident_values, initial_values,
-        [&] {
-          initialize_decode_state(resident_decode_state, steps);
-          dynamic_executor.initialize(0, maximum_graph_steps, 1);
-        },
-        [&] { dynamic_executor.launch(); });
-    const Measurement resident_measurement = measure(
-        device, trials, resident_values, initial_values,
-        [&] {
-          initialize_decode_state(resident_decode_state, steps);
-          resident_executor.initialize(0, maximum_graph_steps, 1);
-        },
-        [&] { resident_executor.launch(); });
-    const Measurement host_measurement = measure(
-        device, trials, host_values, initial_values,
-        [&] {
-          initialize_decode_state(host_decode_state, steps);
-          initialize_host_state(0, maximum_graph_steps, 1);
-        },
-        launch_host_decode);
+    std::array<BenchmarkPath, 3> benchmark_paths = {{
+        {&resident_values,
+         [&] {
+           initialize_decode_state(resident_decode_state, steps);
+           dynamic_executor.initialize(0, maximum_graph_steps, 1);
+         },
+         [&] { dynamic_executor.launch(); },
+         {}},
+        {&resident_values,
+         [&] {
+           initialize_decode_state(resident_decode_state, steps);
+           resident_executor.initialize(0, maximum_graph_steps, 1);
+         },
+         [&] { resident_executor.launch(); },
+         {}},
+        {&host_values,
+         [&] {
+           initialize_decode_state(host_decode_state, steps);
+           initialize_host_state(0, maximum_graph_steps, 1);
+         },
+         launch_host_decode,
+         {}},
+    }};
+    warm_up_interleaved(device, kWarmupTrials, initial_values, benchmark_paths);
+    measure_interleaved(device, trials, initial_values, benchmark_paths);
+    const Measurement &dynamic_measurement = benchmark_paths[0].measurement;
+    const Measurement &resident_measurement = benchmark_paths[1].measurement;
+    const Measurement &host_measurement = benchmark_paths[2].measurement;
+    const double dynamic_device_mean =
+        mean(dynamic_measurement.device_samples_ns);
+    const double resident_device_mean =
+        mean(resident_measurement.device_samples_ns);
+    const double host_device_mean = mean(host_measurement.device_samples_ns);
+    const double dynamic_wall_mean = mean(dynamic_measurement.wall_samples_ns);
+    const double resident_wall_mean =
+        mean(resident_measurement.wall_samples_ns);
+    const double host_wall_mean = mean(host_measurement.wall_samples_ns);
 
     const sg::State final_state = resident_executor.read_state();
     if (final_state.status != static_cast<uint32_t>(sg::Status::complete) ||
@@ -1128,28 +1182,36 @@ int main(int argc, char **argv) {
                 static_cast<unsigned long long>(final_state.executed_tasks));
     std::printf("Top-1 token:              %u (logit=%f, vocab=%u)\n",
                 resident_top_token, resident_top_logit, tail_weights.vocab);
-    std::printf("Measured trials:          %u\n\n", trials);
-    std::printf("%-24s %12s %12s %12s\n", "Path", "Device us", "Wall us",
-                "Launches");
-    std::printf("%-24s %12.3f %12.3f %12u\n", "Dynamic resident graph",
-                dynamic_measurement.device_ns / 1.0e3,
-                dynamic_measurement.wall_ns / 1.0e3, 1u);
-    std::printf("%-24s %12.3f %12.3f %12u\n", "Compiled resident graph",
-                resident_measurement.device_ns / 1.0e3,
-                resident_measurement.wall_ns / 1.0e3, 1u);
+    std::printf("Measured trials:          %u per path (interleaved)\n\n",
+                trials);
+    std::printf("%-24s %14s %14s %14s %14s %12s\n", "Path", "Device avg us",
+                "Device p50 us", "Wall avg us", "Wall p50 us", "Launches");
+    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %12u\n",
+                "Dynamic resident graph", dynamic_device_mean / 1.0e3,
+                median(dynamic_measurement.device_samples_ns) / 1.0e3,
+                dynamic_wall_mean / 1.0e3,
+                median(dynamic_measurement.wall_samples_ns) / 1.0e3, 1u);
+    std::printf("%-24s %14.3f %14.3f %14.3f %14.3f %12u\n",
+                "Compiled resident graph", resident_device_mean / 1.0e3,
+                median(resident_measurement.device_samples_ns) / 1.0e3,
+                resident_wall_mean / 1.0e3,
+                median(resident_measurement.wall_samples_ns) / 1.0e3, 1u);
     std::printf(
-        "%-24s %12.3f %12.3f %12u\n", "Host-driven steps",
-        host_measurement.device_ns / 1.0e3, host_measurement.wall_ns / 1.0e3,
+        "%-24s %14.3f %14.3f %14.3f %14.3f %12u\n", "Host-driven steps",
+        host_device_mean / 1.0e3,
+        median(host_measurement.device_samples_ns) / 1.0e3,
+        host_wall_mean / 1.0e3,
+        median(host_measurement.wall_samples_ns) / 1.0e3,
         steps * (layers * static_cast<uint32_t>(decoder_host_launches.size()) +
                  static_cast<uint32_t>(tail_host_launches.size())));
     std::printf("\nDynamic device speedup:  %.2fx\n",
-                host_measurement.device_ns / dynamic_measurement.device_ns);
+                host_device_mean / dynamic_device_mean);
     std::printf("Compiled device speedup: %.2fx\n",
-                host_measurement.device_ns / resident_measurement.device_ns);
+                host_device_mean / resident_device_mean);
     std::printf("Compiled wall speedup:   %.2fx\n",
-                host_measurement.wall_ns / resident_measurement.wall_ns);
+                host_wall_mean / resident_wall_mean);
     std::printf("Compiled over dynamic:   %.2fx\n\n",
-                dynamic_measurement.device_ns / resident_measurement.device_ns);
+                dynamic_device_mean / resident_device_mean);
     return 0;
   } catch (const std::exception &error) {
     std::fprintf(stderr, "%s\n", error.what());
