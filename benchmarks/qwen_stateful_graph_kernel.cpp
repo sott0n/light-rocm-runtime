@@ -476,6 +476,12 @@ __device__ void qkv_projection_resident_stage(const qd::Context *context,
 
 __device__ void gate_up_silu_range_wave(const qd::Context *context,
                                         const sg::Task &task) {
+  // Two 14-column groups cover the 896-element row. This keeps 42 independent
+  // loads in flight without crossing the VGPR/private-memory boundary seen at
+  // a full-row (28-column) prefetch.
+  constexpr uint32_t kPrefetchColumns = 14u;
+  constexpr uint32_t kColumnStride = 32u * kPrefetchColumns;
+  static_assert(qd::kHiddenSize % kColumnStride == 0u);
   const uint32_t lane = threadIdx.x & 31u;
   const uint32_t wave = threadIdx.x >> 5u;
   constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
@@ -484,10 +490,24 @@ __device__ void gate_up_silu_range_wave(const qd::Context *context,
     float gate = 0.0f;
     float up = 0.0f;
     const size_t row_offset = static_cast<size_t>(row) * context->hidden_size;
-    for (uint32_t column = lane; column < context->hidden_size; column += 32u) {
-      const float input = context->mlp_normalized[column];
-      gate = fmaf(input, context->gate_weight[row_offset + column], gate);
-      up = fmaf(input, context->up_weight[row_offset + column], up);
+    for (uint32_t column = lane; column < qd::kHiddenSize;
+         column += kColumnStride) {
+      float inputs[kPrefetchColumns];
+      float gate_weights[kPrefetchColumns];
+      float up_weights[kPrefetchColumns];
+#pragma unroll
+      for (uint32_t index = 0; index < kPrefetchColumns; ++index) {
+        const uint32_t prefetched_column = column + 32u * index;
+        inputs[index] = context->mlp_normalized[prefetched_column];
+        gate_weights[index] =
+            context->gate_weight[row_offset + prefetched_column];
+        up_weights[index] = context->up_weight[row_offset + prefetched_column];
+      }
+#pragma unroll
+      for (uint32_t index = 0; index < kPrefetchColumns; ++index) {
+        gate = fmaf(inputs[index], gate_weights[index], gate);
+        up = fmaf(inputs[index], up_weights[index], up);
+      }
     }
     gate = wave_sum(gate);
     up = wave_sum(up);

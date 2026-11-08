@@ -516,6 +516,41 @@ profiled stages, or 18.8% of the nominal 624 GB/s roof, and reduced compiled
 execution to 5.75 times the modeled bandwidth floor. The final kernel remains
 spill-free at 60 SGPRs, 82 VGPRs, and 1,124 bytes of fixed group memory.
 
+The gate/up resident stage was subsequently changed from a load-use sequence
+for one wave column at a time to a statically unrolled software pipeline. It
+issues the input, gate-weight, and up-weight loads for 14 columns before
+starting the corresponding FMAs, preserving the original accumulation order.
+Two such groups cover each 896-element row. A same-session sweep used 16
+generated tokens, all 24 checkpoint layers, three uninstrumented comparison
+trials, and five resident profile trials:
+
+| Prefetched columns | Gate/up stage | Effective minimum bandwidth | Nominal bandwidth | Compiled VGPRs |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 106.689 ms | 125.571 GB/s | 20.12% | 82 |
+| 2 | 58.371 ms | 229.515 GB/s | 36.78% | 82 |
+| 4 | 36.900 ms | 363.061 GB/s | 58.18% | 82 |
+| 7 | 29.102 ms | 460.349 GB/s | 73.77% | 85 |
+| 14 | 24.740 ms | 541.519 GB/s | 86.78% | 120 |
+
+The 14-column pipeline shortened gate/up by 76.8% and reduced the
+uninstrumented compiled mean from 306.628 ms to 228.233 ms in that sweep. A
+fresh final run reproduced 24.759 ms and 541.094 GB/s for gate/up, a 230.378 ms
+compiled mean, and a 1.59x compiled-over-HIP-Graph speedup. A 28-column
+full-row variant was rejected without executing the persistent grid: its
+compiled metadata rose to 184 VGPRs and an 8-byte private segment, crossing a
+resource boundary that could reduce residency. The selected variant uses 60
+SGPRs, 120 VGPRs, no private segment, no dynamic stack, and no register spills.
+
+The hardware-counter workflow was also repeated after this change. It measured
+31.670 GB of actual DRAM traffic, effectively unchanged from the earlier
+31.668 GB, while the total measured DRAM rate increased from 133.110 GB/s to
+185.973 GB/s and nominal utilization from 21.332% to 29.803%. Dependency wait
+fell from 100.000% to 96.300%, occupancy rose from 6.037% to 7.175%, and the
+unprofiled compiled p50 was 170.295 ms in the post-counter clock state. The
+unchanged traffic and higher delivered bandwidth confirm that the gain comes
+from additional memory-level parallelism rather than cache reuse or omitted
+work.
+
 ### Historical CU-mode full-checkpoint measurement
 
 The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`
