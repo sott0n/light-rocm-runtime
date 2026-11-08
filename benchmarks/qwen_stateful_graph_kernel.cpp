@@ -126,6 +126,35 @@ __device__ __forceinline__ float wave_sum(float value) {
   return value;
 }
 
+template <uint32_t InputSize, uint32_t PrefetchColumns>
+__device__ __forceinline__ void
+prefetched_two_row_matvec(const float *input, const float *first_weight,
+                          const float *second_weight, bool has_second_row,
+                          uint32_t lane, float &first_sum, float &second_sum) {
+  constexpr uint32_t kColumnStride = 32u * PrefetchColumns;
+  static_assert(InputSize % kColumnStride == 0u);
+  for (uint32_t column = lane; column < InputSize; column += kColumnStride) {
+    float inputs[PrefetchColumns];
+    float first_weights[PrefetchColumns];
+    float second_weights[PrefetchColumns];
+#pragma unroll
+    for (uint32_t index = 0; index < PrefetchColumns; ++index) {
+      const uint32_t prefetched_column = column + 32u * index;
+      inputs[index] = input[prefetched_column];
+      first_weights[index] = first_weight[prefetched_column];
+      second_weights[index] =
+          has_second_row ? second_weight[prefetched_column] : 0.0f;
+    }
+#pragma unroll
+    for (uint32_t index = 0; index < PrefetchColumns; ++index) {
+      first_sum = fmaf(inputs[index], first_weights[index], first_sum);
+      if (has_second_row) {
+        second_sum = fmaf(inputs[index], second_weights[index], second_sum);
+      }
+    }
+  }
+}
+
 __device__ void matvec_range_wave(const float *input, const float *weight,
                                   float *output, uint32_t input_size,
                                   const sg::Task &task) {
@@ -178,14 +207,10 @@ __device__ void down_matvec_resident_stage(const qd::Context *context,
             ? context->down_weight +
                   static_cast<size_t>(second_row) * context->intermediate_size
             : first_weight;
-    for (uint32_t column = lane; column < context->intermediate_size;
-         column += 32u) {
-      const float input = context->activated[column];
-      first_sum = fmaf(input, first_weight[column], first_sum);
-      if (has_second_row) {
-        second_sum = fmaf(input, second_weight[column], second_sum);
-      }
-    }
+    // Four 38-column groups cover the 4,864-element input without a tail.
+    prefetched_two_row_matvec<qd::kIntermediateSize, 38u>(
+        context->activated, first_weight, second_weight, has_second_row, lane,
+        first_sum, second_sum);
     first_sum = wave_sum(first_sum);
     second_sum = wave_sum(second_sum);
     if (lane == 0) {
@@ -273,13 +298,9 @@ __device__ void lm_head_top1_resident_partition(const qd::Context *context,
             ? context->tail->lm_head_weight +
                   static_cast<size_t>(second_row) * context->hidden_size
             : first_weight;
-    for (uint32_t column = lane; column < context->hidden_size; column += 32u) {
-      const float input = context->tail->final_normalized[column];
-      first_sum = fmaf(input, first_weight[column], first_sum);
-      if (has_second_row) {
-        second_sum = fmaf(input, second_weight[column], second_sum);
-      }
-    }
+    prefetched_two_row_matvec<qd::kHiddenSize, 14u>(
+        context->tail->final_normalized, first_weight, second_weight,
+        has_second_row, lane, first_sum, second_sum);
     first_sum = wave_sum(first_sum);
     second_sum = wave_sum(second_sum);
     if (lane == 0) {
@@ -456,13 +477,9 @@ __device__ void qkv_projection_resident_stage(const qd::Context *context,
         second.weight + static_cast<size_t>(second.row) * context->hidden_size;
     float first_sum = 0.0f;
     float second_sum = 0.0f;
-    for (uint32_t column = lane; column < context->hidden_size; column += 32u) {
-      const float input = context->attention_normalized[column];
-      first_sum = fmaf(input, first_weight[column], first_sum);
-      if (has_second_row) {
-        second_sum = fmaf(input, second_weight[column], second_sum);
-      }
-    }
+    prefetched_two_row_matvec<qd::kHiddenSize, 14u>(
+        context->attention_normalized, first_weight, second_weight,
+        has_second_row, lane, first_sum, second_sum);
     first_sum = wave_sum(first_sum);
     second_sum = wave_sum(second_sum);
     if (lane == 0) {
@@ -476,12 +493,6 @@ __device__ void qkv_projection_resident_stage(const qd::Context *context,
 
 __device__ void gate_up_silu_range_wave(const qd::Context *context,
                                         const sg::Task &task) {
-  // Two 14-column groups cover the 896-element row. This keeps 42 independent
-  // loads in flight without crossing the VGPR/private-memory boundary seen at
-  // a full-row (28-column) prefetch.
-  constexpr uint32_t kPrefetchColumns = 14u;
-  constexpr uint32_t kColumnStride = 32u * kPrefetchColumns;
-  static_assert(qd::kHiddenSize % kColumnStride == 0u);
   const uint32_t lane = threadIdx.x & 31u;
   const uint32_t wave = threadIdx.x >> 5u;
   constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
@@ -490,25 +501,11 @@ __device__ void gate_up_silu_range_wave(const qd::Context *context,
     float gate = 0.0f;
     float up = 0.0f;
     const size_t row_offset = static_cast<size_t>(row) * context->hidden_size;
-    for (uint32_t column = lane; column < qd::kHiddenSize;
-         column += kColumnStride) {
-      float inputs[kPrefetchColumns];
-      float gate_weights[kPrefetchColumns];
-      float up_weights[kPrefetchColumns];
-#pragma unroll
-      for (uint32_t index = 0; index < kPrefetchColumns; ++index) {
-        const uint32_t prefetched_column = column + 32u * index;
-        inputs[index] = context->mlp_normalized[prefetched_column];
-        gate_weights[index] =
-            context->gate_weight[row_offset + prefetched_column];
-        up_weights[index] = context->up_weight[row_offset + prefetched_column];
-      }
-#pragma unroll
-      for (uint32_t index = 0; index < kPrefetchColumns; ++index) {
-        gate = fmaf(inputs[index], gate_weights[index], gate);
-        up = fmaf(inputs[index], up_weights[index], up);
-      }
-    }
+    // Two 14-column groups cover the 896-element row while keeping 42
+    // independent input and weight loads in flight.
+    prefetched_two_row_matvec<qd::kHiddenSize, 14u>(
+        context->mlp_normalized, context->gate_weight + row_offset,
+        context->up_weight + row_offset, true, lane, gate, up);
     gate = wave_sum(gate);
     up = wave_sum(up);
     if (lane == 0) {
@@ -647,13 +644,9 @@ __device__ void attention_output_resident_stage(const qd::Context *context,
                        : first_weight;
     float first_sum = 0.0f;
     float second_sum = 0.0f;
-    for (uint32_t column = lane; column < context->query_size; column += 32u) {
-      const float input = context->query[column];
-      first_sum = fmaf(input, first_weight[column], first_sum);
-      if (has_second_row) {
-        second_sum = fmaf(input, second_weight[column], second_sum);
-      }
-    }
+    prefetched_two_row_matvec<qd::kHiddenSize, 14u>(
+        context->query, first_weight, second_weight, has_second_row, lane,
+        first_sum, second_sum);
     first_sum = wave_sum(first_sum);
     second_sum = wave_sum(second_sum);
     if (lane == 0) {
@@ -977,6 +970,55 @@ extern "C" __global__ void qwen_stateful_graph_stage_profile_kernel(
       state, tasks, programs, phase_states, program_count, total_task_count,
       phase_state_count, opaque_context, stages, compiled_programs,
       stage_count);
+}
+
+extern "C" __global__ void
+qwen_stateful_graph_matched_step_kernel(sg::State *state, const sg::Task *tasks,
+                                        uint32_t task_count, uint32_t reserved,
+                                        void *opaque_context) {
+  (void)reserved;
+  const sg::Stage stage{0, task_count};
+  QwenWorkload::execute_stage(stage, tasks, state, opaque_context, blockIdx.x,
+                              gridDim.x);
+  __syncthreads();
+  if (blockIdx.x == 0 && threadIdx.x == 0 &&
+      static_cast<qd::Opcode>(tasks[0].opcode) ==
+          qd::Opcode::residual_advance) {
+    ++state->step;
+  }
+}
+
+extern "C" __global__ void qwen_stateful_graph_matched_profile_step_kernel(
+    sg::State *state, const sg::Task *tasks, uint32_t task_count,
+    uint32_t profile_index, void *opaque_context) {
+  auto *contexts = static_cast<qd::Context *>(opaque_context);
+  qd::StageProfile *profile = contexts[0].tail->stage_profile;
+  qd::StageProfileEntry *entry =
+      profile != nullptr && profile_index < profile->entry_count
+          ? &profile->entries[profile_index]
+          : nullptr;
+  if (threadIdx.x == 0 && entry != nullptr) {
+    const uint64_t begin = static_cast<uint64_t>(wall_clock64());
+    atomicMin(reinterpret_cast<unsigned long long *>(&entry->begin_tick),
+              static_cast<unsigned long long>(begin));
+  }
+
+  const sg::Stage stage{0, task_count};
+  QwenWorkload::execute_stage(stage, tasks, state, opaque_context, blockIdx.x,
+                              gridDim.x);
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    if (blockIdx.x == 0 && static_cast<qd::Opcode>(tasks[0].opcode) ==
+                               qd::Opcode::residual_advance) {
+      ++state->step;
+    }
+    if (entry != nullptr) {
+      const uint64_t end = static_cast<uint64_t>(wall_clock64());
+      atomicMax(reinterpret_cast<unsigned long long *>(&entry->end_tick),
+                static_cast<unsigned long long>(end));
+    }
+  }
 }
 
 extern "C" __global__ void

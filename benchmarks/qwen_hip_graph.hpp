@@ -44,8 +44,8 @@ public:
       check_hip(hipModuleGetFunction(
                     &function_, module_,
                     stage_profile
-                        ? "qwen_stateful_graph_host_profile_step_kernel"
-                        : "qwen_stateful_graph_host_step_kernel"),
+                        ? "qwen_stateful_graph_matched_profile_step_kernel"
+                        : "qwen_stateful_graph_matched_step_kernel"),
                 "hipModuleGetFunction");
       check_hip(hipGraphCreate(&graph_, 0), "hipGraphCreate");
 

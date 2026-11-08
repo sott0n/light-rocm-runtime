@@ -172,15 +172,16 @@ advances token position and KV length before returning to Attention. The tail
 Program then evaluates the device predicate, so the complete autoregressive
 loop remains inside one kernel launch.
 
-The host-driven and HIP Graph baselines invoke the same arithmetic in nine
-kernels per decoder layer plus four kernels per token for final RMSNorm,
-partitioned LM head, Top-1 reduction, and embedding feedback. Their LM head
-owns an independent task table and retains its 32-way split even when resident
-admission selects fewer workers. The HIP Graph path loads the same HSACO as
-LRRT and records that fixed kernel sequence as one graph submission. By
-default the benchmark requests 20 resident workers, then clamps that request
-through the device/kernel resource limit. It uses deterministic model-shaped
-decoder weights and a 4,096-row synthetic LM head.
+The host-driven diagnostic invokes generic task bodies in nine kernels per
+decoder layer plus four kernels per token. The HIP Graph comparison instead
+invokes the same compiled-stage arithmetic, task decomposition, admitted
+worker count, and LM-head partition count as resident execution. Its fixed
+kernel sequence differs only by using a graph node boundary where resident
+execution uses an in-kernel stage barrier. The HIP Graph path loads the same
+HSACO as LRRT and records that sequence as one graph submission. By default
+the benchmark requests 20 resident workers, then clamps that request through
+the device/kernel resource limit. It uses deterministic model-shaped decoder
+weights and a 4,096-row synthetic LM head.
 Pass `--weights` with an existing Qwen layer bundle manifest to run both paths
 with its checkpoint attention norm, Q/K/V weights and biases, output projection,
 `mlp_norm`, gate, up, and down tensors. Pass `--tail` to load an existing
@@ -551,6 +552,70 @@ unchanged traffic and higher delivered bandwidth confirm that the gain comes
 from additional memory-level parallelism rather than cache reuse or omitted
 work.
 
+The same pipeline was then factored into a common two-output matvec primitive
+and applied to every specialized resident weight stream: QKV projection,
+attention output, down projection, and LM head. QKV, output, gate/up, and LM
+head use two 14-column groups for their 896-element inputs. Down projection
+uses four 38-column groups for its 4,864-element input. In each case the wave
+issues the input and both row-weight loads for a complete group before starting
+its FMAs.
+
+A final 16-token, 24-layer profile compared this combined implementation with
+the gate/up-only result:
+
+| Metric | Gate/up prefetch only | All resident weight streams | Change |
+| --- | ---: | ---: | ---: |
+| QKV projection | 17.584 ms | 6.141 ms | 65.1% shorter |
+| Attention output | 13.574 ms | 4.839 ms | 64.3% shorter |
+| Down projection | 67.288 ms | 13.404 ms | 80.1% shorter |
+| LM head + local Top-1 | 78.753 ms | 18.773 ms | 76.2% shorter |
+| Resident stage sum | 213.581 ms | 80.003 ms | 62.5% shorter |
+| Uninstrumented compiled mean | 230.378 ms | 84.551 ms | 63.3% shorter |
+
+The final effective minimum bandwidths were 259.0 GB/s for QKV, 255.7 GB/s
+for attention output, 539.1 GB/s for gate/up, 500.1 GB/s for down projection,
+and 464.1 GB/s for LM head. Down-projection groups of 8, 19, and 38 columns
+improved its stage from 18.713 ms through 14.525 ms to 13.571 ms during the
+sweep. The next divisor, 76 columns, was rejected without execution because it
+produced 170 VGPR spills and a 592-byte private segment. The selected compiled
+kernel uses 59 SGPRs and 167 VGPRs with no private segment, dynamic stack, or
+register spills.
+
+Post-change hardware counters measured 31.666 GB of actual DRAM traffic and
+477.178 GB/s, or 76.471% of the nominal 624 GB/s roof. The counter-traffic
+floor remained 50.748 ms while the unprofiled post-counter p50 fell to
+66.362 ms, only 1.31 times that floor. Dependency wait fell further to 92.703%,
+issue wait was 1.095%, and occupancy remained 7.173%. The traffic is again
+unchanged; the improvement is delivered bandwidth from a larger set of
+outstanding weight loads.
+
+The original HIP Graph path still used the generic one-row task bodies and a
+different LM-head partition count, so its apparent 4.40x deficit after these
+resident changes was not used as an execution-mode result. The comparison was
+made matched before reporting a speedup. Each HIP Graph node now invokes the
+same `execute_stage` implementation, grouped prefetch, two-row accumulation,
+20-workgroup mapping, and 20-way LM-head task table as the compiled resident
+kernel. Both paths therefore perform the same stage work; the intended
+difference is an in-kernel compiled barrier versus a HIP Graph kernel-node
+boundary. The generic host-driven path remains available as a separate
+diagnostic.
+
+One matched 16-token, 24-layer run measured:
+
+| Metric | Compiled resident | Matched HIP Graph |
+| --- | ---: | ---: |
+| Uninstrumented mean | 89.981 ms | 98.899 ms |
+| Uninstrumented p50 | 91.128 ms | 99.581 ms |
+| Instrumented stage/kernel sum | 85.206 ms | 77.795 ms |
+| Unattributed resident time / graph gaps | 0.371 ms | 16.037 ms |
+| Instrumented interval | 85.577 ms | 93.832 ms |
+
+The matched HIP stage kernels are faster in isolation, partly because their
+separate entry uses 136 VGPRs while the complete persistent megakernel uses
+167. Graph node gaps more than offset that advantage, leaving compiled resident
+1.10x faster end to end. This is the execution-mode comparison; results against
+the older generic HIP kernels are optimization diagnostics only.
+
 ### Historical CU-mode full-checkpoint measurement
 
 The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`
@@ -615,10 +680,13 @@ Device-resident decode state, embedding feedback, EOS termination, and
 resource-aware worker admission are now implemented. The benchmark compares
 the whole loop against HIP Graph and host-driven LRRT using the same HSACO,
 weights, buffer layout, and arithmetic. The full-checkpoint comparison is now
-recorded above with independent resident and baseline task tables. The
+recorded above with matched resident and HIP Graph task tables. The
 benchmark now uses WGP mode with a conservative 20-worker limit; CU-mode and
 larger launches are unsupported after reproducing GPU-reset failures on a
 fresh boot. The 32-way down-projection task split remains because it increased
-streaming-weight parallelism independently of resident worker count. The next
-milestone is to establish repeated full-stack stability at this limit, then
-optimize the memory-bound task bodies without weakening the HIP Graph baseline.
+streaming-weight parallelism independently of resident worker count. All
+resident matvec weight streams now use the grouped software pipeline described
+above, and the matched HIP Graph comparison invokes the same stage
+implementation and work decomposition. The next performance work is the
+remaining normalization, attention, and scheduler overhead, alongside repeated
+full-stack stability checks at the supported worker limit.

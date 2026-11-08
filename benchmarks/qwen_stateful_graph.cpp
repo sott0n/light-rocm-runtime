@@ -807,14 +807,15 @@ int main(int argc, char **argv) {
     validate_tail_shape(tail_weights);
     const uint32_t resident_lm_head_partitions =
         std::min({tail_weights.vocab, qd::kMaximumLmHeadPartitions, workers});
-    const uint32_t baseline_lm_head_partitions =
-        std::min(tail_weights.vocab, qd::kMaximumLmHeadPartitions);
+    // Keep the comparison paths on the resident task decomposition so the
+    // benchmark isolates execution mode rather than LM-head partition count.
+    const uint32_t comparison_lm_head_partitions = resident_lm_head_partitions;
     DeviceTailWeights device_tail_weights(device, tail_weights);
 
     const ProgramTable resident_program_table = make_qwen_decoder_programs(
         tail_weights.vocab, resident_lm_head_partitions);
     const ProgramTable baseline_program_table = make_qwen_decoder_programs(
-        tail_weights.vocab, baseline_lm_head_partitions);
+        tail_weights.vocab, comparison_lm_head_partitions);
     const std::vector<sg::Task> &tasks = resident_program_table.tasks;
     const std::vector<sg::Program> &programs = resident_program_table.programs;
     const std::vector<sg::Task> &baseline_tasks = baseline_program_table.tasks;
@@ -994,9 +995,9 @@ int main(int argc, char **argv) {
     lrrt::DeviceBuffer host_final_normalized(device,
                                              qd::kHiddenSize * sizeof(float));
     lrrt::DeviceBuffer host_partial_max_values(
-        device, baseline_lm_head_partitions * sizeof(float));
+        device, comparison_lm_head_partitions * sizeof(float));
     lrrt::DeviceBuffer host_partial_max_indices(
-        device, baseline_lm_head_partitions * sizeof(uint32_t));
+        device, comparison_lm_head_partitions * sizeof(uint32_t));
     lrrt::DeviceBuffer host_decode_state(device, sizeof(qd::DecodeState));
     lrrt::DeviceBuffer host_output_tokens(device, steps * sizeof(uint32_t));
     lrrt::DeviceBuffer resident_stage_profile_buffer(device,
@@ -1035,7 +1036,7 @@ int main(int argc, char **argv) {
         static_cast<qd::DecodeState *>(host_decode_state.data()),
         static_cast<uint32_t *>(host_output_tokens.data()),
         tail_weights.vocab,
-        baseline_lm_head_partitions,
+        comparison_lm_head_partitions,
         static_cast<uint32_t>(tail_weights.token_ids.size()),
         0,
         nullptr,
@@ -1134,8 +1135,10 @@ int main(int argc, char **argv) {
     };
     std::vector<HostLaunch> decoder_host_launches;
     std::vector<HostLaunch> tail_host_launches;
+    std::vector<HostLaunch> decoder_matched_launches;
+    std::vector<HostLaunch> tail_matched_launches;
     const auto append_host_launch = [&](std::vector<HostLaunch> &launches,
-                                        HostStage stage) {
+                                        HostStage stage, uint32_t workgroups) {
       launches.push_back({
           {
               static_cast<sg::State *>(host_state.data()),
@@ -1144,21 +1147,25 @@ int main(int argc, char **argv) {
               0,
               host_context_buffer.data(),
           },
-          {{stage.task_count * kBlockSize, 1, 1}, {kBlockSize, 1, 1}, 0},
+          {{workgroups * kBlockSize, 1, 1}, {kBlockSize, 1, 1}, 0},
       });
     };
     for (const HostStage stage : kHostStages) {
-      append_host_launch(decoder_host_launches, stage);
+      append_host_launch(decoder_host_launches, stage, stage.task_count);
+      append_host_launch(decoder_matched_launches, stage, workers);
     }
-    append_host_launch(tail_host_launches, {qd::kDecoderTaskCount, 1});
-    append_host_launch(tail_host_launches, {qd::kDecoderTaskCount + 1u,
-                                            baseline_lm_head_partitions});
-    append_host_launch(
-        tail_host_launches,
-        {qd::kDecoderTaskCount + 1u + baseline_lm_head_partitions, 1});
-    append_host_launch(
-        tail_host_launches,
-        {qd::kDecoderTaskCount + 2u + baseline_lm_head_partitions, 1});
+    const std::array<HostStage, 4> tail_stages = {
+        HostStage{qd::kDecoderTaskCount, 1},
+        HostStage{qd::kDecoderTaskCount + 1u, comparison_lm_head_partitions},
+        HostStage{qd::kDecoderTaskCount + 1u + comparison_lm_head_partitions,
+                  1},
+        HostStage{qd::kDecoderTaskCount + 2u + comparison_lm_head_partitions,
+                  1},
+    };
+    for (const HostStage stage : tail_stages) {
+      append_host_launch(tail_host_launches, stage, stage.task_count);
+      append_host_launch(tail_matched_launches, stage, workers);
+    }
     const auto launch_host_decode = [&] {
       for (uint32_t step = 0; step < steps; ++step) {
         for (uint32_t layer = 0; layer < layers; ++layer) {
@@ -1206,39 +1213,40 @@ int main(int argc, char **argv) {
               {&decoder_host_launches[stage], kDecoderProfileStages[stage]});
           add_stage_work(roofline_profile, kDecoderProfileStages[stage],
                          step + 1u, tail_weights.vocab,
-                         baseline_lm_head_partitions);
+                         comparison_lm_head_partitions);
           add_stage_work(resident_stage_profile, kDecoderProfileStages[stage],
                          step + 1u, tail_weights.vocab,
                          resident_lm_head_partitions);
           add_stage_work(hip_stage_profile, kDecoderProfileStages[stage],
                          step + 1u, tail_weights.vocab,
-                         baseline_lm_head_partitions);
+                         comparison_lm_head_partitions);
         }
       }
       for (size_t stage = 0; stage < tail_host_launches.size(); ++stage) {
         profile_launches.push_back(
             {&tail_host_launches[stage], kTailProfileStages[stage]});
         add_stage_work(roofline_profile, kTailProfileStages[stage], step + 1u,
-                       tail_weights.vocab, baseline_lm_head_partitions);
+                       tail_weights.vocab, comparison_lm_head_partitions);
         add_stage_work(resident_stage_profile, kTailProfileStages[stage],
                        step + 1u, tail_weights.vocab,
                        resident_lm_head_partitions);
         add_stage_work(hip_stage_profile, kTailProfileStages[stage], step + 1u,
-                       tail_weights.vocab, baseline_lm_head_partitions);
+                       tail_weights.vocab, comparison_lm_head_partitions);
       }
     }
     if (profile_launches.size() != host_kernel_count) {
       throw std::runtime_error("roofline profile launch layout mismatch");
     }
 #if LRRT_ENABLE_HIP_GRAPH
-    lrrt::benchmarks::QwenHipGraph hip_graph(code_object, decoder_host_launches,
-                                             tail_host_launches, steps, layers);
+    lrrt::benchmarks::QwenHipGraph hip_graph(
+        code_object, decoder_matched_launches, tail_matched_launches, steps,
+        layers);
     std::unique_ptr<lrrt::benchmarks::QwenHipGraph> hip_stage_profile_graph;
     if (options.profile_roofline) {
       hip_stage_profile_graph =
           std::make_unique<lrrt::benchmarks::QwenHipGraph>(
-              code_object, decoder_host_launches, tail_host_launches, steps,
-              layers, true);
+              code_object, decoder_matched_launches, tail_matched_launches,
+              steps, layers, true);
     }
 #endif
 
@@ -1802,8 +1810,9 @@ int main(int argc, char **argv) {
                 qd::kDecoderTaskCount);
     std::printf("Resident tail tasks:      %u (%u LM head partitions)\n",
                 resident_lm_head_partitions + 3u, resident_lm_head_partitions);
-    std::printf("Baseline tail tasks:      %u (%u LM head partitions)\n",
-                baseline_lm_head_partitions + 3u, baseline_lm_head_partitions);
+    std::printf("Comparison tail tasks:    %u (%u LM head partitions)\n",
+                comparison_lm_head_partitions + 3u,
+                comparison_lm_head_partitions);
     std::printf("Programs:                 %zu (attention -> FFN -> "
                 "conditional LM head)\n",
                 programs.size());
