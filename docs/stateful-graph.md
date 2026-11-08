@@ -297,6 +297,61 @@ stage time, modeled work, arithmetic intensity, and effective minimum
 bandwidth. The peak and bandwidth values must describe the target device and
 clock mode; they are not inferred from the device name.
 
+The modeled minimum above does not include cache-line overfetch or repeated
+DRAM traffic. On ROCr builds, `rocprofv3` can measure that traffic and the
+resident kernel's cache, stall, and occupancy counters directly. The helper
+below runs three counter-compatible passes sequentially because gfx1101 cannot
+collect all required GL2 counters in one pass:
+
+```sh
+./tools/profile_qwen_counters.py \
+  --weights-dir /tmp/lrrt-qwen-full --layers 24 --steps 16 \
+  --memory-bandwidth-gbps 624 \
+  --output-dir /tmp/qwen-hardware-profile \
+  --json /tmp/qwen-hardware-profile/summary.json
+```
+
+The report uses `FETCH_SIZE` and `WRITE_SIZE` for actual DRAM traffic and
+derives bandwidth from each dispatch's hardware timestamps. When a bandwidth
+roof is supplied, it also reports a counter-traffic latency floor and the
+compiled dispatch/floor ratio. `L2CacheHit`, `MemUnitBusy`, dependency and
+issue wait, occupancy, and GPU busy distinguish cache reuse, latency hiding,
+and instruction-issue limits. The helper separates the full requested workload
+from the benchmark's shorter termination probes using its DRAM traffic. It then
+uses the median of those full-workload counters and a three-trial unprofiled
+p50, run after counter collection to avoid idle-clock ramp, for the bandwidth
+calculation. Raw profiler CSVs are kept only when `--output-dir` is present.
+Run this without another GPU workload; the counters are not a process-isolation
+mechanism. Direct-KFD builds bypass the ROCr profiling interception used by
+this workflow.
+
+One steady-state RX 7800 XT run of the command above measured:
+
+| Metric | Hardware-counter result |
+| --- | ---: |
+| Unprofiled compiled p50 | 237.913 ms |
+| Actual DRAM read | 31.651 GB |
+| Actual DRAM write | 0.017 GB |
+| Actual DRAM bandwidth | 133.110 GB/s |
+| Nominal-bandwidth utilization | 21.332% of 624 GB/s |
+| Counter-traffic floor | 50.751 ms |
+| Compiled time / counter floor | 4.69x |
+| L2 cache hit | 2.877% |
+| Memory unit busy | 82.692% |
+| Wave dependency wait | 100.000% |
+| Wave issue wait | 0.224% |
+| Occupancy | 6.037% |
+
+The 31.668 GB measured total is effectively the same as the roofline model's
+minimum traffic for this 16-token workload, so redundant DRAM transfer is not
+the dominant gap. The low L2 hit rate is also expected for streaming weights.
+The combination of 100% dependency wait, negligible instruction-issue wait,
+and 6% occupancy identifies insufficient latency hiding and memory-level
+parallelism as the primary limitation: the memory path is active, but only
+about one fifth of nominal DRAM bandwidth is delivered. The next optimization
+should therefore increase outstanding weight loads or resident wave
+concurrency without extending the per-row dependency chain.
+
 On the same RX 7800 XT and full-checkpoint shape, one profile using the limits
 above measured the following dominant stages. `Roof` is
 `max(FLOPs/peak, minimum-bytes/bandwidth)` and `gap` is measured stage time

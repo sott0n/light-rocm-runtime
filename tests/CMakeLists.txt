@@ -53,6 +53,12 @@ function(lrrt_add_backend_independent_tests)
         "${PROJECT_SOURCE_DIR}/tests/qwen_benchmark_runner_test.py"
     )
     add_test(
+      NAME lrrt_qwen_hardware_profile_tests
+      COMMAND
+        "${PYTHON_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/qwen_hardware_profile_test.py"
+    )
+    add_test(
       NAME lrrt_double_buffer_pipeline_sweep_tests
       COMMAND
         "${PYTHON_EXECUTABLE}"
