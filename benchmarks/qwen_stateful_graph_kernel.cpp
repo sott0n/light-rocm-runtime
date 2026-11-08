@@ -146,6 +146,57 @@ __device__ void matvec_range_wave(const float *input, const float *weight,
   }
 }
 
+// The compiled resident launch has fewer workgroups than the 32-way down
+// projection. Redistribute the complete output range over all resident waves
+// instead of making a subset of workers execute a second task serially. Each
+// wave accumulates two independent rows so both weight streams can remain in
+// flight while sharing the input load.
+__device__ void down_matvec_resident_stage(const qd::Context *context,
+                                           const sg::Stage &stage,
+                                           const sg::Task *tasks,
+                                           uint32_t worker,
+                                           uint32_t active_workers) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  const uint32_t first_row = tasks[stage.task_offset].begin;
+  const uint32_t end_row = tasks[stage.task_offset + stage.task_count - 1u].end;
+  const uint32_t resident_wave = worker * kWavesPerWorker + wave;
+  const uint32_t resident_waves = active_workers * kWavesPerWorker;
+
+  for (uint32_t row = first_row + resident_wave; row < end_row;
+       row += 2u * resident_waves) {
+    const uint32_t second_row = row + resident_waves;
+    const bool has_second_row = second_row < end_row;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    const float *first_weight =
+        context->down_weight +
+        static_cast<size_t>(row) * context->intermediate_size;
+    const float *second_weight =
+        has_second_row
+            ? context->down_weight +
+                  static_cast<size_t>(second_row) * context->intermediate_size
+            : first_weight;
+    for (uint32_t column = lane; column < context->intermediate_size;
+         column += 32u) {
+      const float input = context->activated[column];
+      first_sum = fmaf(input, first_weight[column], first_sum);
+      if (has_second_row) {
+        second_sum = fmaf(input, second_weight[column], second_sum);
+      }
+    }
+    first_sum = wave_sum(first_sum);
+    second_sum = wave_sum(second_sum);
+    if (lane == 0) {
+      context->projected[row] = first_sum;
+      if (has_second_row) {
+        context->projected[second_row] = second_sum;
+      }
+    }
+  }
+}
+
 __device__ __forceinline__ bool better_top1(float value, uint32_t index,
                                             float best_value,
                                             uint32_t best_index) {
@@ -538,6 +589,25 @@ struct QwenWorkload {
   }
 
   __device__ static __forceinline__ void
+  execute_stage(const sg::Stage &stage, const sg::Task *tasks, sg::State *state,
+                void *opaque_context, uint32_t worker,
+                uint32_t active_workers) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    qd::Context *context = &contexts[state->step % contexts[0].layer_count];
+    const sg::Task &first_task = tasks[stage.task_offset];
+    if (stage.task_count == qd::kDownProjectionPartitions &&
+        static_cast<qd::Opcode>(first_task.opcode) ==
+            qd::Opcode::down_matvec_f32) {
+      down_matvec_resident_stage(context, stage, tasks, worker, active_workers);
+      return;
+    }
+    for (uint32_t task_index = worker; task_index < stage.task_count;
+         task_index += active_workers) {
+      execute(tasks[stage.task_offset + task_index], state, opaque_context);
+    }
+  }
+
+  __device__ static __forceinline__ void
   initialize_profile(void *opaque_context) {
     no_profile_initialize(opaque_context);
   }
@@ -606,6 +676,16 @@ struct QwenSchedulerProfileWorkload {
     if (opcode == qd::Opcode::residual_advance ||
         opcode == qd::Opcode::embedding_feedback_f32) {
       execute_task(task, state, context, reduction, wave_indices);
+    }
+  }
+
+  __device__ static __forceinline__ void
+  execute_stage(const sg::Stage &stage, const sg::Task *tasks, sg::State *state,
+                void *opaque_context, uint32_t worker,
+                uint32_t active_workers) {
+    for (uint32_t task_index = worker; task_index < stage.task_count;
+         task_index += active_workers) {
+      execute(tasks[stage.task_offset + task_index], state, opaque_context);
     }
   }
 

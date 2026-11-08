@@ -161,11 +161,8 @@ __device__ __forceinline__ void run_compiled_resident(
       const uint32_t active_workers =
           min(state->worker_count, stage.task_count);
       if (worker < active_workers) {
-        for (uint32_t task_index = worker; task_index < stage.task_count;
-             task_index += active_workers) {
-          Workload::execute(tasks[stage.task_offset + task_index], state,
-                            opaque_context);
-        }
+        Workload::execute_stage(stage, tasks, state, opaque_context, worker,
+                                active_workers);
       }
       __syncthreads();
 

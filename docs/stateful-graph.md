@@ -372,6 +372,33 @@ measured resident deficit. The next concurrency target is therefore more
 simultaneous matvec waves within the safe 20-workgroup resident launch, before
 software-prefetch changes to the inner loop.
 
+The compiled Qwen workload now provides a stage-level execution hook for this
+case. Its down-projection implementation redistributes the complete 896-row
+output range over all 160 resident wave32 wavefronts instead of assigning 32
+task partitions to 20 workgroups and making 12 workgroups run a second task
+serially. Each wave accumulates two independent rows at once. This reuses the
+activation load and exposes two weight streams to the memory pipeline without
+increasing the persistent grid beyond the supported 20-workgroup limit. The
+host-driven and HIP Graph kernels keep their original 32-workgroup arithmetic
+path.
+
+A same-session A/B run used 16 generated tokens, all 24 checkpoint layers,
+three uninstrumented trials per path, and five diagnostic trials per profile.
+Only the resident down-projection stage hook was disabled for the control run:
+
+| Metric | Original task assignment | Resident stage specialization | Change |
+| --- | ---: | ---: | ---: |
+| Down-projection stage | 135.212 ms | 59.804 ms | 55.8% shorter |
+| Down effective minimum bandwidth | 49.6 GB/s | 112.1 GB/s | 2.26x |
+| Down resident / HIP Graph | 2.066x | 0.907x | resident became 9.3% shorter |
+| Compiled resident | 524.952 ms | 439.167 ms | 16.3% shorter |
+| Compiled resident / HIP Graph speed | 0.77x | 0.93x | 20.8% relative gain |
+
+The specialized compiled kernel remains spill-free at 51 SGPRs, 79 VGPRs,
+and 1,060 bytes of fixed group memory, so the optimization does not weaken the
+resource assumptions behind the existing WGP20 admission limit. LM head is now
+the dominant persistent-only deficit.
+
 ### Historical CU-mode full-checkpoint measurement
 
 The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`
