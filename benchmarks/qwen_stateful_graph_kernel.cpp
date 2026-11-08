@@ -405,6 +405,75 @@ __device__ void qkv_projection_range_wave(const qd::Context *context,
   }
 }
 
+struct QkvRowView {
+  const float *weight;
+  const float *bias;
+  float *output;
+  uint32_t row;
+};
+
+__device__ __forceinline__ QkvRowView qkv_row_view(const qd::Context *context,
+                                                   uint32_t packed_row) {
+  QkvRowView view{context->q_weight, context->q_bias, context->query,
+                  packed_row};
+  if (packed_row >= context->query_size + context->kv_size) {
+    view.weight = context->v_weight;
+    view.bias = context->v_bias;
+    view.output = context->value;
+    view.row -= context->query_size + context->kv_size;
+  } else if (packed_row >= context->query_size) {
+    view.weight = context->k_weight;
+    view.bias = context->k_bias;
+    view.output = context->key;
+    view.row -= context->query_size;
+  }
+  return view;
+}
+
+__device__ void qkv_projection_resident_stage(const qd::Context *context,
+                                              const sg::Stage &stage,
+                                              const sg::Task *tasks,
+                                              uint32_t worker,
+                                              uint32_t active_workers) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  const uint32_t first_row = tasks[stage.task_offset].begin;
+  const uint32_t end_row = tasks[stage.task_offset + stage.task_count - 1u].end;
+  const uint32_t resident_wave = worker * kWavesPerWorker + wave;
+  const uint32_t resident_waves = active_workers * kWavesPerWorker;
+
+  for (uint32_t packed_row = first_row + resident_wave; packed_row < end_row;
+       packed_row += 2u * resident_waves) {
+    const uint32_t second_packed_row = packed_row + resident_waves;
+    const bool has_second_row = second_packed_row < end_row;
+    const QkvRowView first = qkv_row_view(context, packed_row);
+    const QkvRowView second =
+        has_second_row ? qkv_row_view(context, second_packed_row) : first;
+    const float *first_weight =
+        first.weight + static_cast<size_t>(first.row) * context->hidden_size;
+    const float *second_weight =
+        second.weight + static_cast<size_t>(second.row) * context->hidden_size;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    for (uint32_t column = lane; column < context->hidden_size; column += 32u) {
+      const float input = context->attention_normalized[column];
+      first_sum = fmaf(input, first_weight[column], first_sum);
+      if (has_second_row) {
+        second_sum = fmaf(input, second_weight[column], second_sum);
+      }
+    }
+    first_sum = wave_sum(first_sum);
+    second_sum = wave_sum(second_sum);
+    if (lane == 0) {
+      first.output[first.row] = first_sum + first.bias[first.row];
+      if (has_second_row) {
+        second.output[second.row] = second_sum + second.bias[second.row];
+      }
+    }
+  }
+}
+
 __device__ void gate_up_silu_range_wave(const qd::Context *context,
                                         const sg::Task &task) {
   const uint32_t lane = threadIdx.x & 31u;
@@ -529,6 +598,49 @@ __device__ void attention_output_residual_range_wave(const qd::Context *context,
     sum = wave_sum(sum);
     if (lane == 0) {
       context->hidden[row] += sum;
+    }
+  }
+}
+
+__device__ void attention_output_resident_stage(const qd::Context *context,
+                                                const sg::Stage &stage,
+                                                const sg::Task *tasks,
+                                                uint32_t worker,
+                                                uint32_t active_workers) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  const uint32_t first_row = tasks[stage.task_offset].begin;
+  const uint32_t end_row = tasks[stage.task_offset + stage.task_count - 1u].end;
+  const uint32_t resident_wave = worker * kWavesPerWorker + wave;
+  const uint32_t resident_waves = active_workers * kWavesPerWorker;
+
+  for (uint32_t row = first_row + resident_wave; row < end_row;
+       row += 2u * resident_waves) {
+    const uint32_t second_row = row + resident_waves;
+    const bool has_second_row = second_row < end_row;
+    const float *first_weight =
+        context->out_weight + static_cast<size_t>(row) * context->query_size;
+    const float *second_weight =
+        has_second_row ? context->out_weight + static_cast<size_t>(second_row) *
+                                                   context->query_size
+                       : first_weight;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    for (uint32_t column = lane; column < context->query_size; column += 32u) {
+      const float input = context->query[column];
+      first_sum = fmaf(input, first_weight[column], first_sum);
+      if (has_second_row) {
+        second_sum = fmaf(input, second_weight[column], second_sum);
+      }
+    }
+    first_sum = wave_sum(first_sum);
+    second_sum = wave_sum(second_sum);
+    if (lane == 0) {
+      context->hidden[row] += first_sum;
+      if (has_second_row) {
+        context->hidden[second_row] += second_sum;
+      }
     }
   }
 }
@@ -664,6 +776,18 @@ struct QwenWorkload {
     auto *contexts = static_cast<qd::Context *>(opaque_context);
     qd::Context *context = &contexts[state->step % contexts[0].layer_count];
     const sg::Task &first_task = tasks[stage.task_offset];
+    if (static_cast<qd::Opcode>(first_task.opcode) ==
+        qd::Opcode::qkv_projection_f32) {
+      qkv_projection_resident_stage(context, stage, tasks, worker,
+                                    active_workers);
+      return;
+    }
+    if (static_cast<qd::Opcode>(first_task.opcode) ==
+        qd::Opcode::attention_output_residual_f32) {
+      attention_output_resident_stage(context, stage, tasks, worker,
+                                      active_workers);
+      return;
+    }
     if (stage.task_count == qd::kDownProjectionPartitions &&
         static_cast<qd::Opcode>(first_task.opcode) ==
             qd::Opcode::down_matvec_f32) {

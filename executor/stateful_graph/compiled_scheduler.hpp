@@ -158,8 +158,7 @@ __device__ __forceinline__ void run_compiled_resident(
     for (uint32_t stage_index = 0; stage_index < compiled.stage_count;
          ++stage_index) {
       const Stage stage = stages[compiled.stage_offset + stage_index];
-      const uint32_t active_workers =
-          min(state->worker_count, stage.task_count);
+      const uint32_t active_workers = state->worker_count;
       if (worker < active_workers) {
         Workload::execute_stage(stage, tasks, state, opaque_context, worker,
                                 active_workers);

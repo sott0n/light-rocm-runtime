@@ -98,7 +98,10 @@ For fixed workloads, `compile_resident_plan()` converts a topologically ordered
 task DAG into contiguous dependency-independent stages. The reusable compiled
 scheduler in `executor/stateful_graph/compiled_scheduler.hpp` assigns those
 tasks directly to persistent workers, removing runtime task scans and atomic
-claims. All resident workers rendezvous at each stage boundary; the last arrival
+claims. It invokes the workload stage hook on every resident worker, allowing a
+specialized workload to redistribute a stage independently of the task-table
+partition count; the default hook still assigns each task once by worker index.
+All resident workers rendezvous at each stage boundary; the last arrival
 performs the same device-side Program transition, conditional branch, and
 termination logic as the dynamic scheduler. This fast path requires all
 launched workgroups to be concurrently resident. The dynamic scheduler remains
@@ -418,11 +421,45 @@ disabled for the control run:
 | Compiled resident / HIP Graph speed | 0.93x | 1.09x | resident became faster |
 
 The normal uninstrumented comparison measured HIP Graph at 423.116 ms, making
-compiled resident execution 8.6% faster by throughput. The final specialized
-kernel remains spill-free at 52 SGPRs, 80 VGPRs, and 1,124 bytes of fixed group
-memory, preserving the WGP20 resource assumptions. The largest remaining
-resident stage penalties are now small, distributed launch/barrier costs and
-the matvec bodies that are already close to HIP Graph parity.
+compiled resident execution 8.6% faster by throughput. The two-row specialized
+kernel remained spill-free at 52 SGPRs, 80 VGPRs, and 1,124 bytes of fixed
+group memory, preserving the WGP20 resource assumptions.
+
+A follow-up stream-count sweep confirmed that two concurrent rows per wave are
+the optimum for these WGP20 matvec stages on the reference GPU. The HIP Graph
+control stayed within 1.2% across the three 16-token runs:
+
+| Rows per wave | Down stage | LM-head stage | Compiled resident |
+| ---: | ---: | ---: | ---: |
+| 2 | 59.804 ms | 71.190 ms | 389.654 ms |
+| 3 | 75.421 ms | 88.541 ms | 423.251 ms |
+| 4 | 77.074 ms | 95.698 ms | 435.074 ms |
+
+Additional independent streams therefore reduce, rather than improve, the
+effective bandwidth despite leaving the reported spill and occupancy resources
+unchanged. The resident specializations retain two rows per wave.
+
+QKV projection and attention output still used only eight workgroups apiece,
+leaving 12 of the safe 20 resident workgroups idle. Their compiled stage hooks
+now redistribute the complete packed-QKV or output-row range over all 160
+resident wave32 wavefronts, again accumulating two rows per wave. The HIP Graph
+baseline retains its original eight-workgroup task partitioning. A same-session
+A/B run used the same 16-token, 24-layer, three-trial comparison and five-trial
+profiles, disabling only these two resident stage hooks for the control:
+
+| Metric | Eight-worker control | All-worker resident stage | Change |
+| --- | ---: | ---: | ---: |
+| QKV stage | 60.380 ms | 15.494 ms | 74.3% shorter |
+| QKV effective minimum bandwidth | 26.3 GB/s | 102.6 GB/s | 3.90x |
+| Attention-output stage | 47.070 ms | 11.895 ms | 74.7% shorter |
+| Attention-output effective minimum bandwidth | 26.3 GB/s | 104.0 GB/s | 3.96x |
+| Compiled resident | 379.442 ms | 291.845 ms | 23.1% shorter |
+| Compiled resident / HIP Graph speed | 1.08x | 1.41x | 30.0% relative gain |
+
+The specialized run reached 117.3 GB/s effective minimum bandwidth across all
+profiled stages, or 18.8% of the nominal 624 GB/s roof, and reduced compiled
+execution to 5.75 times the modeled bandwidth floor. The final kernel remains
+spill-free at 60 SGPRs, 82 VGPRs, and 1,124 bytes of fixed group memory.
 
 ### Historical CU-mode full-checkpoint measurement
 
