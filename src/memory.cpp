@@ -1210,19 +1210,33 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     }
   }
 
-  const void *unused_agent_ptr = nullptr;
+  void *copy_dst = dst;
+  const void *copy_src = src;
+  void *pageable_host_ptr = nullptr;
   void *host_base = nullptr;
   if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
-    HostPointerLookup lookup = translate_host_pointer(
-        src, device, size, &unused_agent_ptr, &host_base);
+    const void *mapped_src = nullptr;
+    HostPointerLookup lookup =
+        translate_host_pointer(src, device, size, &mapped_src, &host_base);
     if (lookup == HostPointerLookup::Invalid) {
       return LR_ERROR_INVALID_ARGUMENT;
     }
+    if (lookup == HostPointerLookup::Valid) {
+      copy_src = mapped_src;
+    } else {
+      pageable_host_ptr = const_cast<void *>(src);
+    }
   } else if (kind == LR_MEMCPY_DEVICE_TO_HOST) {
-    HostPointerLookup lookup = translate_host_pointer(
-        dst, device, size, &unused_agent_ptr, &host_base);
+    const void *mapped_dst = nullptr;
+    HostPointerLookup lookup =
+        translate_host_pointer(dst, device, size, &mapped_dst, &host_base);
     if (lookup == HostPointerLookup::Invalid) {
       return LR_ERROR_INVALID_ARGUMENT;
+    }
+    if (lookup == HostPointerLookup::Valid) {
+      copy_dst = const_cast<void *>(mapped_dst);
+    } else {
+      pageable_host_ptr = dst;
     }
   }
   if (host_base && !operation_pins.pin_host(host_base)) {
@@ -1235,9 +1249,30 @@ lr_status_t lr_memcpy(lr_device_t device, void *dst, const void *src,
     return synchronization_status;
   }
 
+  if (pageable_host_ptr) {
+    void *mapped_host_ptr = nullptr;
+    hsa_status_t lock_status = hsa_amd_memory_lock(
+        pageable_host_ptr, size, &g_devices[device.index].agent, 1,
+        &mapped_host_ptr);
+    if (lock_status != HSA_STATUS_SUCCESS) {
+      return to_lr_status(lock_status);
+    }
+    if (kind == LR_MEMCPY_HOST_TO_DEVICE) {
+      copy_src = mapped_host_ptr;
+    } else {
+      copy_dst = mapped_host_ptr;
+    }
+  }
+
   lock.unlock();
-  hsa_status_t status = hsa_memory_copy(dst, src, size);
+  hsa_status_t status = hsa_memory_copy(copy_dst, copy_src, size);
   lock.lock();
+  if (pageable_host_ptr) {
+    hsa_status_t unlock_status = hsa_amd_memory_unlock(pageable_host_ptr);
+    if (status == HSA_STATUS_SUCCESS) {
+      status = unlock_status;
+    }
+  }
   if (status == HSA_STATUS_SUCCESS) {
     record_memcpy(&g_devices[device.index], kind, size);
   }

@@ -42,8 +42,11 @@ using Clock = std::chrono::steady_clock;
 constexpr uint32_t kBlockSize = sg::kWorkerThreads;
 constexpr uint32_t kWarmupTrials = 5;
 constexpr uint32_t kRooflineProfileTrials = 5;
-constexpr uint32_t kMaximumWorkers = sg::kMaximumResidentWorkers;
-constexpr uint32_t kDefaultWorkers = kMaximumWorkers;
+// The Qwen kernel uses a grid-wide software barrier. Keep the WGP-mode launch
+// below the empirically stable residency boundary even when generic resource
+// admission reports that more workgroups fit.
+constexpr uint32_t kMaximumStableWorkers = 20;
+constexpr uint32_t kDefaultWorkers = kMaximumStableWorkers;
 constexpr uint32_t kSyntheticVocabSize = 4096;
 
 struct Measurement {
@@ -753,8 +756,8 @@ int main(int argc, char **argv) {
     if (options.layers > std::numeric_limits<uint32_t>::max() / 2u / steps) {
       throw std::invalid_argument("steps times layers is too large");
     }
-    if (workers > kMaximumWorkers) {
-      throw std::invalid_argument("workers exceed resident scheduler limit");
+    if (workers > kMaximumStableWorkers) {
+      throw std::invalid_argument("workers exceed Qwen WGP stability limit");
     }
 
     lrrt::Runtime runtime;
@@ -1634,9 +1637,9 @@ int main(int argc, char **argv) {
     std::printf("\nLRRT Qwen Stateful Graph Benchmark\n");
     std::printf("==================================\n");
     std::printf("Workers:                  %u persistent workgroups "
-                "(%u requested, safe limit %u)\n",
+                "(%u requested, Qwen WGP limit %u, resource limit %u)\n",
                 workers, worker_admission.requested_worker_count,
-                worker_admission.safe_worker_limit);
+                kMaximumStableWorkers, worker_admission.safe_worker_limit);
     std::printf("Qwen decoder shape:       hidden=%u heads=%u kv_heads=%u "
                 "head_dim=%u intermediate=%u\n",
                 qd::kHiddenSize, qd::kAttentionHeads, qd::kKvHeads,

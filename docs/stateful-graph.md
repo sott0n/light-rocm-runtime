@@ -124,7 +124,7 @@ attention RMSNorm
 ```
 
 The decoder layer is represented as two device-linked Programs: a 25-task
-attention DAG followed by a 32-task FFN DAG. Together they contain the same 57
+attention DAG followed by a 54-task FFN DAG. Together they contain 79
 tasks, while each phase remains below the scheduler's 64-task limit. The Q/K/V
 task maps a packed 1,152-row output range onto the three checkpoint matrices
 and fuses bias addition. This avoids three separately scheduled projection
@@ -156,10 +156,13 @@ Top-1 reduction. The LM head never materializes the full logits vector: each
 of at most 32 tasks emits one local token/logit candidate and the successor
 reduces only those candidates. The resident path matches its partition count
 to the admitted worker count, avoiding a second partition on only a subset of
-workers. The Qwen HSACO is compiled in CU mode so gfx1101 can admit the full 32
-workers across its 60 CUs; WGP mode completed with 27 workers but deadlocked at
-28 because the software stage barrier requires every launched workgroup to be
-resident. Its final task records the sampled token, tests
+workers. The Qwen HSACO uses the compiler's default WGP mode and limits the
+launch to 20 persistent workgroups. The generic resource calculation permits
+more workgroups, but it does not prove simultaneous residency for the
+grid-wide software stage barrier. Experimental CU-mode launches and larger
+WGP-mode launches caused non-deterministic hangs and GPU resets, so the Qwen
+benchmark rejects worker counts above the conservative limit before launch.
+Its final task records the sampled token, tests
 EOS and the maximum-token limit, and, when execution continues, copies the
 selected full-vocabulary embedding row into the shared hidden buffer. It also
 advances token position and KV length before returning to Attention. The tail
@@ -172,8 +175,8 @@ partitioned LM head, Top-1 reduction, and embedding feedback. Their LM head
 owns an independent task table and retains its 32-way split even when resident
 admission selects fewer workers. The HIP Graph path loads the same HSACO as
 LRRT and records that fixed kernel sequence as one graph submission. By
-default the benchmark requests 32 resident workers, then clamps that request
-through the device/kernel admission limit. It uses deterministic model-shaped
+default the benchmark requests 20 resident workers, then clamps that request
+through the device/kernel resource limit. It uses deterministic model-shaped
 decoder weights and a 4,096-row synthetic LM head.
 Pass `--weights` with an existing Qwen layer bundle manifest to run both paths
 with its checkpoint attention norm, Q/K/V weights and biases, output projection,
@@ -181,7 +184,7 @@ with its checkpoint attention norm, Q/K/V weights and biases, output projection,
 `lrrt.mini_model_tail_weights` manifest:
 
 ```sh
-./build/lrrt_qwen_stateful_graph_benchmark 64 20 32 \
+./build/lrrt_qwen_stateful_graph_benchmark 64 20 20 \
   --weights /path/to/qwen-bundle/layer_0/weights.json \
   --tail /path/to/qwen-bundle/model_tail/weights.json
 ```
@@ -190,7 +193,7 @@ To exercise a full checkpoint decoder stack, point the benchmark at the bundle
 root and select the layer count:
 
 ```sh
-./build/lrrt_qwen_stateful_graph_benchmark 4 20 32 \
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
   --weights-dir /path/to/qwen-bundle --layers 24
 ```
 
@@ -217,7 +220,7 @@ Pass `--csv` to preserve every measured invocation in execution order for
 offline analysis and reproducibility:
 
 ```sh
-./build/lrrt_qwen_stateful_graph_benchmark 4 20 32 \
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
   --weights-dir /tmp/lrrt-qwen-full --layers 24 \
   --csv /tmp/qwen-stateful-trials.csv
 ```
@@ -265,7 +268,7 @@ The optional hardware limits are explicit inputs because LRRT device
 properties do not expose a reliable active-clock FP32 rate or DRAM bandwidth:
 
 ```sh
-./build/lrrt_qwen_stateful_graph_benchmark 4 20 32 \
+./build/lrrt_qwen_stateful_graph_benchmark 4 20 20 \
   --weights-dir /tmp/lrrt-qwen-full --layers 24 \
   --profile-roofline \
   --peak-fp32-tflops 37.32 --memory-bandwidth-gbps 624
@@ -311,7 +314,7 @@ workgroups and reached about 36 GB/s while 32-way LM-head work reached about
 
 Increasing the down projection from 10 to 32 partitions raised its available
 parallelism from 80 to 256 wave32 wavefronts. A repeat of the same 20-trial
-full-checkpoint profile produced:
+full-checkpoint profile on the experimental 32-worker CU-mode build produced:
 
 | Metric | 10 partitions | 32 partitions | Change |
 | --- | ---: | ---: | ---: |
@@ -322,25 +325,28 @@ full-checkpoint profile produced:
 | Compiled resident | 113.077 ms | 96.978 ms | 14.2% shorter |
 | HIP Graph | 114.990 ms | 99.013 ms | 13.9% shorter |
 
-Correctness remained identical across compiled resident, host-driven, and HIP
-Graph execution. The modeled 12.685 ms bandwidth floor did not change, so the
-overall compiled-resident distance to that floor improved from 8.91x to 7.65x.
+For that completed run, correctness remained identical across compiled
+resident, host-driven, and HIP Graph execution. The modeled 12.685 ms bandwidth
+floor did not change, so the overall compiled-resident distance to that floor
+improved from 8.91x to 7.65x.
 The resident scheduler/barrier probe rose from 0.971 ms to 1.151 ms because the
 compiled plan contains 22 more tasks per layer, but it remains only 1.19% of
 resident time. The result confirms that maintaining enough independent waves
 to hide streaming-weight latency is more important than reducing scheduler
 work at this point. Gate/up still uses 20 partitions and QKV/output projection
 use eight each; they are the next concurrency targets before adding
-register-buffered software prefetch to the matvec inner loop.
+register-buffered software prefetch to the matvec inner loop. These timing
+results motivate retaining 32 down-projection tasks, but they do not establish
+that the 32-worker CU-mode launch is safe.
 
-### Full-checkpoint measurement
+### Historical CU-mode full-checkpoint measurement
 
 The full-weight comparison uses the official `Qwen/Qwen2.5-0.5B-Instruct`
 checkpoint: all 24 decoder layers, the 151,936-row embedding table, final
 RMSNorm, and tied LM head are converted to the existing FP32 bundle format.
 The measured model file had SHA-256
 `fdf756fa7fcbe7404d5c60e26bff1a0c8b8aa1f72ced49e7dd0210fe288fb7fe`.
-The conversion and benchmark commands were:
+The conversion and benchmark commands on that experimental revision were:
 
 ```sh
 python3 tools/convert_qwen_layer.py \
@@ -353,9 +359,11 @@ python3 tools/convert_qwen_layer.py \
   --csv /tmp/qwen-cu32.csv
 ```
 
-With all 32 requested workers admitted, every path uses 32 LM-head partitions,
-while the resident and baseline task tables remain independent. On the gfx1101
-AMD Radeon RX 7800 XT reference system, one 20-trial interleaved run produced:
+The current benchmark rejects this 32-worker command; it is retained only to
+identify the historical measurement. Although one 20-trial interleaved run
+completed on the gfx1101 AMD Radeon RX 7800 XT reference system, fresh-boot
+retests produced CPC VM faults, unrecoverable MES hangs, and GPU resets. The
+run produced:
 
 | Path | Device mean | Device p50 | Wall mean | Wall p50 |
 | --- | ---: | ---: | ---: | ---: |
@@ -364,7 +372,8 @@ AMD Radeon RX 7800 XT reference system, one 20-trial interleaved run produced:
 | Host-driven LRRT | 154.827 ms | 149.695 ms | 156.588 ms | 151.429 ms |
 | HIP Graph | 151.996 ms | 146.075 ms | 152.018 ms | 146.096 ms |
 
-The compiled-resident, host-driven, and HIP Graph correctness checks produced
+For the completed run, the compiled-resident, host-driven, and HIP Graph
+correctness checks produced
 matching graph state, hidden values, Q/K/V values, KV caches, final normalized
 values, decode state, and generated token sequence. The compiled resident path
 had a 1.3% lower mean device and wall time than HIP Graph in this run. The
@@ -372,11 +381,10 @@ paired device-time difference ranged from 6.892 ms in favor of resident to
 3.906 ms in favor of HIP Graph, with resident ahead in 15 of 20 trials. The
 overlapping distribution makes this practical parity, not a performance-win
 claim. A same-configuration 20-worker control run left resident 7.5% behind
-HIP Graph, confirming that the additional admitted workers closed the previous
-gap even though clock variation prevents comparing absolute times across the
-two runs. The first-token hidden input remains deterministic benchmark data
-rather than a tokenized prompt, while subsequent autoregressive steps use
-checkpoint embedding rows selected entirely on the device.
+HIP Graph, but the unsafe 32-worker result cannot be used as a supported
+performance comparison. The first-token hidden input remains deterministic
+benchmark data rather than a tokenized prompt, while subsequent autoregressive
+steps use checkpoint embedding rows selected entirely on the device.
 
 The loader accepts the existing `lrrt.mini_decoder_weights` and
 `lrrt.mini_model_tail_weights` FP32 formats. Autoregressive feedback requires
@@ -384,9 +392,10 @@ the model-tail bundle to contain every token embedding in vocabulary order.
 Bundles whose hidden, head, KV-head, head-dimension, intermediate dimensions,
 or embedding table do not match the specialized megakernel are rejected.
 
-The dynamic resident kernel uses 1,072 bytes of group memory, 44 SGPRs, and 73
-VGPRs on gfx1101. The compiled resident kernel uses 1,060 bytes, 50 SGPRs, and
-75 VGPRs. Neither uses a private segment, dynamic stack, or register spills.
+The experimental CU-mode dynamic resident kernel used 1,072 bytes of group
+memory, 44 SGPRs, and 73 VGPRs on gfx1101. Its compiled resident kernel used
+1,060 bytes, 50 SGPRs, and 75 VGPRs. Neither used a private segment, dynamic
+stack, or register spills.
 
 ## Qwen path
 
@@ -394,8 +403,10 @@ Device-resident decode state, embedding feedback, EOS termination, and
 resource-aware worker admission are now implemented. The benchmark compares
 the whole loop against HIP Graph and host-driven LRRT using the same HSACO,
 weights, buffer layout, and arithmetic. The full-checkpoint comparison is now
-recorded above with independent resident and baseline task tables. CU-mode
-32-worker admission closes the previous 7.9% deficit, but the measured result
-is still practical parity. The next milestone is a persistent-specific
-optimization that produces a stable advantage without weakening the HIP Graph
-baseline.
+recorded above with independent resident and baseline task tables. The
+benchmark now uses WGP mode with a conservative 20-worker limit; CU-mode and
+larger launches are unsupported after reproducing GPU-reset failures on a
+fresh boot. The 32-way down-projection task split remains because it increased
+streaming-weight parallelism independently of resident worker count. The next
+milestone is to establish repeated full-stack stability at this limit, then
+optimize the memory-bound task bodies without weakening the HIP Graph baseline.

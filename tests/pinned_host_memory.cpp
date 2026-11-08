@@ -47,6 +47,14 @@ int main() {
       }
       lrrt::DeviceBuffer device_buffer(device, byte_count);
       lrrt::Event copy_event(device);
+      lrrt::copy_to_device(device_buffer, pageable_input);
+      lrrt::copy_to_host(pageable_output, device_buffer);
+      for (size_t i = 0; i < element_count; ++i) {
+        if (std::fabs(pageable_output[i] - pageable_input[i]) > 0.001f) {
+          throw std::runtime_error("pageable synchronous copy result mismatch");
+        }
+      }
+      std::fill(pageable_output.begin(), pageable_output.end(), 0.0f);
 #if LRRT_TEST_LIGHT_ROCR
       expect_status(lr_memcpy_async(device.get(), device_buffer.data(),
                                     pageable_input.data(), byte_count,
@@ -188,9 +196,9 @@ int main() {
 
       const uint64_t async_copy_bytes = 2 * byte_count + subpointer_size;
       const uint64_t expected_copy_bytes =
-          async_copy_bytes +
+          byte_count + async_copy_bytes +
           (LRRT_TEST_LIGHT_ROCR ? 0 : static_cast<uint64_t>(byte_count));
-      const uint64_t expected_copy_count = LRRT_TEST_LIGHT_ROCR ? 6 : 8;
+      const uint64_t expected_copy_count = LRRT_TEST_LIGHT_ROCR ? 8 : 10;
       if (stats.h2d_copy_bytes != expected_copy_bytes ||
           stats.d2h_copy_bytes != expected_copy_bytes ||
           stats.d2d_copy_bytes != 0 ||
