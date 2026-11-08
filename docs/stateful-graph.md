@@ -394,10 +394,35 @@ Only the resident down-projection stage hook was disabled for the control run:
 | Compiled resident | 524.952 ms | 439.167 ms | 16.3% shorter |
 | Compiled resident / HIP Graph speed | 0.77x | 0.93x | 20.8% relative gain |
 
-The specialized compiled kernel remains spill-free at 51 SGPRs, 79 VGPRs,
-and 1,060 bytes of fixed group memory, so the optimization does not weaken the
-resource assumptions behind the existing WGP20 admission limit. LM head is now
-the dominant persistent-only deficit.
+At this stage, the down-only specialized compiled kernel remained spill-free
+at 51 SGPRs, 79 VGPRs, and 1,060 bytes of fixed group memory. LM head then
+became the dominant persistent-only deficit.
+
+The compiled resident LM-head stage now applies the same memory-level
+parallelism principle without changing its 20-way partition ABI. Each wave
+accumulates two vocabulary rows concurrently, loading the normalized hidden
+value once for both weight streams, and then performs the same deterministic
+local Top-1 reduction. Host-driven and HIP Graph execution continue to use the
+original one-row-per-wave implementation and 32 partitions.
+
+A second same-session A/B run used the same 16-token, 24-layer, three-trial
+comparison and five-trial profiles. Only the resident LM-head stage hook was
+disabled for the control run:
+
+| Metric | Original resident LM head | Two-row resident LM head | Change |
+| --- | ---: | ---: | ---: |
+| LM-head stage | 127.727 ms | 71.190 ms | 44.3% shorter |
+| LM-head effective minimum bandwidth | 68.2 GB/s | 122.4 GB/s | 1.79x |
+| LM-head resident / HIP Graph | 1.616x | 0.889x | resident became 11.1% shorter |
+| Compiled resident | 448.667 ms | 389.654 ms | 13.2% shorter |
+| Compiled resident / HIP Graph speed | 0.93x | 1.09x | resident became faster |
+
+The normal uninstrumented comparison measured HIP Graph at 423.116 ms, making
+compiled resident execution 8.6% faster by throughput. The final specialized
+kernel remains spill-free at 52 SGPRs, 80 VGPRs, and 1,124 bytes of fixed group
+memory, preserving the WGP20 resource assumptions. The largest remaining
+resident stage penalties are now small, distributed launch/barrier costs and
+the matvec bodies that are already close to HIP Graph parity.
 
 ### Historical CU-mode full-checkpoint measurement
 

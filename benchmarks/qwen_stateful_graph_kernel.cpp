@@ -246,6 +246,75 @@ __device__ void lm_head_top1_partition(const qd::Context *context,
   }
 }
 
+// Resident LM-head partitions contain enough rows that a single independent
+// weight stream per wave leaves memory latency exposed. Accumulate two rows in
+// parallel while loading the normalized hidden value once, then retain the
+// same per-wave and per-workgroup Top-1 reduction contract as the host path.
+__device__ void lm_head_top1_resident_partition(const qd::Context *context,
+                                                const sg::Task &task) {
+  const uint32_t lane = threadIdx.x & 31u;
+  const uint32_t wave = threadIdx.x >> 5u;
+  constexpr uint32_t kWavesPerWorker = sg::kWorkerThreads / 32u;
+  __shared__ float reduction[kWavesPerWorker];
+  __shared__ uint32_t wave_indices[kWavesPerWorker];
+  float best_value = -INFINITY;
+  uint32_t best_index = UINT32_MAX;
+
+  for (uint32_t row = task.begin + wave; row < task.end;
+       row += 2u * kWavesPerWorker) {
+    const uint32_t second_row = row + kWavesPerWorker;
+    const bool has_second_row = second_row < task.end;
+    float first_sum = 0.0f;
+    float second_sum = 0.0f;
+    const float *first_weight = context->tail->lm_head_weight +
+                                static_cast<size_t>(row) * context->hidden_size;
+    const float *second_weight =
+        has_second_row
+            ? context->tail->lm_head_weight +
+                  static_cast<size_t>(second_row) * context->hidden_size
+            : first_weight;
+    for (uint32_t column = lane; column < context->hidden_size; column += 32u) {
+      const float input = context->tail->final_normalized[column];
+      first_sum = fmaf(input, first_weight[column], first_sum);
+      if (has_second_row) {
+        second_sum = fmaf(input, second_weight[column], second_sum);
+      }
+    }
+    first_sum = wave_sum(first_sum);
+    second_sum = wave_sum(second_sum);
+    if (lane == 0) {
+      if (better_top1(first_sum, row, best_value, best_index)) {
+        best_value = first_sum;
+        best_index = row;
+      }
+      if (has_second_row &&
+          better_top1(second_sum, second_row, best_value, best_index)) {
+        best_value = second_sum;
+        best_index = second_row;
+      }
+    }
+  }
+
+  if (lane == 0) {
+    reduction[wave] = best_value;
+    wave_indices[wave] = best_index;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    best_value = reduction[0];
+    best_index = wave_indices[0];
+    for (uint32_t candidate = 1; candidate < kWavesPerWorker; ++candidate) {
+      if (better_top1(reduction[candidate], wave_indices[candidate], best_value,
+                      best_index)) {
+        best_value = reduction[candidate];
+        best_index = wave_indices[candidate];
+      }
+    }
+    context->tail->partial_max_values[task.argument0] = best_value;
+    context->tail->partial_max_indices[task.argument0] = best_index;
+  }
+}
+
 __device__ void reduce_top1(const qd::Context *context) {
   if (threadIdx.x != 0) {
     return;
@@ -599,6 +668,15 @@ struct QwenWorkload {
         static_cast<qd::Opcode>(first_task.opcode) ==
             qd::Opcode::down_matvec_f32) {
       down_matvec_resident_stage(context, stage, tasks, worker, active_workers);
+      return;
+    }
+    if (static_cast<qd::Opcode>(first_task.opcode) ==
+        qd::Opcode::lm_head_top1_partition_f32) {
+      for (uint32_t task_index = worker; task_index < stage.task_count;
+           task_index += active_workers) {
+        lm_head_top1_resident_partition(context,
+                                        tasks[stage.task_offset + task_index]);
+      }
       return;
     }
     for (uint32_t task_index = worker; task_index < stage.task_count;
