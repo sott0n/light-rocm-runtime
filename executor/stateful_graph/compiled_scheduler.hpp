@@ -122,6 +122,10 @@ __device__ __forceinline__ void run_compiled_resident(
               opaque_context)
               ? static_cast<uint32_t>(Status::running)
               : static_cast<uint32_t>(Status::invalid_program);
+      if (scratch->validation_status ==
+          static_cast<uint32_t>(Status::running)) {
+        Workload::initialize_profile(opaque_context);
+      }
     }
     __syncthreads();
     if (threadIdx.x == 0) {
@@ -177,6 +181,7 @@ __device__ __forceinline__ void run_compiled_resident(
             compiled_detail::finish_program(state, program, generation,
                                             phase_state_count);
           }
+          Workload::complete_profile_stage(stage, tasks, opaque_context);
           __threadfence();
           atomicExch(&barrier->completed_mask, stage_index + 1u);
         }

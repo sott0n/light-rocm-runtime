@@ -7,6 +7,43 @@ namespace qd = lrrt::qwen::stateful_graph;
 
 namespace {
 
+__device__ qd::ProfileStage profile_stage(qd::Opcode opcode) {
+  switch (opcode) {
+  case qd::Opcode::attention_rmsnorm_f32:
+    return qd::ProfileStage::attention_norm;
+  case qd::Opcode::qkv_projection_f32:
+    return qd::ProfileStage::qkv_projection;
+  case qd::Opcode::rope_kv_cache_f32:
+    return qd::ProfileStage::rope_kv_cache;
+  case qd::Opcode::grouped_query_attention_f32:
+    return qd::ProfileStage::attention;
+  case qd::Opcode::attention_output_residual_f32:
+    return qd::ProfileStage::attention_output;
+  case qd::Opcode::mlp_rmsnorm_f32:
+    return qd::ProfileStage::mlp_norm;
+  case qd::Opcode::gate_up_silu_f32:
+    return qd::ProfileStage::gate_up_silu;
+  case qd::Opcode::down_matvec_f32:
+    return qd::ProfileStage::down_projection;
+  case qd::Opcode::residual_advance:
+    return qd::ProfileStage::residual_advance;
+  case qd::Opcode::final_rmsnorm_f32:
+    return qd::ProfileStage::final_norm;
+  case qd::Opcode::lm_head_top1_partition_f32:
+    return qd::ProfileStage::lm_head_top1;
+  case qd::Opcode::top1_reduce:
+    return qd::ProfileStage::top1_reduce;
+  case qd::Opcode::embedding_feedback_f32:
+    return qd::ProfileStage::embedding_feedback;
+  }
+  return qd::ProfileStage::count;
+}
+
+__device__ __forceinline__ void no_profile_initialize(void *) {}
+
+__device__ __forceinline__ void no_profile_complete(const sg::Stage &,
+                                                    const sg::Task *, void *) {}
+
 __device__ bool valid_qwen_task(const sg::Task &task,
                                 const qd::Context *context) {
   switch (static_cast<qd::Opcode>(task.opcode)) {
@@ -499,6 +536,47 @@ struct QwenWorkload {
     qd::Context *context = &contexts[state->step % contexts[0].layer_count];
     execute_task(task, state, context, reduction, wave_indices);
   }
+
+  __device__ static __forceinline__ void
+  initialize_profile(void *opaque_context) {
+    no_profile_initialize(opaque_context);
+  }
+
+  __device__ static __forceinline__ void
+  complete_profile_stage(const sg::Stage &stage, const sg::Task *tasks,
+                         void *opaque_context) {
+    no_profile_complete(stage, tasks, opaque_context);
+  }
+};
+
+struct QwenStageProfileWorkload : QwenWorkload {
+  __device__ static __forceinline__ void
+  initialize_profile(void *opaque_context) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    qd::StageProfile *profile = contexts[0].tail->stage_profile;
+    if (profile != nullptr) {
+      profile->previous_tick = static_cast<uint64_t>(wall_clock64());
+    }
+  }
+
+  __device__ static __forceinline__ void
+  complete_profile_stage(const sg::Stage &stage, const sg::Task *tasks,
+                         void *opaque_context) {
+    auto *contexts = static_cast<qd::Context *>(opaque_context);
+    qd::StageProfile *profile = contexts[0].tail->stage_profile;
+    if (profile == nullptr) {
+      return;
+    }
+    const uint64_t now = static_cast<uint64_t>(wall_clock64());
+    const qd::ProfileStage stage_id =
+        profile_stage(static_cast<qd::Opcode>(tasks[stage.task_offset].opcode));
+    const uint32_t index = static_cast<uint32_t>(stage_id);
+    if (index < qd::kProfileStageCount) {
+      profile->stage_ticks[index] += now - profile->previous_tick;
+      ++profile->stage_counts[index];
+    }
+    profile->previous_tick = now;
+  }
 };
 
 // Preserves the Qwen Program transitions and compiled stage barriers while
@@ -529,6 +607,17 @@ struct QwenSchedulerProfileWorkload {
         opcode == qd::Opcode::embedding_feedback_f32) {
       execute_task(task, state, context, reduction, wave_indices);
     }
+  }
+
+  __device__ static __forceinline__ void
+  initialize_profile(void *opaque_context) {
+    no_profile_initialize(opaque_context);
+  }
+
+  __device__ static __forceinline__ void
+  complete_profile_stage(const sg::Stage &stage, const sg::Task *tasks,
+                         void *opaque_context) {
+    no_profile_complete(stage, tasks, opaque_context);
   }
 };
 
@@ -575,6 +664,19 @@ extern "C" __global__ void qwen_stateful_graph_scheduler_profile_kernel(
       stage_count);
 }
 
+extern "C" __global__ void qwen_stateful_graph_stage_profile_kernel(
+    sg::State *state, const sg::Task *tasks, const sg::Program *programs,
+    sg::MaskState *phase_states, uint32_t program_count,
+    uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
+    const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
+    uint32_t stage_count, uint32_t reserved) {
+  (void)reserved;
+  sg::device::run_compiled_resident<QwenStageProfileWorkload>(
+      state, tasks, programs, phase_states, program_count, total_task_count,
+      phase_state_count, opaque_context, stages, compiled_programs,
+      stage_count);
+}
+
 extern "C" __global__ void
 qwen_stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
                                      uint32_t task_count, uint32_t reserved,
@@ -592,5 +694,42 @@ qwen_stateful_graph_host_step_kernel(sg::State *state, const sg::Task *tasks,
   if (threadIdx.x == 0 && static_cast<qd::Opcode>(tasks[blockIdx.x].opcode) ==
                               qd::Opcode::residual_advance) {
     ++state->step;
+  }
+}
+
+extern "C" __global__ void qwen_stateful_graph_host_profile_step_kernel(
+    sg::State *state, const sg::Task *tasks, uint32_t task_count,
+    uint32_t profile_index, void *opaque_context) {
+  if (blockIdx.x >= task_count) {
+    return;
+  }
+  auto *contexts = static_cast<qd::Context *>(opaque_context);
+  qd::Context *context = &contexts[state->step % contexts[0].layer_count];
+  qd::StageProfile *profile = contexts[0].tail->stage_profile;
+  qd::StageProfileEntry *entry =
+      profile != nullptr && profile_index < profile->entry_count
+          ? &profile->entries[profile_index]
+          : nullptr;
+  if (threadIdx.x == 0 && entry != nullptr) {
+    const uint64_t begin = static_cast<uint64_t>(wall_clock64());
+    atomicMin(reinterpret_cast<unsigned long long *>(&entry->begin_tick),
+              static_cast<unsigned long long>(begin));
+  }
+
+  __shared__ float reduction[sg::kWorkerThreads];
+  __shared__ uint32_t wave_indices[sg::kWorkerThreads / 32u];
+  execute_task(tasks[blockIdx.x], state, context, reduction, wave_indices);
+  __syncthreads();
+
+  if (threadIdx.x == 0) {
+    if (static_cast<qd::Opcode>(tasks[blockIdx.x].opcode) ==
+        qd::Opcode::residual_advance) {
+      ++state->step;
+    }
+    if (entry != nullptr) {
+      const uint64_t end = static_cast<uint64_t>(wall_clock64());
+      atomicMax(reinterpret_cast<unsigned long long *>(&entry->end_tick),
+                static_cast<unsigned long long>(end));
+    }
   }
 }

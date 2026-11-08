@@ -264,6 +264,17 @@ the event-marker time separately and subtracts each marker packet from its
 preceding stage interval. The uninstrumented resident, host, and HIP Graph
 measurements still run first and are not included in this profile.
 
+The same option also runs dedicated instrumented resident and HIP Graph paths.
+The resident kernel reads the constant-rate GPU wall clock when each compiled
+stage completes. Its intervals include the compiled barrier and Program
+transition leading into the next stage. The HIP Graph profile records the
+earliest workgroup start and latest workgroup completion for every kernel node;
+the reported graph-gap total contains time outside those kernel envelopes.
+Both paths aggregate the same 13 operator classes and report minimum effective
+bandwidth, bandwidth utilization when a hardware limit is supplied, and the
+largest resident-over-HIP penalties. These are separate five-trial diagnostic
+passes; the normal comparison kernels contain no stage instrumentation.
+
 The optional hardware limits are explicit inputs because LRRT device
 properties do not expose a reliable active-clock FP32 rate or DRAM bandwidth:
 
@@ -333,11 +344,33 @@ The resident scheduler/barrier probe rose from 0.971 ms to 1.151 ms because the
 compiled plan contains 22 more tasks per layer, but it remains only 1.19% of
 resident time. The result confirms that maintaining enough independent waves
 to hide streaming-weight latency is more important than reducing scheduler
-work at this point. Gate/up still uses 20 partitions and QKV/output projection
-use eight each; they are the next concurrency targets before adding
-register-buffered software prefetch to the matvec inner loop. These timing
-results motivate retaining 32 down-projection tasks, but they do not establish
-that the 32-worker CU-mode launch is safe.
+work at this point. These timing results motivate retaining 32 down-projection
+tasks, but they do not establish that the 32-worker CU-mode launch is safe.
+
+A later direct resident-versus-HIP profile on the supported 20-worker WGP
+configuration localized the remaining gap. The run used one generated token,
+all 24 checkpoint layers, three uninstrumented comparison trials, and five
+trials per diagnostic path:
+
+| Stage | Resident | HIP Graph | Resident penalty | Resident min BW | HIP min BW |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| QKV projection | 3.398 ms | 3.362 ms | 0.036 ms | 29.3 GB/s | 29.6 GB/s |
+| attention output | 2.624 ms | 2.587 ms | 0.037 ms | 29.5 GB/s | 29.9 GB/s |
+| gate + up + SiLU | 5.887 ms | 5.864 ms | 0.023 ms | 142.2 GB/s | 142.8 GB/s |
+| down projection | 7.587 ms | 3.842 ms | 3.746 ms | 55.2 GB/s | 109.0 GB/s |
+| LM head + local Top-1 | 7.098 ms | 4.478 ms | 2.621 ms | 76.7 GB/s | 121.6 GB/s |
+| all stages | 27.003 ms | 20.382 ms | 6.621 ms | 73.3 GB/s | 97.1 GB/s |
+
+The corresponding uninstrumented means were 27.108 ms for compiled resident
+and 21.066 ms for HIP Graph. QKV, output projection, and gate/up were already
+at parity between execution models. Down projection has 32 tasks, but only 20
+resident workgroups can execute at once, so 12 workers receive a second task
+after their first; the HIP kernel launches 32 independent workgroups. The LM
+head similarly uses 20 resident partitions versus 32 baseline partitions.
+Together these two streaming matvec stages explain essentially all of the
+measured resident deficit. The next concurrency target is therefore more
+simultaneous matvec waves within the safe 20-workgroup resident launch, before
+software-prefetch changes to the inner loop.
 
 ### Historical CU-mode full-checkpoint measurement
 

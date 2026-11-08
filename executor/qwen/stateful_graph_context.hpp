@@ -32,6 +32,42 @@ constexpr uint32_t kFfnTaskCount =
 constexpr uint32_t kDecoderTaskCount = kAttentionTaskCount + kFfnTaskCount;
 constexpr uint32_t kMaximumTailTaskCount = 3u + kMaximumLmHeadPartitions;
 
+enum class ProfileStage : uint32_t {
+  attention_norm,
+  qkv_projection,
+  rope_kv_cache,
+  attention,
+  attention_output,
+  mlp_norm,
+  gate_up_silu,
+  down_projection,
+  residual_advance,
+  final_norm,
+  lm_head_top1,
+  top1_reduce,
+  embedding_feedback,
+  count,
+};
+
+constexpr uint32_t kProfileStageCount =
+    static_cast<uint32_t>(ProfileStage::count);
+
+struct StageProfileEntry {
+  uint64_t begin_tick;
+  uint64_t end_tick;
+};
+
+// Separate diagnostic kernels populate this structure with the constant-rate
+// GPU wall clock. Normal resident and host-step kernels never touch it.
+struct alignas(16) StageProfile {
+  uint64_t previous_tick;
+  uint64_t stage_ticks[kProfileStageCount];
+  uint64_t stage_counts[kProfileStageCount];
+  StageProfileEntry *entries;
+  uint32_t entry_count;
+  uint32_t reserved;
+};
+
 enum class Opcode : uint32_t {
   attention_rmsnorm_f32 = 1,
   qkv_projection_f32 = 2,
@@ -84,6 +120,7 @@ struct alignas(16) TailContext {
   uint32_t partition_count;
   uint32_t embedding_count;
   uint32_t reserved;
+  StageProfile *stage_profile;
 };
 
 // Device pointers and dimensions consumed by the Qwen decoder-stage
@@ -128,9 +165,13 @@ struct alignas(16) Context {
 
 static_assert(std::is_standard_layout_v<Context>);
 static_assert(std::is_standard_layout_v<TailContext>);
+static_assert(std::is_standard_layout_v<StageProfile>);
+static_assert(std::is_standard_layout_v<StageProfileEntry>);
 static_assert(std::is_standard_layout_v<DecodeState>);
 static_assert(sizeof(Context) == 224);
-static_assert(sizeof(TailContext) == 80);
+static_assert(sizeof(TailContext) == 96);
+static_assert(sizeof(StageProfile) == 240);
+static_assert(sizeof(StageProfileEntry) == 16);
 static_assert(sizeof(DecodeState) == 32);
 static_assert(kAttentionTaskCount <= lrrt::stateful_graph::kMaximumTasks);
 static_assert(kFfnTaskCount <= lrrt::stateful_graph::kMaximumTasks);

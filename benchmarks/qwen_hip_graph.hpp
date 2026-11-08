@@ -9,6 +9,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -29,9 +30,10 @@ public:
   QwenHipGraph(const std::vector<unsigned char> &image,
                const std::vector<HostLaunch> &decoder_launches,
                const std::vector<HostLaunch> &tail_launches, uint32_t steps,
-               uint32_t layers)
+               uint32_t layers, bool stage_profile = false)
       : stream_(nullptr), module_(nullptr), function_(nullptr), graph_(nullptr),
-        executable_(nullptr), start_(nullptr), end_(nullptr) {
+        executable_(nullptr), start_(nullptr), end_(nullptr),
+        stage_profile_(stage_profile) {
     try {
       check_hip(hipSetDevice(0), "hipSetDevice");
       check_hip(hipStreamCreateWithFlags(&stream_, hipStreamNonBlocking),
@@ -39,8 +41,11 @@ public:
       check_hip(hipEventCreate(&start_), "hipEventCreate start");
       check_hip(hipEventCreate(&end_), "hipEventCreate end");
       check_hip(hipModuleLoadData(&module_, image.data()), "hipModuleLoadData");
-      check_hip(hipModuleGetFunction(&function_, module_,
-                                     "qwen_stateful_graph_host_step_kernel"),
+      check_hip(hipModuleGetFunction(
+                    &function_, module_,
+                    stage_profile
+                        ? "qwen_stateful_graph_host_profile_step_kernel"
+                        : "qwen_stateful_graph_host_step_kernel"),
                 "hipModuleGetFunction");
       check_hip(hipGraphCreate(&graph_, 0), "hipGraphCreate");
 
@@ -48,6 +53,9 @@ public:
           static_cast<size_t>(steps) *
           (static_cast<size_t>(layers) * decoder_launches.size() +
            tail_launches.size());
+      if (node_count > std::numeric_limits<uint32_t>::max()) {
+        throw std::invalid_argument("Qwen HIP Graph has too many nodes");
+      }
       nodes_.reserve(node_count);
       hipGraphNode_t previous = nullptr;
       for (uint32_t step = 0; step < steps; ++step) {
@@ -150,6 +158,9 @@ private:
     nodes_.emplace_back();
     KernelNode &node = nodes_.back();
     node.args = launch.args;
+    if (stage_profile_) {
+      node.args.reserved = static_cast<uint32_t>(nodes_.size() - 1u);
+    }
     node.parameters = {
         &node.args.state,    &node.args.tasks,   &node.args.task_count,
         &node.args.reserved, &node.args.context,
@@ -179,6 +190,7 @@ private:
   hipGraphExec_t executable_;
   hipEvent_t start_;
   hipEvent_t end_;
+  bool stage_profile_;
   std::vector<KernelNode> nodes_;
 };
 

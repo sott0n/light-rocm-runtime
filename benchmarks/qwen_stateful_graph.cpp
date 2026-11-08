@@ -519,24 +519,8 @@ constexpr HostStage kHostStages[] = {
     {qd::kDecoderTaskCount - 1, 1},
 };
 
-enum class ProfileStage : size_t {
-  attention_norm,
-  qkv_projection,
-  rope_kv_cache,
-  attention,
-  attention_output,
-  mlp_norm,
-  gate_up_silu,
-  down_projection,
-  residual_advance,
-  final_norm,
-  lm_head_top1,
-  top1_reduce,
-  embedding_feedback,
-  count,
-};
-
-constexpr size_t kProfileStageCount = static_cast<size_t>(ProfileStage::count);
+using ProfileStage = qd::ProfileStage;
+constexpr size_t kProfileStageCount = qd::kProfileStageCount;
 
 constexpr std::array<const char *, kProfileStageCount> kProfileStageNames = {
     "attention norm",     "QKV projection",       "RoPE + KV cache",
@@ -775,6 +759,8 @@ int main(int argc, char **argv) {
         module.kernel("qwen_stateful_graph_compiled_kernel");
     lrrt::Kernel scheduler_profile_kernel =
         module.kernel("qwen_stateful_graph_scheduler_profile_kernel");
+    lrrt::Kernel stage_profile_kernel =
+        module.kernel("qwen_stateful_graph_stage_profile_kernel");
     lrrt::Kernel host_step =
         module.kernel("qwen_stateful_graph_host_step_kernel");
     const sg::ResidentAdmission worker_admission =
@@ -842,9 +828,14 @@ int main(int argc, char **argv) {
         static_cast<uint64_t>(steps) * 2u *
             (2u * static_cast<uint64_t>(layers) + 1u) +
         1u;
+    const uint64_t profile_entry_count_u64 =
+        static_cast<uint64_t>(steps) *
+        (static_cast<uint64_t>(layers) * std::size(kHostStages) + 4u);
     if (phase_state_count_u64 >
             static_cast<uint64_t>(sg::phase_generation(UINT32_MAX)) + 1u ||
         expected_program_phases_u64 >
+            static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) ||
+        profile_entry_count_u64 >
             static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) {
       throw std::invalid_argument("program phase count is too large");
     }
@@ -852,6 +843,8 @@ int main(int argc, char **argv) {
         static_cast<uint32_t>(expected_program_phases_u64);
     const uint32_t phase_state_count =
         static_cast<uint32_t>(phase_state_count_u64);
+    const uint32_t profile_entry_count =
+        static_cast<uint32_t>(profile_entry_count_u64);
     const uint32_t cache_capacity = steps * 2u;
     std::vector<float> initial_values(qd::kHiddenSize);
     for (uint32_t index = 0; index < qd::kHiddenSize; ++index) {
@@ -953,6 +946,9 @@ int main(int argc, char **argv) {
     sg::ResidentExecutor profile_executor(device, scheduler_profile_kernel,
                                           tasks, programs, resident_config,
                                           compiled_plan);
+    sg::ResidentExecutor stage_profile_executor(device, stage_profile_kernel,
+                                                tasks, programs,
+                                                resident_config, compiled_plan);
     lrrt::DeviceBuffer rope_cos_buffer(device, rope_cos.size() * sizeof(float));
     lrrt::DeviceBuffer rope_sin_buffer(device, rope_sin.size() * sizeof(float));
     lrrt::DeviceBuffer resident_values(device, qd::kHiddenSize * sizeof(float));
@@ -1003,11 +999,18 @@ int main(int argc, char **argv) {
         device, baseline_lm_head_partitions * sizeof(uint32_t));
     lrrt::DeviceBuffer host_decode_state(device, sizeof(qd::DecodeState));
     lrrt::DeviceBuffer host_output_tokens(device, steps * sizeof(uint32_t));
+    lrrt::DeviceBuffer resident_stage_profile_buffer(device,
+                                                     sizeof(qd::StageProfile));
+    lrrt::DeviceBuffer host_stage_profile_buffer(device,
+                                                 sizeof(qd::StageProfile));
+    lrrt::DeviceBuffer host_stage_profile_entries(
+        device, static_cast<size_t>(profile_entry_count) *
+                    sizeof(qd::StageProfileEntry));
     lrrt::DeviceBuffer resident_tail_context_buffer(device,
                                                     sizeof(qd::TailContext));
     lrrt::DeviceBuffer host_tail_context_buffer(device,
                                                 sizeof(qd::TailContext));
-    const qd::TailContext resident_tail_context = {
+    qd::TailContext resident_tail_context = {
         static_cast<const float *>(device_tail_weights.final_norm.data()),
         static_cast<const float *>(device_tail_weights.lm_head.data()),
         static_cast<const float *>(device_tail_weights.embeddings.data()),
@@ -1020,8 +1023,9 @@ int main(int argc, char **argv) {
         resident_lm_head_partitions,
         static_cast<uint32_t>(tail_weights.token_ids.size()),
         0,
+        nullptr,
     };
-    const qd::TailContext host_tail_context = {
+    qd::TailContext host_tail_context = {
         static_cast<const float *>(device_tail_weights.final_norm.data()),
         static_cast<const float *>(device_tail_weights.lm_head.data()),
         static_cast<const float *>(device_tail_weights.embeddings.data()),
@@ -1034,6 +1038,7 @@ int main(int argc, char **argv) {
         baseline_lm_head_partitions,
         static_cast<uint32_t>(tail_weights.token_ids.size()),
         0,
+        nullptr,
     };
     lrrt::copy_to_device(resident_tail_context_buffer, &resident_tail_context,
                          sizeof(resident_tail_context));
@@ -1117,6 +1122,7 @@ int main(int argc, char **argv) {
     dynamic_executor.bind_context(resident_context_buffer.data());
     resident_executor.bind_context(resident_context_buffer.data());
     profile_executor.bind_context(resident_context_buffer.data());
+    stage_profile_executor.bind_context(resident_context_buffer.data());
     lrrt::DeviceBuffer baseline_task_buffer(device, baseline_tasks.size() *
                                                         sizeof(sg::Task));
     lrrt::copy_to_device(baseline_task_buffer, baseline_tasks);
@@ -1191,12 +1197,20 @@ int main(int argc, char **argv) {
     std::vector<ProfileLaunch> profile_launches;
     profile_launches.reserve(host_kernel_count);
     RooflineProfile roofline_profile;
+    RooflineProfile resident_stage_profile;
+    RooflineProfile hip_stage_profile;
     for (uint32_t step = 0; step < steps; ++step) {
       for (uint32_t layer = 0; layer < layers; ++layer) {
         for (size_t stage = 0; stage < decoder_host_launches.size(); ++stage) {
           profile_launches.push_back(
               {&decoder_host_launches[stage], kDecoderProfileStages[stage]});
           add_stage_work(roofline_profile, kDecoderProfileStages[stage],
+                         step + 1u, tail_weights.vocab,
+                         baseline_lm_head_partitions);
+          add_stage_work(resident_stage_profile, kDecoderProfileStages[stage],
+                         step + 1u, tail_weights.vocab,
+                         resident_lm_head_partitions);
+          add_stage_work(hip_stage_profile, kDecoderProfileStages[stage],
                          step + 1u, tail_weights.vocab,
                          baseline_lm_head_partitions);
         }
@@ -1206,6 +1220,11 @@ int main(int argc, char **argv) {
             {&tail_host_launches[stage], kTailProfileStages[stage]});
         add_stage_work(roofline_profile, kTailProfileStages[stage], step + 1u,
                        tail_weights.vocab, baseline_lm_head_partitions);
+        add_stage_work(resident_stage_profile, kTailProfileStages[stage],
+                       step + 1u, tail_weights.vocab,
+                       resident_lm_head_partitions);
+        add_stage_work(hip_stage_profile, kTailProfileStages[stage], step + 1u,
+                       tail_weights.vocab, baseline_lm_head_partitions);
       }
     }
     if (profile_launches.size() != host_kernel_count) {
@@ -1214,6 +1233,13 @@ int main(int argc, char **argv) {
 #if LRRT_ENABLE_HIP_GRAPH
     lrrt::benchmarks::QwenHipGraph hip_graph(code_object, decoder_host_launches,
                                              tail_host_launches, steps, layers);
+    std::unique_ptr<lrrt::benchmarks::QwenHipGraph> hip_stage_profile_graph;
+    if (options.profile_roofline) {
+      hip_stage_profile_graph =
+          std::make_unique<lrrt::benchmarks::QwenHipGraph>(
+              code_object, decoder_host_launches, tail_host_launches, steps,
+              layers, true);
+    }
 #endif
 
     const auto initialize_host_state =
@@ -1377,6 +1403,130 @@ int main(int argc, char **argv) {
     measure_interleaved(trials, initial_values, benchmark_paths, trial_samples);
 
     if (options.profile_roofline) {
+      double wall_clock_ns_per_tick = 0.0;
+#if LRRT_ENABLE_HIP_GRAPH
+      int wall_clock_khz = 0;
+      lrrt::benchmarks::check_hip(
+          hipDeviceGetAttribute(&wall_clock_khz,
+                                hipDeviceAttributeWallClockRate, 0),
+          "hipDeviceGetAttribute wall clock rate");
+      if (wall_clock_khz <= 0) {
+        throw std::runtime_error("HIP reported an invalid GPU wall clock rate");
+      }
+      wall_clock_ns_per_tick = 1.0e6 / static_cast<double>(wall_clock_khz);
+#endif
+
+      qd::StageProfile empty_resident_profile{};
+      resident_tail_context.stage_profile =
+          static_cast<qd::StageProfile *>(resident_stage_profile_buffer.data());
+      lrrt::copy_to_device(resident_tail_context_buffer, &resident_tail_context,
+                           sizeof(resident_tail_context));
+      lrrt::Event resident_profile_start(device);
+      lrrt::Event resident_profile_end(device);
+      for (uint32_t trial = 0; trial < kRooflineProfileTrials; ++trial) {
+        lrrt::copy_to_device(resident_stage_profile_buffer,
+                             &empty_resident_profile,
+                             sizeof(empty_resident_profile));
+        initialize_decode_state(resident_decode_state, steps);
+        stage_profile_executor.initialize(0, maximum_graph_steps, 1);
+        lrrt::copy_to_device(resident_values, initial_values);
+        resident_profile_start.record();
+        stage_profile_executor.launch();
+        resident_profile_end.record();
+        device.synchronize();
+        double instrumented_ns = 0.0;
+        try {
+          instrumented_ns = static_cast<double>(lrrt::elapsed_time_ns(
+              resident_profile_start, resident_profile_end));
+        } catch (const std::exception &error) {
+          throw std::runtime_error(
+              std::string("resident stage event timing: ") + error.what());
+        }
+        resident_stage_profile.instrumented_ns += instrumented_ns;
+        qd::StageProfile observed{};
+        lrrt::copy_to_host(&observed, resident_stage_profile_buffer,
+                           sizeof(observed));
+        const uint64_t total_ticks =
+            std::accumulate(std::begin(observed.stage_ticks),
+                            std::end(observed.stage_ticks), uint64_t{0});
+        if (total_ticks == 0) {
+          throw std::runtime_error("resident stage profile recorded no ticks");
+        }
+#if !LRRT_ENABLE_HIP_GRAPH
+        wall_clock_ns_per_tick =
+            instrumented_ns / static_cast<double>(total_ticks);
+#endif
+        for (size_t index = 0; index < kProfileStageCount; ++index) {
+          if (observed.stage_counts[index] !=
+              resident_stage_profile.launches[index]) {
+            throw std::runtime_error(
+                "resident stage profile launch count mismatch");
+          }
+          resident_stage_profile.device_ns[index] +=
+              static_cast<double>(observed.stage_ticks[index]) *
+              wall_clock_ns_per_tick;
+        }
+      }
+      resident_stage_profile.instrumented_ns /= kRooflineProfileTrials;
+      for (double &stage_ns : resident_stage_profile.device_ns) {
+        stage_ns /= kRooflineProfileTrials;
+      }
+      resident_tail_context.stage_profile = nullptr;
+      lrrt::copy_to_device(resident_tail_context_buffer, &resident_tail_context,
+                           sizeof(resident_tail_context));
+
+#if LRRT_ENABLE_HIP_GRAPH
+      if (!hip_stage_profile_graph) {
+        throw std::logic_error("HIP stage profile graph was not created");
+      }
+      qd::StageProfile empty_hip_profile{};
+      empty_hip_profile.entries = static_cast<qd::StageProfileEntry *>(
+          host_stage_profile_entries.data());
+      empty_hip_profile.entry_count = profile_entry_count;
+      std::vector<qd::StageProfileEntry> empty_entries(
+          profile_entry_count,
+          {std::numeric_limits<uint64_t>::max(), uint64_t{0}});
+      std::vector<qd::StageProfileEntry> observed_entries(profile_entry_count);
+      host_tail_context.stage_profile =
+          static_cast<qd::StageProfile *>(host_stage_profile_buffer.data());
+      lrrt::copy_to_device(host_tail_context_buffer, &host_tail_context,
+                           sizeof(host_tail_context));
+      for (uint32_t trial = 0; trial < kRooflineProfileTrials; ++trial) {
+        lrrt::copy_to_device(host_stage_profile_buffer, &empty_hip_profile,
+                             sizeof(empty_hip_profile));
+        lrrt::copy_to_device(host_stage_profile_entries, empty_entries);
+        initialize_decode_state(host_decode_state, steps);
+        initialize_host_state(0, maximum_graph_steps, 1);
+        lrrt::copy_to_device(host_values, initial_values);
+        hip_stage_profile_graph->record_start();
+        hip_stage_profile_graph->launch();
+        hip_stage_profile_graph->record_end();
+        hip_stage_profile_graph->synchronize();
+        hip_stage_profile.instrumented_ns +=
+            hip_stage_profile_graph->elapsed_time_ns();
+        lrrt::copy_to_host(observed_entries, host_stage_profile_entries);
+        for (size_t index = 0; index < observed_entries.size(); ++index) {
+          const qd::StageProfileEntry &entry = observed_entries[index];
+          if (entry.begin_tick == std::numeric_limits<uint64_t>::max() ||
+              entry.end_tick < entry.begin_tick) {
+            throw std::runtime_error(
+                "HIP Graph stage profile entry was not completed");
+          }
+          hip_stage_profile
+              .device_ns[stage_index(profile_launches[index].stage)] +=
+              static_cast<double>(entry.end_tick - entry.begin_tick) *
+              wall_clock_ns_per_tick;
+        }
+      }
+      hip_stage_profile.instrumented_ns /= kRooflineProfileTrials;
+      for (double &stage_ns : hip_stage_profile.device_ns) {
+        stage_ns /= kRooflineProfileTrials;
+      }
+      host_tail_context.stage_profile = nullptr;
+      lrrt::copy_to_device(host_tail_context_buffer, &host_tail_context,
+                           sizeof(host_tail_context));
+#endif
+
       std::vector<std::unique_ptr<lrrt::Event>> markers;
       markers.reserve(profile_launches.size());
       for (size_t index = 0; index < profile_launches.size(); ++index) {
@@ -1393,10 +1543,7 @@ int main(int argc, char **argv) {
           lrrt::launch(host_step, launch.config, launch.args);
           markers[index]->record();
         }
-        markers.back()->synchronize();
-        for (const auto &marker : markers) {
-          marker->synchronize();
-        }
+        device.synchronize();
         roofline_profile.instrumented_ns += static_cast<double>(
             lrrt::elapsed_time_ns(profile_start, *markers.back()));
         const lrrt::Event *previous = &profile_start;
@@ -1888,6 +2035,120 @@ int main(int argc, char **argv) {
       std::printf(
           "  Roofline gap includes kernel inefficiency and launch/stage "
           "cost; it is not all persistent-only headroom.\n\n");
+
+      const double resident_profiled_ns =
+          std::accumulate(resident_stage_profile.device_ns.begin(),
+                          resident_stage_profile.device_ns.end(), 0.0);
+#if LRRT_ENABLE_HIP_GRAPH
+      const double hip_profiled_ns =
+          std::accumulate(hip_stage_profile.device_ns.begin(),
+                          hip_stage_profile.device_ns.end(), 0.0);
+      std::printf("Resident vs HIP Graph stage profile "
+                  "(%u-trial wall-clock mean)\n",
+                  kRooflineProfileTrials);
+      if (has_hardware_roof) {
+        std::printf("  %-23s %9s %9s %9s %8s %9s %9s %8s %8s\n", "Stage",
+                    "Res ms", "HIP ms", "Delta ms", "Res/HIP", "Res GB/s",
+                    "HIP GB/s", "Res BW%", "HIP BW%");
+      } else {
+        std::printf("  %-23s %9s %9s %9s %8s %9s %9s\n", "Stage", "Res ms",
+                    "HIP ms", "Delta ms", "Res/HIP", "Res GB/s", "HIP GB/s");
+      }
+      for (size_t index = 0; index < kProfileStageCount; ++index) {
+        const double resident_ns = resident_stage_profile.device_ns[index];
+        const double hip_ns = hip_stage_profile.device_ns[index];
+        const double resident_bandwidth =
+            resident_ns == 0.0
+                ? 0.0
+                : resident_stage_profile.minimum_bytes[index] / resident_ns;
+        const double hip_bandwidth =
+            hip_ns == 0.0 ? 0.0
+                          : hip_stage_profile.minimum_bytes[index] / hip_ns;
+        if (has_hardware_roof) {
+          std::printf("  %-23s %9.3f %9.3f %+9.3f %8.3f %9.3f %9.3f %7.2f%% "
+                      "%7.2f%%\n",
+                      kProfileStageNames[index], resident_ns / 1.0e6,
+                      hip_ns / 1.0e6, (resident_ns - hip_ns) / 1.0e6,
+                      hip_ns == 0.0 ? 0.0 : resident_ns / hip_ns,
+                      resident_bandwidth, hip_bandwidth,
+                      100.0 * resident_bandwidth /
+                          options.memory_bandwidth_gbps,
+                      100.0 * hip_bandwidth / options.memory_bandwidth_gbps);
+        } else {
+          std::printf("  %-23s %9.3f %9.3f %+9.3f %8.3f %9.3f %9.3f\n",
+                      kProfileStageNames[index], resident_ns / 1.0e6,
+                      hip_ns / 1.0e6, (resident_ns - hip_ns) / 1.0e6,
+                      hip_ns == 0.0 ? 0.0 : resident_ns / hip_ns,
+                      resident_bandwidth, hip_bandwidth);
+        }
+      }
+      const double resident_total_bytes =
+          std::accumulate(resident_stage_profile.minimum_bytes.begin(),
+                          resident_stage_profile.minimum_bytes.end(), 0.0);
+      const double hip_total_bytes =
+          std::accumulate(hip_stage_profile.minimum_bytes.begin(),
+                          hip_stage_profile.minimum_bytes.end(), 0.0);
+      const double resident_total_bandwidth =
+          resident_total_bytes / resident_profiled_ns;
+      const double hip_total_bandwidth = hip_total_bytes / hip_profiled_ns;
+      if (has_hardware_roof) {
+        std::printf(
+            "  %-23s %9.3f %9.3f %+9.3f %8.3f %9.3f %9.3f %7.2f%% "
+            "%7.2f%%\n",
+            "TOTAL", resident_profiled_ns / 1.0e6, hip_profiled_ns / 1.0e6,
+            (resident_profiled_ns - hip_profiled_ns) / 1.0e6,
+            resident_profiled_ns / hip_profiled_ns, resident_total_bandwidth,
+            hip_total_bandwidth,
+            100.0 * resident_total_bandwidth / options.memory_bandwidth_gbps,
+            100.0 * hip_total_bandwidth / options.memory_bandwidth_gbps);
+      } else {
+        std::printf("  %-23s %9.3f %9.3f %+9.3f %8.3f %9.3f %9.3f\n", "TOTAL",
+                    resident_profiled_ns / 1.0e6, hip_profiled_ns / 1.0e6,
+                    (resident_profiled_ns - hip_profiled_ns) / 1.0e6,
+                    resident_profiled_ns / hip_profiled_ns,
+                    resident_total_bandwidth, hip_total_bandwidth);
+      }
+      std::printf(
+          "  Resident interval %.3f ms; stage sum %.3f ms; "
+          "unattributed %.3f ms\n",
+          resident_stage_profile.instrumented_ns / 1.0e6,
+          resident_profiled_ns / 1.0e6,
+          (resident_stage_profile.instrumented_ns - resident_profiled_ns) /
+              1.0e6);
+      std::printf(
+          "  HIP Graph interval %.3f ms; kernel envelopes %.3f ms; "
+          "graph gaps %.3f ms\n",
+          hip_stage_profile.instrumented_ns / 1.0e6, hip_profiled_ns / 1.0e6,
+          (hip_stage_profile.instrumented_ns - hip_profiled_ns) / 1.0e6);
+      std::array<size_t, kProfileStageCount> resident_penalty_priority{};
+      std::iota(resident_penalty_priority.begin(),
+                resident_penalty_priority.end(), 0u);
+      std::sort(resident_penalty_priority.begin(),
+                resident_penalty_priority.end(), [&](size_t lhs, size_t rhs) {
+                  return resident_stage_profile.device_ns[lhs] -
+                             hip_stage_profile.device_ns[lhs] >
+                         resident_stage_profile.device_ns[rhs] -
+                             hip_stage_profile.device_ns[rhs];
+                });
+      std::printf("  Largest resident penalties:\n");
+      for (size_t rank = 0; rank < 3; ++rank) {
+        const size_t index = resident_penalty_priority[rank];
+        std::printf("    %zu. %-21s %+9.3f ms\n", rank + 1u,
+                    kProfileStageNames[index],
+                    (resident_stage_profile.device_ns[index] -
+                     hip_stage_profile.device_ns[index]) /
+                        1.0e6);
+      }
+      std::printf(
+          "  Resident intervals include compiled barriers and transitions; "
+          "HIP envelopes exclude inter-node graph gaps.\n\n");
+#else
+      std::printf("Resident stage profile (%u-trial wall-clock mean)\n",
+                  kRooflineProfileTrials);
+      std::printf("  Instrumented interval %.3f ms; stage sum %.3f ms\n\n",
+                  resident_stage_profile.instrumented_ns / 1.0e6,
+                  resident_profiled_ns / 1.0e6);
+#endif
     }
     return 0;
   } catch (const std::exception &error) {
