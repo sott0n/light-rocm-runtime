@@ -9,6 +9,40 @@ function(lrrt_bind_hsaco target dependency define path)
   target_compile_definitions(${target} PRIVATE ${define}="${path}")
 endfunction()
 
+lrrt_add_hsaco_kernel(
+  stateful_graph_test_kernel
+  tests/stateful_graph_device_kernel.cpp
+  STATEFUL_GRAPH_TEST_HSACO
+  -O2
+  "-I${PROJECT_SOURCE_DIR}"
+  DEPENDS
+  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
+  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/device_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/compiled_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/tests/stateful_graph_device_context.hpp"
+)
+if(STATEFUL_GRAPH_TEST_HSACO)
+  lrrt_add_test_executable(
+    lrrt_stateful_graph_device_tests
+    stateful_graph_device.cpp
+    lrrt::lrrt
+  )
+  target_include_directories(
+    lrrt_stateful_graph_device_tests
+    PRIVATE "${PROJECT_SOURCE_DIR}"
+  )
+  lrrt_bind_hsaco(
+    lrrt_stateful_graph_device_tests
+    stateful_graph_test_kernel_hsaco
+    LRRT_STATEFUL_GRAPH_TEST_HSACO
+    "${STATEFUL_GRAPH_TEST_HSACO}"
+  )
+  set_tests_properties(
+    lrrt_stateful_graph_device_tests
+    PROPERTIES RESOURCE_LOCK light_rocr_gpu TIMEOUT 20
+  )
+endif()
+
 function(lrrt_add_backend_independent_tests)
   lrrt_add_test_executable(lrrt_bundle_tests bundle.cpp lrrt::bundle)
   lrrt_add_test_executable(
