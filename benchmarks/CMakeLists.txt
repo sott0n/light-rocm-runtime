@@ -11,7 +11,9 @@ add_executable(lrrt_mutex_contention_benchmark mutex_contention.cpp)
 target_link_libraries(lrrt_mutex_contention_benchmark PRIVATE lrrt::lrrt)
 
 add_executable(lrrt_qwen_stateful_graph_benchmark qwen_stateful_graph.cpp)
-target_link_libraries(lrrt_qwen_stateful_graph_benchmark PRIVATE lrrt::lrrt)
+target_link_libraries(
+  lrrt_qwen_stateful_graph_benchmark PRIVATE lrrt::persistent_graph
+)
 target_include_directories(
   lrrt_qwen_stateful_graph_benchmark PRIVATE "${PROJECT_SOURCE_DIR}"
 )
@@ -128,10 +130,11 @@ lrrt_add_hsaco_kernel(
   QWEN_STATEFUL_GRAPH_HSACO
   -O2
   "-I${PROJECT_SOURCE_DIR}"
+  "-I${PROJECT_SOURCE_DIR}/include"
   DEPENDS
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/device_scheduler.hpp"
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/compiled_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/abi.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/device_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/compiled_scheduler.hpp"
   "${PROJECT_SOURCE_DIR}/executor/qwen/stateful_graph_context.hpp"
 )
 lrrt_add_hsaco_kernel(

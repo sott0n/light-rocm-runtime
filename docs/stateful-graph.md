@@ -1,19 +1,20 @@
-# LRRT Stateful Graph
+# LRRT Persistent Graph
 
 ## Objective
 
-LRRT Stateful Graph is an optional execution layer above the small LRRT core.
-It targets workloads with repeated, data-dependent GPU control flow, beginning
-with autoregressive Qwen decode. The layer keeps mutable execution state and
-dependency counters on the device so that one host launch can execute multiple
-conditional graph steps.
+LRRT Persistent Graph is an optional runtime module above the small LRRT core.
+It targets compiler-generated workloads with repeated, data-dependent GPU
+control flow. The module keeps mutable execution state and dependency counters
+on the device so that one host launch can execute multiple conditional graph
+steps. Autoregressive Qwen decode is a performance workload for this API, not
+part of the runtime contract.
 
 This extends the project stack without adding model semantics to the core
 dispatch API:
 
 ```text
 compiler-generated stage kernels
-  -> Stateful Graph: task ABI, device state, conditional scheduling
+  -> Persistent Graph: task ABI, device state, conditional scheduling
   -> LRRT core: memory, code objects, queues, dispatch, events
   -> ROCr or light-rocr backend
 ```
@@ -23,9 +24,27 @@ API. The target is a device-resident execution model that HIP Graph does not
 currently expose on AMD GPUs: a graph loop whose predicate is produced and
 consumed on the GPU without a host round trip.
 
-## Prototype v3
+## Public runtime module
 
-The prototype defines a 64-byte device `State`, a 32-byte `Task`, and a 32-byte
+Host applications link the header-only module target and include its public
+host API:
+
+```cmake
+target_link_libraries(my_executor PRIVATE lrrt::persistent_graph)
+```
+
+```cpp
+#include <lrrt/persistent_graph.hpp>
+```
+
+Compiler-generated resident kernels include
+`<lrrt/persistent_graph/device_scheduler.hpp>` for dynamic scheduling or
+`<lrrt/persistent_graph/compiled_scheduler.hpp>` for a host-compiled stage
+plan. The API lives in the `lrrt::persistent_graph` namespace. Workloads
+supply context validation, task validation, and execution hooks; model and
+operator semantics do not enter the module.
+
+The ABI defines a 64-byte device `State`, a 32-byte `Task`, and a 32-byte
 `Program` descriptor. Each Program selects a DAG of up to 64 tasks from a
 shared task table and names its normal and conditional successors. Tasks can
 publish a branch value in device state, allowing a Program transition to skip
@@ -63,7 +82,7 @@ The worker pool must still satisfy resource-aware admission: every persistent
 worker must be concurrently resident. The benchmark limits the pool to 20
 small workgroups, while tasks are scheduled onto that pool dynamically.
 
-The prototype also uses a fixed 256-thread worker width from the Stateful Graph
+The module also uses a fixed 256-thread worker width from the Persistent Graph
 ABI. LRRT launches raw kernel argument buffers and deliberately does not
 synthesize HIP-specific hidden `blockDim` or `gridDim` arguments, so resident
 kernels must not depend on those fields.
@@ -73,21 +92,21 @@ kernels must not depend on those fields.
 The scheduler ABI carries an opaque execution-context pointer, keeping model
 buffer semantics out of the generic graph state and task descriptors. All
 Qwen-specific shapes, opcodes, contexts, kernels, and benchmark wiring live
-under `executor/qwen` or Qwen-named benchmark sources; the generic
-`executor/stateful_graph` layer has no Qwen dependency. The decoder
+under `executor/qwen` or Qwen-named benchmark sources; the public
+`include/lrrt/persistent_graph` module has no Qwen dependency. The decoder
 specialization uses the
 Qwen2.5-0.5B dimensions `hidden=896`, `heads=14`, `kv_heads=2`, `head_dim=64`,
 and `intermediate=4864`.
 
 The persistent dependency scheduler is implemented by the reusable device
-template in `executor/stateful_graph/device_scheduler.hpp`. A specialization
+template in `lrrt/persistent_graph/device_scheduler.hpp`. A specialization
 supplies only context validation, task validation, and task execution
 callbacks. The Qwen kernel therefore owns its fused model operations and
 shared-memory scratch while the generic scheduler owns task claiming,
 dependency masks, Program transitions, conditional branches, and termination.
 
 The corresponding host runtime API is
-`executor/stateful_graph/resident_executor.hpp`. `ResidentExecutor` validates
+`lrrt/persistent_graph/resident_executor.hpp`. `ResidentExecutor` validates
 and uploads the generic task and Program tables, owns the device State and
 per-phase masks, binds an opaque workload context, initializes each bounded
 run, and dispatches the workload-specialized resident kernel. The Qwen
@@ -96,7 +115,7 @@ benchmark uses this API rather than managing scheduler buffers and constructing
 
 For fixed workloads, `compile_resident_plan()` converts a topologically ordered
 task DAG into contiguous dependency-independent stages. The reusable compiled
-scheduler in `executor/stateful_graph/compiled_scheduler.hpp` assigns those
+scheduler in `lrrt/persistent_graph/compiled_scheduler.hpp` assigns those
 tasks directly to persistent workers, removing runtime task scans and atomic
 claims. It invokes the workload stage hook on every resident worker, allowing a
 specialized workload to redistribute a stage independently of the task-table

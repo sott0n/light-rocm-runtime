@@ -1,8 +1,8 @@
 #ifndef LRRT_BENCHMARKS_QWEN_HIP_GRAPH_HPP_
 #define LRRT_BENCHMARKS_QWEN_HIP_GRAPH_HPP_
 
-#include "executor/stateful_graph/stateful_graph_abi.hpp"
 #include "lrrt/lrrt.h"
+#include "lrrt/persistent_graph/abi.hpp"
 
 #include <hip/hip_runtime_api.h>
 
@@ -141,7 +141,7 @@ private:
   }
 
   struct KernelNode {
-    stateful_graph::HostStepArgs args{};
+    persistent_graph::HostStepArgs args{};
     std::array<void *, 5> parameters{};
   };
 

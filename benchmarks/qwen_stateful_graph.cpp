@@ -1,7 +1,7 @@
 #include "executor/qwen/stateful_graph_context.hpp"
 #include "executor/qwen/weight_bundle.hpp"
-#include "executor/stateful_graph/resident_executor.hpp"
 #include "lrrt/lrrt.hpp"
+#include "lrrt/persistent_graph.hpp"
 
 #ifndef LRRT_ENABLE_HIP_GRAPH
 #define LRRT_ENABLE_HIP_GRAPH 0
@@ -35,7 +35,7 @@
 
 namespace {
 
-namespace sg = lrrt::stateful_graph;
+namespace sg = lrrt::persistent_graph;
 namespace qd = lrrt::qwen::stateful_graph;
 using Clock = std::chrono::steady_clock;
 

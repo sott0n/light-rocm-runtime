@@ -1,9 +1,9 @@
-#ifndef LRRT_STATEFUL_GRAPH_COMPILED_SCHEDULER_HPP_
-#define LRRT_STATEFUL_GRAPH_COMPILED_SCHEDULER_HPP_
+#ifndef LRRT_PERSISTENT_GRAPH_COMPILED_SCHEDULER_HPP_
+#define LRRT_PERSISTENT_GRAPH_COMPILED_SCHEDULER_HPP_
 
-#include "executor/stateful_graph/device_scheduler.hpp"
+#include "lrrt/persistent_graph/device_scheduler.hpp"
 
-namespace lrrt::stateful_graph::device {
+namespace lrrt::persistent_graph::device {
 
 struct CompiledSchedulerScratch {
   uint32_t validation_status;
@@ -194,6 +194,6 @@ __device__ __forceinline__ void run_compiled_resident(
   }
 }
 
-} // namespace lrrt::stateful_graph::device
+} // namespace lrrt::persistent_graph::device
 
-#endif // LRRT_STATEFUL_GRAPH_COMPILED_SCHEDULER_HPP_
+#endif // LRRT_PERSISTENT_GRAPH_COMPILED_SCHEDULER_HPP_

@@ -1,5 +1,5 @@
-#include "executor/stateful_graph/resident_executor.hpp"
 #include "lrrt/lrrt.hpp"
+#include "lrrt/persistent_graph.hpp"
 #include "tests/stateful_graph_device_context.hpp"
 
 #include <array>
@@ -16,8 +16,8 @@
 
 namespace {
 
-namespace sg = lrrt::stateful_graph;
-namespace fixture = lrrt::stateful_graph::test;
+namespace sg = lrrt::persistent_graph;
+namespace fixture = lrrt::persistent_graph::test;
 
 std::vector<unsigned char> read_file(const char *path) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);

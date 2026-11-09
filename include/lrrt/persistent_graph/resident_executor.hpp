@@ -1,8 +1,8 @@
-#ifndef LRRT_STATEFUL_GRAPH_RESIDENT_EXECUTOR_HPP_
-#define LRRT_STATEFUL_GRAPH_RESIDENT_EXECUTOR_HPP_
+#ifndef LRRT_PERSISTENT_GRAPH_RESIDENT_EXECUTOR_HPP_
+#define LRRT_PERSISTENT_GRAPH_RESIDENT_EXECUTOR_HPP_
 
-#include "executor/stateful_graph/stateful_graph_abi.hpp"
 #include "lrrt/lrrt.hpp"
+#include "lrrt/persistent_graph/abi.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -13,7 +13,7 @@
 #include <utility>
 #include <vector>
 
-namespace lrrt::stateful_graph {
+namespace lrrt::persistent_graph {
 
 struct ResidentConfig {
   uint32_t phase_state_count;
@@ -438,6 +438,6 @@ private:
   bool initialized_;
 };
 
-} // namespace lrrt::stateful_graph
+} // namespace lrrt::persistent_graph
 
-#endif // LRRT_STATEFUL_GRAPH_RESIDENT_EXECUTOR_HPP_
+#endif // LRRT_PERSISTENT_GRAPH_RESIDENT_EXECUTOR_HPP_

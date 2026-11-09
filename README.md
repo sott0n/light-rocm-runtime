@@ -33,6 +33,17 @@ The C/HSA runtime remains available as `lrrt::lrrt`. Compiler integrations can
 use the separate `lrrt::bundle` C++ target, which parses the kernel manifest,
 loads its HSACO, validates the kernarg layout, and derives the launch config.
 
+Compiler-generated device-resident graphs can use the optional
+`lrrt::persistent_graph` C++ target. Its public
+`<lrrt/persistent_graph.hpp>` API validates and uploads generic task and
+Program tables, owns resident control state, and launches a
+workload-specialized persistent kernel. Device kernels implement the public
+Persistent Graph ABI and scheduler hooks under
+`<lrrt/persistent_graph/...>`. Model opcodes, tensor semantics, and kernel
+arithmetic remain outside the module; Qwen is a performance and correctness
+workload rather than part of the API. See the
+[Persistent Graph guide](docs/stateful-graph.md).
+
 ## Design Summary
 
 `light-rocm-runtime` is an execution substrate, not a compiler, tensor runtime,

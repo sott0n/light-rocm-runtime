@@ -1,7 +1,7 @@
 #ifndef LRRT_QWEN_STATEFUL_GRAPH_CONTEXT_HPP_
 #define LRRT_QWEN_STATEFUL_GRAPH_CONTEXT_HPP_
 
-#include "executor/stateful_graph/stateful_graph_abi.hpp"
+#include "lrrt/persistent_graph/abi.hpp"
 
 #include <cstdint>
 #include <type_traits>
@@ -173,9 +173,9 @@ static_assert(sizeof(TailContext) == 96);
 static_assert(sizeof(StageProfile) == 240);
 static_assert(sizeof(StageProfileEntry) == 16);
 static_assert(sizeof(DecodeState) == 32);
-static_assert(kAttentionTaskCount <= lrrt::stateful_graph::kMaximumTasks);
-static_assert(kFfnTaskCount <= lrrt::stateful_graph::kMaximumTasks);
-static_assert(kMaximumTailTaskCount <= lrrt::stateful_graph::kMaximumTasks);
+static_assert(kAttentionTaskCount <= lrrt::persistent_graph::kMaximumTasks);
+static_assert(kFfnTaskCount <= lrrt::persistent_graph::kMaximumTasks);
+static_assert(kMaximumTailTaskCount <= lrrt::persistent_graph::kMaximumTasks);
 
 } // namespace lrrt::qwen::stateful_graph
 

@@ -1,8 +1,8 @@
 #include "executor/qwen/stateful_graph_context.hpp"
-#include "executor/stateful_graph/compiled_scheduler.hpp"
-#include "executor/stateful_graph/device_scheduler.hpp"
+#include "lrrt/persistent_graph/compiled_scheduler.hpp"
+#include "lrrt/persistent_graph/device_scheduler.hpp"
 
-namespace sg = lrrt::stateful_graph;
+namespace sg = lrrt::persistent_graph;
 namespace qd = lrrt::qwen::stateful_graph;
 
 namespace {

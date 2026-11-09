@@ -1,4 +1,4 @@
-#include "executor/stateful_graph/resident_executor.hpp"
+#include "lrrt/persistent_graph.hpp"
 
 #include <cstdio>
 #include <stdexcept>
@@ -6,7 +6,7 @@
 
 namespace {
 
-namespace sg = lrrt::stateful_graph;
+namespace sg = lrrt::persistent_graph;
 
 bool expect_invalid(const char *label, const std::vector<sg::Task> &tasks,
                     const std::vector<sg::Program> &programs,

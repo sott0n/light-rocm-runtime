@@ -1,11 +1,11 @@
-#ifndef LRRT_STATEFUL_GRAPH_ABI_HPP_
-#define LRRT_STATEFUL_GRAPH_ABI_HPP_
+#ifndef LRRT_PERSISTENT_GRAPH_ABI_HPP_
+#define LRRT_PERSISTENT_GRAPH_ABI_HPP_
 
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
 
-namespace lrrt::stateful_graph {
+namespace lrrt::persistent_graph {
 
 constexpr uint32_t kAbiVersion = 8;
 constexpr uint32_t kWorkerThreads = 256;
@@ -150,6 +150,6 @@ static_assert(sizeof(CompiledProgram) == 8);
 static_assert(sizeof(ResidentArgs) == 80);
 static_assert(sizeof(HostStepArgs) == 32);
 
-} // namespace lrrt::stateful_graph
+} // namespace lrrt::persistent_graph
 
-#endif // LRRT_STATEFUL_GRAPH_ABI_HPP_
+#endif // LRRT_PERSISTENT_GRAPH_ABI_HPP_

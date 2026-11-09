@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <type_traits>
 
-namespace lrrt::stateful_graph::test {
+namespace lrrt::persistent_graph::test {
 
 constexpr uint32_t kContextMagic = 0x53504754u;
 constexpr uint32_t kValueCount = 8;
@@ -30,6 +30,6 @@ struct Context {
 
 static_assert(std::is_standard_layout_v<Context>);
 
-} // namespace lrrt::stateful_graph::test
+} // namespace lrrt::persistent_graph::test
 
 #endif // LRRT_TESTS_STATEFUL_GRAPH_DEVICE_CONTEXT_HPP_

@@ -15,17 +15,18 @@ lrrt_add_hsaco_kernel(
   STATEFUL_GRAPH_TEST_HSACO
   -O2
   "-I${PROJECT_SOURCE_DIR}"
+  "-I${PROJECT_SOURCE_DIR}/include"
   DEPENDS
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/stateful_graph_abi.hpp"
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/device_scheduler.hpp"
-  "${PROJECT_SOURCE_DIR}/executor/stateful_graph/compiled_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/abi.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/device_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/compiled_scheduler.hpp"
   "${PROJECT_SOURCE_DIR}/tests/stateful_graph_device_context.hpp"
 )
 if(STATEFUL_GRAPH_TEST_HSACO)
   lrrt_add_test_executable(
     lrrt_stateful_graph_device_tests
     stateful_graph_device.cpp
-    lrrt::lrrt
+    lrrt::persistent_graph
   )
   target_include_directories(
     lrrt_stateful_graph_device_tests
@@ -66,11 +67,7 @@ function(lrrt_add_backend_independent_tests)
   lrrt_add_test_executable(
     lrrt_stateful_graph_resident_executor_tests
     stateful_graph_resident_executor.cpp
-    lrrt::lrrt
-  )
-  target_include_directories(
-    lrrt_stateful_graph_resident_executor_tests
-    PRIVATE "${PROJECT_SOURCE_DIR}"
+    lrrt::persistent_graph
   )
 
   if(PYTHON_EXECUTABLE)

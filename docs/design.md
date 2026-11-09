@@ -16,7 +16,7 @@ The intended stack is:
 ```text
 compiler or model layer
   -> generated kernels and scheduling metadata
-  -> optional execution layer: Stateful Graph or another executor
+  -> optional runtime module: Persistent Graph or another executor
   -> executor: tensors, arenas, workspaces, queues, dependencies
   -> light-rocm-runtime: devices, memory, code objects, dispatch, events
   -> ROCr/HSA
@@ -24,9 +24,11 @@ compiler or model layer
 ```
 
 Device-resident graph semantics are provided by the optional
-[Stateful Graph](stateful-graph.md) execution layer, not by the core dispatch
-API. This preserves the small runtime boundary while allowing the project to
-experiment with GPU-resident control flow above it.
+[Persistent Graph](stateful-graph.md) runtime module, not by the core dispatch
+API. The module exposes generic host and device contracts while compiler and
+model layers continue to own task bodies and graph semantics. This preserves
+the small core boundary while allowing LRRT to provide GPU-resident control
+flow as an opt-in feature.
 
 The currently supported backend is ROCr/HSA. Project scope also includes an
 experimental native backend that will first replace `libhsa-runtime64` while

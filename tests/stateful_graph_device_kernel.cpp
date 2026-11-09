@@ -1,9 +1,9 @@
-#include "executor/stateful_graph/compiled_scheduler.hpp"
-#include "executor/stateful_graph/device_scheduler.hpp"
+#include "lrrt/persistent_graph/compiled_scheduler.hpp"
+#include "lrrt/persistent_graph/device_scheduler.hpp"
 #include "tests/stateful_graph_device_context.hpp"
 
-namespace sg = lrrt::stateful_graph;
-namespace fixture = lrrt::stateful_graph::test;
+namespace sg = lrrt::persistent_graph;
+namespace fixture = lrrt::persistent_graph::test;
 
 namespace {
 

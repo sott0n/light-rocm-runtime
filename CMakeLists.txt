@@ -108,6 +108,11 @@ add_library(
 )
 add_library(lrrt::lrrt ALIAS lrrt)
 
+add_library(lrrt_persistent_graph INTERFACE)
+add_library(lrrt::persistent_graph ALIAS lrrt_persistent_graph)
+target_link_libraries(lrrt_persistent_graph INTERFACE lrrt::lrrt)
+target_compile_features(lrrt_persistent_graph INTERFACE cxx_std_17)
+
 add_library(lrrt_bundle src/bundle.cpp)
 add_library(lrrt::bundle ALIAS lrrt_bundle)
 target_link_libraries(lrrt_bundle PUBLIC lrrt::lrrt)

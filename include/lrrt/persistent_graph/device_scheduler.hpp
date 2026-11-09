@@ -1,9 +1,9 @@
-#ifndef LRRT_STATEFUL_GRAPH_DEVICE_SCHEDULER_HPP_
-#define LRRT_STATEFUL_GRAPH_DEVICE_SCHEDULER_HPP_
+#ifndef LRRT_PERSISTENT_GRAPH_DEVICE_SCHEDULER_HPP_
+#define LRRT_PERSISTENT_GRAPH_DEVICE_SCHEDULER_HPP_
 
-#include "executor/stateful_graph/stateful_graph_abi.hpp"
+#include "lrrt/persistent_graph/abi.hpp"
 
-namespace lrrt::stateful_graph::device {
+namespace lrrt::persistent_graph::device {
 
 // Per-workgroup storage supplied by a resident kernel. Workload-specific
 // shared memory stays outside the scheduler and is owned by the task executor.
@@ -275,6 +275,6 @@ run_resident(State *state, const Task *tasks, const Program *programs,
   }
 }
 
-} // namespace lrrt::stateful_graph::device
+} // namespace lrrt::persistent_graph::device
 
-#endif // LRRT_STATEFUL_GRAPH_DEVICE_SCHEDULER_HPP_
+#endif // LRRT_PERSISTENT_GRAPH_DEVICE_SCHEDULER_HPP_
