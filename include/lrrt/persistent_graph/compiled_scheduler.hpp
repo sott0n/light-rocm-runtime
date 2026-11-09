@@ -170,9 +170,15 @@ __device__ __forceinline__ void run_compiled_resident(
         // Every resident worker participates even when it had no task in this
         // stage. Otherwise an idle worker can lag behind, skip a completed
         // stage, and miss a later stage where it becomes active.
+        //
+        // Each generation owns a fresh MaskState, so keep arrivals cumulative
+        // across stages. Workers cannot enter the next stage until its
+        // predecessor publishes completed_mask, which makes the cumulative
+        // target unambiguous and avoids resetting a shared counter here.
+        const uint32_t arrival_target =
+            (stage_index + 1u) * state->worker_count;
         const uint32_t arrived = atomicAdd(&barrier->claimed_mask, 1u) + 1u;
-        if (arrived == state->worker_count) {
-          atomicExch(&barrier->claimed_mask, 0u);
+        if (arrived == arrival_target) {
           if (stage_index + 1u == compiled.stage_count) {
             compiled_detail::finish_program(state, program, generation,
                                             phase_state_count);
