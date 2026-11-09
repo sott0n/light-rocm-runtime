@@ -18,6 +18,7 @@ cmake --build build-bench -j2
 ./build-bench/lrrt_parallel_launch_benchmark
 ./build-bench/lrrt_mutex_contention_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
+./build-bench/lrrt_persistent_graph_benchmark
 ./build-bench/lrrt_pinned_host_transfer_benchmark
 ./build-bench/lrrt_double_buffer_pipeline_benchmark
 ```
@@ -28,12 +29,47 @@ cmake --build build-bench -j2
 | `lrrt_parallel_launch_benchmark` | 512 launches from 1, 2, 4, or 8 threads using a shared queue or per-thread queues |
 | `lrrt_mutex_contention_benchmark` | Lightweight API probes during queue/module/event, backpressure, synchronous-copy, and memory-free waits |
 | `lrrt_async_copy_launch_benchmark` | 100 iterations of copy/launch and launch/copy dependency paths |
+| `lrrt_persistent_graph_benchmark` | Dynamic and compiled Persistent Graph control cost while sweeping resident workers, tasks, dependency stages, and program transitions |
 | `lrrt_pinned_host_transfer_benchmark` | 4 KiB through 1 GiB H2D and D2H transfers; adaptive iteration count targeting 256 MiB per row |
 | `lrrt_double_buffer_pipeline_benchmark` | 50 x 4 MiB chunks with 64 GPU compute rounds per chunk |
 
 Run benchmarks on an otherwise idle system and repeat them when comparing
 changes. GPU clock management, CPU scheduling, system load, and ROCm revisions
 can materially change these numbers.
+
+### Persistent Graph scheduler floor
+
+`lrrt_persistent_graph_benchmark` is independent of Qwen and model kernels. Its
+synthetic task payload is one 32-bit counter update, leaving task
+claiming, compiled stage barriers, and program transitions as the dominant
+work. The default sweep uses 256 steady-state steps and reports the median of
+11 trials:
+
+```sh
+./build-bench/lrrt_persistent_graph_benchmark
+```
+
+Pass `[steps] [trials] [max-workers]` to shorten the run or cap resident
+workers. `1-step us` contains device-side graph validation and the first step.
+The benchmark subtracts that sample from the long run to report marginal
+`ns/phase`, `ns/stage`, and logical task throughput. `start us` is the
+corresponding extrapolated validation/launch intercept. The stage sweep holds
+task count constant and fits latency against stage count, producing the
+incremental dependency-stage cost and, for the compiled path, the
+software-barrier floor. The program sweep holds the total phase count constant
+and varies step count inversely so program-table depth is not confused with a
+longer resident interval. Host plan compilation, executor setup/upload, and
+per-run state initialization are
+reported separately and are not included in the GPU event interval.
+
+Before every trial, an arithmetic kernel launches one workgroup per compute
+unit to condition GPU clocks; this interval is outside the reported event
+timestamps. It removes the initial idle-to-active ramp but does not lock GPU
+clocks, so a long low-utilization scheduler interval may still settle at its
+natural DPM state. Within each shape, the benchmark interleaves the dynamic and
+compiled paths and reverses their order on alternating trials. It does the
+same for one-step and long-run samples so residual clock drift does not
+systematically favor one path or timing window.
 
 ## Development result snapshot
 

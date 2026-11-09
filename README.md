@@ -183,6 +183,7 @@ cmake --build build-bench
 | `lrrt_launch_overhead_benchmark` | Kernel enqueue, synchronization, dispatch throughput, and round-trip cost |
 | `lrrt_mutex_contention_benchmark` | Runtime API concurrency during GPU waits |
 | `lrrt_async_copy_launch_benchmark` | Host waits compared with device-side copy, launch, and event dependencies |
+| `lrrt_persistent_graph_benchmark` | Qwen-independent dynamic/compiled scheduler floor across workers, tasks, stages, and programs |
 | `lrrt_pinned_host_transfer_benchmark` | Pageable and pinned H2D/D2H latency and bandwidth |
 | `lrrt_double_buffer_pipeline_benchmark` | Sequential and double-buffered CPU preparation, H2D, and GPU work |
 
@@ -192,6 +193,7 @@ Run them from the build directory:
 ./build-bench/lrrt_launch_overhead_benchmark
 ./build-bench/lrrt_mutex_contention_benchmark
 ./build-bench/lrrt_async_copy_launch_benchmark
+./build-bench/lrrt_persistent_graph_benchmark
 ./build-bench/lrrt_pinned_host_transfer_benchmark
 ./build-bench/lrrt_double_buffer_pipeline_benchmark
 ```

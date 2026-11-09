@@ -46,6 +46,14 @@ else()
   message(STATUS "Qwen HIP Graph baseline disabled")
 endif()
 
+add_executable(lrrt_persistent_graph_benchmark persistent_graph.cpp)
+target_link_libraries(
+  lrrt_persistent_graph_benchmark PRIVATE lrrt::persistent_graph
+)
+target_include_directories(
+  lrrt_persistent_graph_benchmark PRIVATE "${PROJECT_SOURCE_DIR}"
+)
+
 add_executable(lrrt_async_copy_launch_benchmark async_copy_launch.cpp)
 target_link_libraries(lrrt_async_copy_launch_benchmark PRIVATE lrrt::lrrt)
 
@@ -136,6 +144,19 @@ lrrt_add_hsaco_kernel(
   "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/device_scheduler.hpp"
   "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/compiled_scheduler.hpp"
   "${PROJECT_SOURCE_DIR}/executor/qwen/stateful_graph_context.hpp"
+)
+lrrt_add_hsaco_kernel(
+  persistent_graph_benchmark_kernel
+  benchmarks/persistent_graph_kernel.cpp
+  PERSISTENT_GRAPH_BENCHMARK_HSACO
+  -O2
+  "-I${PROJECT_SOURCE_DIR}"
+  "-I${PROJECT_SOURCE_DIR}/include"
+  DEPENDS
+  "${PROJECT_SOURCE_DIR}/benchmarks/persistent_graph_context.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/abi.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/device_scheduler.hpp"
+  "${PROJECT_SOURCE_DIR}/include/lrrt/persistent_graph/compiled_scheduler.hpp"
 )
 lrrt_add_hsaco_kernel(
   async_copy_launch_benchmark_kernel
@@ -242,6 +263,18 @@ if(QWEN_STATEFUL_GRAPH_HSACO)
     lrrt_qwen_stateful_graph_benchmark
     PRIVATE
       LRRT_QWEN_STATEFUL_GRAPH_HSACO="${QWEN_STATEFUL_GRAPH_HSACO}"
+  )
+endif()
+
+if(PERSISTENT_GRAPH_BENCHMARK_HSACO)
+  add_dependencies(
+    lrrt_persistent_graph_benchmark
+    persistent_graph_benchmark_kernel_hsaco
+  )
+  target_compile_definitions(
+    lrrt_persistent_graph_benchmark
+    PRIVATE
+      LRRT_PERSISTENT_GRAPH_BENCHMARK_HSACO="${PERSISTENT_GRAPH_BENCHMARK_HSACO}"
   )
 endif()
 
