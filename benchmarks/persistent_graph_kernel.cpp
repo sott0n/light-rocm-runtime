@@ -68,14 +68,15 @@ extern "C" __global__ void persistent_graph_dynamic_benchmark_kernel(
     sg::MaskState *phase_states, uint32_t program_count,
     uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
     const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
-    uint32_t stage_count, uint32_t reserved) {
+    uint32_t stage_count, uint32_t reserved,
+    sg::ValidationState *validation_state) {
   (void)stages;
   (void)compiled_programs;
   (void)stage_count;
   (void)reserved;
   sg::device::run_resident<ControlWorkload>(
       state, tasks, programs, phase_states, program_count, total_task_count,
-      phase_state_count, opaque_context);
+      phase_state_count, opaque_context, validation_state);
 }
 
 extern "C" __global__ void persistent_graph_compiled_benchmark_kernel(
@@ -83,10 +84,11 @@ extern "C" __global__ void persistent_graph_compiled_benchmark_kernel(
     sg::MaskState *phase_states, uint32_t program_count,
     uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
     const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
-    uint32_t stage_count, uint32_t reserved) {
+    uint32_t stage_count, uint32_t reserved,
+    sg::ValidationState *validation_state) {
   (void)reserved;
   sg::device::run_compiled_resident<ControlWorkload>(
       state, tasks, programs, phase_states, program_count, total_task_count,
-      phase_state_count, opaque_context, stages, compiled_programs,
-      stage_count);
+      phase_state_count, opaque_context, stages, compiled_programs, stage_count,
+      validation_state);
 }

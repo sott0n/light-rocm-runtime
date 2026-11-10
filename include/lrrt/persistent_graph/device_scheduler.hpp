@@ -28,6 +28,21 @@ __device__ __forceinline__ uint32_t load_mask(uint32_t *mask) {
   return atomicAdd(mask, 0u);
 }
 
+__device__ __forceinline__ uint32_t
+load_validation_status(ValidationState *validation_state) {
+  return validation_state == nullptr
+             ? static_cast<uint32_t>(ValidationStatus::unvalidated)
+             : atomicAdd(&validation_state->status, 0u);
+}
+
+__device__ __forceinline__ void
+publish_validation_status(ValidationState *validation_state,
+                          ValidationStatus status) {
+  if (validation_state != nullptr) {
+    atomicExch(&validation_state->status, static_cast<uint32_t>(status));
+  }
+}
+
 __device__ __forceinline__ uint64_t load_completed_mask(MaskState *mask_state,
                                                         uint32_t task_count) {
   const uint64_t low = load_mask(&mask_state->completed_mask);
@@ -125,18 +140,32 @@ __device__ __forceinline__ void
 run_resident(State *state, const Task *tasks, const Program *programs,
              MaskState *phase_states, uint32_t program_count,
              uint32_t total_task_count, uint32_t phase_state_count,
-             void *opaque_context) {
+             void *opaque_context, ValidationState *validation_state) {
   __shared__ SchedulerScratch scratch_storage;
   SchedulerScratch *scratch = &scratch_storage;
   const uint32_t worker = blockIdx.x;
   if (worker == 0) {
     if (threadIdx.x == 0) {
-      scratch->validation_status =
-          detail::validate_programs<Workload>(
-              state, tasks, programs, phase_states, program_count,
-              total_task_count, phase_state_count, opaque_context)
-              ? static_cast<uint32_t>(Status::running)
-              : static_cast<uint32_t>(Status::invalid_program);
+      const uint32_t cached_status =
+          detail::load_validation_status(validation_state);
+      if (cached_status == static_cast<uint32_t>(ValidationStatus::valid)) {
+        scratch->validation_status = static_cast<uint32_t>(Status::running);
+      } else if (cached_status ==
+                 static_cast<uint32_t>(ValidationStatus::invalid)) {
+        scratch->validation_status =
+            static_cast<uint32_t>(Status::invalid_program);
+      } else {
+        const bool valid = detail::validate_programs<Workload>(
+            state, tasks, programs, phase_states, program_count,
+            total_task_count, phase_state_count, opaque_context);
+        scratch->validation_status =
+            valid ? static_cast<uint32_t>(Status::running)
+                  : static_cast<uint32_t>(Status::invalid_program);
+        __threadfence();
+        detail::publish_validation_status(validation_state,
+                                          valid ? ValidationStatus::valid
+                                                : ValidationStatus::invalid);
+      }
     }
     __syncthreads();
     if (threadIdx.x == 0) {

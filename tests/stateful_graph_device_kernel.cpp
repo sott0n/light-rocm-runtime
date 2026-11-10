@@ -11,11 +11,15 @@ struct SyntheticWorkload {
   __device__ static __forceinline__ bool valid_context(const sg::State *,
                                                        void *opaque_context) {
     const auto *context = static_cast<fixture::Context *>(opaque_context);
+    if (context != nullptr && context->validation_calls != nullptr) {
+      atomicAdd(context->validation_calls, 1u);
+    }
     return context != nullptr && context->magic == fixture::kContextMagic &&
            context->value_count == fixture::kValueCount &&
            context->values != nullptr && context->step_checksums != nullptr &&
            context->branch_steps != nullptr &&
-           context->task_executions != nullptr;
+           context->task_executions != nullptr &&
+           context->validation_calls != nullptr;
   }
 
   __device__ static __forceinline__ bool valid_task(const sg::Task &task,
@@ -102,14 +106,15 @@ extern "C" __global__ void stateful_graph_dynamic_test_kernel(
     sg::MaskState *phase_states, uint32_t program_count,
     uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
     const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
-    uint32_t stage_count, uint32_t reserved) {
+    uint32_t stage_count, uint32_t reserved,
+    sg::ValidationState *validation_state) {
   (void)stages;
   (void)compiled_programs;
   (void)stage_count;
   (void)reserved;
   sg::device::run_resident<SyntheticWorkload>(
       state, tasks, programs, phase_states, program_count, total_task_count,
-      phase_state_count, opaque_context);
+      phase_state_count, opaque_context, validation_state);
 }
 
 extern "C" __global__ void stateful_graph_compiled_test_kernel(
@@ -117,10 +122,11 @@ extern "C" __global__ void stateful_graph_compiled_test_kernel(
     sg::MaskState *phase_states, uint32_t program_count,
     uint32_t total_task_count, uint32_t phase_state_count, void *opaque_context,
     const sg::Stage *stages, const sg::CompiledProgram *compiled_programs,
-    uint32_t stage_count, uint32_t reserved) {
+    uint32_t stage_count, uint32_t reserved,
+    sg::ValidationState *validation_state) {
   (void)reserved;
   sg::device::run_compiled_resident<SyntheticWorkload>(
       state, tasks, programs, phase_states, program_count, total_task_count,
-      phase_state_count, opaque_context, stages, compiled_programs,
-      stage_count);
+      phase_state_count, opaque_context, stages, compiled_programs, stage_count,
+      validation_state);
 }

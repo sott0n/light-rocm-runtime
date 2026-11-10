@@ -104,24 +104,40 @@ __device__ __forceinline__ void finish_program(State *state,
 // fast path requires every launched workgroup to be concurrently resident so
 // that its stage barriers cannot be blocked by an unscheduled workgroup.
 template <typename Workload>
-__device__ __forceinline__ void run_compiled_resident(
-    State *state, const Task *tasks, const Program *programs,
-    MaskState *phase_states, uint32_t program_count, uint32_t total_task_count,
-    uint32_t phase_state_count, void *opaque_context, const Stage *stages,
-    const CompiledProgram *compiled_programs, uint32_t stage_count) {
+__device__ __forceinline__ void
+run_compiled_resident(State *state, const Task *tasks, const Program *programs,
+                      MaskState *phase_states, uint32_t program_count,
+                      uint32_t total_task_count, uint32_t phase_state_count,
+                      void *opaque_context, const Stage *stages,
+                      const CompiledProgram *compiled_programs,
+                      uint32_t stage_count, ValidationState *validation_state) {
   __shared__ CompiledSchedulerScratch scratch_storage;
   CompiledSchedulerScratch *scratch = &scratch_storage;
   const uint32_t worker = blockIdx.x;
 
   if (worker == 0) {
     if (threadIdx.x == 0) {
-      scratch->validation_status =
-          compiled_detail::validate_plan<Workload>(
-              state, tasks, programs, phase_states, stages, compiled_programs,
-              program_count, total_task_count, phase_state_count, stage_count,
-              opaque_context)
-              ? static_cast<uint32_t>(Status::running)
-              : static_cast<uint32_t>(Status::invalid_program);
+      const uint32_t cached_status =
+          detail::load_validation_status(validation_state);
+      if (cached_status == static_cast<uint32_t>(ValidationStatus::valid)) {
+        scratch->validation_status = static_cast<uint32_t>(Status::running);
+      } else if (cached_status ==
+                 static_cast<uint32_t>(ValidationStatus::invalid)) {
+        scratch->validation_status =
+            static_cast<uint32_t>(Status::invalid_program);
+      } else {
+        const bool valid = compiled_detail::validate_plan<Workload>(
+            state, tasks, programs, phase_states, stages, compiled_programs,
+            program_count, total_task_count, phase_state_count, stage_count,
+            opaque_context);
+        scratch->validation_status =
+            valid ? static_cast<uint32_t>(Status::running)
+                  : static_cast<uint32_t>(Status::invalid_program);
+        __threadfence();
+        detail::publish_validation_status(validation_state,
+                                          valid ? ValidationStatus::valid
+                                                : ValidationStatus::invalid);
+      }
       if (scratch->validation_status ==
           static_cast<uint32_t>(Status::running)) {
         Workload::initialize_profile(opaque_context);

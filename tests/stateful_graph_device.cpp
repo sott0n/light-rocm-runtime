@@ -56,9 +56,10 @@ struct FixtureBuffers {
         step_checksums(device, fixture::kMaximumSteps * sizeof(uint32_t)),
         branch_steps(device, fixture::kMaximumSteps * sizeof(uint32_t)),
         task_executions(device, fixture::kTaskCount * sizeof(uint32_t)),
+        validation_calls(device, sizeof(uint32_t)),
         context(device, sizeof(fixture::Context)) {}
 
-  void reset() {
+  void reset(bool reset_validation = true) {
     const std::array<uint32_t, fixture::kValueCount> empty_values{};
     const std::array<uint32_t, fixture::kMaximumSteps> empty_checksums{};
     const std::array<uint32_t, fixture::kMaximumSteps> empty_branch_steps{};
@@ -70,6 +71,11 @@ struct FixtureBuffers {
                          sizeof(empty_branch_steps));
     lrrt::copy_to_device(task_executions, empty_task_executions.data(),
                          sizeof(empty_task_executions));
+    if (reset_validation) {
+      const uint32_t empty_validation_calls = 0;
+      lrrt::copy_to_device(validation_calls, &empty_validation_calls,
+                           sizeof(empty_validation_calls));
+    }
 
     const fixture::Context host_context{
         fixture::kContextMagic,
@@ -78,6 +84,7 @@ struct FixtureBuffers {
         static_cast<uint32_t *>(step_checksums.data()),
         static_cast<uint32_t *>(branch_steps.data()),
         static_cast<uint32_t *>(task_executions.data()),
+        static_cast<uint32_t *>(validation_calls.data()),
     };
     lrrt::copy_to_device(context, &host_context, sizeof(host_context));
   }
@@ -86,25 +93,12 @@ struct FixtureBuffers {
   lrrt::DeviceBuffer step_checksums;
   lrrt::DeviceBuffer branch_steps;
   lrrt::DeviceBuffer task_executions;
+  lrrt::DeviceBuffer validation_calls;
   lrrt::DeviceBuffer context;
 };
 
-bool run_path(const char *label, lrrt::Device device,
-              const lrrt::Kernel &kernel, const std::vector<sg::Task> &tasks,
-              const std::vector<sg::Program> &programs,
-              const sg::ResidentConfig &config, const sg::CompiledPlan *plan,
-              FixtureBuffers *buffers) {
-  buffers->reset();
-  sg::ResidentExecutor executor =
-      plan == nullptr
-          ? sg::ResidentExecutor(device, kernel, tasks, programs, config)
-          : sg::ResidentExecutor(device, kernel, tasks, programs, config,
-                                 *plan);
-  executor.bind_context(buffers->context.data());
-  executor.initialize(0, fixture::kMaximumSteps, 2);
-  executor.launch();
-  device.synchronize();
-
+bool expect_execution(const char *label, const sg::ResidentExecutor &executor,
+                      FixtureBuffers *buffers) {
   const sg::State state = executor.read_state();
   if (state.status != static_cast<uint32_t>(sg::Status::complete) ||
       state.step != fixture::kStepCount || state.predicate_value != 2 ||
@@ -140,6 +134,47 @@ bool run_path(const char *label, lrrt::Device device,
                       {2, 4, 0, 0, 0, 0, 0, 0}) &&
          expect_array(label, "task_executions", task_executions,
                       {4, 4, 4, 4, 2});
+}
+
+bool run_path(const char *label, lrrt::Device device,
+              const lrrt::Kernel &kernel, const std::vector<sg::Task> &tasks,
+              const std::vector<sg::Program> &programs,
+              const sg::ResidentConfig &config, const sg::CompiledPlan *plan,
+              FixtureBuffers *buffers) {
+  buffers->reset();
+  sg::ResidentExecutor executor =
+      plan == nullptr
+          ? sg::ResidentExecutor(device, kernel, tasks, programs, config)
+          : sg::ResidentExecutor(device, kernel, tasks, programs, config,
+                                 *plan);
+  executor.bind_context(buffers->context.data());
+  for (uint32_t run = 0; run < 3; ++run) {
+    if (run != 0) {
+      buffers->reset(false);
+    }
+    if (run == 2) {
+      // Rebinding even the same address explicitly invalidates cached
+      // workload validation for callers that changed context contents.
+      executor.bind_context(buffers->context.data());
+    }
+    executor.initialize(0, fixture::kMaximumSteps, 2);
+    executor.launch();
+    device.synchronize();
+    if (!expect_execution(label, executor, buffers)) {
+      return false;
+    }
+
+    uint32_t validation_calls = 0;
+    lrrt::copy_to_host(&validation_calls, buffers->validation_calls,
+                       sizeof(validation_calls));
+    const uint32_t expected_calls = run == 2 ? 2u : 1u;
+    if (validation_calls != expected_calls) {
+      std::fprintf(stderr, "%s validation calls: got %u, expected %u\n", label,
+                   validation_calls, expected_calls);
+      return false;
+    }
+  }
+  return true;
 }
 
 } // namespace

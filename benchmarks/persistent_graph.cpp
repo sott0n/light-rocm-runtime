@@ -61,6 +61,16 @@ struct InterleavedTimings {
   PathTimings compiled;
 };
 
+struct ValidationReuseTiming {
+  double cold_kernel_ns;
+  double warm_kernel_ns;
+};
+
+struct ValidationReuseTimings {
+  ValidationReuseTiming dynamic;
+  ValidationReuseTiming compiled;
+};
+
 struct ClockConditioningArgs {
   uint64_t cycles;
   uint32_t *output;
@@ -103,6 +113,7 @@ struct ShapeResult {
   PathResult dynamic;
   PathResult compiled;
   double plan_compile_us;
+  ValidationReuseTimings validation_reuse;
 };
 
 uint32_t parse_u32(const char *text, const char *name) {
@@ -352,6 +363,64 @@ InterleavedTimings measure_interleaved(lrrt::Device device, lrrt::Queue &queue,
   };
 }
 
+ValidationReuseTimings
+measure_validation_reuse(lrrt::Device device, lrrt::Queue &queue,
+                         sg::ResidentExecutor &dynamic_executor,
+                         sg::ResidentExecutor &compiled_executor,
+                         const GraphShape &shape, const Options &options,
+                         const ClockConditioner &conditioner) {
+  warm_up_path(queue, dynamic_executor, "dynamic", shape, 1);
+  warm_up_path(queue, compiled_executor, "compiled", shape, 1);
+
+  std::vector<double> dynamic_cold;
+  std::vector<double> dynamic_warm;
+  std::vector<double> compiled_cold;
+  std::vector<double> compiled_warm;
+  for (std::vector<double> *samples :
+       {&dynamic_cold, &dynamic_warm, &compiled_cold, &compiled_warm}) {
+    samples->reserve(options.trials);
+  }
+
+  lrrt::Event start(device);
+  lrrt::Event end(device);
+  auto collect_pair = [&](sg::ResidentExecutor &executor, const char *path,
+                          bool cold_first, std::vector<double> &cold_samples,
+                          std::vector<double> &warm_samples) {
+    auto collect = [&](std::vector<double> &samples) {
+      samples.push_back(
+          sample_path(queue, start, end, executor, path, shape, 1).kernel_ns);
+    };
+    if (cold_first) {
+      executor.invalidate_validation();
+      collect(cold_samples);
+      collect(warm_samples);
+    } else {
+      collect(warm_samples);
+      executor.invalidate_validation();
+      collect(cold_samples);
+    }
+  };
+
+  for (uint32_t trial = 0; trial < options.trials; ++trial) {
+    conditioner.run(queue);
+    const bool cold_first = (trial & 1u) == 0;
+    if (cold_first) {
+      collect_pair(dynamic_executor, "dynamic", true, dynamic_cold,
+                   dynamic_warm);
+      collect_pair(compiled_executor, "compiled", true, compiled_cold,
+                   compiled_warm);
+    } else {
+      collect_pair(compiled_executor, "compiled", false, compiled_cold,
+                   compiled_warm);
+      collect_pair(dynamic_executor, "dynamic", false, dynamic_cold,
+                   dynamic_warm);
+    }
+  }
+
+  return {{median(std::move(dynamic_cold)), median(std::move(dynamic_warm))},
+          {median(std::move(compiled_cold)), median(std::move(compiled_warm))}};
+}
+
 PathResult make_path_result(const char *path, const GraphShape &shape,
                             const Options &options, double setup_us,
                             const PathTimings &timings) {
@@ -425,6 +494,9 @@ ShapeResult run_shape(lrrt::Device device, lrrt::Queue &queue,
   const InterleavedTimings timings =
       measure_interleaved(device, queue, dynamic_executor, compiled_executor,
                           shape, options, conditioner);
+  const ValidationReuseTimings validation_reuse =
+      measure_validation_reuse(device, queue, dynamic_executor,
+                               compiled_executor, shape, options, conditioner);
   PathResult dynamic = make_path_result(
       "dynamic", shape, options,
       elapsed_ns(dynamic_setup_begin, dynamic_setup_end) / 1.0e3,
@@ -434,7 +506,7 @@ ShapeResult run_shape(lrrt::Device device, lrrt::Queue &queue,
       elapsed_ns(compiled_setup_begin, compiled_setup_end) / 1.0e3,
       timings.compiled);
   return {std::move(dynamic), std::move(compiled),
-          elapsed_ns(plan_begin, plan_end) / 1.0e3};
+          elapsed_ns(plan_begin, plan_end) / 1.0e3, validation_reuse};
 }
 
 void print_header() {
@@ -624,6 +696,20 @@ int main(int argc, char **argv) {
                 "%.3f us compiled\n",
                 baseline.dynamic.initialize_us,
                 baseline.compiled.initialize_us);
+    std::printf("Baseline dynamic validation reuse:    %.3f us cold, "
+                "%.3f us warm, %.3f us saved\n",
+                baseline.validation_reuse.dynamic.cold_kernel_ns / 1.0e3,
+                baseline.validation_reuse.dynamic.warm_kernel_ns / 1.0e3,
+                (baseline.validation_reuse.dynamic.cold_kernel_ns -
+                 baseline.validation_reuse.dynamic.warm_kernel_ns) /
+                    1.0e3);
+    std::printf("Baseline compiled validation reuse:   %.3f us cold, "
+                "%.3f us warm, %.3f us saved\n",
+                baseline.validation_reuse.compiled.cold_kernel_ns / 1.0e3,
+                baseline.validation_reuse.compiled.warm_kernel_ns / 1.0e3,
+                (baseline.validation_reuse.compiled.cold_kernel_ns -
+                 baseline.validation_reuse.compiled.warm_kernel_ns) /
+                    1.0e3);
     std::printf("\nstart us is the extrapolated device validation/launch "
                 "intercept; "
                 "ns/phase and Mtask/s are marginal steady-state values.\n");

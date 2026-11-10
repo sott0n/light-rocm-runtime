@@ -62,6 +62,13 @@ longer resident interval. Host plan compilation, executor setup/upload, and
 per-run state initialization are
 reported separately and are not included in the GPU event interval.
 
+The derived-cost section also reports `validation reuse` for the baseline
+shape. `cold` explicitly invalidates the device validation result before a
+one-step launch; `warm` repeats the same launch key and reuses it. Their
+difference isolates the fixed device graph/plan validation cost removed from
+repeated launches. These samples use the same executor and launch shape and
+alternate ordering across trials.
+
 Before every trial, an arithmetic kernel launches one workgroup per compute
 unit to condition GPU clocks; this interval is outside the reported event
 timestamps. It removes the initial idle-to-active ramp but does not lock GPU

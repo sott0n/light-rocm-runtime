@@ -5,6 +5,7 @@
 #include "lrrt/persistent_graph/abi.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -292,6 +293,7 @@ public:
     task_count_ = static_cast<uint32_t>(tasks.size());
     program_count_ = static_cast<uint32_t>(programs.size());
     stage_count_ = 0;
+    invalidate_validation();
     initialized_ = false;
   }
 
@@ -302,7 +304,19 @@ public:
     upload_compiled_plan(tasks, programs, plan);
   }
 
-  void bind_context(void *device_context) { context_ = device_context; }
+  void bind_context(void *device_context) {
+    context_ = device_context;
+    invalidate_validation();
+  }
+
+  // Call this after mutating validation-relevant contents behind a bound
+  // device context. Graph and plan uploads, context binding, and changes to
+  // initialize() parameters invalidate the cache automatically.
+  void invalidate_validation() {
+    const ValidationState validation{};
+    copy_to_device(validation_buffer_, &validation, sizeof(validation));
+    validation_key_.reset();
+  }
 
   void initialize(uint32_t program_index, uint32_t max_steps,
                   uint32_t stop_value) {
@@ -311,6 +325,15 @@ public:
     }
     if (max_steps == 0) {
       throw std::invalid_argument("stateful graph max steps must be nonzero");
+    }
+    const std::array<uint32_t, 3> validation_key = {
+        program_index,
+        max_steps,
+        stop_value,
+    };
+    if (!validation_key_ || *validation_key_ != validation_key) {
+      invalidate_validation();
+      validation_key_ = validation_key;
     }
     State state{};
     state.abi_version = kAbiVersion;
@@ -367,6 +390,7 @@ private:
         task_buffer_(device, graph.task_bytes),
         program_buffer_(device, graph.program_bytes),
         phase_state_buffer_(device, graph.phase_state_bytes),
+        validation_buffer_(device, sizeof(ValidationState)),
         empty_phase_states_(config.phase_state_count), context_(nullptr),
         task_count_(0), program_count_(0), stage_count_(0),
         initialized_(false) {
@@ -390,6 +414,7 @@ private:
                                  : nullptr,
         stage_count_,
         0,
+        static_cast<ValidationState *>(validation_buffer_.data()),
     };
   }
 
@@ -412,6 +437,7 @@ private:
     copy_to_device(*stage_buffer_, plan.stages);
     copy_to_device(*compiled_program_buffer_, plan.programs);
     stage_count_ = static_cast<uint32_t>(plan.stages.size());
+    invalidate_validation();
     initialized_ = false;
   }
 
@@ -428,6 +454,7 @@ private:
   DeviceBuffer task_buffer_;
   DeviceBuffer program_buffer_;
   DeviceBuffer phase_state_buffer_;
+  DeviceBuffer validation_buffer_;
   std::optional<DeviceBuffer> stage_buffer_;
   std::optional<DeviceBuffer> compiled_program_buffer_;
   std::vector<MaskState> empty_phase_states_;
@@ -436,6 +463,7 @@ private:
   uint32_t program_count_;
   uint32_t stage_count_;
   bool initialized_;
+  std::optional<std::array<uint32_t, 3>> validation_key_;
 };
 
 } // namespace lrrt::persistent_graph

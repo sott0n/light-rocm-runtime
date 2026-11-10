@@ -26,6 +26,7 @@ struct Context {
   uint32_t *step_checksums;
   uint32_t *branch_steps;
   uint32_t *task_executions;
+  uint32_t *validation_calls;
 };
 
 static_assert(std::is_standard_layout_v<Context>);

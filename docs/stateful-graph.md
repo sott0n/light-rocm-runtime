@@ -113,6 +113,16 @@ run, and dispatches the workload-specialized resident kernel. The Qwen
 benchmark uses this API rather than managing scheduler buffers and constructing
 `ResidentArgs` itself.
 
+`ResidentExecutor` also owns a device validation record. The dynamic and
+compiled schedulers validate an uploaded graph, plan, and workload context on
+their first launch, then reuse the result while the validation key is
+unchanged. Uploading a graph or compiled plan, binding a context, or changing
+the initial Program, maximum-step bound, or stop value invalidates the record
+automatically. A caller that mutates validation-relevant data behind an
+already-bound context must call `invalidate_validation()` before launching
+again. Per-run State and phase masks are still reset by every `initialize()`;
+only the invariant validation scan is cached.
+
 For fixed workloads, `compile_resident_plan()` converts a topologically ordered
 task DAG into contiguous dependency-independent stages. The reusable compiled
 scheduler in `lrrt/persistent_graph/compiled_scheduler.hpp` assigns those

@@ -7,7 +7,7 @@
 
 namespace lrrt::persistent_graph {
 
-constexpr uint32_t kAbiVersion = 8;
+constexpr uint32_t kAbiVersion = 9;
 constexpr uint32_t kWorkerThreads = 256;
 constexpr uint32_t kMaximumResidentWorkers = 32;
 constexpr uint32_t kMaximumTasks = 64;
@@ -97,6 +97,20 @@ struct MaskState {
   uint32_t completed_count;
 };
 
+enum class ValidationStatus : uint32_t {
+  unvalidated = 0,
+  valid = 1,
+  invalid = 2,
+};
+
+// Persists device validation across repeated launches of an unchanged graph.
+// ResidentExecutor invalidates it whenever graph structure, workload context,
+// or validation-relevant initial state changes.
+struct alignas(8) ValidationState {
+  uint32_t status;
+  uint32_t reserved;
+};
+
 // A compiled stage is a contiguous group of dependency-independent tasks.
 // Persistent workers execute the group directly instead of atomically scanning
 // and claiming individual tasks.
@@ -123,6 +137,7 @@ struct ResidentArgs {
   const CompiledProgram *compiled_programs;
   uint32_t stage_count;
   uint32_t reserved;
+  ValidationState *validation_state;
 };
 
 struct HostStepArgs {
@@ -137,6 +152,7 @@ static_assert(std::is_standard_layout_v<State>);
 static_assert(std::is_standard_layout_v<Task>);
 static_assert(std::is_standard_layout_v<Program>);
 static_assert(std::is_standard_layout_v<MaskState>);
+static_assert(std::is_standard_layout_v<ValidationState>);
 static_assert(std::is_standard_layout_v<Stage>);
 static_assert(std::is_standard_layout_v<CompiledProgram>);
 static_assert(std::is_standard_layout_v<ResidentArgs>);
@@ -145,9 +161,10 @@ static_assert(sizeof(State) == 64);
 static_assert(sizeof(Task) == 32);
 static_assert(sizeof(Program) == 32);
 static_assert(sizeof(MaskState) == 20);
+static_assert(sizeof(ValidationState) == 8);
 static_assert(sizeof(Stage) == 8);
 static_assert(sizeof(CompiledProgram) == 8);
-static_assert(sizeof(ResidentArgs) == 80);
+static_assert(sizeof(ResidentArgs) == 88);
 static_assert(sizeof(HostStepArgs) == 32);
 
 } // namespace lrrt::persistent_graph
