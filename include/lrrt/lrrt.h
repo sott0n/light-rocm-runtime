@@ -76,6 +76,7 @@ typedef struct lr_device_properties_t {
   uint32_t maximum_waves_per_compute_unit;
   uint32_t maximum_workgroup_size;
   uint64_t group_segment_size;
+  uint32_t shader_engine_count;
 } lr_device_properties_t;
 
 typedef struct lr_kernel_properties_t {

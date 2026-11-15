@@ -563,6 +563,12 @@ lr_status_t lr_device_get_properties(lr_device_t device,
     status = hsa_agent_get_info(agent, HSA_AGENT_INFO_WORKGROUP_MAX_SIZE,
                                 &properties->maximum_workgroup_size);
   }
+  if (status == HSA_STATUS_SUCCESS) {
+    status = hsa_agent_get_info(
+        agent,
+        static_cast<hsa_agent_info_t>(HSA_AMD_AGENT_INFO_NUM_SHADER_ENGINES),
+        &properties->shader_engine_count);
+  }
   GroupSegmentSize group_segment;
   if (status == HSA_STATUS_SUCCESS) {
     status = hsa_agent_iterate_regions(agent, find_group_segment_size,
@@ -593,6 +599,7 @@ lr_status_t lr_device_get_properties(lr_device_t device,
   properties->maximum_workgroup_size = 1024;
   properties->group_segment_size =
       static_cast<uint64_t>(node.lds_size_kb) * 1024u;
+  properties->shader_engine_count = node.shader_engine_count;
   return LR_SUCCESS;
 #else
   (void)device;

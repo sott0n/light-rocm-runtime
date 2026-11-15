@@ -36,16 +36,36 @@ bool expect_compile_invalid(const char *label,
 } // namespace
 
 int main() {
-  const lrrt::DeviceProperties device_properties = {60, 32, 32, 1024,
-                                                    64u * 1024u};
+  const lrrt::DeviceProperties device_properties = {60,   32,          32,
+                                                    1024, 64u * 1024u, 3};
   const lrrt::KernelProperties kernel_properties = {128, 1060, 0};
   const sg::ResidentAdmission admission =
       sg::admit_resident_workers(device_properties, kernel_properties, 128);
   if (admission.requested_worker_count != 128 ||
-      admission.safe_worker_limit != sg::kMaximumResidentWorkers ||
-      admission.worker_count != sg::kMaximumResidentWorkers) {
+      admission.safe_worker_limit != 20 || admission.worker_count != 20) {
     std::fprintf(stderr, "unexpected resident admission result\n");
     return 1;
+  }
+  const sg::ResidentAdmission smaller_admission =
+      sg::admit_resident_workers(device_properties, kernel_properties, 8);
+  if (smaller_admission.safe_worker_limit != 20 ||
+      smaller_admission.worker_count != 8) {
+    std::fprintf(stderr, "resident admission changed a safe request\n");
+    return 1;
+  }
+  try {
+    (void)sg::resident_worker_limit({60, 32, 32, 1024, 64u * 1024u, 0},
+                                    kernel_properties);
+    std::fprintf(stderr, "missing shader-engine topology was admitted\n");
+    return 1;
+  } catch (const std::invalid_argument &) {
+  }
+  try {
+    (void)sg::resident_worker_limit({61, 32, 32, 1024, 64u * 1024u, 3},
+                                    kernel_properties);
+    std::fprintf(stderr, "uneven shader-engine topology was admitted\n");
+    return 1;
+  } catch (const std::invalid_argument &) {
   }
   try {
     (void)sg::resident_worker_limit(device_properties,

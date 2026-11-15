@@ -33,7 +33,10 @@ inline uint32_t resident_worker_limit(const DeviceProperties &device,
                                       uint32_t dynamic_group_segment_size = 0) {
   if (device.compute_unit_count == 0 || device.wavefront_size == 0 ||
       device.maximum_waves_per_compute_unit == 0 ||
-      device.maximum_workgroup_size == 0 || block_threads == 0) {
+      device.maximum_workgroup_size == 0 || device.shader_engine_count == 0 ||
+      device.shader_engine_count > device.compute_unit_count ||
+      device.compute_unit_count % device.shader_engine_count != 0 ||
+      block_threads == 0) {
     throw std::invalid_argument("incomplete resident resource properties");
   }
   if (block_threads > device.maximum_workgroup_size) {
@@ -51,10 +54,15 @@ inline uint32_t resident_worker_limit(const DeviceProperties &device,
     throw std::invalid_argument("resident workgroup exceeds LDS limit");
   }
 
-  // Stateful graph kernels use grid-wide software barriers. Limiting the grid
-  // to one workgroup per CU is conservative, but does not depend on fragile
-  // architecture-specific SGPR/VGPR occupancy formulas.
-  return std::min(device.compute_unit_count, kMaximumResidentWorkers);
+  // Stateful graph kernels use grid-wide software barriers without a
+  // cooperative-dispatch primitive. Do not assume that initial workgroups are
+  // spread evenly across shader engines: make the whole resident grid fit in
+  // one engine, with at most one workgroup per CU. A dispatchable workgroup is
+  // therefore admitted without depending on architecture-specific SGPR/VGPR
+  // occupancy formulas or cross-engine placement.
+  const uint32_t compute_units_per_shader_engine =
+      device.compute_unit_count / device.shader_engine_count;
+  return std::min(compute_units_per_shader_engine, kMaximumResidentWorkers);
 }
 
 inline ResidentAdmission admit_resident_workers(

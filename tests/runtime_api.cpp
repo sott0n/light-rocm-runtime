@@ -293,7 +293,13 @@ int main(void) {
       device_properties.wavefront_size == 0 ||
       device_properties.maximum_waves_per_compute_unit == 0 ||
       device_properties.maximum_workgroup_size == 0 ||
-      device_properties.group_segment_size == 0) {
+      device_properties.group_segment_size == 0 ||
+      device_properties.shader_engine_count == 0 ||
+      device_properties.shader_engine_count >
+          device_properties.compute_unit_count ||
+      device_properties.compute_unit_count %
+              device_properties.shader_engine_count !=
+          0) {
     fprintf(stderr, "lr_device_get_properties returned incomplete limits\n");
     lr_shutdown();
     return 1;

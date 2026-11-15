@@ -49,6 +49,7 @@ int main() {
       properties.maximum_waves_per_compute_unit == 0 ||
       properties.maximum_workgroup_size == 0 ||
       properties.group_segment_size == 0 ||
+      properties.shader_engine_count == 0 ||
       !expect_status(lr_synchronize(device), LR_SUCCESS,
                      "lr_synchronize idle device") ||
       !expect_status(lr_shutdown(), LR_SUCCESS, "lr_shutdown") ||

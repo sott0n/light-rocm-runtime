@@ -189,11 +189,15 @@ of at most 32 tasks emits one local token/logit candidate and the successor
 reduces only those candidates. The resident path matches its partition count
 to the admitted worker count, avoiding a second partition on only a subset of
 workers. The Qwen HSACO uses the compiler's default WGP mode and limits the
-launch to 20 persistent workgroups. The generic resource calculation permits
-more workgroups, but it does not prove simultaneous residency for the
-grid-wide software stage barrier. Experimental CU-mode launches and larger
-WGP-mode launches caused non-deterministic hangs and GPU resets, so the Qwen
-benchmark rejects worker counts above the conservative limit before launch.
+launch through the generic Runtime admission policy. A software grid barrier
+cannot assume that initial workgroups are distributed evenly across shader
+engines, so `resident_worker_limit()` makes the entire grid fit within one
+shader engine at one workgroup per CU. The reference GPU reports 60 CUs across
+three shader engines, producing the experimentally stable 20-worker boundary.
+Qwen requests 20 by default, while the Runtime clamps larger requests to that
+topology-derived safety limit. Experimental CU-mode and larger WGP-mode
+launches caused non-deterministic hangs and GPU resets before this policy was
+centralized.
 Its final task records the sampled token, tests
 EOS and the maximum-token limit, and, when execution continues, copies the
 selected full-vocabulary embedding row into the shared hidden buffer. It also
@@ -710,9 +714,11 @@ resource-aware worker admission are now implemented. The benchmark compares
 the whole loop against HIP Graph and host-driven LRRT using the same HSACO,
 weights, buffer layout, and arithmetic. The full-checkpoint comparison is now
 recorded above with matched resident and HIP Graph task tables. The
-benchmark now uses WGP mode with a conservative 20-worker limit; CU-mode and
-larger launches are unsupported after reproducing GPU-reset failures on a
-fresh boot. The 32-way down-projection task split remains because it increased
+benchmark now uses WGP mode and requests 20 workers; Runtime cooperative
+admission independently derives the same limit from the reference GPU's
+shader-engine topology. CU-mode and larger launches remain unsupported after
+reproducing GPU-reset failures on a fresh boot. The 32-way down-projection task
+split remains because it increased
 streaming-weight parallelism independently of resident worker count. All
 resident matvec weight streams now use the grouped software pipeline described
 above, and the matched HIP Graph comparison invokes the same stage

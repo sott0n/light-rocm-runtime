@@ -277,7 +277,8 @@ bool open_only_device(lr_device_t *device, char *name, size_t name_size) {
       properties.compute_unit_count == 0 || properties.wavefront_size == 0 ||
       properties.maximum_waves_per_compute_unit == 0 ||
       properties.maximum_workgroup_size == 0 ||
-      properties.group_segment_size == 0) {
+      properties.group_segment_size == 0 ||
+      properties.shader_engine_count == 0) {
     std::fprintf(stderr,
                  "light-rocr backend returned incomplete device properties\n");
     return false;

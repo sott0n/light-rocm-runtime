@@ -272,6 +272,10 @@ changing the core design.
 - Fixed group/private segment sizes are read from the kernel descriptor and
   dynamic shared memory is added at dispatch. The runtime does not perform a
   complete hardware-capability or occupancy validation before submission.
+- Device properties include shader-engine topology. The optional Persistent
+  Graph module uses it to conservatively admit software-grid-barrier launches
+  that fit within one shader engine; this is a correctness bound, not an
+  automatic performance or occupancy policy for ordinary kernel dispatch.
 - There is no graph capture, command-buffer optimization, kernel fusion, or
   automatic batching in the core runtime.
 
